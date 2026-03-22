@@ -1,0 +1,10 @@
+// SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+
+#mesondefine DRM_CXX_VERSION
+#mesondefine DRM_CXX_VERSION_MAJOR
+#mesondefine DRM_CXX_VERSION_MINOR
+#mesondefine DRM_CXX_VERSION_PATCH
+#mesondefine HAVE_VULKAN

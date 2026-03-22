@@ -1,0 +1,27 @@
+# Build directories
+builddir/
+build/
+_build/
+_doxygen/
+docs/_build/
+
+# Meson private
+.mesonpy/
+meson-private/
+
+# Downloaded subproject sources and package cache
+subprojects/.wraplock
+subprojects/libdisplay-info
+subprojects/Vulkan-Headers/
+subprojects/v4l-utils.wrap
+subprojects/v4l-utils/
+
+# Editor / IDE artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
