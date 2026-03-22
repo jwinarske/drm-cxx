@@ -7,6 +7,8 @@
 #include <expected>
 #include <system_error>
 
+#include "buffer.hpp"
+
 struct gbm_surface;
 
 namespace drm::gbm {
@@ -20,6 +22,12 @@ public:
            uint32_t format, uint32_t flags);
 
   [[nodiscard]] struct gbm_surface* raw() const noexcept;
+
+  // Lock the front buffer after an EGL swap. Returns a Buffer RAII wrapper.
+  std::expected<Buffer, std::error_code> lock_front_buffer();
+
+  // Check if the surface has a free buffer available.
+  [[nodiscard]] bool has_free_buffers() const noexcept;
 
   ~Surface();
   Surface(Surface&&) noexcept;

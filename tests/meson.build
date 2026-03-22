@@ -89,3 +89,10 @@ test('test_display',
     dependencies : test_deps,
   ),
 )
+
+test('test_gbm',
+  executable('test_gbm',
+    'unit/test_gbm.cpp',
+    dependencies : test_deps,
+  ),
+)

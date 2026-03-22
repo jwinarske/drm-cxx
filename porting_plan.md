@@ -637,9 +637,9 @@ Optionally gated behind `get_option('vulkan')`:
 
 ### Phase 6 — GBM + Vulkan (Week 7)
 
-- [ ] `drm::gbm::Device`, `Surface`, `Buffer`.
-- [ ] Vulkan `VK_KHR_display` integration (feature-gated).
-- [ ] `vulkan_display` example.
+- [x] `drm::gbm::Device`, `Surface`, `Buffer`.
+- [x] Vulkan `VK_KHR_display` integration (feature-gated).
+- [x] `vulkan_display` example.
 
 ### Phase 7 — Cleanup, Docs, Release (Week 8)
 

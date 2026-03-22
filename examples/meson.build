@@ -11,9 +11,9 @@ executable('atomic_modeset',
   dependencies : drm_cxx_dep,
 )
 
-# if get_option('vulkan')
-#   executable('vulkan_display',
-#     'vulkan_display/main.cpp',
-#     dependencies : drm_cxx_dep,
-#   )
-# endif
+if get_option('vulkan')
+  executable('vulkan_display',
+    'vulkan_display/main.cpp',
+    dependencies : drm_cxx_dep,
+  )
+endif

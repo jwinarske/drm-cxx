@@ -40,10 +40,14 @@ di_proj = subproject('libdisplay-info',
 di_dep = di_proj.get_variable('di_dep')
 
 if get_option('vulkan')
-  cmake = import('cmake')
-  vk_opts = cmake.subproject_options()
-  vk_headers = cmake.subproject('Vulkan-Headers', options : vk_opts)
-  vk_dep = vk_headers.dependency('Vulkan-Headers')
+  # Try system vulkan headers first, fall back to subproject
+  vk_dep = dependency('vulkan', required : false)
+  if not vk_dep.found()
+    cmake = import('cmake')
+    vk_opts = cmake.subproject_options()
+    vk_headers = cmake.subproject('Vulkan-Headers', options : vk_opts)
+    vk_dep = vk_headers.dependency('Vulkan-Headers')
+  endif
 endif
 
 #── Configuration ─────────────────────────────────────────────
