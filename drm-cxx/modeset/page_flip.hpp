@@ -20,11 +20,19 @@ public:
 
   void set_handler(Handler handler);
 
+  // Wait for and dispatch a page flip event.
+  // timeout_ms: -1 = block forever, 0 = non-blocking, >0 = timeout in ms.
   std::expected<void, std::error_code> dispatch(int timeout_ms = -1);
 
   ~PageFlip();
 
 private:
+  // Allow the C callback trampolines to invoke handler_
+  friend void page_flip_handler(int, unsigned int, unsigned int,
+                                unsigned int, void*);
+  friend void page_flip_handler_v2(int, unsigned int, unsigned int,
+                                    unsigned int, unsigned int, void*);
+
   int drm_fd_{-1};
   Handler handler_;
 };

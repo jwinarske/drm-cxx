@@ -6,10 +6,10 @@ executable('overlay_planes',
   dependencies : drm_cxx_dep,
 )
 
-# executable('atomic_modeset',
-#   'atomic_modeset/main.cpp',
-#   dependencies : drm_cxx_dep,
-# )
+executable('atomic_modeset',
+  'atomic_modeset/main.cpp',
+  dependencies : drm_cxx_dep,
+)
 
 # if get_option('vulkan')
 #   executable('vulkan_display',

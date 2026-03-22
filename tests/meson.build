@@ -75,3 +75,17 @@ test('test_input',
     dependencies : test_deps,
   ),
 )
+
+test('test_mode',
+  executable('test_mode',
+    'unit/test_mode.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_display',
+  executable('test_display',
+    'unit/test_display.cpp',
+    dependencies : test_deps,
+  ),
+)
