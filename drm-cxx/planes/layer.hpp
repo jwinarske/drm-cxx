@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -29,6 +30,13 @@ class Output;
 
 class Layer {
  public:
+  // Transparent hash to allow string_view lookups without temporary std::string
+  struct StringHash {
+    using is_transparent = void;
+    std::size_t operator()(std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
+  };
+  using PropertyMap = std::unordered_map<std::string, uint64_t, StringHash, std::equal_to<>>;
+
   Layer& set_property(std::string_view name, uint64_t value);
   Layer& disable() noexcept;
   Layer& set_composited() noexcept;
@@ -40,7 +48,7 @@ class Layer {
   [[nodiscard]] std::optional<uint32_t> assigned_plane_id() const noexcept;
 
   [[nodiscard]] std::optional<uint64_t> property(std::string_view name) const;
-  [[nodiscard]] const std::unordered_map<std::string, uint64_t>& properties() const noexcept;
+  [[nodiscard]] const PropertyMap& properties() const noexcept;
 
   [[nodiscard]] std::optional<uint32_t> format() const;
   [[nodiscard]] uint64_t modifier() const;
@@ -63,7 +71,7 @@ class Layer {
   friend class Allocator;
   friend class Output;
 
-  std::unordered_map<std::string, uint64_t> properties_;
+  PropertyMap properties_;
   bool force_composited_{false};
   bool needs_composition_{false};
   bool dirty_{true};

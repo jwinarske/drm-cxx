@@ -12,28 +12,26 @@
 #include <print>
 
 int main() {
-  auto result = drm::vulkan::Display::create();
+  const auto result = drm::vulkan::Display::create();
   if (!result) {
     std::println(stderr, "Failed to create Vulkan display (Vulkan may not be available)");
     return EXIT_FAILURE;
   }
-  auto& display = *result;
+  const auto& display = *result;
 
   std::println("Vulkan displays: {}", display.displays().size());
-  for (const auto& d : display.displays()) {
-    std::println("  Display '{}': {}x{} (handle=0x{:x})", d.name, d.width, d.height,
-                 d.display_handle);
+  for (const auto& [display_handle, name, width, height] : display.displays()) {
+    std::println("  Display '{}': {}x{} (handle=0x{:x})", name, width, height, display_handle);
 
-    auto planes = display.planes_for_display(d.display_handle);
-    for (const auto* p : planes) {
+    for (auto planes = display.planes_for_display(display_handle); const auto* p : planes) {
       std::println("    Plane {}: stack_index={}", p->plane_index, p->current_stack_index);
     }
   }
 
   std::println("\nVulkan display planes: {}", display.planes().size());
-  for (const auto& p : display.planes()) {
-    std::println("  Plane {}: stack_index={}, supported_displays={}", p.plane_index,
-                 p.current_stack_index, p.supported_displays.size());
+  for (const auto& [plane_index, current_stack_index, supported_displays] : display.planes()) {
+    std::println("  Plane {}: stack_index={}, supported_displays={}", plane_index,
+                 current_stack_index, supported_displays.size());
   }
 
   return EXIT_SUCCESS;

@@ -66,21 +66,21 @@ std::expected<ModeInfo, std::error_code> select_mode(std::span<const drmModeMode
   }
 
   const drmModeModeInfo* best = nullptr;
-  uint32_t best_score = std::numeric_limits<uint32_t>::max();
+  uint64_t best_score = std::numeric_limits<uint64_t>::max();
 
   for (const auto& m : modes) {
     // Skip interlaced modes unless specifically targeting them
     if (m.flags & DRM_MODE_FLAG_INTERLACE) continue;
 
-    uint32_t dw =
-        (m.hdisplay > target_width) ? m.hdisplay - target_width : target_width - m.hdisplay;
-    uint32_t dh =
-        (m.vdisplay > target_height) ? m.vdisplay - target_height : target_height - m.vdisplay;
-    uint32_t score = dw * dw + dh * dh;
+    auto dw = static_cast<uint64_t>((m.hdisplay > target_width) ? m.hdisplay - target_width
+                                                                : target_width - m.hdisplay);
+    auto dh = static_cast<uint64_t>((m.vdisplay > target_height) ? m.vdisplay - target_height
+                                                                 : target_height - m.vdisplay);
+    uint64_t score = dw * dw + dh * dh;
 
     if (target_refresh > 0) {
-      uint32_t dr =
-          (m.vrefresh > target_refresh) ? m.vrefresh - target_refresh : target_refresh - m.vrefresh;
+      auto dr = static_cast<uint64_t>((m.vrefresh > target_refresh) ? m.vrefresh - target_refresh
+                                                                    : target_refresh - m.vrefresh);
       score += dr * 100;  // Weight refresh match
     }
 

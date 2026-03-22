@@ -64,26 +64,24 @@ std::expected<void, std::error_code> SyncFence::wait(std::chrono::milliseconds t
   return {};
 }
 
-void SyncFence::merge(SyncFence& other) {
+std::expected<void, std::error_code> SyncFence::merge(SyncFence other) {
   if (fd_ < 0 || other.fd_ < 0) {
-    return;
+    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   struct sync_merge_data data{};
   data.fd2 = other.fd_;
-  // name is a char array, leave as zeros
 
   if (::ioctl(fd_, SYNC_IOC_MERGE, &data) < 0) {
-    return;
+    return std::unexpected(std::error_code(errno, std::system_category()));
   }
 
   // Replace our fd with the merged one
   ::close(fd_);
   fd_ = data.fence;
 
-  // Close the other fence
-  ::close(other.fd_);
-  other.fd_ = -1;
+  // other's destructor will close its fd
+  return {};
 }
 
 }  // namespace drm::sync
