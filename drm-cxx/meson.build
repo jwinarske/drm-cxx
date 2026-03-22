@@ -17,6 +17,7 @@ drm_cxx_sources = files(
   'input/seat.cpp',
   'input/keyboard.cpp',
   'input/pointer.cpp',
+  'input/event_dispatcher.cpp',
   'display/edid.cpp',
   'gbm/device.cpp',
   'gbm/surface.cpp',

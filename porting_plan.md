@@ -621,11 +621,11 @@ Optionally gated behind `get_option('vulkan')`:
 
 ### Phase 4 — Input Subsystem (Week 5)
 
-- [ ] `drm::input::Seat` — libinput context + udev.
-- [ ] `drm::input::Keyboard` — xkbcommon RAII.
-- [ ] `drm::input::Pointer`, `Touch`, `Switch`.
-- [ ] `InputEvent` variant + `move_only_function` dispatch.
-- [ ] Port `$HOME/.xkb/keymap.xkb` loading.
+- [x] `drm::input::Seat` — libinput context + udev.
+- [x] `drm::input::Keyboard` — xkbcommon RAII.
+- [x] `drm::input::Pointer`, `Touch`, `Switch`.
+- [x] `InputEvent` variant + `move_only_function` dispatch.
+- [x] Port `$HOME/.xkb/keymap.xkb` loading.
 
 ### Phase 5 — Display Info & Modeset (Week 6)
 

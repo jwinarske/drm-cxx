@@ -68,3 +68,10 @@ test('test_plane_allocator',
     dependencies : test_deps,
   ),
 )
+
+test('test_input',
+  executable('test_input',
+    'unit/test_input.cpp',
+    dependencies : test_deps,
+  ),
+)
