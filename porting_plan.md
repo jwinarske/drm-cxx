@@ -601,23 +601,23 @@ Optionally gated behind `get_option('vulkan')`:
 
 ### Phase 2 — Core + Resources (Week 2)
 
-- [ ] `drm::Device` — fd RAII, capability enables.
-- [ ] `drm::core::resources.hpp` — RAII wrappers replacing bsdrm.
-- [ ] `drm::core::PropertyStore` — property ID cache.
-- [ ] `drm::modeset::AtomicRequest` — atomic req builder.
-- [ ] `drm::sync::SyncFence` — native sync (removes libsync subproject).
-- [ ] Unit tests for all of the above.
+- [x] `drm::Device` — fd RAII, capability enables.
+- [x] `drm::core::resources.hpp` — RAII wrappers replacing bsdrm.
+- [x] `drm::core::PropertyStore` — property ID cache.
+- [x] `drm::modeset::AtomicRequest` — atomic req builder.
+- [x] `drm::sync::SyncFence` — native sync (removes libsync subproject).
+- [x] Unit tests for all of the above.
 
 ### Phase 3 — Native Plane Allocator (Week 3–4)
 
-- [ ] `PlaneRegistry::enumerate()` — detect all planes + caps.
-- [ ] `Layer` — property map, composited flag.
-- [ ] `Output` — CRTC output, layer list, composition layer.
-- [ ] `Allocator::apply()` — greedy + backtrack algorithm.
-- [ ] Atomic test-commit loop.
-- [ ] Change detection / allocation caching.
-- [ ] Unit tests using mock DRM fd.
-- [ ] Integration test: `overlay_planes` example against real hardware.
+- [x] `PlaneRegistry::enumerate()` — detect all planes + caps.
+- [x] `Layer` — property map, composited flag.
+- [x] `Output` — CRTC output, layer list, composition layer.
+- [x] `Allocator::apply()` — greedy + backtrack algorithm.
+- [x] Atomic test-commit loop.
+- [x] Change detection / allocation caching.
+- [x] Unit tests using mock DRM fd.
+- [x] Integration test: `overlay_planes` example against real hardware.
 
 ### Phase 4 — Input Subsystem (Week 5)
 

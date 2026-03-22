@@ -5,7 +5,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <span>
 #include <vector>
 
 #include "layer.hpp"
@@ -21,12 +20,23 @@ public:
 
   void set_composition_layer(Layer& layer);
 
-  [[nodiscard]] std::span<Layer*> layers() noexcept;
+  [[nodiscard]] std::vector<Layer*>& layers() noexcept;
+  [[nodiscard]] const std::vector<Layer*>& layers() const noexcept;
   [[nodiscard]] uint32_t crtc_id() const noexcept;
+  [[nodiscard]] Layer* composition_layer() const noexcept;
+
+  [[nodiscard]] bool any_layer_dirty() const noexcept;
+  [[nodiscard]] std::vector<Layer*> changed_layers() const;
+  void mark_clean() noexcept;
+
+  void sort_layers_by_zpos();
 
 private:
+  void rebuild_layer_ptrs();
+
   uint32_t crtc_id_;
   std::vector<std::unique_ptr<Layer>> owned_layers_;
+  std::vector<Layer*> layer_ptrs_;
   Layer* composition_layer_{};
 };
 

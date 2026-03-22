@@ -40,3 +40,31 @@ test('test_sync_fence',
     dependencies : test_deps,
   ),
 )
+
+test('test_matching',
+  executable('test_matching',
+    'unit/test_matching.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_layer',
+  executable('test_layer',
+    'unit/test_layer.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_output',
+  executable('test_output',
+    'unit/test_output.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_plane_allocator',
+  executable('test_plane_allocator',
+    'unit/test_plane_allocator.cpp',
+    dependencies : test_deps,
+  ),
+)
