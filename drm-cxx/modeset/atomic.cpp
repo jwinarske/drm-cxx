@@ -17,6 +17,10 @@ namespace drm {
 
 AtomicRequest::AtomicRequest(const Device& dev) : req_(drmModeAtomicAlloc()), drm_fd_(dev.fd()) {}
 
+bool AtomicRequest::valid() const noexcept {
+  return req_ != nullptr && drm_fd_ >= 0;
+}
+
 AtomicRequest::~AtomicRequest() {
   if (req_ != nullptr) {
     drmModeAtomicFree(req_);

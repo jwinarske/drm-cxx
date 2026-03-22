@@ -21,6 +21,11 @@ class EventDispatcher {
 
   // Returns a single EventHandler that feeds into this dispatcher.
   // Useful for Seat::set_event_handler(dispatcher.as_handler()).
+  //
+  // WARNING: The returned handler captures 'this'. The caller must ensure
+  // that this EventDispatcher outlives the handler (e.g., the Seat it is
+  // registered with). Using the handler after this dispatcher is destroyed
+  // is undefined behavior.
   EventHandler as_handler();
 
   [[nodiscard]] std::size_t handler_count() const noexcept;
