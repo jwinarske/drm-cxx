@@ -13,6 +13,7 @@ drm_cxx_sources = files(
   'planes/layer.cpp',
   'planes/output.cpp',
   'planes/allocator.cpp',
+  'planes/matching.cpp',
   'input/seat.cpp',
   'input/keyboard.cpp',
   'input/pointer.cpp',
@@ -83,6 +84,7 @@ install_headers(
   'planes/layer.hpp',
   'planes/output.hpp',
   'planes/allocator.hpp',
+  'planes/matching.hpp',
   'planes/composition_layer.hpp',
   subdir : 'drm-cxx/planes',
 )

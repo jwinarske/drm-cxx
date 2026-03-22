@@ -1,15 +1,13 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-# Example programs — stubs for now
+executable('overlay_planes',
+  'overlay_planes/main.cpp',
+  dependencies : drm_cxx_dep,
+)
 
 # executable('atomic_modeset',
 #   'atomic_modeset/main.cpp',
-#   dependencies : drm_cxx_dep,
-# )
-
-# executable('overlay_planes',
-#   'overlay_planes/main.cpp',
 #   dependencies : drm_cxx_dep,
 # )
 
