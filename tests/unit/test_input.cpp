@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
-
-#include "input/seat.hpp"
+#include "input/event_dispatcher.hpp"
 #include "input/keyboard.hpp"
 #include "input/pointer.hpp"
-#include "input/event_dispatcher.hpp"
+#include "input/seat.hpp"
+
+#include <gtest/gtest.h>
 
 // ── Event type tests ──────────────────────────────────────────
 
@@ -31,8 +31,11 @@ TEST(InputEventTest, PointerMotionVariant) {
 
 TEST(InputEventTest, TouchEventVariant) {
   drm::input::TouchEvent te{
-    .time_ms = 200, .slot = 0, .x = 100.0, .y = 200.0,
-    .type = drm::input::TouchEvent::Type::Down,
+      .time_ms = 200,
+      .slot = 0,
+      .x = 100.0,
+      .y = 200.0,
+      .type = drm::input::TouchEvent::Type::Down,
   };
   drm::input::InputEvent event{te};
   EXPECT_TRUE(std::holds_alternative<drm::input::TouchEvent>(event));
@@ -40,9 +43,9 @@ TEST(InputEventTest, TouchEventVariant) {
 
 TEST(InputEventTest, SwitchEventVariant) {
   drm::input::SwitchEvent se{
-    .time_ms = 300,
-    .which = drm::input::SwitchEvent::Switch::Lid,
-    .active = true,
+      .time_ms = 300,
+      .which = drm::input::SwitchEvent::Switch::Lid,
+      .active = true,
   };
   drm::input::InputEvent event{se};
   EXPECT_TRUE(std::holds_alternative<drm::input::SwitchEvent>(event));
@@ -66,7 +69,7 @@ TEST(PointerTest, AccumulateMotion) {
 
 TEST(PointerTest, ButtonState) {
   drm::input::Pointer ptr;
-  uint32_t btn = 0x110; // BTN_LEFT
+  uint32_t btn = 0x110;  // BTN_LEFT
 
   EXPECT_FALSE(ptr.button_pressed(btn));
 
@@ -153,7 +156,7 @@ TEST(KeyboardTest, ProcessKeyFillsSymAndUtf8) {
   kb.process_key(ke);
 
   // After processing, sym should be XKB_KEY_a (0x61) and utf8 should be "a"
-  EXPECT_EQ(ke.sym, 0x61u); // XKB_KEY_a
+  EXPECT_EQ(ke.sym, 0x61u);  // XKB_KEY_a
   EXPECT_STREQ(ke.utf8, "a");
 }
 

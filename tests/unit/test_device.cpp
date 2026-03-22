@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
-
 #include "core/device.hpp"
+
+#include <gtest/gtest.h>
 
 TEST(DeviceTest, OpenInvalidPathReturnsError) {
   auto result = drm::Device::open("/dev/dri/nonexistent_card_999");

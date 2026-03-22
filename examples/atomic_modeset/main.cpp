@@ -8,14 +8,14 @@
 // Opens a DRM device, finds a connected connector, selects the preferred
 // mode, and performs an atomic modeset. Then waits for a page flip event.
 
-#include <cstdlib>
-#include <print>
-
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "modeset/atomic.hpp"
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
+
+#include <cstdlib>
+#include <print>
 
 int main(int argc, char* argv[]) {
   const char* path = (argc > 1) ? argv[1] : "/dev/dri/card0";
@@ -45,16 +45,15 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  std::println("Found {} connectors, {} CRTCs, {} encoders",
-    res->count_connectors, res->count_crtcs, res->count_encoders);
+  std::println("Found {} connectors, {} CRTCs, {} encoders", res->count_connectors,
+               res->count_crtcs, res->count_encoders);
 
   // Find first connected connector
   drm::Connector conn{nullptr, &drmModeFreeConnector};
   for (int i = 0; i < res->count_connectors; ++i) {
     auto c = drm::get_connector(dev.fd(), res->connectors[i]);
     if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
-      std::println("Connector {}: {} modes",
-        c->connector_id, c->count_modes);
+      std::println("Connector {}: {} modes", c->connector_id, c->count_modes);
       conn = std::move(c);
       break;
     }
@@ -66,25 +65,21 @@ int main(int argc, char* argv[]) {
   }
 
   // Select preferred mode
-  auto modes = std::span<const drmModeModeInfo>(
-    conn->modes, conn->count_modes);
+  auto modes = std::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
   auto mode_result = drm::select_preferred_mode(modes);
   if (!mode_result) {
     std::println(stderr, "No suitable mode found");
     return EXIT_FAILURE;
   }
   auto& mode = *mode_result;
-  std::println("Selected mode: {}x{}@{}Hz{}",
-    mode.width(), mode.height(), mode.refresh(),
-    mode.preferred() ? " (preferred)" : "");
+  std::println("Selected mode: {}x{}@{}Hz{}", mode.width(), mode.height(), mode.refresh(),
+               mode.preferred() ? " (preferred)" : "");
 
   // List all available modes
   auto all_modes = drm::get_all_modes(modes);
   for (const auto& m : all_modes) {
-    std::println("  {}x{}@{}Hz{}{}",
-      m.width(), m.height(), m.refresh(),
-      m.preferred() ? " [preferred]" : "",
-      m.interlaced() ? " [interlaced]" : "");
+    std::println("  {}x{}@{}Hz{}{}", m.width(), m.height(), m.refresh(),
+                 m.preferred() ? " [preferred]" : "", m.interlaced() ? " [interlaced]" : "");
   }
 
   // Find encoder and CRTC
@@ -105,14 +100,12 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  std::println("Using CRTC {} with encoder {}",
-    crtc->crtc_id, enc->encoder_id);
+  std::println("Using CRTC {} with encoder {}", crtc->crtc_id, enc->encoder_id);
 
   // Set up page flip handler
   drm::PageFlip page_flip(dev);
   page_flip.set_handler([](uint32_t crtc_id, uint64_t seq, uint64_t ts_ns) {
-    std::println("Page flip on CRTC {}: seq={}, timestamp={}ns",
-      crtc_id, seq, ts_ns);
+    std::println("Page flip on CRTC {}: seq={}, timestamp={}ns", crtc_id, seq, ts_ns);
   });
 
   std::println("\nAtomic modeset example complete.");

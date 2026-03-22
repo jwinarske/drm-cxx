@@ -13,8 +13,9 @@ namespace drm {
 class Device;
 
 class PageFlip {
-public:
-  using Handler = std::move_only_function<void(uint32_t crtc_id, uint64_t sequence, uint64_t timestamp_ns)>;
+ public:
+  using Handler =
+      std::move_only_function<void(uint32_t crtc_id, uint64_t sequence, uint64_t timestamp_ns)>;
 
   explicit PageFlip(const Device& dev);
 
@@ -26,15 +27,14 @@ public:
 
   ~PageFlip();
 
-private:
+ private:
   // Allow the C callback trampolines to invoke handler_
-  friend void page_flip_handler(int, unsigned int, unsigned int,
-                                unsigned int, void*);
-  friend void page_flip_handler_v2(int, unsigned int, unsigned int,
-                                    unsigned int, unsigned int, void*);
+  friend void page_flip_handler(int, unsigned int, unsigned int, unsigned int, void*);
+  friend void page_flip_handler_v2(int, unsigned int, unsigned int, unsigned int, unsigned int,
+                                   void*);
 
   int drm_fd_{-1};
   Handler handler_;
 };
 
-} // namespace drm
+}  // namespace drm

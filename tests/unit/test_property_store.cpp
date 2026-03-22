@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
+#include "core/property_store.hpp"
 
 #include <xf86drmMode.h>
 
-#include "core/property_store.hpp"
+#include <gtest/gtest.h>
 
 TEST(PropertyStoreTest, LookupOnEmptyStoreReturnsError) {
   drm::PropertyStore store;

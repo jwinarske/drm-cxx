@@ -9,7 +9,7 @@ namespace drm::input {
 
 // Pointer state tracker — accumulates motion deltas and button state.
 class Pointer {
-public:
+ public:
   void accumulate_motion(double dx, double dy) noexcept;
   void set_button(uint32_t button, bool pressed) noexcept;
 
@@ -19,10 +19,10 @@ public:
 
   void reset_position(double x, double y) noexcept;
 
-private:
+ private:
   double x_{};
   double y_{};
-  uint32_t buttons_{}; // bitmask of pressed buttons
+  uint32_t buttons_{};  // bitmask of pressed buttons
 };
 
-} // namespace drm::input
+}  // namespace drm::input

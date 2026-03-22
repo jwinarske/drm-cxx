@@ -11,7 +11,9 @@
 namespace drm::display {
 
 struct ColorimetryInfo {
-  struct { float x, y; } red, green, blue, white;
+  struct {
+    float x, y;
+  } red, green, blue, white;
 };
 
 struct HdrStaticMetadata {
@@ -28,4 +30,4 @@ struct ConnectorInfo {
   std::vector<uint32_t> supported_eotfs;
 };
 
-} // namespace drm::display
+}  // namespace drm::display

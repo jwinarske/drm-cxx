@@ -10,9 +10,15 @@
 
 namespace drm {
 
-uint32_t ModeInfo::width() const noexcept { return drm_mode.hdisplay; }
-uint32_t ModeInfo::height() const noexcept { return drm_mode.vdisplay; }
-uint32_t ModeInfo::refresh() const noexcept { return drm_mode.vrefresh; }
+uint32_t ModeInfo::width() const noexcept {
+  return drm_mode.hdisplay;
+}
+uint32_t ModeInfo::height() const noexcept {
+  return drm_mode.vdisplay;
+}
+uint32_t ModeInfo::refresh() const noexcept {
+  return drm_mode.vrefresh;
+}
 
 bool ModeInfo::preferred() const noexcept {
   return (drm_mode.type & DRM_MODE_TYPE_PREFERRED) != 0;
@@ -26,8 +32,8 @@ uint32_t ModeInfo::clock_khz() const noexcept {
   return drm_mode.clock;
 }
 
-std::expected<ModeInfo, std::error_code>
-select_preferred_mode(std::span<const drmModeModeInfo> modes) {
+std::expected<ModeInfo, std::error_code> select_preferred_mode(
+    std::span<const drmModeModeInfo> modes) {
   if (modes.empty()) {
     return std::unexpected(std::make_error_code(std::errc::no_such_device));
   }
@@ -52,10 +58,9 @@ select_preferred_mode(std::span<const drmModeModeInfo> modes) {
   return ModeInfo{.drm_mode = *best};
 }
 
-std::expected<ModeInfo, std::error_code>
-select_mode(std::span<const drmModeModeInfo> modes,
-            uint32_t target_width, uint32_t target_height,
-            uint32_t target_refresh) {
+std::expected<ModeInfo, std::error_code> select_mode(std::span<const drmModeModeInfo> modes,
+                                                     uint32_t target_width, uint32_t target_height,
+                                                     uint32_t target_refresh) {
   if (modes.empty()) {
     return std::unexpected(std::make_error_code(std::errc::no_such_device));
   }
@@ -67,20 +72,19 @@ select_mode(std::span<const drmModeModeInfo> modes,
     // Skip interlaced modes unless specifically targeting them
     if (m.flags & DRM_MODE_FLAG_INTERLACE) continue;
 
-    uint32_t dw = (m.hdisplay > target_width)
-      ? m.hdisplay - target_width : target_width - m.hdisplay;
-    uint32_t dh = (m.vdisplay > target_height)
-      ? m.vdisplay - target_height : target_height - m.vdisplay;
+    uint32_t dw =
+        (m.hdisplay > target_width) ? m.hdisplay - target_width : target_width - m.hdisplay;
+    uint32_t dh =
+        (m.vdisplay > target_height) ? m.vdisplay - target_height : target_height - m.vdisplay;
     uint32_t score = dw * dw + dh * dh;
 
     if (target_refresh > 0) {
-      uint32_t dr = (m.vrefresh > target_refresh)
-        ? m.vrefresh - target_refresh : target_refresh - m.vrefresh;
-      score += dr * 100; // Weight refresh match
+      uint32_t dr =
+          (m.vrefresh > target_refresh) ? m.vrefresh - target_refresh : target_refresh - m.vrefresh;
+      score += dr * 100;  // Weight refresh match
     }
 
-    if (score < best_score ||
-        (score == best_score && best && m.vrefresh > best->vrefresh)) {
+    if (score < best_score || (score == best_score && best && m.vrefresh > best->vrefresh)) {
       best = &m;
       best_score = score;
     }
@@ -93,8 +97,7 @@ select_mode(std::span<const drmModeModeInfo> modes,
   return ModeInfo{.drm_mode = *best};
 }
 
-std::vector<ModeInfo>
-get_all_modes(std::span<const drmModeModeInfo> modes) {
+std::vector<ModeInfo> get_all_modes(std::span<const drmModeModeInfo> modes) {
   std::vector<ModeInfo> result;
   result.reserve(modes.size());
   for (const auto& m : modes) {
@@ -103,4 +106,4 @@ get_all_modes(std::span<const drmModeModeInfo> modes) {
   return result;
 }
 
-} // namespace drm
+}  // namespace drm

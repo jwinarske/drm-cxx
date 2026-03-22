@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
+#include "core/format.hpp"
+
 #include <drm_fourcc.h>
 
-#include "core/format.hpp"
+#include <gtest/gtest.h>
 
 TEST(FormatTest, KnownFormatsReturnCorrectName) {
   EXPECT_EQ(drm::format_name(DRM_FORMAT_XRGB8888), "XRGB8888");

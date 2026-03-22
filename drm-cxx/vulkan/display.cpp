@@ -3,15 +3,16 @@
 
 #include "display.hpp"
 
-#include <dlfcn.h>
 #include <vulkan/vulkan.h>
+
+#include <dlfcn.h>
 
 namespace drm::vulkan {
 
 Display::~Display() {
   if (instance_) {
-    auto vkDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
-      dlsym(RTLD_DEFAULT, "vkDestroyInstance"));
+    auto vkDestroyInstance =
+        reinterpret_cast<PFN_vkDestroyInstance>(dlsym(RTLD_DEFAULT, "vkDestroyInstance"));
     if (vkDestroyInstance) {
       vkDestroyInstance(static_cast<VkInstance>(instance_), nullptr);
     }
@@ -19,10 +20,10 @@ Display::~Display() {
 }
 
 Display::Display(Display&& other) noexcept
-  : displays_(std::move(other.displays_)),
-    planes_(std::move(other.planes_)),
-    instance_(other.instance_),
-    physical_device_(other.physical_device_) {
+    : displays_(std::move(other.displays_)),
+      planes_(std::move(other.planes_)),
+      instance_(other.instance_),
+      physical_device_(other.physical_device_) {
   other.instance_ = nullptr;
   other.physical_device_ = nullptr;
 }
@@ -30,8 +31,8 @@ Display::Display(Display&& other) noexcept
 Display& Display::operator=(Display&& other) noexcept {
   if (this != &other) {
     if (instance_) {
-      auto vkDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
-        dlsym(RTLD_DEFAULT, "vkDestroyInstance"));
+      auto vkDestroyInstance =
+          reinterpret_cast<PFN_vkDestroyInstance>(dlsym(RTLD_DEFAULT, "vkDestroyInstance"));
       if (vkDestroyInstance) {
         vkDestroyInstance(static_cast<VkInstance>(instance_), nullptr);
       }
@@ -50,28 +51,26 @@ Display& Display::operator=(Display&& other) noexcept {
 
 std::expected<Display, std::error_code> Display::create() {
   // Dynamically load Vulkan
-  auto vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
-    dlsym(RTLD_DEFAULT, "vkCreateInstance"));
+  auto vkCreateInstance =
+      reinterpret_cast<PFN_vkCreateInstance>(dlsym(RTLD_DEFAULT, "vkCreateInstance"));
   if (!vkCreateInstance) {
     return std::unexpected(std::make_error_code(std::errc::not_supported));
   }
 
   auto vkEnumeratePhysicalDevices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
-    dlsym(RTLD_DEFAULT, "vkEnumeratePhysicalDevices"));
+      dlsym(RTLD_DEFAULT, "vkEnumeratePhysicalDevices"));
   auto vkGetPhysicalDeviceDisplayPropertiesKHR =
-    reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPropertiesKHR>(
-      dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceDisplayPropertiesKHR"));
+      reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPropertiesKHR>(
+          dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceDisplayPropertiesKHR"));
   auto vkGetPhysicalDeviceDisplayPlanePropertiesKHR =
-    reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPlanePropertiesKHR>(
-      dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR"));
+      reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPlanePropertiesKHR>(
+          dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR"));
   auto vkGetDisplayPlaneSupportedDisplaysKHR =
-    reinterpret_cast<PFN_vkGetDisplayPlaneSupportedDisplaysKHR>(
-      dlsym(RTLD_DEFAULT, "vkGetDisplayPlaneSupportedDisplaysKHR"));
+      reinterpret_cast<PFN_vkGetDisplayPlaneSupportedDisplaysKHR>(
+          dlsym(RTLD_DEFAULT, "vkGetDisplayPlaneSupportedDisplaysKHR"));
 
-  if (!vkEnumeratePhysicalDevices ||
-      !vkGetPhysicalDeviceDisplayPropertiesKHR ||
-      !vkGetPhysicalDeviceDisplayPlanePropertiesKHR ||
-      !vkGetDisplayPlaneSupportedDisplaysKHR) {
+  if (!vkEnumeratePhysicalDevices || !vkGetPhysicalDeviceDisplayPropertiesKHR ||
+      !vkGetPhysicalDeviceDisplayPlanePropertiesKHR || !vkGetDisplayPlaneSupportedDisplaysKHR) {
     return std::unexpected(std::make_error_code(std::errc::not_supported));
   }
 
@@ -101,7 +100,7 @@ std::expected<Display, std::error_code> Display::create() {
   uint32_t dev_count = 0;
   vkEnumeratePhysicalDevices(instance, &dev_count, nullptr);
   if (dev_count == 0) {
-    return display; // No devices, but valid
+    return display;  // No devices, but valid
   }
 
   std::vector<VkPhysicalDevice> devices(dev_count);
@@ -164,8 +163,7 @@ const std::vector<DisplayPlaneInfo>& Display::planes() const noexcept {
   return planes_;
 }
 
-std::vector<const DisplayPlaneInfo*>
-Display::planes_for_display(uint64_t display_handle) const {
+std::vector<const DisplayPlaneInfo*> Display::planes_for_display(uint64_t display_handle) const {
   std::vector<const DisplayPlaneInfo*> result;
   for (const auto& plane : planes_) {
     for (auto dh : plane.supported_displays) {
@@ -178,4 +176,4 @@ Display::planes_for_display(uint64_t display_handle) const {
   return result;
 }
 
-} // namespace drm::vulkan
+}  // namespace drm::vulkan

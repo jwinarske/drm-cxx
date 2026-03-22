@@ -9,6 +9,8 @@ DrmSurface::~DrmSurface() = default;
 DrmSurface::DrmSurface(DrmSurface&&) noexcept = default;
 DrmSurface& DrmSurface::operator=(DrmSurface&&) noexcept = default;
 
-uint64_t DrmSurface::surface_handle() const noexcept { return surface_; }
+uint64_t DrmSurface::surface_handle() const noexcept {
+  return surface_;
+}
 
-} // namespace drm::vulkan
+}  // namespace drm::vulkan

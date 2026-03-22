@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
-
 #include "planes/layer.hpp"
+
+#include <gtest/gtest.h>
 
 TEST(LayerTest, SetPropertyMarksLayerDirty) {
   drm::planes::Layer layer;
@@ -40,7 +40,7 @@ TEST(LayerTest, SetCompositedMakesForceComposited) {
   layer.set_composited();
   // After allocation, composited layers get needs_composition = true
   // but the flag itself is internal. We verify via the API.
-  EXPECT_FALSE(layer.needs_composition()); // Not set until allocator runs
+  EXPECT_FALSE(layer.needs_composition());  // Not set until allocator runs
 }
 
 TEST(LayerTest, PropertyLookupReturnsCorrectValue) {

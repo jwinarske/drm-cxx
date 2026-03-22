@@ -16,13 +16,11 @@ void EventDispatcher::dispatch(const InputEvent& event) {
 }
 
 EventHandler EventDispatcher::as_handler() {
-  return [this](const InputEvent& event) {
-    dispatch(event);
-  };
+  return [this](const InputEvent& event) { dispatch(event); };
 }
 
 std::size_t EventDispatcher::handler_count() const noexcept {
   return handlers_.size();
 }
 
-} // namespace drm::input
+}  // namespace drm::input

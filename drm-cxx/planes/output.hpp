@@ -3,16 +3,16 @@
 
 #pragma once
 
+#include "layer.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <vector>
 
-#include "layer.hpp"
-
 namespace drm::planes {
 
 class Output {
-public:
+ public:
   Output(uint32_t crtc_id, Layer& composition_layer);
 
   Layer& add_layer();
@@ -31,7 +31,7 @@ public:
 
   void sort_layers_by_zpos();
 
-private:
+ private:
   void rebuild_layer_ptrs();
 
   uint32_t crtc_id_;
@@ -40,4 +40,4 @@ private:
   Layer* composition_layer_{};
 };
 
-} // namespace drm::planes
+}  // namespace drm::planes

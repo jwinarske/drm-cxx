@@ -17,10 +17,10 @@ namespace drm::input {
 
 struct KeyboardEvent {
   uint32_t time_ms{};
-  uint32_t key{};       // Linux key code (KEY_*)
-  bool pressed{};       // true = press, false = release
-  uint32_t sym{};       // XKB keysym (filled by Keyboard)
-  char utf8[8]{};       // UTF-8 representation (filled by Keyboard)
+  uint32_t key{};  // Linux key code (KEY_*)
+  bool pressed{};  // true = press, false = release
+  uint32_t sym{};  // XKB keysym (filled by Keyboard)
+  char utf8[8]{};  // UTF-8 representation (filled by Keyboard)
 };
 
 struct PointerMotionEvent {
@@ -31,7 +31,7 @@ struct PointerMotionEvent {
 
 struct PointerButtonEvent {
   uint32_t time_ms{};
-  uint32_t button{};    // BTN_LEFT, BTN_RIGHT, etc.
+  uint32_t button{};  // BTN_LEFT, BTN_RIGHT, etc.
   bool pressed{};
 };
 
@@ -45,7 +45,7 @@ using PointerEvent = std::variant<PointerMotionEvent, PointerButtonEvent, Pointe
 
 struct TouchEvent {
   uint32_t time_ms{};
-  int32_t slot{};       // Multi-touch slot
+  int32_t slot{};  // Multi-touch slot
   double x{};
   double y{};
   enum class Type : uint8_t { Down, Up, Motion, Frame, Cancel } type{};
@@ -70,9 +70,8 @@ struct SeatOptions {
 // ── Seat ───────────────────────────────────────────────────────
 
 class Seat {
-public:
-  static std::expected<Seat, std::error_code>
-    open(SeatOptions opts = {});
+ public:
+  static std::expected<Seat, std::error_code> open(SeatOptions opts = {});
 
   void set_event_handler(EventHandler handler);
 
@@ -92,7 +91,7 @@ public:
   Seat(const Seat&) = delete;
   Seat& operator=(const Seat&) = delete;
 
-private:
+ private:
   Seat() = default;
   void process_events();
 
@@ -103,4 +102,4 @@ private:
   int fd_{-1};
 };
 
-} // namespace drm::input
+}  // namespace drm::input

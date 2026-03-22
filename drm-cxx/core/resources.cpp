@@ -25,4 +25,4 @@ PlaneResPtr get_plane_resources(int fd) {
   return {drmModeGetPlaneResources(fd), &drmModeFreePlaneResources};
 }
 
-} // namespace drm
+}  // namespace drm

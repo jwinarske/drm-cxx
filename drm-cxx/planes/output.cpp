@@ -9,7 +9,7 @@
 namespace drm::planes {
 
 Output::Output(uint32_t crtc_id, Layer& composition_layer)
-  : crtc_id_(crtc_id), composition_layer_(&composition_layer) {
+    : crtc_id_(crtc_id), composition_layer_(&composition_layer) {
   composition_layer.is_composition_layer_ = true;
 }
 
@@ -21,12 +21,8 @@ Layer& Output::add_layer() {
 }
 
 void Output::remove_layer(const Layer& layer) {
-  std::erase_if(layer_ptrs_, [&](const Layer* l) {
-    return l == &layer;
-  });
-  std::erase_if(owned_layers_, [&](const auto& l) {
-    return l.get() == &layer;
-  });
+  std::erase_if(layer_ptrs_, [&](const Layer* l) { return l == &layer; });
+  std::erase_if(owned_layers_, [&](const auto& l) { return l.get() == &layer; });
 }
 
 void Output::set_composition_layer(Layer& layer) {
@@ -93,4 +89,4 @@ void Output::rebuild_layer_ptrs() {
   }
 }
 
-} // namespace drm::planes
+}  // namespace drm::planes

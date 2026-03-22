@@ -9,19 +9,18 @@
 namespace drm::planes {
 
 BipartiteMatching::BipartiteMatching(std::size_t n_left, std::size_t n_right)
-  : n_left_(n_left),
-    n_right_(n_right),
-    adj_(n_left),
-    match_left_(n_left, NIL),
-    match_right_(n_right, NIL),
-    dist_(n_left + 1) {}
+    : n_left_(n_left),
+      n_right_(n_right),
+      adj_(n_left),
+      match_left_(n_left, NIL),
+      match_right_(n_right, NIL),
+      dist_(n_left + 1) {}
 
 void BipartiteMatching::add_edge(std::size_t u, std::size_t v) {
   adj_[u].push_back(v);
 }
 
-void BipartiteMatching::add_edge(std::size_t u, std::size_t v,
-                                  [[maybe_unused]] int score) {
+void BipartiteMatching::add_edge(std::size_t u, std::size_t v, [[maybe_unused]] int score) {
   // Score is used for ordering in the adjacency list.
   // For now we just add the edge; sorting happens before solve if needed.
   adj_[u].push_back(v);
@@ -64,7 +63,7 @@ bool BipartiteMatching::bfs() {
 }
 
 bool BipartiteMatching::dfs(std::size_t u) {
-  if (u == n_left_) return true; // Sentinel: free right node
+  if (u == n_left_) return true;  // Sentinel: free right node
 
   for (std::size_t v : adj_[u]) {
     std::size_t pair_v = match_right_[v];
@@ -95,14 +94,12 @@ std::size_t BipartiteMatching::solve() {
   return matched_;
 }
 
-std::optional<std::size_t>
-BipartiteMatching::match_for_left(std::size_t u) const {
+std::optional<std::size_t> BipartiteMatching::match_for_left(std::size_t u) const {
   if (u >= n_left_ || match_left_[u] == NIL) return std::nullopt;
   return match_left_[u];
 }
 
-std::optional<std::size_t>
-BipartiteMatching::match_for_right(std::size_t v) const {
+std::optional<std::size_t> BipartiteMatching::match_for_right(std::size_t v) const {
   if (v >= n_right_ || match_right_[v] == NIL) return std::nullopt;
   return match_right_[v];
 }
@@ -111,4 +108,4 @@ std::size_t BipartiteMatching::matched_count() const noexcept {
   return matched_;
 }
 
-} // namespace drm::planes
+}  // namespace drm::planes

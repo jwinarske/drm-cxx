@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
-
 #include "planes/matching.hpp"
+
+#include <gtest/gtest.h>
 
 TEST(BipartiteMatchingTest, EmptyGraph) {
   drm::planes::BipartiteMatching m(0, 0);
@@ -98,7 +98,6 @@ TEST(BipartiteMatchingTest, CompleteGraph) {
   // All layers connect to all planes
   drm::planes::BipartiteMatching m(3, 3);
   for (std::size_t i = 0; i < 3; ++i)
-    for (std::size_t j = 0; j < 3; ++j)
-      m.add_edge(i, j);
+    for (std::size_t j = 0; j < 3; ++j) m.add_edge(i, j);
   EXPECT_EQ(m.solve(), 3u);
 }

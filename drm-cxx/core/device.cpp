@@ -3,10 +3,11 @@
 
 #include "device.hpp"
 
+#include <xf86drm.h>
+
 #include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
-#include <xf86drm.h>
 
 namespace drm {
 
@@ -33,8 +34,7 @@ Device& Device::operator=(Device&& other) noexcept {
   return *this;
 }
 
-std::expected<Device, std::error_code>
-Device::open(std::string_view path) {
+std::expected<Device, std::error_code> Device::open(std::string_view path) {
   std::string path_str(path);
   int fd = ::open(path_str.c_str(), O_RDWR | O_CLOEXEC);
   if (fd < 0) {
@@ -55,10 +55,11 @@ Device::open(std::string_view path) {
   return Device(fd);
 }
 
-int Device::fd() const noexcept { return fd_; }
+int Device::fd() const noexcept {
+  return fd_;
+}
 
-std::expected<void, std::error_code>
-Device::set_client_cap(uint64_t cap, uint64_t value) {
+std::expected<void, std::error_code> Device::set_client_cap(uint64_t cap, uint64_t value) {
   if (fd_ < 0) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
@@ -76,4 +77,4 @@ std::expected<void, std::error_code> Device::enable_atomic() {
   return set_client_cap(DRM_CLIENT_CAP_ATOMIC, 1);
 }
 
-} // namespace drm
+}  // namespace drm

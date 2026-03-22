@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
-
 #include "core/device.hpp"
 #include "modeset/atomic.hpp"
 
+#include <gtest/gtest.h>
+
 class AtomicRequestTest : public ::testing::Test {
-protected:
+ protected:
   void SetUp() override {
     auto result = drm::Device::open("/dev/dri/card0");
     if (!result.has_value()) {

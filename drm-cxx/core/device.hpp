@@ -11,14 +11,12 @@
 namespace drm {
 
 class Device {
-public:
-  static std::expected<Device, std::error_code>
-    open(std::string_view path);
+ public:
+  static std::expected<Device, std::error_code> open(std::string_view path);
 
   [[nodiscard]] int fd() const noexcept;
 
-  std::expected<void, std::error_code>
-    set_client_cap(uint64_t cap, uint64_t value);
+  std::expected<void, std::error_code> set_client_cap(uint64_t cap, uint64_t value);
 
   std::expected<void, std::error_code> enable_universal_planes();
   std::expected<void, std::error_code> enable_atomic();
@@ -30,9 +28,9 @@ public:
   Device(const Device&) = delete;
   Device& operator=(const Device&) = delete;
 
-private:
+ private:
   explicit Device(int fd) noexcept;
   int fd_{-1};
 };
 
-} // namespace drm
+}  // namespace drm
