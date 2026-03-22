@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -23,15 +23,17 @@ class PageFlip {
 
   // Wait for and dispatch a page flip event.
   // timeout_ms: -1 = block forever, 0 = non-blocking, >0 = timeout in ms.
-  std::expected<void, std::error_code> dispatch(int timeout_ms = -1);
+  std::expected<void, std::error_code> dispatch(int timeout_ms = -1) const;
 
   ~PageFlip();
 
  private:
   // Allow the C callback trampolines to invoke handler_
-  friend void page_flip_handler(int, unsigned int, unsigned int, unsigned int, void*);
-  friend void page_flip_handler_v2(int, unsigned int, unsigned int, unsigned int, unsigned int,
-                                   void*);
+  friend void page_flip_handler(int /*unused*/, unsigned int /*unused*/, unsigned int /*tv_sec*/,
+                                unsigned int /*tv_usec*/, void* /*user_data*/);
+  friend void page_flip_handler_v2(int /*unused*/, unsigned int /*sequence*/,
+                                   unsigned int /*tv_sec*/, unsigned int /*tv_usec*/,
+                                   unsigned int /*crtc_id*/, void* /*user_data*/);
 
   int drm_fd_{-1};
   Handler handler_;

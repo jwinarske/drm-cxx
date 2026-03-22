@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 //
 // vulkan_display — demonstrates VK_KHR_display integration.
 //

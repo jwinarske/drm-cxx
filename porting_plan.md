@@ -90,12 +90,12 @@ drm-cxx/
 
 ```meson
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 project('drm-cxx', ['cpp'],
   version : '1.0.0',
   meson_version : '>=1.3.0',
-  license : 'Apache-2.0',
+  license : 'MIT',
   default_options : [
     'cpp_std=c++23',
     'b_lto=true',

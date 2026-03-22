@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "display/connector_info.hpp"
 #include "display/edid.hpp"
 
+#include <cstdint>
 #include <gtest/gtest.h>
+#include <span>
 
 TEST(ConnectorInfoTest, DefaultConstruction) {
-  drm::display::ConnectorInfo info;
+  drm::display::ConnectorInfo const info;
   EXPECT_TRUE(info.name.empty());
   EXPECT_FALSE(info.colorimetry.has_value());
   EXPECT_FALSE(info.hdr.has_value());
@@ -15,32 +17,32 @@ TEST(ConnectorInfoTest, DefaultConstruction) {
 }
 
 TEST(HdrStaticMetadataTest, DefaultValues) {
-  drm::display::HdrStaticMetadata md{};
-  EXPECT_FLOAT_EQ(md.max_luminance, 0.0f);
-  EXPECT_FLOAT_EQ(md.min_luminance, 0.0f);
-  EXPECT_FLOAT_EQ(md.max_cll, 0.0f);
-  EXPECT_FLOAT_EQ(md.max_fall, 0.0f);
+  drm::display::HdrStaticMetadata const md{};
+  EXPECT_FLOAT_EQ(md.max_luminance, 0.0F);
+  EXPECT_FLOAT_EQ(md.min_luminance, 0.0F);
+  EXPECT_FLOAT_EQ(md.max_cll, 0.0F);
+  EXPECT_FLOAT_EQ(md.max_fall, 0.0F);
 }
 
 TEST(ColorimetryInfoTest, CanSetValues) {
   drm::display::ColorimetryInfo ci{};
-  ci.red = {0.64f, 0.33f};
-  ci.green = {0.30f, 0.60f};
-  ci.blue = {0.15f, 0.06f};
-  ci.white = {0.3127f, 0.3290f};
+  ci.red = {.x = 0.64F, .y = 0.33F};
+  ci.green = {.x = 0.30F, .y = 0.60F};
+  ci.blue = {.x = 0.15F, .y = 0.06F};
+  ci.white = {.x = 0.3127F, .y = 0.3290F};
 
-  EXPECT_FLOAT_EQ(ci.red.x, 0.64f);
-  EXPECT_FLOAT_EQ(ci.white.y, 0.3290f);
+  EXPECT_FLOAT_EQ(ci.red.x, 0.64F);
+  EXPECT_FLOAT_EQ(ci.white.y, 0.3290F);
 }
 
 TEST(ParseEdidTest, EmptyBlobReturnsError) {
-  std::span<const uint8_t> empty;
+  std::span<const uint8_t> const empty;
   auto result = drm::display::parse_edid(empty);
   EXPECT_FALSE(result.has_value());
 }
 
 TEST(ParseEdidTest, InvalidBlobReturnsError) {
-  uint8_t garbage[] = {0xDE, 0xAD, 0xBE, 0xEF};
+  uint8_t const garbage[] = {0xDE, 0xAD, 0xBE, 0xEF};
   auto result = drm::display::parse_edid(garbage);
   // libdisplay-info may still parse garbage but return minimal info
   // Either way, should not crash

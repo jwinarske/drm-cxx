@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
+#include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <cstdint>

@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "planes/layer.hpp"
 
@@ -32,7 +32,7 @@ TEST(LayerTest, DisableSetsFbIdToZero) {
 
   auto val = layer.property("FB_ID");
   ASSERT_TRUE(val.has_value());
-  EXPECT_EQ(*val, 0u);
+  EXPECT_EQ(*val, 0U);
 }
 
 TEST(LayerTest, SetCompositedMakesForceComposited) {
@@ -50,14 +50,14 @@ TEST(LayerTest, PropertyLookupReturnsCorrectValue) {
   layer.set_property("CRTC_W", 1920);
   layer.set_property("CRTC_H", 1080);
 
-  EXPECT_EQ(layer.property("CRTC_X"), 100u);
-  EXPECT_EQ(layer.property("CRTC_Y"), 200u);
-  EXPECT_EQ(layer.width(), 1920u);
-  EXPECT_EQ(layer.height(), 1080u);
+  EXPECT_EQ(layer.property("CRTC_X"), 100U);
+  EXPECT_EQ(layer.property("CRTC_Y"), 200U);
+  EXPECT_EQ(layer.width(), 1920U);
+  EXPECT_EQ(layer.height(), 1080U);
 }
 
 TEST(LayerTest, UnknownPropertyReturnsNullopt) {
-  drm::planes::Layer layer;
+  drm::planes::Layer const layer;
   EXPECT_FALSE(layer.property("nonexistent").has_value());
 }
 
@@ -71,15 +71,15 @@ TEST(LayerTest, CrtcRectIsCorrect) {
   auto r = layer.crtc_rect();
   EXPECT_EQ(r.x, 10);
   EXPECT_EQ(r.y, 20);
-  EXPECT_EQ(r.w, 800u);
-  EXPECT_EQ(r.h, 600u);
+  EXPECT_EQ(r.w, 800U);
+  EXPECT_EQ(r.h, 600U);
 }
 
 TEST(LayerTest, RequiresScalingDetection) {
   drm::planes::Layer layer;
   // SRC is 16.16 fixed point
-  layer.set_property("SRC_W", 1920u << 16);
-  layer.set_property("SRC_H", 1080u << 16);
+  layer.set_property("SRC_W", 1920U << 16);
+  layer.set_property("SRC_H", 1080U << 16);
   layer.set_property("CRTC_W", 1920);
   layer.set_property("CRTC_H", 1080);
   EXPECT_FALSE(layer.requires_scaling());
@@ -94,7 +94,7 @@ TEST(LayerTest, ContentTypeAndUpdateHint) {
   layer.set_update_hint(60);
 
   EXPECT_EQ(layer.content_type(), drm::planes::ContentType::Video);
-  EXPECT_EQ(layer.update_hz(), 60u);
+  EXPECT_EQ(layer.update_hz(), 60U);
 }
 
 TEST(LayerTest, PropertyHashExcludesFbId) {
@@ -112,6 +112,6 @@ TEST(LayerTest, PropertyHashExcludesFbId) {
 }
 
 TEST(LayerTest, AssignedPlaneIdDefaultsToNullopt) {
-  drm::planes::Layer layer;
+  drm::planes::Layer const layer;
   EXPECT_FALSE(layer.assigned_plane_id().has_value());
 }

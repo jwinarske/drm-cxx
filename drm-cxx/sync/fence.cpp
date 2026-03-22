@@ -1,12 +1,17 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "fence.hpp"
 
 #include <cerrno>
+#include <chrono>
+#include <expected>
+#include <limits>
 #include <linux/sync_file.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <sys/poll.h>
+#include <system_error>
 #include <unistd.h>
 
 namespace drm::sync {
@@ -38,14 +43,14 @@ std::expected<SyncFence, std::error_code> SyncFence::import_fd(int fence_fd) {
   if (fence_fd < 0) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
-  int duped = ::dup(fence_fd);
+  int const duped = ::dup(fence_fd);
   if (duped < 0) {
     return std::unexpected(std::error_code(errno, std::system_category()));
   }
   return SyncFence(duped);
 }
 
-std::expected<void, std::error_code> SyncFence::wait(std::chrono::milliseconds timeout) {
+std::expected<void, std::error_code> SyncFence::wait(std::chrono::milliseconds timeout) const {
   if (fd_ < 0) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
@@ -54,7 +59,11 @@ std::expected<void, std::error_code> SyncFence::wait(std::chrono::milliseconds t
   pfd.fd = fd_;
   pfd.events = POLLIN;
 
-  int ret = ::poll(&pfd, 1, static_cast<int>(timeout.count()));
+  auto ms = timeout.count();
+  if (ms > std::numeric_limits<int>::max()) {
+    ms = std::numeric_limits<int>::max();
+  }
+  int const ret = ::poll(&pfd, 1, static_cast<int>(ms));
   if (ret < 0) {
     return std::unexpected(std::error_code(errno, std::system_category()));
   }
@@ -74,6 +83,10 @@ std::expected<void, std::error_code> SyncFence::merge(SyncFence other) {
 
   if (::ioctl(fd_, SYNC_IOC_MERGE, &data) < 0) {
     return std::unexpected(std::error_code(errno, std::system_category()));
+  }
+
+  if (data.fence < 0) {
+    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   // Replace our fd with the merged one

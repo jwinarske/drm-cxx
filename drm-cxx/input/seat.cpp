@@ -1,14 +1,18 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "seat.hpp"
 
 #include <libinput.h>
 
 #include <cerrno>
+#include <expected>
 #include <fcntl.h>
 #include <libudev.h>
+#include <string>
+#include <system_error>
 #include <unistd.h>
+#include <utility>
 
 namespace drm::input {
 
@@ -22,8 +26,10 @@ auto* ud(void* p) {
 }
 
 int open_restricted(const char* path, int flags, void* /*user_data*/) {
-  int fd = ::open(path, flags);
-  if (fd < 0) return -errno;
+  int const fd = ::open(path, flags);
+  if (fd < 0) {
+    return -errno;
+  }
   return fd;
 }
 
@@ -39,8 +45,12 @@ const struct libinput_interface li_interface = {
 }  // namespace
 
 Seat::~Seat() {
-  if (li_) libinput_unref(li(li_));
-  if (udev_) udev_unref(ud(udev_));
+  if (li_ != nullptr) {
+    libinput_unref(li(li_));
+  }
+  if (udev_ != nullptr) {
+    udev_unref(ud(udev_));
+  }
 }
 
 Seat::Seat(Seat&& other) noexcept
@@ -52,8 +62,12 @@ Seat::Seat(Seat&& other) noexcept
 
 Seat& Seat::operator=(Seat&& other) noexcept {
   if (this != &other) {
-    if (li_) libinput_unref(li(li_));
-    if (udev_) udev_unref(ud(udev_));
+    if (li_ != nullptr) {
+      libinput_unref(li(li_));
+    }
+    if (udev_ != nullptr) {
+      udev_unref(ud(udev_));
+    }
 
     li_ = other.li_;
     udev_ = other.udev_;
@@ -71,16 +85,16 @@ std::expected<Seat, std::error_code> Seat::open(SeatOptions opts) {
   Seat seat;
 
   seat.udev_ = udev_new();
-  if (!seat.udev_) {
+  if (seat.udev_ == nullptr) {
     return std::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
   seat.li_ = libinput_udev_create_context(&li_interface, nullptr, ud(seat.udev_));
-  if (!seat.li_) {
+  if (seat.li_ == nullptr) {
     return std::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
-  std::string seat_name(opts.seat_name);
+  std::string const seat_name(opts.seat_name);
   if (libinput_udev_assign_seat(li(seat.li_), seat_name.c_str()) != 0) {
     return std::unexpected(std::make_error_code(std::errc::no_such_device));
   }
@@ -99,7 +113,7 @@ int Seat::fd() const noexcept {
 }
 
 std::expected<void, std::error_code> Seat::dispatch() {
-  if (!li_) {
+  if (li_ == nullptr) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
@@ -112,7 +126,7 @@ std::expected<void, std::error_code> Seat::dispatch() {
 }
 
 std::expected<void, std::error_code> Seat::suspend() {
-  if (!li_) {
+  if (li_ == nullptr) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
   libinput_suspend(li(li_));
@@ -120,7 +134,7 @@ std::expected<void, std::error_code> Seat::suspend() {
 }
 
 std::expected<void, std::error_code> Seat::resume() {
-  if (!li_) {
+  if (li_ == nullptr) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
   if (libinput_resume(li(li_)) != 0) {
@@ -130,15 +144,20 @@ std::expected<void, std::error_code> Seat::resume() {
 }
 
 void Seat::process_events() {
-  if (!handler_) return;
+  if (!handler_) {
+    return;
+  }
 
-  struct libinput_event* ev;
+  struct libinput_event* ev = nullptr;
   while ((ev = libinput_get_event(li(li_))) != nullptr) {
     auto type = libinput_event_get_type(ev);
 
     switch (type) {
       case LIBINPUT_EVENT_KEYBOARD_KEY: {
         auto* kev = libinput_event_get_keyboard_event(ev);
+        if (kev == nullptr) {
+          break;
+        }
         KeyboardEvent ke{
             .time_ms = libinput_event_keyboard_get_time(kev),
             .key = libinput_event_keyboard_get_key(kev),
@@ -150,6 +169,9 @@ void Seat::process_events() {
 
       case LIBINPUT_EVENT_POINTER_MOTION: {
         auto* pev = libinput_event_get_pointer_event(ev);
+        if (pev == nullptr) {
+          break;
+        }
         PointerMotionEvent me{
             .time_ms = libinput_event_pointer_get_time(pev),
             .dx = libinput_event_pointer_get_dx(pev),
@@ -161,6 +183,9 @@ void Seat::process_events() {
 
       case LIBINPUT_EVENT_POINTER_BUTTON: {
         auto* pev = libinput_event_get_pointer_event(ev);
+        if (pev == nullptr) {
+          break;
+        }
         PointerButtonEvent be{
             .time_ms = libinput_event_pointer_get_time(pev),
             .button = libinput_event_pointer_get_button(pev),
@@ -173,14 +198,17 @@ void Seat::process_events() {
 
       case LIBINPUT_EVENT_POINTER_AXIS: {
         auto* pev = libinput_event_get_pointer_event(ev);
+        if (pev == nullptr) {
+          break;
+        }
         PointerAxisEvent ae{
             .time_ms = libinput_event_pointer_get_time(pev),
         };
-        if (libinput_event_pointer_has_axis(pev, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL)) {
+        if (libinput_event_pointer_has_axis(pev, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL) != 0) {
           ae.horizontal =
               libinput_event_pointer_get_axis_value(pev, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
         }
-        if (libinput_event_pointer_has_axis(pev, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL)) {
+        if (libinput_event_pointer_has_axis(pev, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL) != 0) {
           ae.vertical =
               libinput_event_pointer_get_axis_value(pev, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
         }
@@ -190,6 +218,9 @@ void Seat::process_events() {
 
       case LIBINPUT_EVENT_TOUCH_DOWN: {
         auto* tev = libinput_event_get_touch_event(ev);
+        if (tev == nullptr) {
+          break;
+        }
         TouchEvent te{
             .time_ms = libinput_event_touch_get_time(tev),
             .slot = libinput_event_touch_get_slot(tev),
@@ -203,6 +234,9 @@ void Seat::process_events() {
 
       case LIBINPUT_EVENT_TOUCH_UP: {
         auto* tev = libinput_event_get_touch_event(ev);
+        if (tev == nullptr) {
+          break;
+        }
         TouchEvent te{
             .time_ms = libinput_event_touch_get_time(tev),
             .slot = libinput_event_touch_get_slot(tev),
@@ -214,6 +248,9 @@ void Seat::process_events() {
 
       case LIBINPUT_EVENT_TOUCH_MOTION: {
         auto* tev = libinput_event_get_touch_event(ev);
+        if (tev == nullptr) {
+          break;
+        }
         TouchEvent te{
             .time_ms = libinput_event_touch_get_time(tev),
             .slot = libinput_event_touch_get_slot(tev),
@@ -239,6 +276,9 @@ void Seat::process_events() {
 
       case LIBINPUT_EVENT_SWITCH_TOGGLE: {
         auto* sev = libinput_event_get_switch_event(ev);
+        if (sev == nullptr) {
+          break;
+        }
         SwitchEvent se{
             .time_ms = libinput_event_switch_get_time(sev),
         };

@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "input/event_dispatcher.hpp"
 #include "input/keyboard.hpp"
 #include "input/pointer.hpp"
 #include "input/seat.hpp"
 
+#include <cstdint>
 #include <gtest/gtest.h>
+#include <variant>
 
 // ── Event type tests ──────────────────────────────────────────
 
@@ -16,15 +18,15 @@ TEST(InputEventTest, KeyboardEventVariant) {
 
   EXPECT_TRUE(std::holds_alternative<drm::input::KeyboardEvent>(event));
   auto& got = std::get<drm::input::KeyboardEvent>(event);
-  EXPECT_EQ(got.time_ms, 100u);
-  EXPECT_EQ(got.key, 42u);
+  EXPECT_EQ(got.time_ms, 100U);
+  EXPECT_EQ(got.key, 42U);
   EXPECT_TRUE(got.pressed);
 }
 
 TEST(InputEventTest, PointerMotionVariant) {
   drm::input::PointerMotionEvent me{.time_ms = 50, .dx = 1.5, .dy = -2.0};
   drm::input::PointerEvent pe{me};
-  drm::input::InputEvent event{pe};
+  drm::input::InputEvent const event{pe};
 
   EXPECT_TRUE(std::holds_alternative<drm::input::PointerEvent>(event));
 }
@@ -37,7 +39,7 @@ TEST(InputEventTest, TouchEventVariant) {
       .y = 200.0,
       .type = drm::input::TouchEvent::Type::Down,
   };
-  drm::input::InputEvent event{te};
+  drm::input::InputEvent const event{te};
   EXPECT_TRUE(std::holds_alternative<drm::input::TouchEvent>(event));
 }
 
@@ -47,7 +49,7 @@ TEST(InputEventTest, SwitchEventVariant) {
       .which = drm::input::SwitchEvent::Switch::Lid,
       .active = true,
   };
-  drm::input::InputEvent event{se};
+  drm::input::InputEvent const event{se};
   EXPECT_TRUE(std::holds_alternative<drm::input::SwitchEvent>(event));
 }
 
@@ -69,7 +71,7 @@ TEST(PointerTest, AccumulateMotion) {
 
 TEST(PointerTest, ButtonState) {
   drm::input::Pointer ptr;
-  uint32_t btn = 0x110;  // BTN_LEFT
+  uint32_t const btn = 0x110;  // BTN_LEFT
 
   EXPECT_FALSE(ptr.button_pressed(btn));
 
@@ -93,18 +95,19 @@ TEST(PointerTest, ResetPosition) {
 
 TEST(EventDispatcherTest, AddHandlerIncrementsCount) {
   drm::input::EventDispatcher dispatcher;
-  EXPECT_EQ(dispatcher.handler_count(), 0u);
+  EXPECT_EQ(dispatcher.handler_count(), 0U);
 
   dispatcher.add_handler([](const drm::input::InputEvent&) {});
-  EXPECT_EQ(dispatcher.handler_count(), 1u);
+  EXPECT_EQ(dispatcher.handler_count(), 1U);
 
   dispatcher.add_handler([](const drm::input::InputEvent&) {});
-  EXPECT_EQ(dispatcher.handler_count(), 2u);
+  EXPECT_EQ(dispatcher.handler_count(), 2U);
 }
 
 TEST(EventDispatcherTest, DispatchCallsAllHandlers) {
   drm::input::EventDispatcher dispatcher;
-  int count1 = 0, count2 = 0;
+  int count1 = 0;
+  int count2 = 0;
 
   dispatcher.add_handler([&](const drm::input::InputEvent&) { ++count1; });
   dispatcher.add_handler([&](const drm::input::InputEvent&) { ++count2; });
@@ -156,7 +159,7 @@ TEST(KeyboardTest, ProcessKeyFillsSymAndUtf8) {
   kb.process_key(ke);
 
   // After processing, sym should be XKB_KEY_a (0x61) and utf8 should be "a"
-  EXPECT_EQ(ke.sym, 0x61u);  // XKB_KEY_a
+  EXPECT_EQ(ke.sym, 0x61U);  // XKB_KEY_a
   EXPECT_STREQ(ke.utf8, "a");
 }
 

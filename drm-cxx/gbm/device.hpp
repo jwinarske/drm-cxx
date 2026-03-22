@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -17,8 +17,8 @@ class GbmDevice {
   [[nodiscard]] struct gbm_device* raw() const noexcept;
 
   ~GbmDevice();
-  GbmDevice(GbmDevice&&) noexcept;
-  GbmDevice& operator=(GbmDevice&&) noexcept;
+  GbmDevice(GbmDevice&& /*other*/) noexcept;
+  GbmDevice& operator=(GbmDevice&& /*other*/) noexcept;
   GbmDevice(const GbmDevice&) = delete;
   GbmDevice& operator=(const GbmDevice&) = delete;
 

@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 //
 // atomic_modeset — end-to-end atomic modesetting example.
 //
@@ -8,22 +8,31 @@
 // Opens a DRM device, finds a connected connector, selects the preferred
 // mode, and performs an atomic modeset. Then waits for a page flip event.
 
+#include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "modeset/atomic.hpp"
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
 
+#include <xf86drmMode.h>
+
+#include <cstdint>
 #include <cstdlib>
 #include <print>
+#include <span>
+#include <utility>
 
 int main(const int argc, char* argv[]) {
-  const char* path = (argc > 1) ? argv[1] : "/dev/dri/card0";
+  const auto path = drm::examples::select_device(argc, argv);
+  if (!path) {
+    return EXIT_FAILURE;
+  }
 
   // Open DRM device
-  auto dev_result = drm::Device::open(path);
+  auto dev_result = drm::Device::open(*path);
   if (!dev_result) {
-    std::println(stderr, "Failed to open {}", path);
+    std::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
   auto& dev = *dev_result;

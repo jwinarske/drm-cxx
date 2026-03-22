@@ -134,4 +134,4 @@ Or at compile time: `-DDRM_CXX_LOG_LEVEL=4`
 
 ## License
 
-Apache-2.0
+MIT

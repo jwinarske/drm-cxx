@@ -1,12 +1,18 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "device.hpp"
 
+#include <drm.h>
 #include <xf86drm.h>
 
 #include <cerrno>
+#include <cstdint>
+#include <expected>
 #include <fcntl.h>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <unistd.h>
 
 namespace drm {
@@ -35,15 +41,15 @@ Device& Device::operator=(Device&& other) noexcept {
 }
 
 std::expected<Device, std::error_code> Device::open(std::string_view path) {
-  std::string path_str(path);
-  int fd = ::open(path_str.c_str(), O_RDWR | O_CLOEXEC);
+  std::string const path_str(path);
+  int const fd = ::open(path_str.c_str(), O_RDWR | O_CLOEXEC);
   if (fd < 0) {
     return std::unexpected(std::error_code(errno, std::system_category()));
   }
 
   // Verify this is actually a DRM device
-  auto version = drmGetVersion(fd);
-  if (!version) {
+  auto* version = drmGetVersion(fd);
+  if (version == nullptr) {
     ::close(fd);
     return std::unexpected(std::make_error_code(std::errc::no_such_device));
   }
@@ -59,12 +65,13 @@ int Device::fd() const noexcept {
   return fd_;
 }
 
-std::expected<void, std::error_code> Device::set_client_cap(uint64_t cap, uint64_t value) {
+std::expected<void, std::error_code> Device::set_client_cap(uint64_t cap, uint64_t value) const {
   if (fd_ < 0) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
-  if (drmSetClientCap(fd_, cap, value) != 0) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+  int const ret = drmSetClientCap(fd_, cap, value);
+  if (ret != 0) {
+    return std::unexpected(std::error_code(ret < 0 ? -ret : errno, std::system_category()));
   }
   return {};
 }

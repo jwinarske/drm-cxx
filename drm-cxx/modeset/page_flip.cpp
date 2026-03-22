@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "page_flip.hpp"
 
@@ -8,8 +8,12 @@
 #include <xf86drm.h>
 
 #include <cerrno>
+#include <cstdint>
+#include <expected>
 #include <sys/epoll.h>
+#include <system_error>
 #include <unistd.h>
+#include <utility>
 
 namespace drm {
 
@@ -17,8 +21,8 @@ void page_flip_handler(int /*fd*/, unsigned int /*sequence*/, unsigned int tv_se
                        unsigned int tv_usec, void* user_data) {
   auto* pf = static_cast<PageFlip*>(user_data);
   if (pf->handler_) {
-    uint64_t timestamp_ns = static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL +
-                            static_cast<uint64_t>(tv_usec) * 1'000ULL;
+    uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
+                                  (static_cast<uint64_t>(tv_usec) * 1'000ULL);
     // We pass 0 for crtc_id and sequence here; the v2 handler below is preferred
     pf->handler_(0, 0, timestamp_ns);
   }
@@ -28,8 +32,8 @@ void page_flip_handler_v2(int /*fd*/, unsigned int sequence, unsigned int tv_sec
                           unsigned int tv_usec, unsigned int crtc_id, void* user_data) {
   auto* pf = static_cast<PageFlip*>(user_data);
   if (pf->handler_) {
-    uint64_t timestamp_ns = static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL +
-                            static_cast<uint64_t>(tv_usec) * 1'000ULL;
+    uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
+                                  (static_cast<uint64_t>(tv_usec) * 1'000ULL);
     pf->handler_(crtc_id, sequence, timestamp_ns);
   }
 }
@@ -42,13 +46,13 @@ void PageFlip::set_handler(Handler handler) {
   handler_ = std::move(handler);
 }
 
-std::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) {
+std::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   if (drm_fd_ < 0) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   // Use epoll for the wait
-  int epfd = epoll_create1(EPOLL_CLOEXEC);
+  int const epfd = epoll_create1(EPOLL_CLOEXEC);
   if (epfd < 0) {
     return std::unexpected(std::error_code(errno, std::system_category()));
   }
@@ -62,7 +66,7 @@ std::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) {
   }
 
   struct epoll_event events[1];
-  int nfds = epoll_wait(epfd, events, 1, timeout_ms);
+  int const nfds = epoll_wait(epfd, events, 1, timeout_ms);
   ::close(epfd);
 
   if (nfds < 0) {

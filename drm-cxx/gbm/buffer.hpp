@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -25,8 +25,8 @@ class Buffer {
   [[nodiscard]] std::expected<int, std::error_code> fd() const;
 
   ~Buffer();
-  Buffer(Buffer&&) noexcept;
-  Buffer& operator=(Buffer&&) noexcept;
+  Buffer(Buffer&& /*other*/) noexcept;
+  Buffer& operator=(Buffer&& /*other*/) noexcept;
   Buffer(const Buffer&) = delete;
   Buffer& operator=(const Buffer&) = delete;
 

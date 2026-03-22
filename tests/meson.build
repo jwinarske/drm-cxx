@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 gtest_dep = dependency('gtest', required : true)
 gtest_main_dep = dependency('gtest_main', required : true)

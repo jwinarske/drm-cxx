@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "core/device.hpp"
 #include "modeset/atomic.hpp"
 
 #include <gtest/gtest.h>
+#include <memory>
+#include <utility>
 
 class AtomicRequestTest : public ::testing::Test {
  protected:
@@ -25,7 +27,7 @@ class AtomicRequestTest : public ::testing::Test {
 };
 
 TEST_F(AtomicRequestTest, ConstructAndDestroy) {
-  drm::AtomicRequest req(*dev_);
+  drm::AtomicRequest const req(*dev_);
   // Should not crash — verifies RAII allocation/deallocation
 }
 

@@ -1,19 +1,23 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "property_store.hpp"
 
-#include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include <cerrno>
+#include <cstdint>
+#include <expected>
+#include <string_view>
+#include <system_error>
+#include <vector>
 
 namespace drm {
 
 std::expected<void, std::error_code> PropertyStore::cache_properties(int fd, uint32_t object_id,
                                                                      uint32_t object_type) {
   auto* props = drmModeObjectGetProperties(fd, object_id, object_type);
-  if (!props) {
+  if (props == nullptr) {
     return std::unexpected(std::error_code(errno, std::system_category()));
   }
 
@@ -23,7 +27,7 @@ std::expected<void, std::error_code> PropertyStore::cache_properties(int fd, uin
 
   for (uint32_t i = 0; i < props->count_props; ++i) {
     auto* prop = drmModeGetProperty(fd, props->props[i]);
-    if (!prop) {
+    if (prop == nullptr) {
       continue;
     }
 

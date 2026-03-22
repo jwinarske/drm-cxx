@@ -1,16 +1,27 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "allocator.hpp"
 
 #include "../core/device.hpp"
 #include "../modeset/atomic.hpp"
 #include "matching.hpp"
+#include "planes/layer.hpp"
+#include "planes/output.hpp"
+#include "planes/plane_registry.hpp"
 
 #include <algorithm>
-#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <functional>
 #include <numeric>
-#include <ranges>
+#include <optional>
+#include <span>
+#include <system_error>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace drm::planes {
 
@@ -18,7 +29,9 @@ namespace drm::planes {
 
 std::optional<bool> TestCache::lookup(uint32_t plane_id, std::size_t prop_hash) const {
   auto it = cache_.find({plane_id, prop_hash});
-  if (it == cache_.end()) return std::nullopt;
+  if (it == cache_.end()) {
+    return std::nullopt;
+  }
   return it->second.passed;
 }
 
@@ -30,7 +43,9 @@ void TestCache::record(uint32_t plane_id, std::size_t prop_hash, bool passed) {
 
 std::size_t TestCache::hit_count(uint32_t plane_id, std::size_t prop_hash) const {
   auto it = cache_.find({plane_id, prop_hash});
-  if (it == cache_.end()) return 0;
+  if (it == cache_.end()) {
+    return 0;
+  }
   return it->second.hits;
 }
 
@@ -176,7 +191,7 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     if (!assignment.empty()) {
       // Check via atomic test
       AtomicRequest test_req(dev_);
-      bool preseed_ok = try_test_commit(assignment, output, test_req, flags);
+      bool const preseed_ok = try_test_commit(assignment, output, test_req, flags);
 
       if (!preseed_ok) {
         // §13.2 + §13.1 Backtrack from preseed with best-first ordering
@@ -188,12 +203,18 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
         std::unordered_map<Layer*, bool> assigned_layers;
 
         for (const auto& cand : candidates) {
-          if (used_planes.contains(cand.plane->id)) continue;
-          if (assigned_layers.contains(cand.layer)) continue;
+          if (used_planes.contains(cand.plane->id)) {
+            continue;
+          }
+          if (assigned_layers.contains(cand.layer)) {
+            continue;
+          }
 
           // Check failure cache
           auto cached = failure_cache_.lookup(cand.plane->id, cand.layer->property_hash());
-          if (cached.has_value() && !*cached) continue;
+          if (cached.has_value() && !*cached) {
+            continue;
+          }
 
           assignment[cand.plane->id] = cand.layer;
           used_planes[cand.plane->id] = true;
@@ -212,15 +233,17 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
             return layer_priority(*a.second) < layer_priority(*b.second);
           });
 
-          for (auto it = assigned_vec.begin(); it != assigned_vec.end(); ++it) {
-            assignment.erase(it->first);
+          for (auto& it : assigned_vec) {
+            assignment.erase(it.first);
 
             AtomicRequest bt_req(dev_);
             if (try_test_commit(assignment, output, bt_req, flags)) {
               break;
             }
 
-            if (test_commits_this_frame_ >= max_test_commits_) break;
+            if (test_commits_this_frame_ >= max_test_commits_) {
+              break;
+            }
           }
         }
       }
@@ -243,7 +266,9 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   for (auto& [plane_id, layer] : best_assignment) {
     layer->assigned_plane_ = plane_id;
     layer->needs_composition_ = false;
-    apply_layer_to_plane(*layer, plane_id, req);
+    if (auto r = apply_layer_to_plane(*layer, plane_id, req); !r) {
+      return std::unexpected(r.error());
+    }
   }
 
   // Mark unassigned layers
@@ -262,7 +287,7 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     }
   }
 
-  if (any_composited && output.composition_layer()) {
+  if (any_composited && (output.composition_layer() != nullptr)) {
     // Find primary plane for this crtc
     for (const auto* plane : registry_.for_crtc(crtc_index)) {
       if (plane->type == DRMPlaneType::PRIMARY && !best_assignment.contains(plane->id)) {
@@ -294,14 +319,16 @@ std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_pr
     uint32_t crtc_index) {
   std::vector<std::pair<Layer*, const PlaneCapabilities*>> result;
 
-  if (layers.empty() || planes.empty()) return result;
+  if (layers.empty() || planes.empty()) {
+    return result;
+  }
 
   BipartiteMatching matching(layers.size(), planes.size());
 
   for (std::size_t i = 0; i < layers.size(); ++i) {
     for (std::size_t j = 0; j < planes.size(); ++j) {
       if (plane_statically_compatible(*planes[j], *layers[i], crtc_index)) {
-        int s = score_pair(*planes[j], *layers[i]);
+        int const s = score_pair(*planes[j], *layers[i]);
         matching.add_edge(i, j, s);
       }
     }
@@ -345,13 +372,19 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
 
   // Prefer matching format
   auto fmt = layer.format();
-  if (fmt && plane.supports_format(*fmt)) s += 4;
+  if (fmt && plane.supports_format(*fmt)) {
+    s += 4;
+  }
 
   // Composition layer strongly prefers primary plane
-  if (layer.is_composition_layer() && plane.type == DRMPlaneType::PRIMARY) s += 8;
+  if (layer.is_composition_layer() && plane.type == DRMPlaneType::PRIMARY) {
+    s += 8;
+  }
 
   // Non-composition layers prefer overlay planes
-  if (!layer.is_composition_layer() && plane.type == DRMPlaneType::OVERLAY) s += 2;
+  if (!layer.is_composition_layer() && plane.type == DRMPlaneType::OVERLAY) {
+    s += 2;
+  }
 
   // §13.6 Content-type priority
   s += layer_priority(layer) / 10;
@@ -364,35 +397,57 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
 
 // ── §13.6 Content-type layer priority ─────────────────────────
 
-int Allocator::layer_priority(const Layer& layer) const {
-  if (layer.content_type() == ContentType::Video) return 100;
-  if (layer.update_hz() > 30) return 80;
-  if (layer.update_hz() > 0) return 50;
+int Allocator::layer_priority(const Layer& layer) {
+  if (layer.content_type() == ContentType::Video) {
+    return 100;
+  }
+  if (layer.update_hz() > 30) {
+    return 80;
+  }
+  if (layer.update_hz() > 0) {
+    return 50;
+  }
   return 10;
 }
 
 // ── §13.1 Static compatibility ────────────────────────────────
 
 bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, const Layer& layer,
-                                            uint32_t crtc_index) const {
-  if (!plane.compatible_with_crtc(crtc_index)) return false;
+                                            uint32_t crtc_index) {
+  if (!plane.compatible_with_crtc(crtc_index)) {
+    return false;
+  }
 
   auto fmt = layer.format();
-  if (fmt && !plane.supports_format(*fmt)) return false;
+  if (fmt && !plane.supports_format(*fmt)) {
+    return false;
+  }
 
-  if (layer.rotation() != 0 && !plane.supports_rotation) return false;
+  if (layer.rotation() != 0 && !plane.supports_rotation) {
+    return false;
+  }
 
-  if (layer.requires_scaling() && !plane.supports_scaling) return false;
+  if (layer.requires_scaling() && !plane.supports_scaling) {
+    return false;
+  }
 
   auto z = layer.property("zpos");
   if (z.has_value()) {
-    if (plane.zpos_min && *z < *plane.zpos_min) return false;
-    if (plane.zpos_max && *z > *plane.zpos_max) return false;
+    if (plane.zpos_min && *z < *plane.zpos_min) {
+      return false;
+    }
+    if (plane.zpos_max && *z > *plane.zpos_max) {
+      return false;
+    }
   }
 
   if (plane.type == DRMPlaneType::CURSOR) {
-    if (plane.cursor_max_w > 0 && layer.width() > plane.cursor_max_w) return false;
-    if (plane.cursor_max_h > 0 && layer.height() > plane.cursor_max_h) return false;
+    if (plane.cursor_max_w > 0 && layer.width() > plane.cursor_max_w) {
+      return false;
+    }
+    if (plane.cursor_max_h > 0 && layer.height() > plane.cursor_max_h) {
+      return false;
+    }
   }
 
   return true;
@@ -403,33 +458,37 @@ int Allocator::static_upper_bound(std::span<Layer* const> remaining_layers,
                                   uint32_t crtc_index) const {
   int bound = 0;
   for (const Layer* layer : remaining_layers) {
-    bool any = std::ranges::any_of(available_planes, [&](const PlaneCapabilities* p) {
+    bool const any = std::ranges::any_of(available_planes, [&](const PlaneCapabilities* p) {
       return plane_statically_compatible(*p, *layer, crtc_index);
     });
-    if (any) ++bound;
+    if (any) {
+      ++bound;
+    }
   }
   return bound;
 }
 
 // ── §13.7 Spatial intersection splitting ──────────────────────
 
-bool Allocator::layers_intersect(const Layer& a, const Layer& b) const {
+bool Allocator::layers_intersect(const Layer& a, const Layer& b) {
   auto ra = a.crtc_rect();
   auto rb = b.crtc_rect();
-  return !(ra.x + static_cast<int32_t>(ra.w) <= rb.x || rb.x + static_cast<int32_t>(rb.w) <= ra.x ||
-           ra.y + static_cast<int32_t>(ra.h) <= rb.y || rb.y + static_cast<int32_t>(rb.h) <= ra.y);
+  return ra.x + static_cast<int64_t>(ra.w) > rb.x && rb.x + static_cast<int64_t>(rb.w) > ra.x &&
+         ra.y + static_cast<int64_t>(ra.h) > rb.y && rb.y + static_cast<int64_t>(rb.h) > ra.y;
 }
 
 std::vector<std::vector<Layer*>> Allocator::split_independent_groups(
     std::vector<Layer*>& layers) const {
   if (layers.size() <= 1) {
-    if (layers.empty()) return {};
+    if (layers.empty()) {
+      return {};
+    }
     return {layers};
   }
 
   // Union-find
   std::vector<std::size_t> parent(layers.size());
-  std::iota(parent.begin(), parent.end(), 0);
+  std::ranges::iota(parent, 0);
 
   std::function<std::size_t(std::size_t)> find = [&](std::size_t x) -> std::size_t {
     while (parent[x] != x) {
@@ -442,7 +501,9 @@ std::vector<std::vector<Layer*>> Allocator::split_independent_groups(
   auto unite = [&](std::size_t a, std::size_t b) {
     a = find(a);
     b = find(b);
-    if (a != b) parent[a] = b;
+    if (a != b) {
+      parent[a] = b;
+    }
   };
 
   // Group overlapping layers
@@ -473,12 +534,16 @@ std::vector<std::vector<Layer*>> Allocator::split_independent_groups(
 bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment,
                                 [[maybe_unused]] Output& output, AtomicRequest& req,
                                 uint32_t flags) {
-  if (test_commits_this_frame_ >= max_test_commits_) return false;
+  if (test_commits_this_frame_ >= max_test_commits_) {
+    return false;
+  }
 
   // Build atomic request from assignment
   for (const auto& [plane_id, layer] : assignment) {
     auto result = apply_layer_to_plane(*layer, plane_id, req);
-    if (!result.has_value()) return false;
+    if (!result.has_value()) {
+      return false;
+    }
   }
 
   ++test_commits_this_frame_;
@@ -499,7 +564,9 @@ std::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer
     auto prop_id = prop_store_.property_id(plane_id, name);
     if (prop_id.has_value()) {
       auto result = req.add_property(plane_id, *prop_id, value);
-      if (!result.has_value()) return result;
+      if (!result.has_value()) {
+        return result;
+      }
     }
     // If property not found in store, skip silently — not all layers
     // set properties that exist on all planes.
@@ -514,8 +581,12 @@ bool Allocator::backtrack(std::vector<Layer*>& layers,
                           std::unordered_map<uint32_t, Layer*>& assignment, std::size_t depth,
                           std::size_t best_so_far, AtomicRequest& req, uint32_t flags,
                           uint32_t crtc_index) {
-  if (depth >= layers.size()) return true;
-  if (test_commits_this_frame_ >= max_test_commits_) return false;
+  if (depth >= layers.size()) {
+    return true;
+  }
+  if (test_commits_this_frame_ >= max_test_commits_) {
+    return false;
+  }
 
   Layer* layer = layers[depth];
 
@@ -527,19 +598,25 @@ bool Allocator::backtrack(std::vector<Layer*>& layers,
 
   // §13.1 Check upper bound
   auto remaining = std::span<Layer* const>(layers).subspan(depth);
-  int bound = static_upper_bound(remaining, planes, crtc_index);
+  int const bound = static_upper_bound(remaining, planes, crtc_index);
   if (assignment.size() + static_cast<std::size_t>(bound) <= best_so_far) {
     return false;  // Can't beat current best
   }
 
   // Try assigning this layer to each compatible plane
   for (const auto* plane : planes) {
-    if (assignment.contains(plane->id)) continue;
-    if (!plane_statically_compatible(*plane, *layer, crtc_index)) continue;
+    if (assignment.contains(plane->id)) {
+      continue;
+    }
+    if (!plane_statically_compatible(*plane, *layer, crtc_index)) {
+      continue;
+    }
 
     // Check failure cache
     auto cached = failure_cache_.lookup(plane->id, layer->property_hash());
-    if (cached.has_value() && !*cached) continue;
+    if (cached.has_value() && !*cached) {
+      continue;
+    }
 
     assignment[plane->id] = layer;
     layer->assigned_plane_ = plane->id;
