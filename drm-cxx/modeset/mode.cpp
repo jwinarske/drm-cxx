@@ -3,18 +3,104 @@
 
 #include "mode.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <ranges>
+
 namespace drm {
 
 uint32_t ModeInfo::width() const noexcept { return drm_mode.hdisplay; }
 uint32_t ModeInfo::height() const noexcept { return drm_mode.vdisplay; }
 uint32_t ModeInfo::refresh() const noexcept { return drm_mode.vrefresh; }
+
 bool ModeInfo::preferred() const noexcept {
-  return drm_mode.type & DRM_MODE_TYPE_PREFERRED;
+  return (drm_mode.type & DRM_MODE_TYPE_PREFERRED) != 0;
+}
+
+bool ModeInfo::interlaced() const noexcept {
+  return (drm_mode.flags & DRM_MODE_FLAG_INTERLACE) != 0;
+}
+
+uint32_t ModeInfo::clock_khz() const noexcept {
+  return drm_mode.clock;
 }
 
 std::expected<ModeInfo, std::error_code>
-select_preferred_mode([[maybe_unused]] std::span<const drmModeModeInfo> modes) {
-  return std::unexpected(std::make_error_code(std::errc::not_supported));
+select_preferred_mode(std::span<const drmModeModeInfo> modes) {
+  if (modes.empty()) {
+    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+  }
+
+  // First pass: look for a mode flagged as preferred
+  for (const auto& m : modes) {
+    if (m.type & DRM_MODE_TYPE_PREFERRED) {
+      return ModeInfo{.drm_mode = m};
+    }
+  }
+
+  // Fallback: pick highest resolution, then highest refresh
+  const drmModeModeInfo* best = &modes[0];
+  for (const auto& m : modes) {
+    uint32_t area = static_cast<uint32_t>(m.hdisplay) * m.vdisplay;
+    uint32_t best_area = static_cast<uint32_t>(best->hdisplay) * best->vdisplay;
+    if (area > best_area || (area == best_area && m.vrefresh > best->vrefresh)) {
+      best = &m;
+    }
+  }
+
+  return ModeInfo{.drm_mode = *best};
+}
+
+std::expected<ModeInfo, std::error_code>
+select_mode(std::span<const drmModeModeInfo> modes,
+            uint32_t target_width, uint32_t target_height,
+            uint32_t target_refresh) {
+  if (modes.empty()) {
+    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+  }
+
+  const drmModeModeInfo* best = nullptr;
+  uint32_t best_score = std::numeric_limits<uint32_t>::max();
+
+  for (const auto& m : modes) {
+    // Skip interlaced modes unless specifically targeting them
+    if (m.flags & DRM_MODE_FLAG_INTERLACE) continue;
+
+    uint32_t dw = (m.hdisplay > target_width)
+      ? m.hdisplay - target_width : target_width - m.hdisplay;
+    uint32_t dh = (m.vdisplay > target_height)
+      ? m.vdisplay - target_height : target_height - m.vdisplay;
+    uint32_t score = dw * dw + dh * dh;
+
+    if (target_refresh > 0) {
+      uint32_t dr = (m.vrefresh > target_refresh)
+        ? m.vrefresh - target_refresh : target_refresh - m.vrefresh;
+      score += dr * 100; // Weight refresh match
+    }
+
+    if (score < best_score ||
+        (score == best_score && best && m.vrefresh > best->vrefresh)) {
+      best = &m;
+      best_score = score;
+    }
+  }
+
+  if (!best) {
+    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+  }
+
+  return ModeInfo{.drm_mode = *best};
+}
+
+std::vector<ModeInfo>
+get_all_modes(std::span<const drmModeModeInfo> modes) {
+  std::vector<ModeInfo> result;
+  result.reserve(modes.size());
+  for (const auto& m : modes) {
+    result.push_back(ModeInfo{.drm_mode = m});
+  }
+  return result;
 }
 
 } // namespace drm

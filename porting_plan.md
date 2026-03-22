@@ -629,11 +629,11 @@ Optionally gated behind `get_option('vulkan')`:
 
 ### Phase 5 — Display Info & Modeset (Week 6)
 
-- [ ] `drm::display::ConnectorInfo` wrapping libdisplay-info.
-- [ ] HDR metadata, colorimetry, EOTF support.
-- [ ] `drm::modeset::Mode` — mode matching, preferred mode selection.
-- [ ] `drm::modeset::PageFlip` — vblank event loop with `epoll`.
-- [ ] `atomic_modeset` example end-to-end.
+- [x] `drm::display::ConnectorInfo` wrapping libdisplay-info.
+- [x] HDR metadata, colorimetry, EOTF support.
+- [x] `drm::modeset::Mode` — mode matching, preferred mode selection.
+- [x] `drm::modeset::PageFlip` — vblank event loop with `epoll`.
+- [x] `atomic_modeset` example end-to-end.
 
 ### Phase 6 — GBM + Vulkan (Week 7)
 

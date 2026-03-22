@@ -4,7 +4,37 @@
 #include "page_flip.hpp"
 #include "../core/device.hpp"
 
+#include <cerrno>
+#include <sys/epoll.h>
+#include <unistd.h>
+#include <xf86drm.h>
+
 namespace drm {
+
+void page_flip_handler(int /*fd*/, unsigned int /*sequence*/,
+                       unsigned int tv_sec, unsigned int tv_usec,
+                       void* user_data) {
+  auto* pf = static_cast<PageFlip*>(user_data);
+  if (pf->handler_) {
+    uint64_t timestamp_ns =
+      static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL +
+      static_cast<uint64_t>(tv_usec) * 1'000ULL;
+    // We pass 0 for crtc_id and sequence here; the v2 handler below is preferred
+    pf->handler_(0, 0, timestamp_ns);
+  }
+}
+
+void page_flip_handler_v2(int /*fd*/, unsigned int sequence,
+                           unsigned int tv_sec, unsigned int tv_usec,
+                           unsigned int crtc_id, void* user_data) {
+  auto* pf = static_cast<PageFlip*>(user_data);
+  if (pf->handler_) {
+    uint64_t timestamp_ns =
+      static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL +
+      static_cast<uint64_t>(tv_usec) * 1'000ULL;
+    pf->handler_(crtc_id, sequence, timestamp_ns);
+  }
+}
 
 PageFlip::PageFlip(const Device& dev) : drm_fd_(dev.fd()) {}
 
@@ -15,8 +45,47 @@ void PageFlip::set_handler(Handler handler) {
 }
 
 std::expected<void, std::error_code>
-PageFlip::dispatch([[maybe_unused]] int timeout_ms) {
-  return std::unexpected(std::make_error_code(std::errc::not_supported));
+PageFlip::dispatch(int timeout_ms) {
+  if (drm_fd_ < 0) {
+    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+
+  // Use epoll for the wait
+  int epfd = epoll_create1(EPOLL_CLOEXEC);
+  if (epfd < 0) {
+    return std::unexpected(std::error_code(errno, std::system_category()));
+  }
+
+  struct epoll_event ev{};
+  ev.events = EPOLLIN;
+  ev.data.fd = drm_fd_;
+  if (epoll_ctl(epfd, EPOLL_CTL_ADD, drm_fd_, &ev) < 0) {
+    ::close(epfd);
+    return std::unexpected(std::error_code(errno, std::system_category()));
+  }
+
+  struct epoll_event events[1];
+  int nfds = epoll_wait(epfd, events, 1, timeout_ms);
+  ::close(epfd);
+
+  if (nfds < 0) {
+    return std::unexpected(std::error_code(errno, std::system_category()));
+  }
+  if (nfds == 0) {
+    return std::unexpected(std::make_error_code(std::errc::timed_out));
+  }
+
+  // Handle DRM events
+  drmEventContext ctx{};
+  ctx.version = 3;
+  ctx.page_flip_handler = page_flip_handler;
+  ctx.page_flip_handler2 = page_flip_handler_v2;
+
+  if (drmHandleEvent(drm_fd_, &ctx) != 0) {
+    return std::unexpected(std::error_code(errno, std::system_category()));
+  }
+
+  return {};
 }
 
 } // namespace drm
