@@ -18,6 +18,9 @@ class AtomicRequest {
  public:
   explicit AtomicRequest(const Device& dev);
 
+  // Returns true if the underlying atomic request was allocated successfully.
+  [[nodiscard]] bool valid() const noexcept;
+
   std::expected<void, std::error_code> add_property(uint32_t object_id, uint32_t property_id,
                                                     uint64_t value);
 

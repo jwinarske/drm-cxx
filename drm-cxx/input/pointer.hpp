@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <unordered_set>
 
 namespace drm::input {
 
@@ -11,7 +12,7 @@ namespace drm::input {
 class Pointer {
  public:
   void accumulate_motion(double dx, double dy) noexcept;
-  void set_button(uint32_t button, bool pressed) noexcept;
+  void set_button(uint32_t button, bool pressed);
 
   [[nodiscard]] double x() const noexcept;
   [[nodiscard]] double y() const noexcept;
@@ -22,7 +23,7 @@ class Pointer {
  private:
   double x_{};
   double y_{};
-  uint32_t buttons_{};  // bitmask of pressed buttons
+  std::unordered_set<uint32_t> buttons_;
 };
 
 }  // namespace drm::input

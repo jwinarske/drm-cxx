@@ -292,7 +292,9 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     for (const auto* plane : registry_.for_crtc(crtc_index)) {
       if (plane->type == DRMPlaneType::PRIMARY && !best_assignment.contains(plane->id)) {
         output.composition_layer()->assigned_plane_ = plane->id;
-        apply_layer_to_plane(*output.composition_layer(), plane->id, req);
+        if (auto r = apply_layer_to_plane(*output.composition_layer(), plane->id, req); !r) {
+          return std::unexpected(r.error());
+        }
         break;
       }
     }
