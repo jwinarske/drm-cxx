@@ -28,7 +28,7 @@ class Allocator;
 class Output;
 
 class Layer {
-public:
+ public:
   Layer& set_property(std::string_view name, uint64_t value);
   Layer& disable() noexcept;
   Layer& set_composited() noexcept;
@@ -59,7 +59,7 @@ public:
 
   void mark_clean() noexcept;
 
-private:
+ private:
   friend class Allocator;
   friend class Output;
 
@@ -73,4 +73,4 @@ private:
   uint32_t update_hz_{0};
 };
 
-} // namespace drm::planes
+}  // namespace drm::planes

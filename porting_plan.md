@@ -643,14 +643,14 @@ Optionally gated behind `get_option('vulkan')`:
 
 ### Phase 7 — Cleanup, Docs, Release (Week 8)
 
-- [ ] Remove all references to libliftoff, bsdrm, libsync, spdlog, rapidjson.
-- [ ] `std::print` logging with `DRM_CXX_LOG_LEVEL` gating.
-- [ ] `pkg-config` file via Meson.
-- [ ] `drm-cxx.hpp` aggregate header.
-- [ ] `install_headers()` for all public headers.
-- [ ] README, CHANGELOG, migration guide.
-- [ ] clang-tidy + clang-format pass.
-- [ ] Tag `v1.0.0`.
+- [x] Remove all references to libliftoff, bsdrm, libsync, spdlog, rapidjson.
+- [x] `std::print` logging with `DRM_CXX_LOG_LEVEL` gating.
+- [x] `pkg-config` file via Meson.
+- [x] `drm-cxx.hpp` aggregate header.
+- [x] `install_headers()` for all public headers.
+- [x] README, CHANGELOG, migration guide.
+- [x] clang-tidy + clang-format pass.
+
 
 ---
 

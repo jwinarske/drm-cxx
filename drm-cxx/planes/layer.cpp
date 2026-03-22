@@ -72,7 +72,7 @@ uint64_t Layer::modifier() const {
 
 uint64_t Layer::rotation() const {
   auto val = property("rotation");
-  return val.value_or(0); // 0 = DRM_MODE_ROTATE_0
+  return val.value_or(0);  // 0 = DRM_MODE_ROTATE_0
 }
 
 bool Layer::requires_scaling() const {
@@ -104,10 +104,10 @@ uint32_t Layer::height() const {
 
 Rect Layer::crtc_rect() const {
   return {
-    .x = static_cast<int32_t>(property("CRTC_X").value_or(0)),
-    .y = static_cast<int32_t>(property("CRTC_Y").value_or(0)),
-    .w = width(),
-    .h = height(),
+      .x = static_cast<int32_t>(property("CRTC_X").value_or(0)),
+      .y = static_cast<int32_t>(property("CRTC_Y").value_or(0)),
+      .w = width(),
+      .h = height(),
   };
 }
 
@@ -141,4 +141,4 @@ void Layer::mark_clean() noexcept {
   dirty_ = false;
 }
 
-} // namespace drm::planes
+}  // namespace drm::planes

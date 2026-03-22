@@ -11,7 +11,7 @@ struct gbm_device;
 namespace drm::gbm {
 
 class GbmDevice {
-public:
+ public:
   static std::expected<GbmDevice, std::error_code> create(int drm_fd);
 
   [[nodiscard]] struct gbm_device* raw() const noexcept;
@@ -22,9 +22,9 @@ public:
   GbmDevice(const GbmDevice&) = delete;
   GbmDevice& operator=(const GbmDevice&) = delete;
 
-private:
+ private:
   explicit GbmDevice(struct gbm_device* dev) noexcept;
   struct gbm_device* dev_{};
 };
 
-} // namespace drm::gbm
+}  // namespace drm::gbm

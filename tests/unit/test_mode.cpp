@@ -1,29 +1,29 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
+#include "modeset/mode.hpp"
 
-#include <cstring>
 #include <xf86drmMode.h>
 
-#include "modeset/mode.hpp"
+#include <cstring>
+#include <gtest/gtest.h>
 
 namespace {
 
-drmModeModeInfo make_mode(uint16_t w, uint16_t h, uint32_t refresh,
-                           uint32_t type = 0, uint32_t flags = 0) {
+drmModeModeInfo make_mode(uint16_t w, uint16_t h, uint32_t refresh, uint32_t type = 0,
+                          uint32_t flags = 0) {
   drmModeModeInfo m{};
   m.hdisplay = w;
   m.vdisplay = h;
   m.vrefresh = refresh;
   m.type = type;
   m.flags = flags;
-  m.clock = w * h * refresh / 1000; // approximate
+  m.clock = w * h * refresh / 1000;  // approximate
   std::snprintf(m.name, sizeof(m.name), "%ux%u", w, h);
   return m;
 }
 
-} // namespace
+}  // namespace
 
 TEST(ModeInfoTest, Accessors) {
   auto m = make_mode(1920, 1080, 60, DRM_MODE_TYPE_PREFERRED);
@@ -50,9 +50,9 @@ TEST(ModeSelectionTest, EmptyModesReturnsError) {
 
 TEST(ModeSelectionTest, PreferredModeIsSelected) {
   drmModeModeInfo modes[] = {
-    make_mode(1280, 720, 60),
-    make_mode(1920, 1080, 60, DRM_MODE_TYPE_PREFERRED),
-    make_mode(3840, 2160, 30),
+      make_mode(1280, 720, 60),
+      make_mode(1920, 1080, 60, DRM_MODE_TYPE_PREFERRED),
+      make_mode(3840, 2160, 30),
   };
 
   auto result = drm::select_preferred_mode(modes);
@@ -64,9 +64,9 @@ TEST(ModeSelectionTest, PreferredModeIsSelected) {
 
 TEST(ModeSelectionTest, FallbackToHighestResolution) {
   drmModeModeInfo modes[] = {
-    make_mode(1280, 720, 60),
-    make_mode(1920, 1080, 60),
-    make_mode(3840, 2160, 30),
+      make_mode(1280, 720, 60),
+      make_mode(1920, 1080, 60),
+      make_mode(3840, 2160, 30),
   };
 
   auto result = drm::select_preferred_mode(modes);
@@ -77,10 +77,10 @@ TEST(ModeSelectionTest, FallbackToHighestResolution) {
 
 TEST(ModeSelectionTest, SelectModeExactMatch) {
   drmModeModeInfo modes[] = {
-    make_mode(1280, 720, 60),
-    make_mode(1920, 1080, 60),
-    make_mode(1920, 1080, 144),
-    make_mode(3840, 2160, 60),
+      make_mode(1280, 720, 60),
+      make_mode(1920, 1080, 60),
+      make_mode(1920, 1080, 144),
+      make_mode(3840, 2160, 60),
   };
 
   auto result = drm::select_mode(modes, 1920, 1080);
@@ -93,8 +93,8 @@ TEST(ModeSelectionTest, SelectModeExactMatch) {
 
 TEST(ModeSelectionTest, SelectModeWithRefresh) {
   drmModeModeInfo modes[] = {
-    make_mode(1920, 1080, 60),
-    make_mode(1920, 1080, 144),
+      make_mode(1920, 1080, 60),
+      make_mode(1920, 1080, 144),
   };
 
   auto result = drm::select_mode(modes, 1920, 1080, 60);
@@ -104,9 +104,9 @@ TEST(ModeSelectionTest, SelectModeWithRefresh) {
 
 TEST(ModeSelectionTest, SelectModeClosestMatch) {
   drmModeModeInfo modes[] = {
-    make_mode(1280, 720, 60),
-    make_mode(1920, 1080, 60),
-    make_mode(2560, 1440, 60),
+      make_mode(1280, 720, 60),
+      make_mode(1920, 1080, 60),
+      make_mode(2560, 1440, 60),
   };
 
   // Asking for 1800x1000 — closest is 1920x1080 (dw=120,dh=80 → 20800)
@@ -119,8 +119,8 @@ TEST(ModeSelectionTest, SelectModeClosestMatch) {
 
 TEST(ModeSelectionTest, GetAllModes) {
   drmModeModeInfo modes[] = {
-    make_mode(1280, 720, 60),
-    make_mode(1920, 1080, 60),
+      make_mode(1280, 720, 60),
+      make_mode(1920, 1080, 60),
   };
 
   auto all = drm::get_all_modes(modes);
@@ -131,8 +131,8 @@ TEST(ModeSelectionTest, GetAllModes) {
 
 TEST(ModeSelectionTest, SkipsInterlacedInSelectMode) {
   drmModeModeInfo modes[] = {
-    make_mode(1920, 1080, 60, 0, DRM_MODE_FLAG_INTERLACE),
-    make_mode(1280, 720, 60),
+      make_mode(1920, 1080, 60, 0, DRM_MODE_FLAG_INTERLACE),
+      make_mode(1280, 720, 60),
   };
 
   auto result = drm::select_mode(modes, 1920, 1080);

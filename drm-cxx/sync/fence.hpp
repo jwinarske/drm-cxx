@@ -10,7 +10,7 @@
 namespace drm::sync {
 
 class SyncFence {
-public:
+ public:
   static std::expected<SyncFence, std::error_code> import_fd(int fence_fd);
 
   std::expected<void, std::error_code> wait(std::chrono::milliseconds timeout);
@@ -22,9 +22,9 @@ public:
   SyncFence(const SyncFence&) = delete;
   SyncFence& operator=(const SyncFence&) = delete;
 
-private:
+ private:
   explicit SyncFence(int fd) noexcept;
   int fd_{-1};
 };
 
-} // namespace drm::sync
+}  // namespace drm::sync

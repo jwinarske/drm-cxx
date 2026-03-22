@@ -10,4 +10,4 @@ namespace drm::display {
 // HdrStaticMetadata and ColorimetryInfo are defined in connector_info.hpp.
 // This header re-exports them for convenience.
 
-} // namespace drm::display
+}  // namespace drm::display

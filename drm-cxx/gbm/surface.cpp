@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "surface.hpp"
+
 #include "device.hpp"
 
-#include <cerrno>
 #include <gbm.h>
+
+#include <cerrno>
 
 namespace drm::gbm {
 
@@ -30,9 +32,9 @@ Surface& Surface::operator=(Surface&& other) noexcept {
   return *this;
 }
 
-std::expected<Surface, std::error_code>
-Surface::create(GbmDevice& dev, uint32_t width, uint32_t height,
-                uint32_t format, uint32_t flags) {
+std::expected<Surface, std::error_code> Surface::create(GbmDevice& dev, uint32_t width,
+                                                        uint32_t height, uint32_t format,
+                                                        uint32_t flags) {
   auto* surf = gbm_surface_create(dev.raw(), width, height, format, flags);
   if (!surf) {
     return std::unexpected(std::error_code(errno, std::system_category()));
@@ -40,7 +42,9 @@ Surface::create(GbmDevice& dev, uint32_t width, uint32_t height,
   return Surface(surf);
 }
 
-struct gbm_surface* Surface::raw() const noexcept { return surf_; }
+struct gbm_surface* Surface::raw() const noexcept {
+  return surf_;
+}
 
 std::expected<Buffer, std::error_code> Surface::lock_front_buffer() {
   if (!surf_) {
@@ -60,4 +64,4 @@ bool Surface::has_free_buffers() const noexcept {
   return gbm_surface_has_free_buffers(surf_) != 0;
 }
 
-} // namespace drm::gbm
+}  // namespace drm::gbm

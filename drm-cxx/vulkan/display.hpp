@@ -25,7 +25,7 @@ struct DisplayPlaneInfo {
 };
 
 class Display {
-public:
+ public:
   // Create by enumerating VkDisplayKHR displays on a physical device.
   // Loads Vulkan dynamically; fails gracefully if unavailable.
   static std::expected<Display, std::error_code> create();
@@ -34,8 +34,8 @@ public:
   [[nodiscard]] const std::vector<DisplayPlaneInfo>& planes() const noexcept;
 
   // Find display planes compatible with a given DRM CRTC.
-  [[nodiscard]] std::vector<const DisplayPlaneInfo*>
-    planes_for_display(uint64_t display_handle) const;
+  [[nodiscard]] std::vector<const DisplayPlaneInfo*> planes_for_display(
+      uint64_t display_handle) const;
 
   ~Display();
   Display(Display&&) noexcept;
@@ -43,7 +43,7 @@ public:
   Display(const Display&) = delete;
   Display& operator=(const Display&) = delete;
 
-private:
+ private:
   Display() = default;
 
   std::vector<DisplayInfo> displays_;
@@ -54,4 +54,4 @@ private:
   void* physical_device_{};
 };
 
-} // namespace drm::vulkan
+}  // namespace drm::vulkan

@@ -3,13 +3,13 @@
 
 #include "buffer.hpp"
 
-#include <cerrno>
 #include <gbm.h>
+
+#include <cerrno>
 
 namespace drm::gbm {
 
-Buffer::Buffer(struct gbm_bo* bo, struct gbm_surface* surf) noexcept
-  : bo_(bo), surf_(surf) {}
+Buffer::Buffer(struct gbm_bo* bo, struct gbm_surface* surf) noexcept : bo_(bo), surf_(surf) {}
 
 Buffer::~Buffer() {
   if (bo_ && surf_) {
@@ -20,8 +20,7 @@ Buffer::~Buffer() {
   }
 }
 
-Buffer::Buffer(Buffer&& other) noexcept
-  : bo_(other.bo_), surf_(other.surf_) {
+Buffer::Buffer(Buffer&& other) noexcept : bo_(other.bo_), surf_(other.surf_) {
   other.bo_ = nullptr;
   other.surf_ = nullptr;
 }
@@ -41,7 +40,9 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
   return *this;
 }
 
-struct gbm_bo* Buffer::raw() const noexcept { return bo_; }
+struct gbm_bo* Buffer::raw() const noexcept {
+  return bo_;
+}
 
 uint32_t Buffer::handle() const noexcept {
   if (!bo_) return 0;
@@ -79,4 +80,4 @@ std::expected<int, std::error_code> Buffer::fd() const {
   return dma_fd;
 }
 
-} // namespace drm::gbm
+}  // namespace drm::gbm

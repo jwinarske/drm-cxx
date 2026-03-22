@@ -3,13 +3,13 @@
 
 #pragma once
 
+#include <xf86drmMode.h>
+
 #include <cstdint>
 #include <expected>
 #include <span>
 #include <system_error>
 #include <vector>
-
-#include <xf86drmMode.h>
 
 namespace drm {
 
@@ -25,18 +25,16 @@ struct ModeInfo {
 };
 
 // Select the preferred mode from a list.
-[[nodiscard]] std::expected<ModeInfo, std::error_code>
-  select_preferred_mode(std::span<const drmModeModeInfo> modes);
+[[nodiscard]] std::expected<ModeInfo, std::error_code> select_preferred_mode(
+    std::span<const drmModeModeInfo> modes);
 
 // Select the best mode matching a target resolution.
 // If exact match not found, returns the closest resolution at highest refresh.
-[[nodiscard]] std::expected<ModeInfo, std::error_code>
-  select_mode(std::span<const drmModeModeInfo> modes,
-              uint32_t target_width, uint32_t target_height,
-              uint32_t target_refresh = 0);
+[[nodiscard]] std::expected<ModeInfo, std::error_code> select_mode(
+    std::span<const drmModeModeInfo> modes, uint32_t target_width, uint32_t target_height,
+    uint32_t target_refresh = 0);
 
 // Get all modes as ModeInfo structs.
-[[nodiscard]] std::vector<ModeInfo>
-  get_all_modes(std::span<const drmModeModeInfo> modes);
+[[nodiscard]] std::vector<ModeInfo> get_all_modes(std::span<const drmModeModeInfo> modes);
 
-} // namespace drm
+}  // namespace drm

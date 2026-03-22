@@ -3,16 +3,15 @@
 
 #pragma once
 
+#include "connector_info.hpp"
+
 #include <cstdint>
 #include <expected>
 #include <span>
 #include <system_error>
 
-#include "connector_info.hpp"
-
 namespace drm::display {
 
-std::expected<ConnectorInfo, std::error_code>
-  parse_edid(std::span<const uint8_t> edid_blob);
+std::expected<ConnectorInfo, std::error_code> parse_edid(std::span<const uint8_t> edid_blob);
 
-} // namespace drm::display
+}  // namespace drm::display

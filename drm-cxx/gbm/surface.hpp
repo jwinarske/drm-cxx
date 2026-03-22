@@ -3,11 +3,11 @@
 
 #pragma once
 
+#include "buffer.hpp"
+
 #include <cstdint>
 #include <expected>
 #include <system_error>
-
-#include "buffer.hpp"
 
 struct gbm_surface;
 
@@ -16,10 +16,10 @@ namespace drm::gbm {
 class GbmDevice;
 
 class Surface {
-public:
-  static std::expected<Surface, std::error_code>
-    create(GbmDevice& dev, uint32_t width, uint32_t height,
-           uint32_t format, uint32_t flags);
+ public:
+  static std::expected<Surface, std::error_code> create(GbmDevice& dev, uint32_t width,
+                                                        uint32_t height, uint32_t format,
+                                                        uint32_t flags);
 
   [[nodiscard]] struct gbm_surface* raw() const noexcept;
 
@@ -35,9 +35,9 @@ public:
   Surface(const Surface&) = delete;
   Surface& operator=(const Surface&) = delete;
 
-private:
+ private:
   explicit Surface(struct gbm_surface* surf) noexcept;
   struct gbm_surface* surf_{};
 };
 
-} // namespace drm::gbm
+}  // namespace drm::gbm

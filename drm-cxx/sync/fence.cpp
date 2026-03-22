@@ -4,10 +4,10 @@
 #include "fence.hpp"
 
 #include <cerrno>
-#include <poll.h>
-#include <unistd.h>
 #include <linux/sync_file.h>
+#include <poll.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 namespace drm::sync {
 
@@ -34,8 +34,7 @@ SyncFence& SyncFence::operator=(SyncFence&& other) noexcept {
   return *this;
 }
 
-std::expected<SyncFence, std::error_code>
-SyncFence::import_fd(int fence_fd) {
+std::expected<SyncFence, std::error_code> SyncFence::import_fd(int fence_fd) {
   if (fence_fd < 0) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
@@ -46,8 +45,7 @@ SyncFence::import_fd(int fence_fd) {
   return SyncFence(duped);
 }
 
-std::expected<void, std::error_code>
-SyncFence::wait(std::chrono::milliseconds timeout) {
+std::expected<void, std::error_code> SyncFence::wait(std::chrono::milliseconds timeout) {
   if (fd_ < 0) {
     return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
@@ -88,4 +86,4 @@ void SyncFence::merge(SyncFence& other) {
   other.fd_ = -1;
 }
 
-} // namespace drm::sync
+}  // namespace drm::sync

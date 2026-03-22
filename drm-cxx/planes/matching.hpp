@@ -21,7 +21,7 @@ namespace drm::planes {
 // Returns a matching: for each left node, the matched right node (or nullopt).
 // Runs in O(E * sqrt(V)) — microseconds for typical counts (<=8 each).
 class BipartiteMatching {
-public:
+ public:
   BipartiteMatching(std::size_t n_left, std::size_t n_right);
 
   // Add an edge: left node u can be matched to right node v.
@@ -43,7 +43,7 @@ public:
   // Total number of matched pairs after solve().
   [[nodiscard]] std::size_t matched_count() const noexcept;
 
-private:
+ private:
   bool bfs();
   bool dfs(std::size_t u);
 
@@ -61,4 +61,4 @@ private:
   std::size_t matched_{0};
 };
 
-} // namespace drm::planes
+}  // namespace drm::planes

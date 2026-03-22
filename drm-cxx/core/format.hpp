@@ -11,4 +11,4 @@ namespace drm {
 [[nodiscard]] std::string_view format_name(uint32_t format);
 [[nodiscard]] uint32_t format_bpp(uint32_t format);
 
-} // namespace drm
+}  // namespace drm

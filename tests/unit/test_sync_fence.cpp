@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
+#include "sync/fence.hpp"
 
+#include <gtest/gtest.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
-
-#include "sync/fence.hpp"
 
 TEST(SyncFenceTest, ImportInvalidFdReturnsError) {
   auto result = drm::sync::SyncFence::import_fd(-1);

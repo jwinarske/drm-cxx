@@ -20,8 +20,12 @@ void Pointer::set_button(uint32_t button, bool pressed) noexcept {
   }
 }
 
-double Pointer::x() const noexcept { return x_; }
-double Pointer::y() const noexcept { return y_; }
+double Pointer::x() const noexcept {
+  return x_;
+}
+double Pointer::y() const noexcept {
+  return y_;
+}
 
 bool Pointer::button_pressed(uint32_t button) const noexcept {
   uint32_t bit = button & 0x1F;
@@ -33,4 +37,4 @@ void Pointer::reset_position(double x, double y) noexcept {
   y_ = y;
 }
 
-} // namespace drm::input
+}  // namespace drm::input

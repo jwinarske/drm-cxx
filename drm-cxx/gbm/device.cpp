@@ -3,8 +3,9 @@
 
 #include "device.hpp"
 
-#include <cerrno>
 #include <gbm.h>
+
+#include <cerrno>
 
 namespace drm::gbm {
 
@@ -42,6 +43,8 @@ std::expected<GbmDevice, std::error_code> GbmDevice::create(int drm_fd) {
   return GbmDevice(dev);
 }
 
-struct gbm_device* GbmDevice::raw() const noexcept { return dev_; }
+struct gbm_device* GbmDevice::raw() const noexcept {
+  return dev_;
+}
 
-} // namespace drm::gbm
+}  // namespace drm::gbm

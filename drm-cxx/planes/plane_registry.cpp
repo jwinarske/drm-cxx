@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "plane_registry.hpp"
+
 #include "../core/device.hpp"
+
+#include <xf86drm.h>
+#include <xf86drmMode.h>
 
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#include <xf86drm.h>
-#include <xf86drmMode.h>
 
 namespace drm::planes {
 
@@ -33,9 +35,12 @@ DRMPlaneType parse_plane_type(int fd, uint32_t plane_id) {
 
     if (std::strcmp(prop->name, "type") == 0) {
       auto val = props->prop_values[i];
-      if (val == DRM_PLANE_TYPE_PRIMARY)      result = DRMPlaneType::PRIMARY;
-      else if (val == DRM_PLANE_TYPE_CURSOR)  result = DRMPlaneType::CURSOR;
-      else                                     result = DRMPlaneType::OVERLAY;
+      if (val == DRM_PLANE_TYPE_PRIMARY)
+        result = DRMPlaneType::PRIMARY;
+      else if (val == DRM_PLANE_TYPE_CURSOR)
+        result = DRMPlaneType::CURSOR;
+      else
+        result = DRMPlaneType::OVERLAY;
       drmModeFreeProperty(prop);
       break;
     }
@@ -74,10 +79,9 @@ void detect_plane_capabilities(int fd, uint32_t plane_id, PlaneCapabilities& cap
   drmModeFreeObjectProperties(props);
 }
 
-} // namespace
+}  // namespace
 
-std::expected<PlaneRegistry, std::error_code>
-PlaneRegistry::enumerate(const Device& dev) {
+std::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Device& dev) {
   int fd = dev.fd();
 
   auto* plane_res = drmModeGetPlaneResources(fd);
@@ -112,8 +116,7 @@ std::span<const PlaneCapabilities> PlaneRegistry::all() const noexcept {
   return planes_;
 }
 
-std::vector<const PlaneCapabilities*>
-PlaneRegistry::for_crtc(uint32_t crtc_index) const {
+std::vector<const PlaneCapabilities*> PlaneRegistry::for_crtc(uint32_t crtc_index) const {
   std::vector<const PlaneCapabilities*> result;
   for (const auto& p : planes_) {
     if (p.compatible_with_crtc(crtc_index)) {
@@ -123,4 +126,4 @@ PlaneRegistry::for_crtc(uint32_t crtc_index) const {
   return result;
 }
 
-} // namespace drm::planes
+}  // namespace drm::planes

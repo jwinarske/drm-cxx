@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#include <gtest/gtest.h>
-
 #include "planes/output.hpp"
+
+#include <gtest/gtest.h>
 
 TEST(OutputTest, ConstructWithCompositionLayer) {
   drm::planes::Layer comp_layer;
@@ -30,7 +30,7 @@ TEST(OutputTest, AnyLayerDirtyDetection) {
   drm::planes::Output output(1, comp_layer);
 
   auto& layer = output.add_layer();
-  EXPECT_TRUE(output.any_layer_dirty()); // New layers are dirty
+  EXPECT_TRUE(output.any_layer_dirty());  // New layers are dirty
 
   output.mark_clean();
   EXPECT_FALSE(output.any_layer_dirty());
@@ -75,9 +75,9 @@ TEST(OutputTest, SortLayersByZpos) {
 
   auto& layers = output.layers();
   ASSERT_EQ(layers.size(), 3u);
-  EXPECT_EQ(layers[0], &l2); // zpos 1
-  EXPECT_EQ(layers[1], &l3); // zpos 2
-  EXPECT_EQ(layers[2], &l1); // zpos 3
+  EXPECT_EQ(layers[0], &l2);  // zpos 1
+  EXPECT_EQ(layers[1], &l3);  // zpos 2
+  EXPECT_EQ(layers[2], &l1);  // zpos 3
 }
 
 TEST(OutputTest, SetCompositionLayerUpdatesFlag) {

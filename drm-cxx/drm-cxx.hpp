@@ -3,11 +3,14 @@
 
 #pragma once
 
+// Logging
+#include "log.hpp"
+
 // Core
 #include "core/device.hpp"
-#include "core/resources.hpp"
-#include "core/property_store.hpp"
 #include "core/format.hpp"
+#include "core/property_store.hpp"
+#include "core/resources.hpp"
 
 // Modeset
 #include "modeset/atomic.hpp"
@@ -15,17 +18,18 @@
 #include "modeset/page_flip.hpp"
 
 // Planes
-#include "planes/plane_registry.hpp"
-#include "planes/layer.hpp"
-#include "planes/output.hpp"
 #include "planes/allocator.hpp"
 #include "planes/composition_layer.hpp"
+#include "planes/layer.hpp"
+#include "planes/matching.hpp"
+#include "planes/output.hpp"
+#include "planes/plane_registry.hpp"
 
 // Input
-#include "input/seat.hpp"
+#include "input/event_dispatcher.hpp"
 #include "input/keyboard.hpp"
 #include "input/pointer.hpp"
-#include "input/event_dispatcher.hpp"
+#include "input/seat.hpp"
 
 // Display
 #include "display/connector_info.hpp"
@@ -33,9 +37,9 @@
 #include "display/hdr_metadata.hpp"
 
 // GBM
+#include "gbm/buffer.hpp"
 #include "gbm/device.hpp"
 #include "gbm/surface.hpp"
-#include "gbm/buffer.hpp"
 
 // Sync
 #include "sync/fence.hpp"

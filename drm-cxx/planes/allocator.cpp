@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "allocator.hpp"
-#include "matching.hpp"
+
 #include "../core/device.hpp"
 #include "../modeset/atomic.hpp"
+#include "matching.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -39,8 +40,7 @@ void TestCache::clear() noexcept {
 
 // ── Allocator ──────────────────────────────────────────────────
 
-Allocator::Allocator(const Device& dev, PlaneRegistry& registry)
-  : dev_(dev), registry_(registry) {}
+Allocator::Allocator(const Device& dev, PlaneRegistry& registry) : dev_(dev), registry_(registry) {}
 
 void Allocator::set_max_test_commits(std::size_t max) noexcept {
   max_test_commits_ = max;
@@ -48,8 +48,8 @@ void Allocator::set_max_test_commits(std::size_t max) noexcept {
 
 // ── Main entry point (§13.3 warm-start logic) ──────────────────
 
-std::expected<std::size_t, std::error_code>
-Allocator::apply(Output& output, AtomicRequest& req, uint32_t commit_flags) {
+std::expected<std::size_t, std::error_code> Allocator::apply(Output& output, AtomicRequest& req,
+                                                             uint32_t commit_flags) {
   test_commits_this_frame_ = 0;
 
   // Reset layer assignment state
@@ -78,8 +78,9 @@ Allocator::apply(Output& output, AtomicRequest& req, uint32_t commit_flags) {
 
 // ── Warm-start from previous frame ────────────────────────────
 
-std::expected<std::size_t, std::error_code>
-Allocator::apply_previous_allocation(Output& output, AtomicRequest& req, uint32_t flags) {
+std::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation(Output& output,
+                                                                                 AtomicRequest& req,
+                                                                                 uint32_t flags) {
   if (try_test_commit(previous_allocation_, output, req, flags)) {
     // Apply previous assignment to layers
     std::size_t assigned = 0;
@@ -102,8 +103,9 @@ Allocator::apply_previous_allocation(Output& output, AtomicRequest& req, uint32_
 
 // ── Full search with all improvements ─────────────────────────
 
-std::expected<std::size_t, std::error_code>
-Allocator::full_search(Output& output, AtomicRequest& req, uint32_t flags) {
+std::expected<std::size_t, std::error_code> Allocator::full_search(Output& output,
+                                                                   AtomicRequest& req,
+                                                                   uint32_t flags) {
   // Determine CRTC index from the output's CRTC id
   // For now, we pass the crtc_id and let compatibility checks handle it.
   // The crtc_index is the bit position in possible_crtcs.
@@ -181,8 +183,8 @@ Allocator::full_search(Output& output, AtomicRequest& req, uint32_t flags) {
         AtomicRequest greedy_req(dev_);
         if (!try_test_commit(assignment, output, greedy_req, flags)) {
           // Backtrack: remove assignments one by one from the end
-          auto assigned_vec = std::vector<std::pair<uint32_t, Layer*>>(
-            assignment.begin(), assignment.end());
+          auto assigned_vec =
+              std::vector<std::pair<uint32_t, Layer*>>(assignment.begin(), assignment.end());
 
           // Sort by layer priority (lowest priority dropped first)
           std::ranges::sort(assigned_vec, [this](const auto& a, const auto& b) {
@@ -211,9 +213,8 @@ Allocator::full_search(Output& output, AtomicRequest& req, uint32_t flags) {
 
     // Remove used planes from available
     for (auto& [plane_id, _] : assignment) {
-      std::erase_if(available_planes, [plane_id](const PlaneCapabilities* p) {
-        return p->id == plane_id;
-      });
+      std::erase_if(available_planes,
+                    [plane_id](const PlaneCapabilities* p) { return p->id == plane_id; });
     }
   }
 
@@ -243,8 +244,7 @@ Allocator::full_search(Output& output, AtomicRequest& req, uint32_t flags) {
   if (any_composited && output.composition_layer()) {
     // Find primary plane for this crtc
     for (const auto* plane : registry_.for_crtc(crtc_index)) {
-      if (plane->type == DRMPlaneType::PRIMARY &&
-          !best_assignment.contains(plane->id)) {
+      if (plane->type == DRMPlaneType::PRIMARY && !best_assignment.contains(plane->id)) {
         output.composition_layer()->assigned_plane_ = plane->id;
         apply_layer_to_plane(*output.composition_layer(), plane->id, req);
         break;
@@ -262,18 +262,15 @@ Allocator::full_search(Output& output, AtomicRequest& req, uint32_t flags) {
 
 // ── §13.5 Bipartite pre-solve ─────────────────────────────────
 
-std::vector<std::pair<Layer*, const PlaneCapabilities*>>
-Allocator::bipartite_preseed(Output& output, uint32_t crtc_index) {
+std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_preseed(
+    Output& output, uint32_t crtc_index) {
   return bipartite_preseed_group(output.layers(), registry_.for_crtc(crtc_index), crtc_index);
 }
 
 // Helper: preseed for a group of layers and available planes
-std::vector<std::pair<Layer*, const PlaneCapabilities*>>
-Allocator::bipartite_preseed_group(
-    std::vector<Layer*>& layers,
-    const std::vector<const PlaneCapabilities*>& planes,
+std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_preseed_group(
+    std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
     uint32_t crtc_index) {
-
   std::vector<std::pair<Layer*, const PlaneCapabilities*>> result;
 
   if (layers.empty() || planes.empty()) return result;
@@ -303,17 +300,13 @@ Allocator::bipartite_preseed_group(
 
 // ── §13.2 Best-first search order ─────────────────────────────
 
-std::vector<CandidatePair>
-Allocator::rank_candidates(Output& output, uint32_t crtc_index) const {
+std::vector<CandidatePair> Allocator::rank_candidates(Output& output, uint32_t crtc_index) const {
   return rank_candidates_group(output.layers(), registry_.for_crtc(crtc_index), crtc_index);
 }
 
-std::vector<CandidatePair>
-Allocator::rank_candidates_group(
-    const std::vector<Layer*>& layers,
-    const std::vector<const PlaneCapabilities*>& planes,
+std::vector<CandidatePair> Allocator::rank_candidates_group(
+    const std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
     uint32_t crtc_index) const {
-
   std::vector<CandidatePair> pairs;
   for (const auto* plane : planes) {
     for (auto* layer : layers) {
@@ -359,11 +352,8 @@ int Allocator::layer_priority(const Layer& layer) const {
 
 // ── §13.1 Static compatibility ────────────────────────────────
 
-bool Allocator::plane_statically_compatible(
-    const PlaneCapabilities& plane,
-    const Layer& layer,
-    uint32_t crtc_index) const {
-
+bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, const Layer& layer,
+                                            uint32_t crtc_index) const {
   if (!plane.compatible_with_crtc(crtc_index)) return false;
 
   auto fmt = layer.format();
@@ -387,17 +377,14 @@ bool Allocator::plane_statically_compatible(
   return true;
 }
 
-int Allocator::static_upper_bound(
-    std::span<Layer* const> remaining_layers,
-    const std::vector<const PlaneCapabilities*>& available_planes,
-    uint32_t crtc_index) const {
-
+int Allocator::static_upper_bound(std::span<Layer* const> remaining_layers,
+                                  const std::vector<const PlaneCapabilities*>& available_planes,
+                                  uint32_t crtc_index) const {
   int bound = 0;
   for (const Layer* layer : remaining_layers) {
-    bool any = std::ranges::any_of(available_planes,
-      [&](const PlaneCapabilities* p) {
-        return plane_statically_compatible(*p, *layer, crtc_index);
-      });
+    bool any = std::ranges::any_of(available_planes, [&](const PlaneCapabilities* p) {
+      return plane_statically_compatible(*p, *layer, crtc_index);
+    });
     if (any) ++bound;
   }
   return bound;
@@ -408,14 +395,12 @@ int Allocator::static_upper_bound(
 bool Allocator::layers_intersect(const Layer& a, const Layer& b) const {
   auto ra = a.crtc_rect();
   auto rb = b.crtc_rect();
-  return !(ra.x + static_cast<int32_t>(ra.w) <= rb.x ||
-           rb.x + static_cast<int32_t>(rb.w) <= ra.x ||
-           ra.y + static_cast<int32_t>(ra.h) <= rb.y ||
-           rb.y + static_cast<int32_t>(rb.h) <= ra.y);
+  return !(ra.x + static_cast<int32_t>(ra.w) <= rb.x || rb.x + static_cast<int32_t>(rb.w) <= ra.x ||
+           ra.y + static_cast<int32_t>(ra.h) <= rb.y || rb.y + static_cast<int32_t>(rb.h) <= ra.y);
 }
 
-std::vector<std::vector<Layer*>>
-Allocator::split_independent_groups(std::vector<Layer*>& layers) const {
+std::vector<std::vector<Layer*>> Allocator::split_independent_groups(
+    std::vector<Layer*>& layers) const {
   if (layers.size() <= 1) {
     if (layers.empty()) return {};
     return {layers};
@@ -464,12 +449,9 @@ Allocator::split_independent_groups(std::vector<Layer*>& layers) const {
 
 // ── Test commit helpers ───────────────────────────────────────
 
-bool Allocator::try_test_commit(
-    const std::unordered_map<uint32_t, Layer*>& assignment,
-    [[maybe_unused]] Output& output,
-    AtomicRequest& req,
-    uint32_t flags) {
-
+bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment,
+                                [[maybe_unused]] Output& output, AtomicRequest& req,
+                                uint32_t flags) {
   if (test_commits_this_frame_ >= max_test_commits_) return false;
 
   // Build atomic request from assignment
@@ -489,9 +471,9 @@ bool Allocator::try_test_commit(
   return result.has_value();
 }
 
-std::expected<void, std::error_code>
-Allocator::apply_layer_to_plane(const Layer& layer, uint32_t plane_id,
-                                 AtomicRequest& req) {
+std::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer& layer,
+                                                                     uint32_t plane_id,
+                                                                     AtomicRequest& req) {
   for (const auto& [name, value] : layer.properties()) {
     auto prop_id = prop_store_.property_id(plane_id, name);
     if (prop_id.has_value()) {
@@ -506,16 +488,11 @@ Allocator::apply_layer_to_plane(const Layer& layer, uint32_t plane_id,
 
 // ── Backtracking search ───────────────────────────────────────
 
-bool Allocator::backtrack(
-    std::vector<Layer*>& layers,
-    const std::vector<const PlaneCapabilities*>& planes,
-    std::unordered_map<uint32_t, Layer*>& assignment,
-    std::size_t depth,
-    std::size_t best_so_far,
-    AtomicRequest& req,
-    uint32_t flags,
-    uint32_t crtc_index) {
-
+bool Allocator::backtrack(std::vector<Layer*>& layers,
+                          const std::vector<const PlaneCapabilities*>& planes,
+                          std::unordered_map<uint32_t, Layer*>& assignment, std::size_t depth,
+                          std::size_t best_so_far, AtomicRequest& req, uint32_t flags,
+                          uint32_t crtc_index) {
   if (depth >= layers.size()) return true;
   if (test_commits_this_frame_ >= max_test_commits_) return false;
 
@@ -531,7 +508,7 @@ bool Allocator::backtrack(
   auto remaining = std::span<Layer* const>(layers).subspan(depth);
   int bound = static_upper_bound(remaining, planes, crtc_index);
   if (assignment.size() + static_cast<std::size_t>(bound) <= best_so_far) {
-    return false; // Can't beat current best
+    return false;  // Can't beat current best
   }
 
   // Try assigning this layer to each compatible plane
@@ -560,4 +537,4 @@ bool Allocator::backtrack(
   return backtrack(layers, planes, assignment, depth + 1, best_so_far, req, flags, crtc_index);
 }
 
-} // namespace drm::planes
+}  // namespace drm::planes

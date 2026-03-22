@@ -3,14 +3,15 @@
 
 #include "property_store.hpp"
 
-#include <cerrno>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <cerrno>
+
 namespace drm {
 
-std::expected<void, std::error_code>
-PropertyStore::cache_properties(int fd, uint32_t object_id, uint32_t object_type) {
+std::expected<void, std::error_code> PropertyStore::cache_properties(int fd, uint32_t object_id,
+                                                                     uint32_t object_type) {
   auto* props = drmModeObjectGetProperties(fd, object_id, object_type);
   if (!props) {
     return std::unexpected(std::error_code(errno, std::system_category()));
@@ -27,9 +28,9 @@ PropertyStore::cache_properties(int fd, uint32_t object_id, uint32_t object_type
     }
 
     entries.push_back(PropertyInfo{
-      .id = props->props[i],
-      .name = prop->name,
-      .value = props->prop_values[i],
+        .id = props->props[i],
+        .name = prop->name,
+        .value = props->prop_values[i],
     });
 
     drmModeFreeProperty(prop);
@@ -39,8 +40,8 @@ PropertyStore::cache_properties(int fd, uint32_t object_id, uint32_t object_type
   return {};
 }
 
-std::expected<uint32_t, std::error_code>
-PropertyStore::property_id(uint32_t object_id, std::string_view name) const {
+std::expected<uint32_t, std::error_code> PropertyStore::property_id(uint32_t object_id,
+                                                                    std::string_view name) const {
   auto it = store_.find(object_id);
   if (it == store_.end()) {
     return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
@@ -55,8 +56,8 @@ PropertyStore::property_id(uint32_t object_id, std::string_view name) const {
   return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
 }
 
-std::expected<uint64_t, std::error_code>
-PropertyStore::property_value(uint32_t object_id, std::string_view name) const {
+std::expected<uint64_t, std::error_code> PropertyStore::property_value(
+    uint32_t object_id, std::string_view name) const {
   auto it = store_.find(object_id);
   if (it == store_.end()) {
     return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
@@ -71,8 +72,7 @@ PropertyStore::property_value(uint32_t object_id, std::string_view name) const {
   return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
 }
 
-const std::vector<PropertyInfo>*
-PropertyStore::properties(uint32_t object_id) const {
+const std::vector<PropertyInfo>* PropertyStore::properties(uint32_t object_id) const {
   auto it = store_.find(object_id);
   if (it == store_.end()) {
     return nullptr;
@@ -84,4 +84,4 @@ void PropertyStore::clear() noexcept {
   store_.clear();
 }
 
-} // namespace drm
+}  // namespace drm

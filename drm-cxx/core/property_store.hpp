@@ -20,24 +20,23 @@ struct PropertyInfo {
 };
 
 class PropertyStore {
-public:
-  std::expected<void, std::error_code>
-    cache_properties(int fd, uint32_t object_id, uint32_t object_type);
+ public:
+  std::expected<void, std::error_code> cache_properties(int fd, uint32_t object_id,
+                                                        uint32_t object_type);
 
-  [[nodiscard]] std::expected<uint32_t, std::error_code>
-    property_id(uint32_t object_id, std::string_view name) const;
+  [[nodiscard]] std::expected<uint32_t, std::error_code> property_id(uint32_t object_id,
+                                                                     std::string_view name) const;
 
-  [[nodiscard]] std::expected<uint64_t, std::error_code>
-    property_value(uint32_t object_id, std::string_view name) const;
+  [[nodiscard]] std::expected<uint64_t, std::error_code> property_value(
+      uint32_t object_id, std::string_view name) const;
 
-  [[nodiscard]] const std::vector<PropertyInfo>*
-    properties(uint32_t object_id) const;
+  [[nodiscard]] const std::vector<PropertyInfo>* properties(uint32_t object_id) const;
 
   void clear() noexcept;
 
-private:
+ private:
   // object_id -> list of properties
   std::unordered_map<uint32_t, std::vector<PropertyInfo>> store_;
 };
 
-} // namespace drm
+}  // namespace drm

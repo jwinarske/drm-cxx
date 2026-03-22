@@ -12,7 +12,7 @@
 
 namespace drm {
 class Device;
-} // namespace drm
+}  // namespace drm
 
 namespace drm::planes {
 
@@ -39,17 +39,15 @@ struct PlaneCapabilities {
 };
 
 class PlaneRegistry {
-public:
-  static std::expected<PlaneRegistry, std::error_code>
-    enumerate(const Device& dev);
+ public:
+  static std::expected<PlaneRegistry, std::error_code> enumerate(const Device& dev);
 
   [[nodiscard]] std::span<const PlaneCapabilities> all() const noexcept;
 
-  [[nodiscard]] std::vector<const PlaneCapabilities*>
-    for_crtc(uint32_t crtc_index) const;
+  [[nodiscard]] std::vector<const PlaneCapabilities*> for_crtc(uint32_t crtc_index) const;
 
-private:
+ private:
   std::vector<PlaneCapabilities> planes_;
 };
 
-} // namespace drm::planes
+}  // namespace drm::planes

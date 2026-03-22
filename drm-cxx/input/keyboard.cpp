@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "keyboard.hpp"
+
 #include "seat.hpp"
+
+#include <xkbcommon/xkbcommon.h>
 
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <xkbcommon/xkbcommon.h>
 
 namespace drm::input {
 
@@ -18,7 +20,7 @@ Keyboard::~Keyboard() {
 }
 
 Keyboard::Keyboard(Keyboard&& other) noexcept
-  : ctx_(other.ctx_), keymap_(other.keymap_), state_(other.state_) {
+    : ctx_(other.ctx_), keymap_(other.keymap_), state_(other.state_) {
   other.ctx_ = nullptr;
   other.keymap_ = nullptr;
   other.state_ = nullptr;
@@ -41,8 +43,7 @@ Keyboard& Keyboard::operator=(Keyboard&& other) noexcept {
   return *this;
 }
 
-std::expected<Keyboard, std::error_code>
-Keyboard::create(KeymapOptions opts) {
+std::expected<Keyboard, std::error_code> Keyboard::create(KeymapOptions opts) {
   Keyboard kb;
 
   kb.ctx_ = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -74,8 +75,7 @@ Keyboard::create(KeymapOptions opts) {
     names.options = options_str.c_str();
   }
 
-  kb.keymap_ = xkb_keymap_new_from_names(
-    kb.ctx_, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+  kb.keymap_ = xkb_keymap_new_from_names(kb.ctx_, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
   if (!kb.keymap_) {
     return std::unexpected(std::make_error_code(std::errc::invalid_argument));
   }
@@ -88,8 +88,7 @@ Keyboard::create(KeymapOptions opts) {
   return kb;
 }
 
-std::expected<Keyboard, std::error_code>
-Keyboard::create_from_file(std::string_view keymap_path) {
+std::expected<Keyboard, std::error_code> Keyboard::create_from_file(std::string_view keymap_path) {
   Keyboard kb;
 
   kb.ctx_ = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -103,8 +102,8 @@ Keyboard::create_from_file(std::string_view keymap_path) {
     return std::unexpected(std::error_code(errno, std::system_category()));
   }
 
-  kb.keymap_ = xkb_keymap_new_from_file(
-    kb.ctx_, f, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+  kb.keymap_ =
+      xkb_keymap_new_from_file(kb.ctx_, f, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
   std::fclose(f);
 
   if (!kb.keymap_) {
@@ -130,42 +129,36 @@ void Keyboard::process_key(KeyboardEvent& event) const {
   xkb_state_update_key(const_cast<struct xkb_state*>(state_), keycode, direction);
 
   // Get keysym
-  event.sym = xkb_state_key_get_one_sym(
-    const_cast<struct xkb_state*>(state_), keycode);
+  event.sym = xkb_state_key_get_one_sym(const_cast<struct xkb_state*>(state_), keycode);
 
   // Get UTF-8 representation
   std::memset(event.utf8, 0, sizeof(event.utf8));
-  xkb_state_key_get_utf8(
-    const_cast<struct xkb_state*>(state_), keycode,
-    event.utf8, sizeof(event.utf8));
+  xkb_state_key_get_utf8(const_cast<struct xkb_state*>(state_), keycode, event.utf8,
+                         sizeof(event.utf8));
 }
 
 bool Keyboard::shift_active() const noexcept {
   if (!state_) return false;
-  return xkb_state_mod_name_is_active(
-    const_cast<struct xkb_state*>(state_),
-    XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) > 0;
+  return xkb_state_mod_name_is_active(const_cast<struct xkb_state*>(state_), XKB_MOD_NAME_SHIFT,
+                                      XKB_STATE_MODS_EFFECTIVE) > 0;
 }
 
 bool Keyboard::ctrl_active() const noexcept {
   if (!state_) return false;
-  return xkb_state_mod_name_is_active(
-    const_cast<struct xkb_state*>(state_),
-    XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) > 0;
+  return xkb_state_mod_name_is_active(const_cast<struct xkb_state*>(state_), XKB_MOD_NAME_CTRL,
+                                      XKB_STATE_MODS_EFFECTIVE) > 0;
 }
 
 bool Keyboard::alt_active() const noexcept {
   if (!state_) return false;
-  return xkb_state_mod_name_is_active(
-    const_cast<struct xkb_state*>(state_),
-    XKB_MOD_NAME_ALT, XKB_STATE_MODS_EFFECTIVE) > 0;
+  return xkb_state_mod_name_is_active(const_cast<struct xkb_state*>(state_), XKB_MOD_NAME_ALT,
+                                      XKB_STATE_MODS_EFFECTIVE) > 0;
 }
 
 bool Keyboard::super_active() const noexcept {
   if (!state_) return false;
-  return xkb_state_mod_name_is_active(
-    const_cast<struct xkb_state*>(state_),
-    XKB_MOD_NAME_LOGO, XKB_STATE_MODS_EFFECTIVE) > 0;
+  return xkb_state_mod_name_is_active(const_cast<struct xkb_state*>(state_), XKB_MOD_NAME_LOGO,
+                                      XKB_STATE_MODS_EFFECTIVE) > 0;
 }
 
-} // namespace drm::input
+}  // namespace drm::input

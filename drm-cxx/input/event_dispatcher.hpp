@@ -3,16 +3,16 @@
 
 #pragma once
 
+#include "seat.hpp"
+
 #include <functional>
 #include <vector>
-
-#include "seat.hpp"
 
 namespace drm::input {
 
 // Fan-out dispatcher: routes InputEvents to multiple handlers.
 class EventDispatcher {
-public:
+ public:
   void add_handler(EventHandler handler);
 
   // Dispatch an event to all registered handlers.
@@ -24,8 +24,8 @@ public:
 
   [[nodiscard]] std::size_t handler_count() const noexcept;
 
-private:
+ private:
   std::vector<std::move_only_function<void(const InputEvent&)>> handlers_;
 };
 
-} // namespace drm::input
+}  // namespace drm::input

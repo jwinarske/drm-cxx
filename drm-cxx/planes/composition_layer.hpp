@@ -12,4 +12,4 @@ namespace drm::planes {
 // as a convenience alias and documentation point.
 using CompositionLayer = Layer;
 
-} // namespace drm::planes
+}  // namespace drm::planes

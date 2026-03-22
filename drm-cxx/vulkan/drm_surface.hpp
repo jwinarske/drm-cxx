@@ -13,7 +13,7 @@ namespace drm::vulkan {
 // Full implementation requires a VkInstance and VkPhysicalDevice,
 // which the Display class manages.
 class DrmSurface {
-public:
+ public:
   [[nodiscard]] uint64_t surface_handle() const noexcept;
 
   ~DrmSurface();
@@ -22,10 +22,10 @@ public:
   DrmSurface(const DrmSurface&) = delete;
   DrmSurface& operator=(const DrmSurface&) = delete;
 
-private:
+ private:
   DrmSurface() = default;
   friend class Display;
   uint64_t surface_{};
 };
 
-} // namespace drm::vulkan
+}  // namespace drm::vulkan

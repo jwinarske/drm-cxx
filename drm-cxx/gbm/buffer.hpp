@@ -13,7 +13,7 @@ struct gbm_surface;
 namespace drm::gbm {
 
 class Buffer {
-public:
+ public:
   [[nodiscard]] struct gbm_bo* raw() const noexcept;
   [[nodiscard]] uint32_t handle() const noexcept;
   [[nodiscard]] uint32_t stride() const noexcept;
@@ -30,11 +30,11 @@ public:
   Buffer(const Buffer&) = delete;
   Buffer& operator=(const Buffer&) = delete;
 
-private:
+ private:
   explicit Buffer(struct gbm_bo* bo, struct gbm_surface* surf = nullptr) noexcept;
   struct gbm_bo* bo_{};
   struct gbm_surface* surf_{};  // Non-null if locked from a surface
   friend class Surface;
 };
 
-} // namespace drm::gbm
+}  // namespace drm::gbm
