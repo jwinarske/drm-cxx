@@ -592,12 +592,12 @@ Optionally gated behind `get_option('vulkan')`:
 
 ### Phase 1 — Scaffold & Build System (Week 1)
 
-- [ ] Create `drm-cxx/` repo, canonical directory layout.
-- [ ] Write root `meson.build` and `meson.options` targeting C++23.
-- [ ] Confirm compiler availability (GCC ≥ 13 / Clang ≥ 16).
-- [ ] Add CI workflow (GitHub Actions) with matrix: GCC-13, GCC-14, Clang-16, Clang-17.
-- [ ] Port `config.h.meson`.
-- [ ] Stub all translation units (empty `.cpp` files that compile clean).
+- [x] Create `drm-cxx/` repo, canonical directory layout.
+- [x] Write root `meson.build` and `meson.options` targeting C++23.
+- [x] Confirm compiler availability (GCC ≥ 13 / Clang ≥ 16).
+- [x] Add CI workflow (GitHub Actions) with matrix: GCC-13, GCC-14, Clang-16, Clang-17.
+- [x] Port `config.h.meson`.
+- [x] Stub all translation units (empty `.cpp` files that compile clean).
 
 ### Phase 2 — Core + Resources (Week 2)
 
