@@ -81,6 +81,27 @@ std::expected<std::size_t, std::error_code> Allocator::apply(Output& output, Ato
 std::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation(Output& output,
                                                                                  AtomicRequest& req,
                                                                                  uint32_t flags) {
+  // Validate that all layer pointers from previous allocation still exist
+  auto& current_layers = output.layers();
+  for (auto it = previous_allocation_.begin(); it != previous_allocation_.end();) {
+    bool found = false;
+    for (const auto* l : current_layers) {
+      if (l == it->second) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      it = previous_allocation_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  if (previous_allocation_.empty()) {
+    return std::unexpected(std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+
   if (try_test_commit(previous_allocation_, output, req, flags)) {
     // Apply previous assignment to layers
     std::size_t assigned = 0;

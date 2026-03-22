@@ -49,12 +49,12 @@ std::optional<uint32_t> Layer::assigned_plane_id() const noexcept {
 }
 
 std::optional<uint64_t> Layer::property(std::string_view name) const {
-  auto it = properties_.find(std::string(name));
+  auto it = properties_.find(name);
   if (it == properties_.end()) return std::nullopt;
   return it->second;
 }
 
-const std::unordered_map<std::string, uint64_t>& Layer::properties() const noexcept {
+const Layer::PropertyMap& Layer::properties() const noexcept {
   return properties_;
 }
 
@@ -128,11 +128,15 @@ uint32_t Layer::update_hz() const noexcept {
 }
 
 std::size_t Layer::property_hash() const {
-  std::size_t h = 0;
+  std::size_t h = 0x9e3779b97f4a7c15;  // Golden ratio seed
   for (const auto& [name, val] : properties_) {
     // Skip FB_ID since it changes every frame
     if (name == "FB_ID") continue;
-    h ^= std::hash<std::string>{}(name) ^ std::hash<uint64_t>{}(val);
+    // Proper hash combine (boost-style) to avoid commutative collisions
+    std::size_t name_hash = std::hash<std::string>{}(name);
+    std::size_t val_hash = std::hash<uint64_t>{}(val);
+    h ^= name_hash + 0x9e3779b97f4a7c15 + (h << 6) + (h >> 2);
+    h ^= val_hash + 0x9e3779b97f4a7c15 + (h << 6) + (h >> 2);
   }
   return h;
 }

@@ -17,7 +17,7 @@
 #include <cstdlib>
 #include <print>
 
-int main(int argc, char* argv[]) {
+int main(const int argc, char* argv[]) {
   const char* path = (argc > 1) ? argv[1] : "/dev/dri/card0";
 
   // Open DRM device
@@ -29,17 +29,17 @@ int main(int argc, char* argv[]) {
   auto& dev = *dev_result;
 
   // Enable capabilities
-  if (auto r = dev.enable_universal_planes(); !r) {
+  if (const auto r = dev.enable_universal_planes(); !r) {
     std::println(stderr, "Failed to enable universal planes");
     return EXIT_FAILURE;
   }
-  if (auto r = dev.enable_atomic(); !r) {
+  if (const auto r = dev.enable_atomic(); !r) {
     std::println(stderr, "Failed to enable atomic modesetting");
     return EXIT_FAILURE;
   }
 
   // Get resources
-  auto res = drm::get_resources(dev.fd());
+  const auto res = drm::get_resources(dev.fd());
   if (!res) {
     std::println(stderr, "Failed to get DRM resources");
     return EXIT_FAILURE;
@@ -48,11 +48,11 @@ int main(int argc, char* argv[]) {
   std::println("Found {} connectors, {} CRTCs, {} encoders", res->count_connectors,
                res->count_crtcs, res->count_encoders);
 
-  // Find first connected connector
+  // Find the first connected connector
   drm::Connector conn{nullptr, &drmModeFreeConnector};
   for (int i = 0; i < res->count_connectors; ++i) {
-    auto c = drm::get_connector(dev.fd(), res->connectors[i]);
-    if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
+    if (auto c = drm::get_connector(dev.fd(), res->connectors[i]);
+        c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
       std::println("Connector {}: {} modes", c->connector_id, c->count_modes);
       conn = std::move(c);
       break;
@@ -65,30 +65,29 @@ int main(int argc, char* argv[]) {
   }
 
   // Select preferred mode
-  auto modes = std::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
-  auto mode_result = drm::select_preferred_mode(modes);
+  const auto modes = std::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
+  const auto mode_result = drm::select_preferred_mode(modes);
   if (!mode_result) {
     std::println(stderr, "No suitable mode found");
     return EXIT_FAILURE;
   }
-  auto& mode = *mode_result;
+  const auto& mode = *mode_result;
   std::println("Selected mode: {}x{}@{}Hz{}", mode.width(), mode.height(), mode.refresh(),
                mode.preferred() ? " (preferred)" : "");
 
   // List all available modes
-  auto all_modes = drm::get_all_modes(modes);
-  for (const auto& m : all_modes) {
+  for (const auto all_modes = drm::get_all_modes(modes); const auto& m : all_modes) {
     std::println("  {}x{}@{}Hz{}{}", m.width(), m.height(), m.refresh(),
                  m.preferred() ? " [preferred]" : "", m.interlaced() ? " [interlaced]" : "");
   }
 
   // Find encoder and CRTC
-  if (!conn->encoder_id) {
+  if (conn->encoder_id == 0U) {
     std::println(stderr, "No encoder attached to connector");
     return EXIT_FAILURE;
   }
 
-  auto enc = drm::get_encoder(dev.fd(), conn->encoder_id);
+  const auto enc = drm::get_encoder(dev.fd(), conn->encoder_id);
   if (!enc) {
     std::println(stderr, "Failed to get encoder");
     return EXIT_FAILURE;

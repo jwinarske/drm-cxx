@@ -60,8 +60,12 @@ int main(int argc, char* argv[]) {
     if (plane.zpos_min || plane.zpos_max) {
       std::println("    zpos: [{}, {}]", plane.zpos_min.value_or(0), plane.zpos_max.value_or(0));
     }
-    if (plane.supports_rotation) std::println("    supports rotation");
-    if (plane.supports_scaling) std::println("    supports scaling");
+    if (plane.supports_rotation) {
+      std::println("    supports rotation");
+    }
+    if (plane.supports_scaling) {
+      std::println("    supports scaling");
+    }
   }
 
   // Create virtual layers
@@ -108,8 +112,7 @@ int main(int argc, char* argv[]) {
   std::println("\nAllocator assigned {} layers to hardware planes", *result);
 
   for (const auto* layer : output.layers()) {
-    auto plane = layer->assigned_plane_id();
-    if (plane) {
+    if (auto plane = layer->assigned_plane_id()) {
       std::println("  Layer -> plane {}", *plane);
     } else if (layer->needs_composition()) {
       std::println("  Layer -> needs software composition");

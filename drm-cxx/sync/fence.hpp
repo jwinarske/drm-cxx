@@ -14,7 +14,8 @@ class SyncFence {
   static std::expected<SyncFence, std::error_code> import_fd(int fence_fd);
 
   std::expected<void, std::error_code> wait(std::chrono::milliseconds timeout);
-  void merge(SyncFence& other);
+  // Merge another fence into this one. The other fence is consumed (moved from).
+  std::expected<void, std::error_code> merge(SyncFence other);
 
   ~SyncFence();
   SyncFence(SyncFence&&) noexcept;
