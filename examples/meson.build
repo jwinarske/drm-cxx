@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 executable('overlay_planes',
   'overlay_planes/main.cpp',
@@ -8,6 +8,11 @@ executable('overlay_planes',
 
 executable('atomic_modeset',
   'atomic_modeset/main.cpp',
+  dependencies : drm_cxx_dep,
+)
+
+executable('hotplug_monitor',
+  'hotplug_monitor/main.cpp',
   dependencies : drm_cxx_dep,
 )
 

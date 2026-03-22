@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -30,8 +30,8 @@ class Surface {
   [[nodiscard]] bool has_free_buffers() const noexcept;
 
   ~Surface();
-  Surface(Surface&&) noexcept;
-  Surface& operator=(Surface&&) noexcept;
+  Surface(Surface&& /*other*/) noexcept;
+  Surface& operator=(Surface&& /*other*/) noexcept;
   Surface(const Surface&) = delete;
   Surface& operator=(const Surface&) = delete;
 

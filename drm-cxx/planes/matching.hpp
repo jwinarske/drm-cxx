@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -54,7 +54,7 @@ class BipartiteMatching {
   std::vector<std::vector<std::size_t>> adj_;
 
   // Matching state
-  static constexpr std::size_t NIL = static_cast<std::size_t>(-1);
+  static constexpr std::size_t nil = static_cast<std::size_t>(-1);
   std::vector<std::size_t> match_left_;   // left -> right
   std::vector<std::size_t> match_right_;  // right -> left
   std::vector<std::size_t> dist_;         // BFS distance for left nodes

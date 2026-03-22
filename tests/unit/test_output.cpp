@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
+#include "planes/layer.hpp"
 #include "planes/output.hpp"
 
 #include <gtest/gtest.h>
 
 TEST(OutputTest, ConstructWithCompositionLayer) {
   drm::planes::Layer comp_layer;
-  drm::planes::Output output(42, comp_layer);
+  drm::planes::Output const output(42, comp_layer);
 
-  EXPECT_EQ(output.crtc_id(), 42u);
+  EXPECT_EQ(output.crtc_id(), 42U);
   EXPECT_EQ(output.composition_layer(), &comp_layer);
   EXPECT_TRUE(comp_layer.is_composition_layer());
 }
@@ -19,10 +20,10 @@ TEST(OutputTest, AddAndRemoveLayer) {
   drm::planes::Output output(1, comp_layer);
 
   auto& layer = output.add_layer();
-  EXPECT_EQ(output.layers().size(), 1u);
+  EXPECT_EQ(output.layers().size(), 1U);
 
   output.remove_layer(layer);
-  EXPECT_EQ(output.layers().size(), 0u);
+  EXPECT_EQ(output.layers().size(), 0U);
 }
 
 TEST(OutputTest, AnyLayerDirtyDetection) {
@@ -50,7 +51,7 @@ TEST(OutputTest, ChangedLayersReturnsOnlyDirty) {
   l1.set_property("FB_ID", 1);
 
   auto changed = output.changed_layers();
-  EXPECT_EQ(changed.size(), 1u);
+  EXPECT_EQ(changed.size(), 1U);
   EXPECT_EQ(changed[0], &l1);
 
   // l2 should not be in changed
@@ -74,7 +75,7 @@ TEST(OutputTest, SortLayersByZpos) {
   output.sort_layers_by_zpos();
 
   auto& layers = output.layers();
-  ASSERT_EQ(layers.size(), 3u);
+  ASSERT_EQ(layers.size(), 3U);
   EXPECT_EQ(layers[0], &l2);  // zpos 1
   EXPECT_EQ(layers[1], &l3);  // zpos 2
   EXPECT_EQ(layers[2], &l1);  // zpos 3

@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -64,7 +64,7 @@ using EventHandler = std::move_only_function<void(const InputEvent&)>;
 
 struct SeatOptions {
   std::string_view seat_name = "seat0";
-  std::string_view keymap_path = {};  // Empty = use RMLVO defaults
+  std::string_view keymap_path;  // Empty = use RMLVO defaults
 };
 
 // ── Seat ───────────────────────────────────────────────────────
@@ -86,8 +86,8 @@ class Seat {
   std::expected<void, std::error_code> resume();
 
   ~Seat();
-  Seat(Seat&&) noexcept;
-  Seat& operator=(Seat&&) noexcept;
+  Seat(Seat&& /*other*/) noexcept;
+  Seat& operator=(Seat&& /*other*/) noexcept;
   Seat(const Seat&) = delete;
   Seat& operator=(const Seat&) = delete;
 

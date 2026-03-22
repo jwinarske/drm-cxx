@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "format.hpp"
 
 #include <drm_fourcc.h>
+
+#include <cstdint>
+#include <string_view>
 
 namespace drm {
 

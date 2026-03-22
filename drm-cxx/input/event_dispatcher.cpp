@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "event_dispatcher.hpp"
+
+#include "input/seat.hpp"
+
+#include <cstddef>
+#include <utility>
 
 namespace drm::input {
 

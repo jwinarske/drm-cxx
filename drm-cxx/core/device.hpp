@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -16,15 +16,15 @@ class Device {
 
   [[nodiscard]] int fd() const noexcept;
 
-  std::expected<void, std::error_code> set_client_cap(uint64_t cap, uint64_t value);
+  std::expected<void, std::error_code> set_client_cap(uint64_t cap, uint64_t value) const;
 
   std::expected<void, std::error_code> enable_universal_planes();
   std::expected<void, std::error_code> enable_atomic();
 
   ~Device();
 
-  Device(Device&&) noexcept;
-  Device& operator=(Device&&) noexcept;
+  Device(Device&& /*other*/) noexcept;
+  Device& operator=(Device&& /*other*/) noexcept;
   Device(const Device&) = delete;
   Device& operator=(const Device&) = delete;
 

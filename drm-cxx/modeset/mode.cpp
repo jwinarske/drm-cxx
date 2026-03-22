@@ -1,12 +1,16 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "mode.hpp"
 
-#include <algorithm>
-#include <cmath>
+#include <drm_mode.h>
+
+#include <cstdint>
+#include <expected>
 #include <limits>
-#include <ranges>
+#include <span>
+#include <system_error>
+#include <vector>
 
 namespace drm {
 
@@ -40,16 +44,16 @@ std::expected<ModeInfo, std::error_code> select_preferred_mode(
 
   // First pass: look for a mode flagged as preferred
   for (const auto& m : modes) {
-    if (m.type & DRM_MODE_TYPE_PREFERRED) {
+    if ((m.type & DRM_MODE_TYPE_PREFERRED) != 0u) {
       return ModeInfo{.drm_mode = m};
     }
   }
 
   // Fallback: pick highest resolution, then highest refresh
-  const drmModeModeInfo* best = &modes[0];
+  const drmModeModeInfo* best = modes.data();
   for (const auto& m : modes) {
-    uint32_t area = static_cast<uint32_t>(m.hdisplay) * m.vdisplay;
-    uint32_t best_area = static_cast<uint32_t>(best->hdisplay) * best->vdisplay;
+    uint64_t const area = static_cast<uint64_t>(m.hdisplay) * m.vdisplay;
+    uint64_t const best_area = static_cast<uint64_t>(best->hdisplay) * best->vdisplay;
     if (area > best_area || (area == best_area && m.vrefresh > best->vrefresh)) {
       best = &m;
     }
@@ -70,13 +74,15 @@ std::expected<ModeInfo, std::error_code> select_mode(std::span<const drmModeMode
 
   for (const auto& m : modes) {
     // Skip interlaced modes unless specifically targeting them
-    if (m.flags & DRM_MODE_FLAG_INTERLACE) continue;
+    if ((m.flags & DRM_MODE_FLAG_INTERLACE) != 0u) {
+      continue;
+    }
 
     auto dw = static_cast<uint64_t>((m.hdisplay > target_width) ? m.hdisplay - target_width
                                                                 : target_width - m.hdisplay);
     auto dh = static_cast<uint64_t>((m.vdisplay > target_height) ? m.vdisplay - target_height
                                                                  : target_height - m.vdisplay);
-    uint64_t score = dw * dw + dh * dh;
+    uint64_t score = (dw * dw) + (dh * dh);
 
     if (target_refresh > 0) {
       auto dr = static_cast<uint64_t>((m.vrefresh > target_refresh) ? m.vrefresh - target_refresh
@@ -84,13 +90,14 @@ std::expected<ModeInfo, std::error_code> select_mode(std::span<const drmModeMode
       score += dr * 100;  // Weight refresh match
     }
 
-    if (score < best_score || (score == best_score && best && m.vrefresh > best->vrefresh)) {
+    if (score < best_score ||
+        (score == best_score && (best != nullptr) && m.vrefresh > best->vrefresh)) {
       best = &m;
       best_score = score;
     }
   }
 
-  if (!best) {
+  if (best == nullptr) {
     return std::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 

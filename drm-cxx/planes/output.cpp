@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "output.hpp"
 
+#include "planes/layer.hpp"
+
 #include <algorithm>
-#include <ranges>
+#include <cstdint>
+#include <memory>
+#include <vector>
 
 namespace drm::planes {
 
@@ -26,7 +30,7 @@ void Output::remove_layer(const Layer& layer) {
 }
 
 void Output::set_composition_layer(Layer& layer) {
-  if (composition_layer_) {
+  if (composition_layer_ != nullptr) {
     composition_layer_->is_composition_layer_ = false;
   }
   composition_layer_ = &layer;
@@ -51,16 +55,19 @@ Layer* Output::composition_layer() const noexcept {
 
 bool Output::any_layer_dirty() const noexcept {
   for (const auto* layer : layer_ptrs_) {
-    if (layer->is_dirty()) return true;
+    if (layer->is_dirty()) {
+      return true;
+    }
   }
-  if (composition_layer_ && composition_layer_->is_dirty()) return true;
-  return false;
+  return composition_layer_ && composition_layer_->is_dirty();
 }
 
 std::vector<Layer*> Output::changed_layers() const {
   std::vector<Layer*> result;
   for (auto* layer : layer_ptrs_) {
-    if (layer->is_dirty()) result.push_back(layer);
+    if (layer->is_dirty()) {
+      result.push_back(layer);
+    }
   }
   return result;
 }
@@ -69,7 +76,7 @@ void Output::mark_clean() noexcept {
   for (auto* layer : layer_ptrs_) {
     layer->mark_clean();
   }
-  if (composition_layer_) {
+  if (composition_layer_ != nullptr) {
     composition_layer_->mark_clean();
   }
 }

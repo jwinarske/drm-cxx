@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
-#include "gbm/buffer.hpp"
 #include "gbm/device.hpp"
 #include "gbm/surface.hpp"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <unistd.h>
+#include <utility>
 
 TEST(GbmDeviceTest, CreateWithInvalidFdFails) {
   auto result = drm::gbm::GbmDevice::create(-1);
@@ -17,8 +17,10 @@ TEST(GbmDeviceTest, CreateWithInvalidFdFails) {
 TEST(GbmDeviceTest, CreateWithNonDrmFdGraceful) {
   // /dev/null is not a DRM device — gbm_create_device may or may not
   // succeed depending on the mesa implementation. Either way, no crash.
-  int fd = ::open("/dev/null", O_RDWR);
-  if (fd < 0) GTEST_SKIP() << "Cannot open /dev/null";
+  int const fd = ::open("/dev/null", O_RDWR);
+  if (fd < 0) {
+    GTEST_SKIP() << "Cannot open /dev/null";
+  }
 
   auto result = drm::gbm::GbmDevice::create(fd);
   // Just verify no crash — result may be valid or error

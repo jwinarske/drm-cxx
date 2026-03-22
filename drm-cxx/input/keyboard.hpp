@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
-#include <cstdint>
 #include <expected>
-#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -18,11 +16,11 @@ namespace drm::input {
 struct KeyboardEvent;
 
 struct KeymapOptions {
-  std::string_view rules = {};
-  std::string_view model = {};
-  std::string_view layout = {};
-  std::string_view variant = {};
-  std::string_view options = {};
+  std::string_view rules;
+  std::string_view model;
+  std::string_view layout;
+  std::string_view variant;
+  std::string_view options;
 };
 
 class Keyboard {

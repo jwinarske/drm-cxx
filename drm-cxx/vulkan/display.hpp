@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -38,8 +38,8 @@ class Display {
       uint64_t display_handle) const;
 
   ~Display();
-  Display(Display&&) noexcept;
-  Display& operator=(Display&&) noexcept;
+  Display(Display&& /*other*/) noexcept;
+  Display& operator=(Display&& /*other*/) noexcept;
   Display(const Display&) = delete;
   Display& operator=(const Display&) = delete;
 

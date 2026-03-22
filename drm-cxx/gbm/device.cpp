@@ -1,18 +1,20 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "device.hpp"
 
 #include <gbm.h>
 
 #include <cerrno>
+#include <expected>
+#include <system_error>
 
 namespace drm::gbm {
 
 GbmDevice::GbmDevice(struct gbm_device* dev) noexcept : dev_(dev) {}
 
 GbmDevice::~GbmDevice() {
-  if (dev_) {
+  if (dev_ != nullptr) {
     gbm_device_destroy(dev_);
   }
 }
@@ -23,7 +25,9 @@ GbmDevice::GbmDevice(GbmDevice&& other) noexcept : dev_(other.dev_) {
 
 GbmDevice& GbmDevice::operator=(GbmDevice&& other) noexcept {
   if (this != &other) {
-    if (dev_) gbm_device_destroy(dev_);
+    if (dev_ != nullptr) {
+      gbm_device_destroy(dev_);
+    }
     dev_ = other.dev_;
     other.dev_ = nullptr;
   }
@@ -36,7 +40,7 @@ std::expected<GbmDevice, std::error_code> GbmDevice::create(int drm_fd) {
   }
 
   auto* dev = gbm_create_device(drm_fd);
-  if (!dev) {
+  if (dev == nullptr) {
     return std::unexpected(std::error_code(errno, std::system_category()));
   }
 

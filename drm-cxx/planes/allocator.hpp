@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -33,14 +33,14 @@ struct CandidatePair {
 // Test-commit failure cache: memoize (plane_id, property_hash) -> pass/fail
 class TestCache {
  public:
-  std::optional<bool> lookup(uint32_t plane_id, std::size_t prop_hash) const;
+  [[nodiscard]] std::optional<bool> lookup(uint32_t plane_id, std::size_t prop_hash) const;
   void record(uint32_t plane_id, std::size_t prop_hash, bool passed);
-  std::size_t hit_count(uint32_t plane_id, std::size_t prop_hash) const;
+  [[nodiscard]] std::size_t hit_count(uint32_t plane_id, std::size_t prop_hash) const;
   void clear() noexcept;
 
  private:
   struct Entry {
-    bool passed;
+    bool passed{};
     std::size_t hits{0};
   };
   std::map<std::pair<uint32_t, std::size_t>, Entry> cache_;
@@ -85,11 +85,11 @@ class Allocator {
   int score_pair(const PlaneCapabilities& plane, const Layer& layer) const;
 
   // §13.6 Content-type layer priority
-  int layer_priority(const Layer& layer) const;
+  static int layer_priority(const Layer& layer);
 
   // §13.1 Static compatibility check (necessary conditions only)
-  bool plane_statically_compatible(const PlaneCapabilities& plane, const Layer& layer,
-                                   uint32_t crtc_index) const;
+  static bool plane_statically_compatible(const PlaneCapabilities& plane, const Layer& layer,
+                                          uint32_t crtc_index);
 
   // §13.1 Static upper bound
   int static_upper_bound(std::span<Layer* const> remaining_layers,
@@ -97,7 +97,7 @@ class Allocator {
                          uint32_t crtc_index) const;
 
   // §13.7 Spatial intersection splitting
-  bool layers_intersect(const Layer& a, const Layer& b) const;
+  static bool layers_intersect(const Layer& a, const Layer& b);
   std::vector<std::vector<Layer*>> split_independent_groups(std::vector<Layer*>& layers) const;
 
   // Backtracking search

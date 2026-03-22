@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 //
 // overlay_planes — demonstrates the native plane allocator.
 //
@@ -8,22 +8,28 @@
 // Opens a DRM device, enumerates planes, creates virtual layers,
 // and runs the allocator to assign layers to hardware planes.
 
+#include "../select_device.hpp"
 #include "core/device.hpp"
-#include "core/resources.hpp"
 #include "modeset/atomic.hpp"
 #include "planes/allocator.hpp"
+#include "planes/layer.hpp"
+#include "planes/output.hpp"
 #include "planes/plane_registry.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <print>
 
 int main(int argc, char* argv[]) {
-  const char* path = (argc > 1) ? argv[1] : "/dev/dri/card0";
+  const auto path = drm::examples::select_device(argc, argv);
+  if (!path) {
+    return EXIT_FAILURE;
+  }
 
   // Open DRM device
-  auto dev_result = drm::Device::open(path);
+  auto dev_result = drm::Device::open(*path);
   if (!dev_result) {
-    std::println(stderr, "Failed to open {}", path);
+    std::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
   auto& dev = *dev_result;
@@ -49,10 +55,11 @@ int main(int argc, char* argv[]) {
   std::println("Found {} planes:", registry.all().size());
   for (const auto& plane : registry.all()) {
     const char* type_str = "OVERLAY";
-    if (plane.type == drm::planes::DRMPlaneType::PRIMARY)
+    if (plane.type == drm::planes::DRMPlaneType::PRIMARY) {
       type_str = "PRIMARY";
-    else if (plane.type == drm::planes::DRMPlaneType::CURSOR)
+    } else if (plane.type == drm::planes::DRMPlaneType::CURSOR) {
       type_str = "CURSOR";
+    }
 
     std::println("  Plane {}: type={}, formats={}, crtc_mask=0x{:x}", plane.id, type_str,
                  plane.formats.size(), plane.possible_crtcs);

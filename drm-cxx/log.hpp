@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
 #include <cstdint>
+#include <format>
 #include <print>
-#include <string_view>
 #include <utility>
 
 namespace drm {

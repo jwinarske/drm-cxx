@@ -1,21 +1,22 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "planes/matching.hpp"
 
+#include <cstddef>
 #include <gtest/gtest.h>
 
 TEST(BipartiteMatchingTest, EmptyGraph) {
   drm::planes::BipartiteMatching m(0, 0);
-  EXPECT_EQ(m.solve(), 0u);
+  EXPECT_EQ(m.solve(), 0U);
 }
 
 TEST(BipartiteMatchingTest, SingleEdge) {
   drm::planes::BipartiteMatching m(1, 1);
   m.add_edge(0, 0);
-  EXPECT_EQ(m.solve(), 1u);
-  EXPECT_EQ(m.match_for_left(0), 0u);
-  EXPECT_EQ(m.match_for_right(0), 0u);
+  EXPECT_EQ(m.solve(), 1U);
+  EXPECT_EQ(m.match_for_left(0), 0U);
+  EXPECT_EQ(m.match_for_right(0), 0U);
 }
 
 TEST(BipartiteMatchingTest, PerfectMatching) {
@@ -24,7 +25,7 @@ TEST(BipartiteMatchingTest, PerfectMatching) {
   m.add_edge(0, 0);
   m.add_edge(1, 1);
   m.add_edge(2, 2);
-  EXPECT_EQ(m.solve(), 3u);
+  EXPECT_EQ(m.solve(), 3U);
 }
 
 TEST(BipartiteMatchingTest, PartialMatching) {
@@ -34,7 +35,7 @@ TEST(BipartiteMatchingTest, PartialMatching) {
   m.add_edge(1, 0);
   m.add_edge(1, 1);
   m.add_edge(2, 1);
-  EXPECT_EQ(m.solve(), 2u);
+  EXPECT_EQ(m.solve(), 2U);
 }
 
 TEST(BipartiteMatchingTest, ConflictResolution) {
@@ -44,7 +45,7 @@ TEST(BipartiteMatchingTest, ConflictResolution) {
   m.add_edge(1, 0);
   m.add_edge(1, 1);
 
-  EXPECT_EQ(m.solve(), 2u);
+  EXPECT_EQ(m.solve(), 2U);
 
   auto m0 = m.match_for_left(0);
   auto m1 = m.match_for_left(1);
@@ -55,7 +56,7 @@ TEST(BipartiteMatchingTest, ConflictResolution) {
 
 TEST(BipartiteMatchingTest, NoEdges) {
   drm::planes::BipartiteMatching m(3, 3);
-  EXPECT_EQ(m.solve(), 0u);
+  EXPECT_EQ(m.solve(), 0U);
   EXPECT_FALSE(m.match_for_left(0).has_value());
   EXPECT_FALSE(m.match_for_right(0).has_value());
 }
@@ -71,7 +72,7 @@ TEST(BipartiteMatchingTest, MatchedCountConsistency) {
 
   auto count = m.solve();
   EXPECT_EQ(count, m.matched_count());
-  EXPECT_EQ(count, 3u);
+  EXPECT_EQ(count, 3U);
 }
 
 TEST(BipartiteMatchingTest, OutOfBoundsReturnsNullopt) {
@@ -90,14 +91,17 @@ TEST(BipartiteMatchingTest, StarGraph) {
   m.add_edge(0, 1);
   m.add_edge(0, 2);
   m.add_edge(0, 3);
-  EXPECT_EQ(m.solve(), 1u);
+  EXPECT_EQ(m.solve(), 1U);
   ASSERT_TRUE(m.match_for_left(0).has_value());
 }
 
 TEST(BipartiteMatchingTest, CompleteGraph) {
   // All layers connect to all planes
   drm::planes::BipartiteMatching m(3, 3);
-  for (std::size_t i = 0; i < 3; ++i)
-    for (std::size_t j = 0; j < 3; ++j) m.add_edge(i, j);
-  EXPECT_EQ(m.solve(), 3u);
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      m.add_edge(i, j);
+    }
+  }
+  EXPECT_EQ(m.solve(), 3U);
 }

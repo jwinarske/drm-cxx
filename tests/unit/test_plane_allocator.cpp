@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "planes/plane_registry.hpp"
 
@@ -25,10 +25,10 @@ TEST(PlaneCapabilitiesTest, CrtcCompatibility) {
 }
 
 TEST(PlaneCapabilitiesTest, DefaultValues) {
-  drm::planes::PlaneCapabilities caps;
+  drm::planes::PlaneCapabilities const caps;
 
-  EXPECT_EQ(caps.id, 0u);
-  EXPECT_EQ(caps.possible_crtcs, 0u);
+  EXPECT_EQ(caps.id, 0U);
+  EXPECT_EQ(caps.possible_crtcs, 0U);
   EXPECT_EQ(caps.type, drm::planes::DRMPlaneType::OVERLAY);
   EXPECT_TRUE(caps.formats.empty());
   EXPECT_FALSE(caps.zpos_min.has_value());

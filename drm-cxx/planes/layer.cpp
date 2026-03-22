@@ -1,9 +1,14 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "layer.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace drm::planes {
 
@@ -50,7 +55,9 @@ std::optional<uint32_t> Layer::assigned_plane_id() const noexcept {
 
 std::optional<uint64_t> Layer::property(std::string_view name) const {
   auto it = properties_.find(name);
-  if (it == properties_.end()) return std::nullopt;
+  if (it == properties_.end()) {
+    return std::nullopt;
+  }
   return it->second;
 }
 
@@ -61,7 +68,9 @@ const Layer::PropertyMap& Layer::properties() const noexcept {
 std::optional<uint32_t> Layer::format() const {
   // The format is set as a separate property hint by the compositor.
   auto fmt = property("pixel_format");
-  if (fmt) return static_cast<uint32_t>(*fmt);
+  if (fmt) {
+    return static_cast<uint32_t>(*fmt);
+  }
   return std::nullopt;
 }
 
@@ -81,13 +90,15 @@ bool Layer::requires_scaling() const {
   auto src_h = property("SRC_H");
   auto crtc_h = property("CRTC_H");
 
-  if (!src_w || !crtc_w || !src_h || !crtc_h) return false;
+  if (!src_w || !crtc_w || !src_h || !crtc_h) {
+    return false;
+  }
 
   // SRC coordinates are in 16.16 fixed point
-  uint32_t sw = static_cast<uint32_t>(*src_w >> 16);
-  uint32_t sh = static_cast<uint32_t>(*src_h >> 16);
-  uint32_t cw = static_cast<uint32_t>(*crtc_w);
-  uint32_t ch = static_cast<uint32_t>(*crtc_h);
+  auto const sw = static_cast<uint32_t>(*src_w >> 16);
+  auto const sh = static_cast<uint32_t>(*src_h >> 16);
+  auto const cw = static_cast<uint32_t>(*crtc_w);
+  auto const ch = static_cast<uint32_t>(*crtc_h);
 
   return sw != cw || sh != ch;
 }
@@ -131,10 +142,12 @@ std::size_t Layer::property_hash() const {
   std::size_t h = 0x9e3779b97f4a7c15;  // Golden ratio seed
   for (const auto& [name, val] : properties_) {
     // Skip FB_ID since it changes every frame
-    if (name == "FB_ID") continue;
+    if (name == "FB_ID") {
+      continue;
+    }
     // Proper hash combine (boost-style) to avoid commutative collisions
-    std::size_t name_hash = std::hash<std::string>{}(name);
-    std::size_t val_hash = std::hash<uint64_t>{}(val);
+    std::size_t const name_hash = std::hash<std::string>{}(name);
+    std::size_t const val_hash = std::hash<uint64_t>{}(val);
     h ^= name_hash + 0x9e3779b97f4a7c15 + (h << 6) + (h >> 2);
     h ^= val_hash + 0x9e3779b97f4a7c15 + (h << 6) + (h >> 2);
   }

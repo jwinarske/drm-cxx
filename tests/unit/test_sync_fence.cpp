@@ -1,11 +1,15 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #include "sync/fence.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <sys/eventfd.h>
+#include <sys/types.h>
 #include <unistd.h>
+#include <utility>
 
 TEST(SyncFenceTest, ImportInvalidFdReturnsError) {
   auto result = drm::sync::SyncFence::import_fd(-1);
@@ -14,7 +18,7 @@ TEST(SyncFenceTest, ImportInvalidFdReturnsError) {
 
 TEST(SyncFenceTest, ImportValidFdSucceeds) {
   // Use an eventfd as a stand-in for a real sync fence fd
-  int efd = eventfd(0, EFD_CLOEXEC);
+  int const efd = eventfd(0, EFD_CLOEXEC);
   ASSERT_GE(efd, 0);
 
   auto result = drm::sync::SyncFence::import_fd(efd);
@@ -26,20 +30,20 @@ TEST(SyncFenceTest, ImportValidFdSucceeds) {
 }
 
 TEST(SyncFenceTest, MoveConstructor) {
-  int efd = eventfd(0, EFD_CLOEXEC);
+  int const efd = eventfd(0, EFD_CLOEXEC);
   ASSERT_GE(efd, 0);
 
   auto result = drm::sync::SyncFence::import_fd(efd);
   ASSERT_TRUE(result.has_value());
   ::close(efd);
 
-  drm::sync::SyncFence fence2(std::move(*result));
+  drm::sync::SyncFence const fence2(std::move(*result));
   // fence2 should hold the fd now; original is moved-from
 }
 
 TEST(SyncFenceTest, MoveAssignment) {
-  int efd1 = eventfd(0, EFD_CLOEXEC);
-  int efd2 = eventfd(0, EFD_CLOEXEC);
+  int const efd1 = eventfd(0, EFD_CLOEXEC);
+  int const efd2 = eventfd(0, EFD_CLOEXEC);
   ASSERT_GE(efd1, 0);
   ASSERT_GE(efd2, 0);
 
@@ -56,7 +60,7 @@ TEST(SyncFenceTest, MoveAssignment) {
 }
 
 TEST(SyncFenceTest, WaitOnSignaledEventFdSucceeds) {
-  int efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  int const efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   ASSERT_GE(efd, 0);
 
   // Signal the eventfd so poll returns immediately
@@ -72,7 +76,7 @@ TEST(SyncFenceTest, WaitOnSignaledEventFdSucceeds) {
 }
 
 TEST(SyncFenceTest, WaitTimesOut) {
-  int efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  int const efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   ASSERT_GE(efd, 0);
 
   // Don't signal — should time out

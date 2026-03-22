@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 
 #pragma once
 
@@ -16,7 +16,7 @@ class DrmSurface {
  public:
   [[nodiscard]] uint64_t surface_handle() const noexcept;
 
-  ~DrmSurface();
+  ~DrmSurface() = default;
   DrmSurface(DrmSurface&&) noexcept;
   DrmSurface& operator=(DrmSurface&&) noexcept;
   DrmSurface(const DrmSurface&) = delete;
