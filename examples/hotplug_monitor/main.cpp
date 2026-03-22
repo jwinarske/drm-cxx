@@ -21,7 +21,6 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
-#include <cstring>
 #include <functional>
 #include <libudev.h>
 #include <memory>
@@ -29,6 +28,7 @@
 #include <span>
 #include <string>
 #include <sys/epoll.h>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -78,7 +78,8 @@ class UdevHotplugMonitor {
       std::function<void(const char* action, const char* devnode, const char* subsystem)> callback)
       : sub_systems_(std::move(sub_systems)), callback_(std::move(callback)) {
     if (pipe(pipe_fds_) == -1) {
-      drm::log_error("Failed to create pipe: {} ({})", std::strerror(errno), errno);
+      drm::log_error("Failed to create pipe: {} ({})", std::system_category().message(errno),
+                     errno);
       pipe_fds_[0] = -1;
       pipe_fds_[1] = -1;
       return;
@@ -110,7 +111,8 @@ class UdevHotplugMonitor {
     }
     if (pipe_fds_[1] != -1) {
       if (write(pipe_fds_[1], "x", 1) == -1) {
-        drm::log_error("Failed to write to stop pipe: {} ({})", std::strerror(errno), errno);
+        drm::log_error("Failed to write to stop pipe: {} ({})",
+                       std::system_category().message(errno), errno);
       }
     }
   }
@@ -152,7 +154,8 @@ class UdevHotplugMonitor {
 
     const EpollFd epoll_fd(epoll_create1(0));
     if (!epoll_fd.valid()) {
-      drm::log_error("Failed to create epoll: {} ({})", std::strerror(errno), errno);
+      drm::log_error("Failed to create epoll: {} ({})", std::system_category().message(errno),
+                     errno);
       is_running_ = false;
       return;
     }
@@ -162,14 +165,16 @@ class UdevHotplugMonitor {
 
     ev.data.fd = udev_fd;
     if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, udev_fd, &ev) == -1) {
-      drm::log_error("Failed to add udev fd to epoll: {} ({})", std::strerror(errno), errno);
+      drm::log_error("Failed to add udev fd to epoll: {} ({})",
+                     std::system_category().message(errno), errno);
       is_running_ = false;
       return;
     }
 
     ev.data.fd = pipe_fds_[0];
     if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, pipe_fds_[0], &ev) == -1) {
-      drm::log_error("Failed to add pipe fd to epoll: {} ({})", std::strerror(errno), errno);
+      drm::log_error("Failed to add pipe fd to epoll: {} ({})",
+                     std::system_category().message(errno), errno);
       is_running_ = false;
       return;
     }
@@ -181,7 +186,7 @@ class UdevHotplugMonitor {
         if (errno == EINTR) {
           continue;
         }
-        drm::log_error("epoll_wait failed: {} ({})", std::strerror(errno), errno);
+        drm::log_error("epoll_wait failed: {} ({})", std::system_category().message(errno), errno);
         break;
       }
 
@@ -220,11 +225,11 @@ class UdevHotplugMonitor {
 // Global signal handling
 // ---------------------------------------------------------------------------
 namespace {
-std::atomic<bool> g_quit{false};
+volatile std::sig_atomic_t g_quit = 0;
 }
 
 static void signal_handler(int /*sig*/) {
-  g_quit.store(true, std::memory_order_relaxed);
+  g_quit = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +310,7 @@ int main(const int argc, char* argv[]) {
       });
 
   // Spin until Ctrl-C
-  while (!g_quit.load(std::memory_order_relaxed)) {
+  while (!g_quit) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
