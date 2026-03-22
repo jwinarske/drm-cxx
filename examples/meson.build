@@ -16,6 +16,11 @@ executable('hotplug_monitor',
   dependencies : drm_cxx_dep,
 )
 
+executable('mouse_cursor',
+  'mouse_cursor/main.cpp',
+  dependencies : drm_cxx_dep,
+)
+
 if get_option('vulkan')
   executable('vulkan_display',
     'vulkan_display/main.cpp',

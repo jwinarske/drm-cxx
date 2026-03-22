@@ -26,7 +26,7 @@ auto* ud(void* p) {
 }
 
 int open_restricted(const char* path, int flags, void* /*user_data*/) {
-  int const fd = ::open(path, flags);
+  int const fd = ::open(path, flags | O_CLOEXEC);
   if (fd < 0) {
     return -errno;
   }

@@ -12,13 +12,11 @@ void Pointer::accumulate_motion(double dx, double dy) noexcept {
   y_ += dy;
 }
 
-void Pointer::set_button(uint32_t button, bool pressed) noexcept {
-  // Use lower bits for common buttons (BTN_LEFT=0x110, etc.)
-  uint32_t const bit = button & 0x1F;
+void Pointer::set_button(uint32_t button, bool pressed) {
   if (pressed) {
-    buttons_ |= (1U << bit);
+    buttons_.insert(button);
   } else {
-    buttons_ &= ~(1U << bit);
+    buttons_.erase(button);
   }
 }
 
@@ -30,8 +28,7 @@ double Pointer::y() const noexcept {
 }
 
 bool Pointer::button_pressed(uint32_t button) const noexcept {
-  uint32_t const bit = button & 0x1F;
-  return (buttons_ & (1U << bit)) != 0;
+  return buttons_.contains(button);
 }
 
 void Pointer::reset_position(double x, double y) noexcept {
