@@ -1,25 +1,42 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-# Tests — stubs for now
+gtest_dep = dependency('gtest', required : true)
+gtest_main_dep = dependency('gtest_main', required : true)
 
-# test('test_property_store',
-#   executable('test_property_store',
-#     'unit/test_property_store.cpp',
-#     dependencies : drm_cxx_dep,
-#   ),
-# )
+test_deps = [drm_cxx_dep, gtest_dep, gtest_main_dep]
 
-# test('test_plane_allocator',
-#   executable('test_plane_allocator',
-#     'unit/test_plane_allocator.cpp',
-#     dependencies : drm_cxx_dep,
-#   ),
-# )
+test('test_format',
+  executable('test_format',
+    'unit/test_format.cpp',
+    dependencies : test_deps,
+  ),
+)
 
-# test('test_atomic_builder',
-#   executable('test_atomic_builder',
-#     'unit/test_atomic_builder.cpp',
-#     dependencies : drm_cxx_dep,
-#   ),
-# )
+test('test_property_store',
+  executable('test_property_store',
+    'unit/test_property_store.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_device',
+  executable('test_device',
+    'unit/test_device.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_atomic_builder',
+  executable('test_atomic_builder',
+    'unit/test_atomic_builder.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_sync_fence',
+  executable('test_sync_fence',
+    'unit/test_sync_fence.cpp',
+    dependencies : test_deps,
+  ),
+)
