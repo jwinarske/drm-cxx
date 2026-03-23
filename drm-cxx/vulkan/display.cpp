@@ -16,7 +16,7 @@ namespace drm::vulkan {
 
 Display::~Display() {
   if (instance_ != nullptr) {
-    auto vk_destroy_instance =
+    auto* vk_destroy_instance =
         reinterpret_cast<PFN_vkDestroyInstance>(dlsym(RTLD_DEFAULT, "vkDestroyInstance"));
     if (vk_destroy_instance != nullptr) {
       vk_destroy_instance(static_cast<VkInstance>(instance_), nullptr);
@@ -36,7 +36,7 @@ Display::Display(Display&& other) noexcept
 Display& Display::operator=(Display&& other) noexcept {
   if (this != &other) {
     if (instance_ != nullptr) {
-      auto vk_destroy_instance =
+      auto* vk_destroy_instance =
           reinterpret_cast<PFN_vkDestroyInstance>(dlsym(RTLD_DEFAULT, "vkDestroyInstance"));
       if (vk_destroy_instance != nullptr) {
         vk_destroy_instance(static_cast<VkInstance>(instance_), nullptr);
@@ -56,21 +56,21 @@ Display& Display::operator=(Display&& other) noexcept {
 
 std::expected<Display, std::error_code> Display::create() {
   // Dynamically load Vulkan
-  auto vk_create_instance =
+  auto* vk_create_instance =
       reinterpret_cast<PFN_vkCreateInstance>(dlsym(RTLD_DEFAULT, "vkCreateInstance"));
   if (vk_create_instance == nullptr) {
     return std::unexpected(std::make_error_code(std::errc::not_supported));
   }
 
-  auto vk_enumerate_physical_devices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+  auto* vk_enumerate_physical_devices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
       dlsym(RTLD_DEFAULT, "vkEnumeratePhysicalDevices"));
-  auto vk_get_physical_device_display_properties_khr =
+  auto* vk_get_physical_device_display_properties_khr =
       reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPropertiesKHR>(
           dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceDisplayPropertiesKHR"));
-  auto vk_get_physical_device_display_plane_properties_khr =
+  auto* vk_get_physical_device_display_plane_properties_khr =
       reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPlanePropertiesKHR>(
           dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceDisplayPlanePropertiesKHR"));
-  auto vk_get_display_plane_supported_displays_khr =
+  auto* vk_get_display_plane_supported_displays_khr =
       reinterpret_cast<PFN_vkGetDisplayPlaneSupportedDisplaysKHR>(
           dlsym(RTLD_DEFAULT, "vkGetDisplayPlaneSupportedDisplaysKHR"));
 

@@ -15,8 +15,8 @@ project('drm-cxx', ['cpp'],
 cpp = meson.get_compiler('cpp')
 
 # Enforce C++23 features are truly available
-assert(cpp.has_argument('-std=c++23'),
-  'A C++23-capable compiler is required (GCC >= 13, Clang >= 16)')
+assert(cpp.has_argument('-std=c++23') or cpp.has_argument('-std=c++2b'),
+  'A C++23-capable compiler is required (GCC >= 13, Clang >= 17)')
 
 add_project_arguments(
   cpp.get_supported_arguments([

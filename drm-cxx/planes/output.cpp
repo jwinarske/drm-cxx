@@ -59,7 +59,7 @@ bool Output::any_layer_dirty() const noexcept {
       return true;
     }
   }
-  return composition_layer_ && composition_layer_->is_dirty();
+  return (composition_layer_ != nullptr) && composition_layer_->is_dirty();
 }
 
 std::vector<Layer*> Output::changed_layers() const {

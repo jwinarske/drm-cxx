@@ -92,13 +92,13 @@ class Allocator {
                                           uint32_t crtc_index);
 
   // §13.1 Static upper bound
-  int static_upper_bound(std::span<Layer* const> remaining_layers,
-                         const std::vector<const PlaneCapabilities*>& available_planes,
-                         uint32_t crtc_index) const;
+  static int static_upper_bound(std::span<Layer* const> remaining_layers,
+                                const std::vector<const PlaneCapabilities*>& available_planes,
+                                uint32_t crtc_index);
 
   // §13.7 Spatial intersection splitting
   static bool layers_intersect(const Layer& a, const Layer& b);
-  std::vector<std::vector<Layer*>> split_independent_groups(std::vector<Layer*>& layers) const;
+  static std::vector<std::vector<Layer*>> split_independent_groups(std::vector<Layer*>& layers);
 
   // Backtracking search
   bool backtrack(std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
