@@ -35,9 +35,12 @@ xkb_dep     = dependency('xkbcommon', include_type : 'system', required : true)
 rt_dep      = cpp.find_library('rt',  required : true)
 dl_dep      = cpp.find_library('dl',  required : true)
 
-di_proj = subproject('libdisplay-info',
-  default_options : ['default_library=static'])
-di_dep = di_proj.get_variable('di_dep')
+di_dep = dependency('libdisplay-info', required : false)
+if not di_dep.found()
+  di_proj = subproject('libdisplay-info',
+    default_options : ['default_library=static'])
+  di_dep = di_proj.get_variable('di_dep')
+endif
 
 if get_option('vulkan')
   # Try system vulkan headers first, fall back to subproject
