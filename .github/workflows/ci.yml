@@ -22,13 +22,13 @@ jobs:
             cc: gcc-14
             cxx: g++-14
           - compiler: clang
-            version: '16'
-            cc: clang-16
-            cxx: clang++-16
+            version: '19'
+            cc: clang-19
+            cxx: clang++-19
           - compiler: clang
-            version: '17'
-            cc: clang-17
-            cxx: clang++-17
+            version: '20'
+            cc: clang-20
+            cxx: clang++-20
 
     name: ${{ matrix.compiler }}-${{ matrix.version }}
 
@@ -41,6 +41,7 @@ jobs:
           sudo apt-get install -y \
             meson ninja-build \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev \
+            libdisplay-info-dev libvulkan-dev \
             ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
 
       - name: Configure
@@ -49,7 +50,7 @@ jobs:
           CXX: ${{ matrix.cxx }}
         run: |
           meson setup builddir \
-            -Dvulkan=false \
+            -Dvulkan=true \
             -Dexamples=false \
             -Dtests=false
 
@@ -59,3 +60,44 @@ jobs:
       - name: Test
         run: meson test -C builddir --no-rebuild
         if: false  # Enable when tests are implemented
+
+  lint:
+    runs-on: ubuntu-24.04
+    name: lint
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            meson ninja-build \
+            libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev \
+            libdisplay-info-dev libvulkan-dev \
+            clang-19 clang-tidy-19 clang-format-19
+
+      - name: Configure
+        env:
+          CC: clang-19
+          CXX: clang++-19
+        run: |
+          meson setup builddir \
+            -Dvulkan=true \
+            -Dexamples=false \
+            -Dtests=false
+
+      - name: Build (generate compile_commands.json)
+        run: ninja -C builddir
+
+      - name: clang-tidy
+        run: |
+          find drm-cxx -name '*.cpp' | \
+            xargs clang-tidy-19 -p builddir
+
+      - name: clang-format
+        run: |
+          find drm-cxx examples tests -name '*.cpp' -o -name '*.hpp' | \
+            xargs clang-format-19 --dry-run --Werror

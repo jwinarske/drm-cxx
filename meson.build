@@ -15,8 +15,8 @@ project('drm-cxx', ['cpp'],
 cpp = meson.get_compiler('cpp')
 
 # Enforce C++23 features are truly available
-assert(cpp.has_argument('-std=c++23'),
-  'A C++23-capable compiler is required (GCC >= 13, Clang >= 16)')
+assert(cpp.has_argument('-std=c++23') or cpp.has_argument('-std=c++2b'),
+  'A C++23-capable compiler is required (GCC >= 13, Clang >= 17)')
 
 add_project_arguments(
   cpp.get_supported_arguments([
@@ -35,9 +35,12 @@ xkb_dep     = dependency('xkbcommon', include_type : 'system', required : true)
 rt_dep      = cpp.find_library('rt',  required : true)
 dl_dep      = cpp.find_library('dl',  required : true)
 
-di_proj = subproject('libdisplay-info',
-  default_options : ['default_library=static'])
-di_dep = di_proj.get_variable('di_dep')
+di_dep = dependency('libdisplay-info', required : false)
+if not di_dep.found()
+  di_proj = subproject('libdisplay-info',
+    default_options : ['default_library=static'])
+  di_dep = di_proj.get_variable('di_dep')
+endif
 
 if get_option('vulkan')
   # Try system vulkan headers first, fall back to subproject

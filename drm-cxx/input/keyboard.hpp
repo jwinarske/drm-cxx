@@ -41,8 +41,8 @@ class Keyboard {
   [[nodiscard]] bool super_active() const noexcept;
 
   ~Keyboard();
-  Keyboard(Keyboard&&) noexcept;
-  Keyboard& operator=(Keyboard&&) noexcept;
+  Keyboard(Keyboard&& /*other*/) noexcept;
+  Keyboard& operator=(Keyboard&& /*other*/) noexcept;
   Keyboard(const Keyboard&) = delete;
   Keyboard& operator=(const Keyboard&) = delete;
 

@@ -44,7 +44,7 @@ std::expected<ModeInfo, std::error_code> select_preferred_mode(
 
   // First pass: look for a mode flagged as preferred
   for (const auto& m : modes) {
-    if ((m.type & DRM_MODE_TYPE_PREFERRED) != 0u) {
+    if ((m.type & DRM_MODE_TYPE_PREFERRED) != 0U) {
       return ModeInfo{.drm_mode = m};
     }
   }
@@ -74,7 +74,7 @@ std::expected<ModeInfo, std::error_code> select_mode(std::span<const drmModeMode
 
   for (const auto& m : modes) {
     // Skip interlaced modes unless specifically targeting them
-    if ((m.flags & DRM_MODE_FLAG_INTERLACE) != 0u) {
+    if ((m.flags & DRM_MODE_FLAG_INTERLACE) != 0U) {
       continue;
     }
 

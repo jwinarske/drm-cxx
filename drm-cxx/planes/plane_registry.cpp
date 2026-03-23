@@ -75,7 +75,7 @@ void detect_plane_capabilities(int fd, uint32_t plane_id, PlaneCapabilities& cap
 
     if (std::strcmp(prop->name, "zpos") == 0) {
       // For range properties, extract min/max
-      if (((prop->flags & DRM_MODE_PROP_RANGE) != 0u) && prop->count_values >= 2) {
+      if (((prop->flags & DRM_MODE_PROP_RANGE) != 0U) && prop->count_values >= 2) {
         caps.zpos_min = prop->values[0];
         caps.zpos_max = prop->values[1];
       } else {

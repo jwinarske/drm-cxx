@@ -76,11 +76,11 @@ std::expected<void, std::error_code> Device::set_client_cap(uint64_t cap, uint64
   return {};
 }
 
-std::expected<void, std::error_code> Device::enable_universal_planes() {
+std::expected<void, std::error_code> Device::enable_universal_planes() const {
   return set_client_cap(DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
 }
 
-std::expected<void, std::error_code> Device::enable_atomic() {
+std::expected<void, std::error_code> Device::enable_atomic() const {
   return set_client_cap(DRM_CLIENT_CAP_ATOMIC, 1);
 }
 

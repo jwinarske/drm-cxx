@@ -30,8 +30,8 @@ class AtomicRequest {
 
   ~AtomicRequest();
 
-  AtomicRequest(AtomicRequest&&) noexcept;
-  AtomicRequest& operator=(AtomicRequest&&) noexcept;
+  AtomicRequest(AtomicRequest&& /*other*/) noexcept;
+  AtomicRequest& operator=(AtomicRequest&& /*other*/) noexcept;
   AtomicRequest(const AtomicRequest&) = delete;
   AtomicRequest& operator=(const AtomicRequest&) = delete;
 
