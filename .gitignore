@@ -25,3 +25,4 @@ subprojects/v4l-utils/
 
 # OS artifacts
 .DS_Store
+a.out
