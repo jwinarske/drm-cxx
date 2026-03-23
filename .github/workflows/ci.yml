@@ -41,7 +41,7 @@ jobs:
           sudo apt-get install -y \
             meson ninja-build \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev \
-            libvulkan-dev \
+            libdisplay-info-dev libvulkan-dev \
             ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
 
       - name: Configure
@@ -76,7 +76,7 @@ jobs:
           sudo apt-get install -y \
             meson ninja-build \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev \
-            libvulkan-dev \
+            libdisplay-info-dev libvulkan-dev \
             clang-19 clang-tidy-19 clang-format-19
 
       - name: Configure
