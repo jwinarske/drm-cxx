@@ -16,10 +16,11 @@ class Device {
 
   [[nodiscard]] int fd() const noexcept;
 
-  std::expected<void, std::error_code> set_client_cap(uint64_t cap, uint64_t value) const;
+  [[nodiscard]] std::expected<void, std::error_code> set_client_cap(uint64_t cap,
+                                                                    uint64_t value) const;
 
-  std::expected<void, std::error_code> enable_universal_planes();
-  std::expected<void, std::error_code> enable_atomic();
+  [[nodiscard]] std::expected<void, std::error_code> enable_universal_planes() const;
+  [[nodiscard]] std::expected<void, std::error_code> enable_atomic() const;
 
   ~Device();
 

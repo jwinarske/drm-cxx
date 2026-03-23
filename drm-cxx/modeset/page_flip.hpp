@@ -23,9 +23,13 @@ class PageFlip {
 
   // Wait for and dispatch a page flip event.
   // timeout_ms: -1 = block forever, 0 = non-blocking, >0 = timeout in ms.
-  std::expected<void, std::error_code> dispatch(int timeout_ms = -1) const;
+  [[nodiscard]] std::expected<void, std::error_code> dispatch(int timeout_ms = -1) const;
 
   ~PageFlip();
+  PageFlip(PageFlip&&) noexcept = default;
+  PageFlip& operator=(PageFlip&&) noexcept = default;
+  PageFlip(const PageFlip&) = delete;
+  PageFlip& operator=(const PageFlip&) = delete;
 
  private:
   // Allow the C callback trampolines to invoke handler_

@@ -14,8 +14,20 @@ Checks: >
   -cppcoreguidelines-pro-type-reinterpret-cast,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
   -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-special-member-functions,
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -modernize-avoid-c-arrays,
+  -bugprone-easily-swappable-parameters,
+  -readability-function-cognitive-complexity,
+  -misc-no-recursion,
+  -misc-non-private-member-variables-in-classes,
+  -clang-analyzer-core.NullDereference,
 
-WarningsAsErrors: ''
+WarningsAsErrors: '*'
 
 HeaderFilterRegex: 'drm-cxx/.*'
 

@@ -229,7 +229,7 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
               std::vector<std::pair<uint32_t, Layer*>>(assignment.begin(), assignment.end());
 
           // Sort by layer priority (lowest priority dropped first)
-          std::ranges::sort(assigned_vec, [this](const auto& a, const auto& b) {
+          std::ranges::sort(assigned_vec, [](const auto& a, const auto& b) {
             return layer_priority(*a.second) < layer_priority(*b.second);
           });
 
@@ -457,7 +457,7 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
 
 int Allocator::static_upper_bound(std::span<Layer* const> remaining_layers,
                                   const std::vector<const PlaneCapabilities*>& available_planes,
-                                  uint32_t crtc_index) const {
+                                  uint32_t crtc_index) {
   int bound = 0;
   for (const Layer* layer : remaining_layers) {
     bool const any = std::ranges::any_of(available_planes, [&](const PlaneCapabilities* p) {
@@ -479,8 +479,7 @@ bool Allocator::layers_intersect(const Layer& a, const Layer& b) {
          ra.y + static_cast<int64_t>(ra.h) > rb.y && rb.y + static_cast<int64_t>(rb.h) > ra.y;
 }
 
-std::vector<std::vector<Layer*>> Allocator::split_independent_groups(
-    std::vector<Layer*>& layers) const {
+std::vector<std::vector<Layer*>> Allocator::split_independent_groups(std::vector<Layer*>& layers) {
   if (layers.size() <= 1) {
     if (layers.empty()) {
       return {};

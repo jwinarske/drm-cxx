@@ -16,7 +16,7 @@ class Device;
 
 namespace drm::planes {
 
-enum class DRMPlaneType : uint32_t {
+enum class DRMPlaneType : uint8_t {
   PRIMARY,
   OVERLAY,
   CURSOR,
