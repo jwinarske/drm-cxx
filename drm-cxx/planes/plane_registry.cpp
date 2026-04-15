@@ -22,7 +22,7 @@
 namespace drm::planes {
 
 bool PlaneCapabilities::supports_format(uint32_t fmt) const {
-  return std::ranges::find(formats, fmt) != formats.end();
+  return std::find(formats.begin(), formats.end(), fmt) != formats.end();
 }
 
 bool PlaneCapabilities::compatible_with_crtc(uint32_t crtc_index) const {

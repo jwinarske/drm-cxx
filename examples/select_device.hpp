@@ -32,7 +32,7 @@ inline std::vector<std::string> enumerate_cards() {
       cards.push_back(entry.path().string());
     }
   }
-  std::ranges::sort(cards);
+  std::sort(cards.begin(), cards.end());
   return cards;
 }
 

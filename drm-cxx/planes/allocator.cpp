@@ -230,9 +230,10 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
               std::vector<std::pair<uint32_t, Layer*>>(assignment.begin(), assignment.end());
 
           // Sort by layer priority (lowest priority dropped first)
-          std::ranges::sort(assigned_vec, [](const auto& a, const auto& b) {
-            return layer_priority(*a.second) < layer_priority(*b.second);
-          });
+          std::sort(assigned_vec.begin(), assigned_vec.end(),
+                    [](const auto& a, const auto& b) {
+                      return layer_priority(*a.second) < layer_priority(*b.second);
+                    });
 
           for (auto& it : assigned_vec) {
             assignment.erase(it.first);
@@ -366,7 +367,8 @@ std::vector<CandidatePair> Allocator::rank_candidates_group(
       }
     }
   }
-  std::ranges::sort(pairs, std::greater{}, &CandidatePair::score);
+  std::sort(pairs.begin(), pairs.end(),
+            [](const CandidatePair& a, const CandidatePair& b) { return a.score > b.score; });
   return pairs;
 }
 
@@ -461,9 +463,11 @@ int Allocator::static_upper_bound(drm::span<Layer* const> remaining_layers,
                                   uint32_t crtc_index) {
   int bound = 0;
   for (const Layer* layer : remaining_layers) {
-    bool const any = std::ranges::any_of(available_planes, [&](const PlaneCapabilities* p) {
-      return plane_statically_compatible(*p, *layer, crtc_index);
-    });
+    bool const any =
+        std::any_of(available_planes.begin(), available_planes.end(),
+                    [&](const PlaneCapabilities* p) {
+                      return plane_statically_compatible(*p, *layer, crtc_index);
+                    });
     if (any) {
       ++bound;
     }
@@ -490,7 +494,7 @@ std::vector<std::vector<Layer*>> Allocator::split_independent_groups(std::vector
 
   // Union-find
   std::vector<std::size_t> parent(layers.size());
-  std::ranges::iota(parent, 0);
+  std::iota(parent.begin(), parent.end(), static_cast<std::size_t>(0));
 
   std::function<std::size_t(std::size_t)> find = [&](std::size_t x) -> std::size_t {
     while (parent[x] != x) {

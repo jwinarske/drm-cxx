@@ -82,7 +82,7 @@ void Output::mark_clean() noexcept {
 }
 
 void Output::sort_layers_by_zpos() {
-  std::ranges::sort(layer_ptrs_, [](const Layer* a, const Layer* b) {
+  std::sort(layer_ptrs_.begin(), layer_ptrs_.end(), [](const Layer* a, const Layer* b) {
     auto za = a->property("zpos").value_or(0);
     auto zb = b->property("zpos").value_or(0);
     return za < zb;
