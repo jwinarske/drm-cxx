@@ -55,6 +55,21 @@ if(DRM_CXX_VULKAN)
   pkg_check_modules(vulkan REQUIRED IMPORTED_TARGET vulkan)
 endif()
 
+# {fmt} backs the drm-cxx/detail/format.hpp adapter when the toolchain lacks
+# std::print / std::format. Probe the compiler with the currently selected
+# C++ standard; on failure, pull fmt via pkg-config. Under C++23 the adapter
+# aliases std::* directly and fmt is unused.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -std=c++${CMAKE_CXX_STANDARD}")
+check_cxx_source_compiles([=[
+  #include <print>
+  int main() { std::println("{}", 1); return 0; }
+]=] DRM_CXX_HAS_STD_PRINT)
+unset(CMAKE_REQUIRED_FLAGS)
+if(NOT DRM_CXX_HAS_STD_PRINT)
+  pkg_check_modules(fmt REQUIRED IMPORTED_TARGET fmt)
+endif()
+
 if(DRM_CXX_VULKAN)
   set(HAVE_VULKAN 1)
 else()

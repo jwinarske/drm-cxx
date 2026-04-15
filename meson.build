@@ -58,6 +58,24 @@ if not tcb_span_dep.found()
   tcb_span_dep = tcb_span_proj.get_variable('tcb_span_dep')
 endif
 
+# {fmt} backs the drm-cxx/detail/format.hpp adapter when the toolchain lacks
+# std::print / std::format (i.e. anything below C++23 / libstdc++ 14). Detect
+# up front so the dep is only pulled on the fallback path; under C++23 the
+# adapter aliases std::* directly and fmt is unused.
+has_std_print = cpp.compiles(
+  '#include <print>\nint main(){ std::println("{}", 1); }',
+  name : 'std::print / std::println available',
+)
+if has_std_print
+  fmt_dep = dependency('', required : false)
+else
+  fmt_dep = dependency('fmt', required : false)
+  if not fmt_dep.found()
+    fmt_proj = subproject('fmt', default_options : ['default_library=static'])
+    fmt_dep = fmt_proj.get_variable('fmt_dep')
+  endif
+endif
+
 if get_option('vulkan')
   # Try system vulkan headers first, fall back to subproject
   vk_dep = dependency('vulkan', required : false)

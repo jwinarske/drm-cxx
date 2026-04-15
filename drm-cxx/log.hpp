@@ -4,9 +4,9 @@
 #pragma once
 
 #include <cstdint>
-#include <format>
-#include <print>
 #include <utility>
+
+#include "drm-cxx/detail/format.hpp"
 
 namespace drm {
 
@@ -42,30 +42,30 @@ inline void set_log_level(LogLevel level) {
 }
 
 template <typename... Args>
-void log_error(std::format_string<Args...> fmt, Args&&... args) {
+void log_error(drm::format_string<Args...> fmt, Args&&... args) {
   if (detail::current_log_level() >= LogLevel::Error) {
-    std::println(stderr, "[drm:error] {}", std::format(fmt, std::forward<Args>(args)...));
+    drm::println(stderr, "[drm:error] {}", drm::format(fmt, std::forward<Args>(args)...));
   }
 }
 
 template <typename... Args>
-void log_warn(std::format_string<Args...> fmt, Args&&... args) {
+void log_warn(drm::format_string<Args...> fmt, Args&&... args) {
   if (detail::current_log_level() >= LogLevel::Warn) {
-    std::println(stderr, "[drm:warn] {}", std::format(fmt, std::forward<Args>(args)...));
+    drm::println(stderr, "[drm:warn] {}", drm::format(fmt, std::forward<Args>(args)...));
   }
 }
 
 template <typename... Args>
-void log_info(std::format_string<Args...> fmt, Args&&... args) {
+void log_info(drm::format_string<Args...> fmt, Args&&... args) {
   if (detail::current_log_level() >= LogLevel::Info) {
-    std::println("[drm:info] {}", std::format(fmt, std::forward<Args>(args)...));
+    drm::println("[drm:info] {}", drm::format(fmt, std::forward<Args>(args)...));
   }
 }
 
 template <typename... Args>
-void log_debug(std::format_string<Args...> fmt, Args&&... args) {
+void log_debug(drm::format_string<Args...> fmt, Args&&... args) {
   if (detail::current_log_level() >= LogLevel::Debug) {
-    std::println("[drm:debug] {}", std::format(fmt, std::forward<Args>(args)...));
+    drm::println("[drm:debug] {}", drm::format(fmt, std::forward<Args>(args)...));
   }
 }
 

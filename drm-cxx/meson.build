@@ -36,6 +36,7 @@ drm_cxx_deps = [
   di_dep,
   tl_expected_dep,
   tcb_span_dep,
+  fmt_dep,
 ]
 
 drm_cxx_inc = include_directories('.', '..')
@@ -70,6 +71,7 @@ install_headers(
 
 install_headers(
   'detail/expected.hpp',
+  'detail/format.hpp',
   'detail/span.hpp',
   subdir : 'drm-cxx/detail',
 )

@@ -16,6 +16,11 @@ if(DRM_CXX_VULKAN)
   pkg_check_modules(vulkan REQUIRED IMPORTED_TARGET vulkan)
 endif()
 
+set(DRM_CXX_HAS_STD_PRINT @DRM_CXX_HAS_STD_PRINT@)
+if(NOT DRM_CXX_HAS_STD_PRINT)
+  pkg_check_modules(fmt REQUIRED IMPORTED_TARGET fmt)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/drm-cxx-targets.cmake")
 
 check_required_components(drm-cxx)

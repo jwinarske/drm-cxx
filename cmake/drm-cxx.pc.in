@@ -6,6 +6,6 @@ includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 Name: drm-cxx
 Description: @PROJECT_DESCRIPTION@
 Version: @PROJECT_VERSION@
-Requires: libdrm gbm libinput libudev xkbcommon libdisplay-info@PC_VULKAN_REQUIRES@
+Requires: libdrm gbm libinput libudev xkbcommon libdisplay-info@PC_VULKAN_REQUIRES@@PC_FMT_REQUIRES@
 Libs: -L${libdir} -ldrm-cxx
 Cflags: -I${includedir}

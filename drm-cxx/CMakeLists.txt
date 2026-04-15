@@ -78,6 +78,10 @@ if(DRM_CXX_VULKAN)
   target_link_libraries(drm-cxx PUBLIC PkgConfig::vulkan)
 endif()
 
+if(NOT DRM_CXX_HAS_STD_PRINT)
+  target_link_libraries(drm-cxx PUBLIC PkgConfig::fmt)
+endif()
+
 # TODO(Phase D): when C++17 migration lands, wire tl-expected and tcb-span
 # here via FetchContent with find_package(...CONFIG QUIET) fallback. The
 # detail/ adapter headers currently alias std::expected / std::span under
@@ -96,6 +100,7 @@ install(FILES
 
 install(FILES
     detail/expected.hpp
+    detail/format.hpp
     detail/span.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/detail)
 
@@ -180,6 +185,12 @@ if(DRM_CXX_VULKAN)
   set(PC_VULKAN_REQUIRES " vulkan")
 else()
   set(PC_VULKAN_REQUIRES "")
+endif()
+
+if(DRM_CXX_HAS_STD_PRINT)
+  set(PC_FMT_REQUIRES "")
+else()
+  set(PC_FMT_REQUIRES " fmt")
 endif()
 
 configure_file(
