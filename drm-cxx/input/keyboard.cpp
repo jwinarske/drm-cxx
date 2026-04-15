@@ -5,13 +5,14 @@
 
 #include "seat.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <xkbcommon/xkbcommon-names.h>
 #include <xkbcommon/xkbcommon.h>
 
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <expected>
 #include <string>
 #include <system_error>
 
@@ -59,12 +60,12 @@ Keyboard& Keyboard::operator=(Keyboard&& other) noexcept {
   return *this;
 }
 
-std::expected<Keyboard, std::error_code> Keyboard::create(KeymapOptions opts) {
+drm::expected<Keyboard, std::error_code> Keyboard::create(KeymapOptions opts) {
   Keyboard kb;
 
   kb.ctx_ = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
   if (kb.ctx_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+    return drm::unexpected(std::make_error_code(std::errc::not_enough_memory));
   }
 
   struct xkb_rule_names names{};
@@ -97,29 +98,29 @@ std::expected<Keyboard, std::error_code> Keyboard::create(KeymapOptions opts) {
 
   kb.keymap_ = xkb_keymap_new_from_names(kb.ctx_, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
   if (kb.keymap_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+    return drm::unexpected(std::make_error_code(std::errc::invalid_argument));
   }
 
   kb.state_ = xkb_state_new(kb.keymap_);
   if (kb.state_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+    return drm::unexpected(std::make_error_code(std::errc::not_enough_memory));
   }
 
   return kb;
 }
 
-std::expected<Keyboard, std::error_code> Keyboard::create_from_file(std::string_view keymap_path) {
+drm::expected<Keyboard, std::error_code> Keyboard::create_from_file(std::string_view keymap_path) {
   Keyboard kb;
 
   kb.ctx_ = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
   if (kb.ctx_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+    return drm::unexpected(std::make_error_code(std::errc::not_enough_memory));
   }
 
   std::string const path_str(keymap_path);
   FILE* f = std::fopen(path_str.c_str(), "r");
   if (f == nullptr) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   kb.keymap_ =
@@ -127,12 +128,12 @@ std::expected<Keyboard, std::error_code> Keyboard::create_from_file(std::string_
   std::fclose(f);
 
   if (kb.keymap_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+    return drm::unexpected(std::make_error_code(std::errc::invalid_argument));
   }
 
   kb.state_ = xkb_state_new(kb.keymap_);
   if (kb.state_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+    return drm::unexpected(std::make_error_code(std::errc::not_enough_memory));
   }
 
   return kb;

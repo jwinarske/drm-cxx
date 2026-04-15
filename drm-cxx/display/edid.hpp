@@ -5,13 +5,14 @@
 
 #include "connector_info.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
+
 #include <cstdint>
-#include <expected>
-#include <span>
 #include <system_error>
 
 namespace drm::display {
 
-std::expected<ConnectorInfo, std::error_code> parse_edid(std::span<const uint8_t> edid_blob);
+drm::expected<ConnectorInfo, std::error_code> parse_edid(drm::span<const uint8_t> edid_blob);
 
 }  // namespace drm::display

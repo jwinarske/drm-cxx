@@ -3,10 +3,11 @@
 
 #include "seat.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <libinput.h>
 
 #include <cerrno>
-#include <expected>
 #include <fcntl.h>
 #include <libudev.h>
 #include <string>
@@ -81,22 +82,22 @@ Seat& Seat::operator=(Seat&& other) noexcept {
   return *this;
 }
 
-std::expected<Seat, std::error_code> Seat::open(SeatOptions opts) {
+drm::expected<Seat, std::error_code> Seat::open(SeatOptions opts) {
   Seat seat;
 
   seat.udev_ = udev_new();
   if (seat.udev_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
   seat.li_ = libinput_udev_create_context(&li_interface, nullptr, ud(seat.udev_));
   if (seat.li_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
   std::string const seat_name(opts.seat_name);
   if (libinput_udev_assign_seat(li(seat.li_), seat_name.c_str()) != 0) {
-    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
   seat.fd_ = libinput_get_fd(li(seat.li_));
@@ -112,33 +113,33 @@ int Seat::fd() const noexcept {
   return fd_;
 }
 
-std::expected<void, std::error_code> Seat::dispatch() {
+drm::expected<void, std::error_code> Seat::dispatch() {
   if (li_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   if (libinput_dispatch(li(li_)) != 0) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   process_events();
   return {};
 }
 
-std::expected<void, std::error_code> Seat::suspend() {
+drm::expected<void, std::error_code> Seat::suspend() {
   if (li_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
   libinput_suspend(li(li_));
   return {};
 }
 
-std::expected<void, std::error_code> Seat::resume() {
+drm::expected<void, std::error_code> Seat::resume() {
   if (li_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
   if (libinput_resume(li(li_)) != 0) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
   return {};
 }

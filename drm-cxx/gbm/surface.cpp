@@ -6,11 +6,12 @@
 #include "device.hpp"
 #include "gbm/buffer.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <gbm.h>
 
 #include <cerrno>
 #include <cstdint>
-#include <expected>
 #include <system_error>
 
 namespace drm::gbm {
@@ -38,12 +39,12 @@ Surface& Surface::operator=(Surface&& other) noexcept {
   return *this;
 }
 
-std::expected<Surface, std::error_code> Surface::create(GbmDevice& dev, uint32_t width,
+drm::expected<Surface, std::error_code> Surface::create(GbmDevice& dev, uint32_t width,
                                                         uint32_t height, uint32_t format,
                                                         uint32_t flags) {
   auto* surf = gbm_surface_create(dev.raw(), width, height, format, flags);
   if (surf == nullptr) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
   return Surface(surf);
 }
@@ -52,14 +53,14 @@ struct gbm_surface* Surface::raw() const noexcept {
   return surf_;
 }
 
-std::expected<Buffer, std::error_code> Surface::lock_front_buffer() {
+drm::expected<Buffer, std::error_code> Surface::lock_front_buffer() {
   if (surf_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   auto* bo = gbm_surface_lock_front_buffer(surf_);
   if (bo == nullptr) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   return Buffer(bo, surf_);

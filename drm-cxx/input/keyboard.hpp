@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include <expected>
+#include <drm-cxx/detail/expected.hpp>
+
 #include <string_view>
 #include <system_error>
 
@@ -26,10 +27,10 @@ struct KeymapOptions {
 class Keyboard {
  public:
   // Create from RMLVO names (empty = system defaults).
-  static std::expected<Keyboard, std::error_code> create(KeymapOptions opts = {});
+  static drm::expected<Keyboard, std::error_code> create(KeymapOptions opts = {});
 
   // Create from a keymap file path (e.g. $HOME/.xkb/keymap.xkb).
-  static std::expected<Keyboard, std::error_code> create_from_file(std::string_view keymap_path);
+  static drm::expected<Keyboard, std::error_code> create_from_file(std::string_view keymap_path);
 
   // Process a key event: fills in sym and utf8 fields.
   void process_key(KeyboardEvent& event) const;

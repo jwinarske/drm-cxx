@@ -3,10 +3,11 @@
 
 #include "device.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <gbm.h>
 
 #include <cerrno>
-#include <expected>
 #include <system_error>
 
 namespace drm::gbm {
@@ -34,14 +35,14 @@ GbmDevice& GbmDevice::operator=(GbmDevice&& other) noexcept {
   return *this;
 }
 
-std::expected<GbmDevice, std::error_code> GbmDevice::create(int drm_fd) {
+drm::expected<GbmDevice, std::error_code> GbmDevice::create(int drm_fd) {
   if (drm_fd < 0) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   auto* dev = gbm_create_device(drm_fd);
   if (dev == nullptr) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   return GbmDevice(dev);

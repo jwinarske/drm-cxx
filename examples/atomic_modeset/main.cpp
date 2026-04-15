@@ -15,12 +15,13 @@
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
 
+#include <drm-cxx/detail/span.hpp>
+
 #include <xf86drmMode.h>
 
 #include <cstdint>
 #include <cstdlib>
 #include <print>
-#include <span>
 #include <utility>
 
 int main(const int argc, char* argv[]) {
@@ -74,7 +75,7 @@ int main(const int argc, char* argv[]) {
   }
 
   // Select preferred mode
-  const auto modes = std::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
+  const auto modes = drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
   const auto mode_result = drm::select_preferred_mode(modes);
   if (!mode_result) {
     std::println(stderr, "No suitable mode found");

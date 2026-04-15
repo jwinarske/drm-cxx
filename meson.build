@@ -42,6 +42,22 @@ if not di_dep.found()
   di_dep = di_proj.get_variable('di_dep')
 endif
 
+# C++17-compatible polyfills for C++23 std::expected and C++20 std::span.
+# Used unconditionally via the drm-cxx/detail/{expected,span}.hpp adapter
+# headers; when the compiler provides the std versions, the adapter aliases
+# them directly and these subprojects simply go unused at compile time.
+tl_expected_dep = dependency('tl-expected', required : false)
+if not tl_expected_dep.found()
+  tl_expected_proj = subproject('tl-expected')
+  tl_expected_dep = tl_expected_proj.get_variable('tl_expected_dep')
+endif
+
+tcb_span_dep = dependency('tcb-span', required : false)
+if not tcb_span_dep.found()
+  tcb_span_proj = subproject('tcb-span')
+  tcb_span_dep = tcb_span_proj.get_variable('tcb_span_dep')
+endif
+
 if get_option('vulkan')
   # Try system vulkan headers first, fall back to subproject
   vk_dep = dependency('vulkan', required : false)

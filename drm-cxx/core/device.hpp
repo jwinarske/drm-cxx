@@ -3,8 +3,9 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <cstdint>
-#include <expected>
 #include <string_view>
 #include <system_error>
 
@@ -12,15 +13,15 @@ namespace drm {
 
 class Device {
  public:
-  static std::expected<Device, std::error_code> open(std::string_view path);
+  static drm::expected<Device, std::error_code> open(std::string_view path);
 
   [[nodiscard]] int fd() const noexcept;
 
-  [[nodiscard]] std::expected<void, std::error_code> set_client_cap(uint64_t cap,
+  [[nodiscard]] drm::expected<void, std::error_code> set_client_cap(uint64_t cap,
                                                                     uint64_t value) const;
 
-  [[nodiscard]] std::expected<void, std::error_code> enable_universal_planes() const;
-  [[nodiscard]] std::expected<void, std::error_code> enable_atomic() const;
+  [[nodiscard]] drm::expected<void, std::error_code> enable_universal_planes() const;
+  [[nodiscard]] drm::expected<void, std::error_code> enable_atomic() const;
 
   ~Device();
 

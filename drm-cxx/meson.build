@@ -34,9 +34,11 @@ drm_cxx_deps = [
   rt_dep,
   dl_dep,
   di_dep,
+  tl_expected_dep,
+  tcb_span_dep,
 ]
 
-drm_cxx_inc = include_directories('.')
+drm_cxx_inc = include_directories('.', '..')
 
 if get_option('vulkan')
   drm_cxx_sources += files(
@@ -64,6 +66,12 @@ install_headers(
   'drm-cxx.hpp',
   'log.hpp',
   subdir : 'drm-cxx',
+)
+
+install_headers(
+  'detail/expected.hpp',
+  'detail/span.hpp',
+  subdir : 'drm-cxx/detail',
 )
 
 install_headers(

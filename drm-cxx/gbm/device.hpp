@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include <expected>
+#include <drm-cxx/detail/expected.hpp>
+
 #include <system_error>
 
 struct gbm_device;
@@ -12,7 +13,7 @@ namespace drm::gbm {
 
 class GbmDevice {
  public:
-  static std::expected<GbmDevice, std::error_code> create(int drm_fd);
+  static drm::expected<GbmDevice, std::error_code> create(int drm_fd);
 
   [[nodiscard]] struct gbm_device* raw() const noexcept;
 

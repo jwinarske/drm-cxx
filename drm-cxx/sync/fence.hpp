@@ -3,19 +3,20 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <chrono>
-#include <expected>
 #include <system_error>
 
 namespace drm::sync {
 
 class SyncFence {
  public:
-  static std::expected<SyncFence, std::error_code> import_fd(int fence_fd);
+  static drm::expected<SyncFence, std::error_code> import_fd(int fence_fd);
 
-  [[nodiscard]] std::expected<void, std::error_code> wait(std::chrono::milliseconds timeout) const;
+  [[nodiscard]] drm::expected<void, std::error_code> wait(std::chrono::milliseconds timeout) const;
   // Merge another fence into this one. The other fence is consumed (moved from).
-  [[nodiscard]] std::expected<void, std::error_code> merge(SyncFence other);
+  [[nodiscard]] drm::expected<void, std::error_code> merge(SyncFence other);
 
   ~SyncFence();
   SyncFence(SyncFence&& /*other*/) noexcept;

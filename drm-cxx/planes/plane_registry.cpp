@@ -5,6 +5,9 @@
 
 #include "../core/device.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
+
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
@@ -12,8 +15,6 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
-#include <expected>
-#include <span>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -96,12 +97,12 @@ void detect_plane_capabilities(int fd, uint32_t plane_id, PlaneCapabilities& cap
 
 }  // namespace
 
-std::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Device& dev) {
+drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Device& dev) {
   int const fd = dev.fd();
 
   auto* plane_res = drmModeGetPlaneResources(fd);
   if (plane_res == nullptr) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   PlaneRegistry registry;
@@ -129,7 +130,7 @@ std::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
   return registry;
 }
 
-std::span<const PlaneCapabilities> PlaneRegistry::all() const noexcept {
+drm::span<const PlaneCapabilities> PlaneRegistry::all() const noexcept {
   return planes_;
 }
 

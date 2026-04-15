@@ -3,11 +3,12 @@
 
 #include "buffer.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <gbm.h>
 
 #include <cerrno>
 #include <cstdint>
-#include <expected>
 #include <system_error>
 
 namespace drm::gbm {
@@ -82,13 +83,13 @@ uint32_t Buffer::format() const noexcept {
   return gbm_bo_get_format(bo_);
 }
 
-std::expected<int, std::error_code> Buffer::fd() const {
+drm::expected<int, std::error_code> Buffer::fd() const {
   if (bo_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
   int const dma_fd = gbm_bo_get_fd(bo_);
   if (dma_fd < 0) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
   return dma_fd;
 }

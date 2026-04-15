@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: drm-cxx
+Description: @PROJECT_DESCRIPTION@
+Version: @PROJECT_VERSION@
+Requires: libdrm gbm libinput libudev xkbcommon libdisplay-info@PC_VULKAN_REQUIRES@
+Libs: -L${libdir} -ldrm-cxx
+Cflags: -I${includedir}

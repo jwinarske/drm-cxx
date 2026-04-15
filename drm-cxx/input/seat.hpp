@@ -3,8 +3,9 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <cstdint>
-#include <expected>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -71,19 +72,19 @@ struct SeatOptions {
 
 class Seat {
  public:
-  static std::expected<Seat, std::error_code> open(SeatOptions opts = {});
+  static drm::expected<Seat, std::error_code> open(SeatOptions opts = {});
 
   void set_event_handler(EventHandler handler);
 
   // Dispatch pending libinput events. Call after poll/epoll on fd().
-  std::expected<void, std::error_code> dispatch();
+  drm::expected<void, std::error_code> dispatch();
 
   // File descriptor for poll/epoll integration.
   [[nodiscard]] int fd() const noexcept;
 
   // Suspend/resume for VT switching.
-  std::expected<void, std::error_code> suspend();
-  std::expected<void, std::error_code> resume();
+  drm::expected<void, std::error_code> suspend();
+  drm::expected<void, std::error_code> resume();
 
   ~Seat();
   Seat(Seat&& /*other*/) noexcept;

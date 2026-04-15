@@ -5,12 +5,13 @@
 
 #include "../core/device.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <cerrno>
 #include <cstdint>
-#include <expected>
 #include <system_error>
 
 namespace drm {
@@ -46,39 +47,39 @@ AtomicRequest& AtomicRequest::operator=(AtomicRequest&& other) noexcept {
   return *this;
 }
 
-std::expected<void, std::error_code> AtomicRequest::add_property(uint32_t object_id,
+drm::expected<void, std::error_code> AtomicRequest::add_property(uint32_t object_id,
                                                                  uint32_t property_id,
                                                                  uint64_t value) {
   if (req_ == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
   int const ret = drmModeAtomicAddProperty(req_, object_id, property_id, value);
   if (ret < 0) {
-    return std::unexpected(std::error_code(-ret, std::system_category()));
+    return drm::unexpected(std::error_code(-ret, std::system_category()));
   }
   return {};
 }
 
-std::expected<void, std::error_code> AtomicRequest::test(uint32_t flags) {
+drm::expected<void, std::error_code> AtomicRequest::test(uint32_t flags) {
   if ((req_ == nullptr) || drm_fd_ < 0) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
   int const ret = drmModeAtomicCommit(drm_fd_, req_, flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr);
   if (ret != 0) {
     int const err = (ret < 0) ? -ret : errno;
-    return std::unexpected(std::error_code(err, std::system_category()));
+    return drm::unexpected(std::error_code(err, std::system_category()));
   }
   return {};
 }
 
-std::expected<void, std::error_code> AtomicRequest::commit(uint32_t flags, void* user_data) {
+drm::expected<void, std::error_code> AtomicRequest::commit(uint32_t flags, void* user_data) {
   if ((req_ == nullptr) || drm_fd_ < 0) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
   int const ret = drmModeAtomicCommit(drm_fd_, req_, flags, user_data);
   if (ret != 0) {
     int const err = (ret < 0) ? -ret : errno;
-    return std::unexpected(std::error_code(err, std::system_category()));
+    return drm::unexpected(std::error_code(err, std::system_category()));
   }
   return {};
 }

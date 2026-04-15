@@ -3,8 +3,9 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <cstdint>
-#include <expected>
 #include <functional>
 #include <system_error>
 
@@ -23,7 +24,7 @@ class PageFlip {
 
   // Wait for and dispatch a page flip event.
   // timeout_ms: -1 = block forever, 0 = non-blocking, >0 = timeout in ms.
-  [[nodiscard]] std::expected<void, std::error_code> dispatch(int timeout_ms = -1) const;
+  [[nodiscard]] drm::expected<void, std::error_code> dispatch(int timeout_ms = -1) const;
 
   ~PageFlip();
   PageFlip(PageFlip&&) noexcept = default;

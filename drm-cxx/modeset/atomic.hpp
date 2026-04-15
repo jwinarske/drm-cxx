@@ -3,11 +3,12 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <cstdint>
-#include <expected>
 #include <system_error>
 
 namespace drm {
@@ -21,12 +22,12 @@ class AtomicRequest {
   // Returns true if the underlying atomic request was allocated successfully.
   [[nodiscard]] bool valid() const noexcept;
 
-  std::expected<void, std::error_code> add_property(uint32_t object_id, uint32_t property_id,
+  drm::expected<void, std::error_code> add_property(uint32_t object_id, uint32_t property_id,
                                                     uint64_t value);
 
-  std::expected<void, std::error_code> test(uint32_t flags = DRM_MODE_ATOMIC_TEST_ONLY);
+  drm::expected<void, std::error_code> test(uint32_t flags = DRM_MODE_ATOMIC_TEST_ONLY);
 
-  std::expected<void, std::error_code> commit(uint32_t flags, void* user_data = nullptr);
+  drm::expected<void, std::error_code> commit(uint32_t flags, void* user_data = nullptr);
 
   ~AtomicRequest();
 

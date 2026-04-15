@@ -10,14 +10,15 @@
 #include "planes/output.hpp"
 #include "planes/plane_registry.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <functional>
 #include <numeric>
 #include <optional>
-#include <span>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
@@ -63,7 +64,7 @@ void Allocator::set_max_test_commits(std::size_t max) noexcept {
 
 // ── Main entry point (§13.3 warm-start logic) ──────────────────
 
-std::expected<std::size_t, std::error_code> Allocator::apply(Output& output, AtomicRequest& req,
+drm::expected<std::size_t, std::error_code> Allocator::apply(Output& output, AtomicRequest& req,
                                                              uint32_t commit_flags) {
   test_commits_this_frame_ = 0;
 
@@ -93,7 +94,7 @@ std::expected<std::size_t, std::error_code> Allocator::apply(Output& output, Ato
 
 // ── Warm-start from previous frame ────────────────────────────
 
-std::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation(Output& output,
+drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation(Output& output,
                                                                                  AtomicRequest& req,
                                                                                  uint32_t flags) {
   // Validate that all layer pointers from previous allocation still exist
@@ -114,7 +115,7 @@ std::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   }
 
   if (previous_allocation_.empty()) {
-    return std::unexpected(std::make_error_code(std::errc::resource_unavailable_try_again));
+    return drm::unexpected(std::make_error_code(std::errc::resource_unavailable_try_again));
   }
 
   if (try_test_commit(previous_allocation_, output, req, flags)) {
@@ -134,12 +135,12 @@ std::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
     output.mark_clean();
     return assigned;
   }
-  return std::unexpected(std::make_error_code(std::errc::resource_unavailable_try_again));
+  return drm::unexpected(std::make_error_code(std::errc::resource_unavailable_try_again));
 }
 
 // ── Full search with all improvements ─────────────────────────
 
-std::expected<std::size_t, std::error_code> Allocator::full_search(Output& output,
+drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& output,
                                                                    AtomicRequest& req,
                                                                    uint32_t flags) {
   // Determine CRTC index from the output's CRTC id
@@ -267,7 +268,7 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     layer->assigned_plane_ = plane_id;
     layer->needs_composition_ = false;
     if (auto r = apply_layer_to_plane(*layer, plane_id, req); !r) {
-      return std::unexpected(r.error());
+      return drm::unexpected(r.error());
     }
   }
 
@@ -293,7 +294,7 @@ std::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
       if (plane->type == DRMPlaneType::PRIMARY && !best_assignment.contains(plane->id)) {
         output.composition_layer()->assigned_plane_ = plane->id;
         if (auto r = apply_layer_to_plane(*output.composition_layer(), plane->id, req); !r) {
-          return std::unexpected(r.error());
+          return drm::unexpected(r.error());
         }
         break;
       }
@@ -455,7 +456,7 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
   return true;
 }
 
-int Allocator::static_upper_bound(std::span<Layer* const> remaining_layers,
+int Allocator::static_upper_bound(drm::span<Layer* const> remaining_layers,
                                   const std::vector<const PlaneCapabilities*>& available_planes,
                                   uint32_t crtc_index) {
   int bound = 0;
@@ -558,7 +559,7 @@ bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assi
   return result.has_value();
 }
 
-std::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer& layer,
+drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer& layer,
                                                                      uint32_t plane_id,
                                                                      AtomicRequest& req) {
   for (const auto& [name, value] : layer.properties()) {
@@ -598,7 +599,7 @@ bool Allocator::backtrack(std::vector<Layer*>& layers,
   }
 
   // §13.1 Check upper bound
-  auto remaining = std::span<Layer* const>(layers).subspan(depth);
+  auto remaining = drm::span<Layer* const>(layers).subspan(depth);
   int const bound = static_upper_bound(remaining, planes, crtc_index);
   if (assignment.size() + static_cast<std::size_t>(bound) <= best_so_far) {
     return false;  // Can't beat current best

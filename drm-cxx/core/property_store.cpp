@@ -3,22 +3,23 @@
 
 #include "property_store.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <xf86drmMode.h>
 
 #include <cerrno>
 #include <cstdint>
-#include <expected>
 #include <string_view>
 #include <system_error>
 #include <vector>
 
 namespace drm {
 
-std::expected<void, std::error_code> PropertyStore::cache_properties(int fd, uint32_t object_id,
+drm::expected<void, std::error_code> PropertyStore::cache_properties(int fd, uint32_t object_id,
                                                                      uint32_t object_type) {
   auto* props = drmModeObjectGetProperties(fd, object_id, object_type);
   if (props == nullptr) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   auto& entries = store_[object_id];
@@ -44,11 +45,11 @@ std::expected<void, std::error_code> PropertyStore::cache_properties(int fd, uin
   return {};
 }
 
-std::expected<uint32_t, std::error_code> PropertyStore::property_id(uint32_t object_id,
+drm::expected<uint32_t, std::error_code> PropertyStore::property_id(uint32_t object_id,
                                                                     std::string_view name) const {
   auto it = store_.find(object_id);
   if (it == store_.end()) {
-    return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+    return drm::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
   }
 
   for (const auto& prop : it->second) {
@@ -57,14 +58,14 @@ std::expected<uint32_t, std::error_code> PropertyStore::property_id(uint32_t obj
     }
   }
 
-  return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+  return drm::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
 }
 
-std::expected<uint64_t, std::error_code> PropertyStore::property_value(
+drm::expected<uint64_t, std::error_code> PropertyStore::property_value(
     uint32_t object_id, std::string_view name) const {
   auto it = store_.find(object_id);
   if (it == store_.end()) {
-    return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+    return drm::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
   }
 
   for (const auto& prop : it->second) {
@@ -73,7 +74,7 @@ std::expected<uint64_t, std::error_code> PropertyStore::property_value(
     }
   }
 
-  return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+  return drm::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
 }
 
 const std::vector<PropertyInfo>* PropertyStore::properties(uint32_t object_id) const {

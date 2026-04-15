@@ -4,9 +4,10 @@
 #include "display/connector_info.hpp"
 #include "display/edid.hpp"
 
+#include <drm-cxx/detail/span.hpp>
+
 #include <cstdint>
 #include <gtest/gtest.h>
-#include <span>
 
 TEST(ConnectorInfoTest, DefaultConstruction) {
   drm::display::ConnectorInfo const info;
@@ -36,7 +37,7 @@ TEST(ColorimetryInfoTest, CanSetValues) {
 }
 
 TEST(ParseEdidTest, EmptyBlobReturnsError) {
-  std::span<const uint8_t> const empty;
+  drm::span<const uint8_t> const empty;
   auto result = drm::display::parse_edid(empty);
   EXPECT_FALSE(result.has_value());
 }

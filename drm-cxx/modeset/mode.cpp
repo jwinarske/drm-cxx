@@ -3,12 +3,13 @@
 
 #include "mode.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
+
 #include <drm_mode.h>
 
 #include <cstdint>
-#include <expected>
 #include <limits>
-#include <span>
 #include <system_error>
 #include <vector>
 
@@ -36,10 +37,10 @@ uint32_t ModeInfo::clock_khz() const noexcept {
   return drm_mode.clock;
 }
 
-std::expected<ModeInfo, std::error_code> select_preferred_mode(
-    std::span<const drmModeModeInfo> modes) {
+drm::expected<ModeInfo, std::error_code> select_preferred_mode(
+    drm::span<const drmModeModeInfo> modes) {
   if (modes.empty()) {
-    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
   // First pass: look for a mode flagged as preferred
@@ -62,11 +63,11 @@ std::expected<ModeInfo, std::error_code> select_preferred_mode(
   return ModeInfo{.drm_mode = *best};
 }
 
-std::expected<ModeInfo, std::error_code> select_mode(std::span<const drmModeModeInfo> modes,
+drm::expected<ModeInfo, std::error_code> select_mode(drm::span<const drmModeModeInfo> modes,
                                                      uint32_t target_width, uint32_t target_height,
                                                      uint32_t target_refresh) {
   if (modes.empty()) {
-    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
   const drmModeModeInfo* best = nullptr;
@@ -98,13 +99,13 @@ std::expected<ModeInfo, std::error_code> select_mode(std::span<const drmModeMode
   }
 
   if (best == nullptr) {
-    return std::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
   return ModeInfo{.drm_mode = *best};
 }
 
-std::vector<ModeInfo> get_all_modes(std::span<const drmModeModeInfo> modes) {
+std::vector<ModeInfo> get_all_modes(drm::span<const drmModeModeInfo> modes) {
   std::vector<ModeInfo> result;
   result.reserve(modes.size());
   for (const auto& m : modes) {

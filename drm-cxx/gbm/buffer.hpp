@@ -3,8 +3,9 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <cstdint>
-#include <expected>
 #include <system_error>
 
 struct gbm_bo;
@@ -22,7 +23,7 @@ class Buffer {
   [[nodiscard]] uint32_t format() const noexcept;
 
   // Get a DMA-BUF fd for this buffer.
-  [[nodiscard]] std::expected<int, std::error_code> fd() const;
+  [[nodiscard]] drm::expected<int, std::error_code> fd() const;
 
   ~Buffer();
   Buffer(Buffer&& /*other*/) noexcept;

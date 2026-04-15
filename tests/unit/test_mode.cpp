@@ -3,13 +3,14 @@
 
 #include "modeset/mode.hpp"
 
+#include <drm-cxx/detail/span.hpp>
+
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <gtest/gtest.h>
-#include <span>
 
 namespace {
 
@@ -46,7 +47,7 @@ TEST(ModeInfoTest, InterlacedFlag) {
 }
 
 TEST(ModeSelectionTest, EmptyModesReturnsError) {
-  std::span<const drmModeModeInfo> const empty;
+  drm::span<const drmModeModeInfo> const empty;
   auto result = drm::select_preferred_mode(empty);
   EXPECT_FALSE(result.has_value());
 }

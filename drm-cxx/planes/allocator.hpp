@@ -8,11 +8,12 @@
 #include "output.hpp"
 #include "plane_registry.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
+
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <map>
-#include <span>
 #include <system_error>
 #include <unordered_map>
 #include <vector>
@@ -51,7 +52,7 @@ class Allocator {
   Allocator(const Device& dev, PlaneRegistry& registry);
 
   // Main entry point. Returns how many layers were hardware-assigned.
-  std::expected<std::size_t, std::error_code> apply(Output& output, AtomicRequest& req,
+  drm::expected<std::size_t, std::error_code> apply(Output& output, AtomicRequest& req,
                                                     uint32_t commit_flags);
 
   // Configurable test commit budget (default: 16)
@@ -59,12 +60,12 @@ class Allocator {
 
  private:
   // §13.3 Warm-start: try previous frame's allocation
-  std::expected<std::size_t, std::error_code> apply_previous_allocation(Output& output,
+  drm::expected<std::size_t, std::error_code> apply_previous_allocation(Output& output,
                                                                         AtomicRequest& req,
                                                                         uint32_t flags);
 
   // Full search with all improvements
-  std::expected<std::size_t, std::error_code> full_search(Output& output, AtomicRequest& req,
+  drm::expected<std::size_t, std::error_code> full_search(Output& output, AtomicRequest& req,
                                                           uint32_t flags);
 
   // §13.5 Bipartite pre-solve
@@ -92,7 +93,7 @@ class Allocator {
                                           uint32_t crtc_index);
 
   // §13.1 Static upper bound
-  static int static_upper_bound(std::span<Layer* const> remaining_layers,
+  static int static_upper_bound(drm::span<Layer* const> remaining_layers,
                                 const std::vector<const PlaneCapabilities*>& available_planes,
                                 uint32_t crtc_index);
 
@@ -110,7 +111,7 @@ class Allocator {
                        AtomicRequest& req, uint32_t flags);
 
   // Apply layer properties to a plane in the atomic request
-  std::expected<void, std::error_code> apply_layer_to_plane(const Layer& layer, uint32_t plane_id,
+  drm::expected<void, std::error_code> apply_layer_to_plane(const Layer& layer, uint32_t plane_id,
                                                             AtomicRequest& req);
 
   const Device& dev_;

@@ -14,6 +14,8 @@
 #include "log.hpp"
 #include "modeset/mode.hpp"
 
+#include <drm-cxx/detail/span.hpp>
+
 #include <xf86drmMode.h>
 
 #include <atomic>
@@ -25,7 +27,6 @@
 #include <libudev.h>
 #include <memory>
 #include <print>
-#include <span>
 #include <string>
 #include <sys/epoll.h>
 #include <system_error>
@@ -265,7 +266,7 @@ static void print_connector_status(int drm_fd) {
                  conn->count_modes);
 
     if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0) {
-      const auto modes = std::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
+      const auto modes = drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
       if (const auto pref = drm::select_preferred_mode(modes)) {
         std::println("      preferred: {}x{}@{}Hz", pref->width(), pref->height(), pref->refresh());
       }

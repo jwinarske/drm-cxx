@@ -3,8 +3,9 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <cstdint>
-#include <expected>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -28,7 +29,7 @@ class Display {
  public:
   // Create by enumerating VkDisplayKHR displays on a physical device.
   // Loads Vulkan dynamically; fails gracefully if unavailable.
-  static std::expected<Display, std::error_code> create();
+  static drm::expected<Display, std::error_code> create();
 
   [[nodiscard]] const std::vector<DisplayInfo>& displays() const noexcept;
   [[nodiscard]] const std::vector<DisplayPlaneInfo>& planes() const noexcept;

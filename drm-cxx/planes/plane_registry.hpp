@@ -3,10 +3,11 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
+
 #include <cstdint>
-#include <expected>
 #include <optional>
-#include <span>
 #include <system_error>
 #include <vector>
 
@@ -40,9 +41,9 @@ struct PlaneCapabilities {
 
 class PlaneRegistry {
  public:
-  static std::expected<PlaneRegistry, std::error_code> enumerate(const Device& dev);
+  static drm::expected<PlaneRegistry, std::error_code> enumerate(const Device& dev);
 
-  [[nodiscard]] std::span<const PlaneCapabilities> all() const noexcept;
+  [[nodiscard]] drm::span<const PlaneCapabilities> all() const noexcept;
 
   [[nodiscard]] std::vector<const PlaneCapabilities*> for_crtc(uint32_t crtc_index) const;
 

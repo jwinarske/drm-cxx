@@ -5,11 +5,12 @@
 
 #include "../core/device.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <xf86drm.h>
 
 #include <cerrno>
 #include <cstdint>
-#include <expected>
 #include <sys/epoll.h>
 #include <system_error>
 #include <unistd.h>
@@ -46,15 +47,15 @@ void PageFlip::set_handler(Handler handler) {
   handler_ = std::move(handler);
 }
 
-std::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
+drm::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   if (drm_fd_ < 0) {
-    return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   // Use epoll for the wait
   int const epfd = epoll_create1(EPOLL_CLOEXEC);
   if (epfd < 0) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   struct epoll_event ev{};
@@ -62,7 +63,7 @@ std::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   ev.data.fd = drm_fd_;
   if (epoll_ctl(epfd, EPOLL_CTL_ADD, drm_fd_, &ev) < 0) {
     ::close(epfd);
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   struct epoll_event events[1];
@@ -70,10 +71,10 @@ std::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   ::close(epfd);
 
   if (nfds < 0) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
   if (nfds == 0) {
-    return std::unexpected(std::make_error_code(std::errc::timed_out));
+    return drm::unexpected(std::make_error_code(std::errc::timed_out));
   }
 
   // Handle DRM events
@@ -83,7 +84,7 @@ std::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   ctx.page_flip_handler2 = page_flip_handler_v2;
 
   if (drmHandleEvent(drm_fd_, &ctx) != 0) {
-    return std::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected(std::error_code(errno, std::system_category()));
   }
 
   return {};

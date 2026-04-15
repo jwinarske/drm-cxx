@@ -3,8 +3,9 @@
 
 #pragma once
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <cstdint>
-#include <expected>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -21,13 +22,13 @@ struct PropertyInfo {
 
 class PropertyStore {
  public:
-  std::expected<void, std::error_code> cache_properties(int fd, uint32_t object_id,
+  drm::expected<void, std::error_code> cache_properties(int fd, uint32_t object_id,
                                                         uint32_t object_type);
 
-  [[nodiscard]] std::expected<uint32_t, std::error_code> property_id(uint32_t object_id,
+  [[nodiscard]] drm::expected<uint32_t, std::error_code> property_id(uint32_t object_id,
                                                                      std::string_view name) const;
 
-  [[nodiscard]] std::expected<uint64_t, std::error_code> property_value(
+  [[nodiscard]] drm::expected<uint64_t, std::error_code> property_value(
       uint32_t object_id, std::string_view name) const;
 
   [[nodiscard]] const std::vector<PropertyInfo>* properties(uint32_t object_id) const;
