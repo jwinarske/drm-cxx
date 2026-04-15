@@ -46,7 +46,7 @@ drm::expected<ModeInfo, std::error_code> select_preferred_mode(
   // First pass: look for a mode flagged as preferred
   for (const auto& m : modes) {
     if ((m.type & DRM_MODE_TYPE_PREFERRED) != 0U) {
-      return ModeInfo{.drm_mode = m};
+      return ModeInfo{m};
     }
   }
 
@@ -60,7 +60,7 @@ drm::expected<ModeInfo, std::error_code> select_preferred_mode(
     }
   }
 
-  return ModeInfo{.drm_mode = *best};
+  return ModeInfo{*best};
 }
 
 drm::expected<ModeInfo, std::error_code> select_mode(drm::span<const drmModeModeInfo> modes,
@@ -102,14 +102,14 @@ drm::expected<ModeInfo, std::error_code> select_mode(drm::span<const drmModeMode
     return drm::unexpected(std::make_error_code(std::errc::no_such_device));
   }
 
-  return ModeInfo{.drm_mode = *best};
+  return ModeInfo{*best};
 }
 
 std::vector<ModeInfo> get_all_modes(drm::span<const drmModeModeInfo> modes) {
   std::vector<ModeInfo> result;
   result.reserve(modes.size());
   for (const auto& m : modes) {
-    result.push_back(ModeInfo{.drm_mode = m});
+    result.push_back(ModeInfo{m});
   }
   return result;
 }

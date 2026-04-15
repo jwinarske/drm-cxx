@@ -39,6 +39,15 @@ drm_cxx_deps = [
   fmt_dep,
 ]
 
+# Public headers live in src/ but are #include'd as <drm-cxx/...>. Expose
+# src/ under a drm-cxx/ prefix by symlinking at configure time inside the
+# build tree; include_directories('..') then picks up the build-side path
+# too, so <drm-cxx/foo.hpp> resolves through the symlink. Linux-only.
+run_command('ln', '-sfn',
+  meson.project_source_root() / 'src',
+  meson.project_build_root() / 'drm-cxx',
+  check : true)
+
 drm_cxx_inc = include_directories('.', '..')
 
 if get_option('vulkan')
@@ -140,6 +149,6 @@ endif
 pkg = import('pkgconfig')
 pkg.generate(drm_cxx_lib,
   name : 'drm-cxx',
-  description : 'C++23 DRM/KMS library',
+  description : 'C++17 DRM/KMS library',
   version : meson.project_version(),
 )

@@ -41,21 +41,22 @@ set_target_properties(drm-cxx PROPERTIES
   EXPORT_NAME drm-cxx)
 
 # Two public include roots:
-#   - drm-cxx/ so internal cross-subdir includes like "core/foo.hpp" work
-#     (matches meson's include_directories('.'))
-#   - the project root so public headers can use <drm-cxx/detail/*.hpp>,
-#     which is also the form consumers get through pkg-config's
-#     `-I${includedir}` and through the installed include layout.
+#   - src/ so internal cross-subdir includes like "core/foo.hpp" resolve
+#     (matches meson's include_directories('.') on the source subdir).
+#   - ${binary}/include so public headers use <drm-cxx/...>, served by a
+#     build-tree symlink drm-cxx -> src that the root CMakeLists creates.
+#     The installed layout still uses the real ${includedir}/drm-cxx dir.
 target_include_directories(drm-cxx
   PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/drm-cxx>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/vendor>
   PRIVATE
     $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>)
 
-target_compile_features(drm-cxx PUBLIC cxx_std_23)
+target_compile_features(drm-cxx PUBLIC cxx_std_17)
 
 target_compile_options(drm-cxx PRIVATE
   -Wall -Wextra -Wpedantic
@@ -79,13 +80,24 @@ if(DRM_CXX_VULKAN)
 endif()
 
 if(NOT DRM_CXX_HAS_STD_PRINT)
-  target_link_libraries(drm-cxx PUBLIC PkgConfig::fmt)
+  if(TARGET PkgConfig::fmt)
+    target_link_libraries(drm-cxx PUBLIC PkgConfig::fmt)
+  else()
+    target_link_libraries(drm-cxx PUBLIC fmt::fmt)
+  endif()
 endif()
 
-# TODO(Phase D): when C++17 migration lands, wire tl-expected and tcb-span
-# here via FetchContent with find_package(...CONFIG QUIET) fallback. The
-# detail/ adapter headers currently alias std::expected / std::span under
-# C++23, so both are unused at compile time today.
+# C++17 polyfills — linked PUBLIC so the tl/tcb include paths propagate
+# into this target's build-tree usage requirements through the detail/
+# adapter headers. Install-interface fallout is handled below by vendoring
+# the headers under ${includedir}/drm-cxx/vendor so downstream consumers
+# of the installed package don't need the polyfill targets.
+if(NOT DRM_CXX_HAS_STD_EXPECTED)
+  target_link_libraries(drm-cxx PUBLIC $<BUILD_INTERFACE:tl::expected>)
+endif()
+if(NOT DRM_CXX_HAS_STD_SPAN)
+  target_link_libraries(drm-cxx PUBLIC $<BUILD_INTERFACE:tcb::span>)
+endif()
 
 if(NOT DRM_CXX_INSTALL)
   return()
@@ -155,6 +167,20 @@ if(DRM_CXX_VULKAN)
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/vulkan)
 endif()
 
+# Vendor polyfill headers into the install tree so downstream consumers
+# don't need tl-expected / tcb-span installed separately. The detail/
+# adapter's `#include <tl/expected.hpp>` / `#include <tcb/span.hpp>`
+# resolves through the ${includedir}/drm-cxx/vendor install-interface
+# include dir.
+if(NOT DRM_CXX_HAS_STD_EXPECTED)
+  install(FILES "${PROJECT_SOURCE_DIR}/subprojects/tl-expected/include/tl/expected.hpp"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/vendor/tl)
+endif()
+if(NOT DRM_CXX_HAS_STD_SPAN)
+  install(FILES "${PROJECT_SOURCE_DIR}/subprojects/tcb-span/include/tcb/span.hpp"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/vendor/tcb)
+endif()
+
 install(TARGETS drm-cxx
   EXPORT  drm-cxx-targets
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -189,8 +215,21 @@ endif()
 
 if(DRM_CXX_HAS_STD_PRINT)
   set(PC_FMT_REQUIRES "")
-else()
+elseif(TARGET PkgConfig::fmt)
+  # fmt came from pkg-config — safe to list as a Requires so raw
+  # `pkg-config --libs drm-cxx` picks it up transitively.
   set(PC_FMT_REQUIRES " fmt")
+else()
+  # fmt was FetchContent'd or came from find_package(fmt CONFIG); it has
+  # no pkg-config file installed, so listing it in Requires would make
+  # downstream `pkg-config drm-cxx` fail. Fall back to a private -lfmt
+  # link, which is sufficient because fmt was FMT_INSTALL=ON'd into our
+  # prefix alongside libdrm-cxx.
+  set(PC_FMT_REQUIRES "")
+  set(PC_FMT_LIBS_PRIVATE " -lfmt")
+endif()
+if(NOT DEFINED PC_FMT_LIBS_PRIVATE)
+  set(PC_FMT_LIBS_PRIVATE "")
 endif()
 
 configure_file(

@@ -33,9 +33,9 @@ drm::expected<void, std::error_code> PropertyStore::cache_properties(int fd, uin
     }
 
     entries.push_back(PropertyInfo{
-        .id = props->props[i],
-        .name = prop->name,
-        .value = props->prop_values[i],
+        props->props[i],
+        prop->name,
+        props->prop_values[i],
     });
 
     drmModeFreeProperty(prop);

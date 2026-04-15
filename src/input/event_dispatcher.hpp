@@ -31,7 +31,7 @@ class EventDispatcher {
   [[nodiscard]] std::size_t handler_count() const noexcept;
 
  private:
-  std::vector<std::move_only_function<void(const InputEvent&)>> handlers_;
+  std::vector<std::function<void(const InputEvent&)>> handlers_;
 };
 
 }  // namespace drm::input

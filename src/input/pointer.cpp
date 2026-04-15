@@ -28,7 +28,7 @@ double Pointer::y() const noexcept {
 }
 
 bool Pointer::button_pressed(uint32_t button) const noexcept {
-  return buttons_.contains(button);
+  return buttons_.count(button) != 0;
 }
 
 void Pointer::reset_position(double x, double y) noexcept {

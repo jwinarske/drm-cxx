@@ -11,6 +11,7 @@
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
+#include "drm-cxx/detail/format.hpp"
 #include "log.hpp"
 #include "modeset/mode.hpp"
 
@@ -27,8 +28,6 @@
 #include <libudev.h>
 #include <memory>
 #include <string>
-
-#include "drm-cxx/detail/format.hpp"
 #include <sys/epoll.h>
 #include <system_error>
 #include <thread>

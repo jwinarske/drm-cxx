@@ -11,6 +11,7 @@
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
+#include "drm-cxx/detail/format.hpp"
 #include "modeset/atomic.hpp"
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
@@ -22,8 +23,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <utility>
-
-#include "drm-cxx/detail/format.hpp"
 
 int main(const int argc, char* argv[]) {
   const auto path = drm::examples::select_device(argc, argv);
@@ -87,7 +86,8 @@ int main(const int argc, char* argv[]) {
                mode.preferred() ? " (preferred)" : "");
 
   // List all available modes
-  for (const auto all_modes = drm::get_all_modes(modes); const auto& m : all_modes) {
+  const auto all_modes = drm::get_all_modes(modes);
+  for (const auto& m : all_modes) {
     drm::println("  {}x{}@{}Hz{}{}", m.width(), m.height(), m.refresh(),
                  m.preferred() ? " [preferred]" : "", m.interlaced() ? " [interlaced]" : "");
   }

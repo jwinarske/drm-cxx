@@ -59,7 +59,7 @@ struct SwitchEvent {
 };
 
 using InputEvent = std::variant<KeyboardEvent, PointerEvent, TouchEvent, SwitchEvent>;
-using EventHandler = std::move_only_function<void(const InputEvent&)>;
+using EventHandler = std::function<void(const InputEvent&)>;
 
 // ── SeatOptions ────────────────────────────────────────────────
 

@@ -11,8 +11,8 @@
 
 #include <version>
 
-#if defined(__cpp_lib_print) && __cpp_lib_print >= 202207L && \
-    defined(__cpp_lib_format) && __cpp_lib_format >= 201907L
+#if defined(__cpp_lib_print) && __cpp_lib_print >= 202207L && defined(__cpp_lib_format) && \
+    __cpp_lib_format >= 201907L
 #include <format>
 #include <print>
 namespace drm {

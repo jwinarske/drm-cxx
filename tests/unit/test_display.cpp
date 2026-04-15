@@ -27,10 +27,10 @@ TEST(HdrStaticMetadataTest, DefaultValues) {
 
 TEST(ColorimetryInfoTest, CanSetValues) {
   drm::display::ColorimetryInfo ci{};
-  ci.red = {.x = 0.64F, .y = 0.33F};
-  ci.green = {.x = 0.30F, .y = 0.60F};
-  ci.blue = {.x = 0.15F, .y = 0.06F};
-  ci.white = {.x = 0.3127F, .y = 0.3290F};
+  ci.red = {0.64F, 0.33F};
+  ci.green = {0.30F, 0.60F};
+  ci.blue = {0.15F, 0.06F};
+  ci.white = {0.3127F, 0.3290F};
 
   EXPECT_FLOAT_EQ(ci.red.x, 0.64F);
   EXPECT_FLOAT_EQ(ci.white.y, 0.3290F);

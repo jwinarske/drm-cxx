@@ -1,29 +1,30 @@
 # drm-cxx
 
-C++23 native library for Linux DRM/KMS display management, input handling, and hardware plane allocation.
+C++17 library for Linux DRM/KMS display management, input handling, and hardware plane allocation. Originally prototyped against C++23 and hoisted down to C++17 behind adapter headers (`drm::expected`, `drm::span`, `drm::print`) so it builds on older toolchains while still picking up `std::expected` / `std::span` / `std::print` transparently on C++23 stacks.
 
 ## Features
 
 - **RAII everywhere** — DRM devices, GBM buffers, libinput contexts, xkbcommon state
-- **`std::expected<T, E>`** for all fallible operations
+- **`drm::expected<T, E>`** for all fallible operations (aliases `std::expected` on C++23, `tl::expected` on C++17)
 - **Native plane allocator** replacing libliftoff with 7 algorithmic improvements:
   - Hopcroft-Karp bipartite pre-solve
   - Warm-start from previous frame (0-1 test commits in steady state)
   - Failure memoization, content-type priority, spatial splitting
 - **Atomic modesetting** — builder pattern for `drmModeAtomicCommit`
-- **Input subsystem** — libinput/xkbcommon with typed event variants and `std::move_only_function` dispatch
+- **Input subsystem** — libinput/xkbcommon with typed event variants and `std::function` dispatch
 - **Display info** — EDID parsing via libdisplay-info (colorimetry, HDR, EOTFs)
 - **GBM integration** — device, surface, buffer with DMA-BUF support
 - **Vulkan `VK_KHR_display`** — optional, dynamically loaded
-- **`std::print` logging** with runtime `LogLevel` gating
+- **`drm::print` logging** with runtime `LogLevel` gating (aliases `std::print` on C++23, `fmt::print` on C++17)
 
 ## Requirements
 
 | Tool | Minimum |
 |------|---------|
-| GCC | 13.1 |
-| Clang | 16.0 |
+| GCC | 9 (13.1 for native `std::expected` / `std::print`) |
+| Clang | 10 (16.0 for native `std::expected` / `std::print`) |
 | Meson | 1.3.0 |
+| CMake | 3.21 |
 | libdrm | 2.4.113 |
 | libgbm | any |
 | libinput | 1.21 |
@@ -94,7 +95,7 @@ auto keyboard = drm::input::Keyboard::create({.layout = "us"}).value();
 seat.set_event_handler([&](const drm::input::InputEvent& ev) {
   if (auto* ke = std::get_if<drm::input::KeyboardEvent>(&ev)) {
     keyboard.process_key(*ke);
-    std::println("Key {}: sym=0x{:x} utf8='{}'", ke->key, ke->sym, ke->utf8);
+    drm::println("Key {}: sym=0x{:x} utf8='{}'", ke->key, ke->sym, ke->utf8);
   }
 });
 ```
@@ -104,7 +105,7 @@ seat.set_event_handler([&](const drm::input::InputEvent& ev) {
 ```cpp
 auto info = drm::display::parse_edid(edid_blob).value();
 if (info.hdr) {
-  std::println("HDR: max={}cd/m²", info.hdr->max_luminance);
+  drm::println("HDR: max={}cd/m²", info.hdr->max_luminance);
 }
 ```
 
@@ -123,14 +124,14 @@ Or at compile time: `-DDRM_CXX_LOG_LEVEL=4`
 |-------|---------|
 | `drmpp::` namespace | `drm::` |
 | `#include <drmpp/drmpp.h>` | `#include <drm-cxx/drm-cxx.hpp>` |
-| `int` errno returns | `std::expected<T, std::error_code>` |
-| `spdlog::info(...)` | `drm::log_info(...)` or `std::println(...)` |
+| `int` errno returns | `drm::expected<T, std::error_code>` |
+| `spdlog::info(...)` | `drm::log_info(...)` or `drm::println(...)` |
 | `liftoff_output_apply()` | `allocator.apply(output, req, flags)` |
 | `liftoff_layer_set_property()` | `layer.set_property(name, value)` |
 | `liftoff_layer_needs_composition()` | `layer.needs_composition()` |
 | libsync `sync_wait()` | `drm::sync::SyncFence::wait()` |
 | bsdrm helpers | `drm::get_resources()`, `drm::get_connector()`, etc. |
-| Virtual callback classes | `std::move_only_function<>` handlers |
+| Virtual callback classes | `std::function<>` handlers |
 
 ## License
 

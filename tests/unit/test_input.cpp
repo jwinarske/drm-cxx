@@ -13,7 +13,10 @@
 // ── Event type tests ──────────────────────────────────────────
 
 TEST(InputEventTest, KeyboardEventVariant) {
-  drm::input::KeyboardEvent ke{.time_ms = 100, .key = 42, .pressed = true};
+  drm::input::KeyboardEvent ke;
+  ke.time_ms = 100;
+  ke.key = 42;
+  ke.pressed = true;
   drm::input::InputEvent event{ke};
 
   EXPECT_TRUE(std::holds_alternative<drm::input::KeyboardEvent>(event));
@@ -24,7 +27,10 @@ TEST(InputEventTest, KeyboardEventVariant) {
 }
 
 TEST(InputEventTest, PointerMotionVariant) {
-  drm::input::PointerMotionEvent me{.time_ms = 50, .dx = 1.5, .dy = -2.0};
+  drm::input::PointerMotionEvent me;
+  me.time_ms = 50;
+  me.dx = 1.5;
+  me.dy = -2.0;
   drm::input::PointerEvent pe{me};
   drm::input::InputEvent const event{pe};
 
@@ -32,23 +38,21 @@ TEST(InputEventTest, PointerMotionVariant) {
 }
 
 TEST(InputEventTest, TouchEventVariant) {
-  drm::input::TouchEvent te{
-      .time_ms = 200,
-      .slot = 0,
-      .x = 100.0,
-      .y = 200.0,
-      .type = drm::input::TouchEvent::Type::Down,
-  };
+  drm::input::TouchEvent te;
+  te.time_ms = 200;
+  te.slot = 0;
+  te.x = 100.0;
+  te.y = 200.0;
+  te.type = drm::input::TouchEvent::Type::Down;
   drm::input::InputEvent const event{te};
   EXPECT_TRUE(std::holds_alternative<drm::input::TouchEvent>(event));
 }
 
 TEST(InputEventTest, SwitchEventVariant) {
-  drm::input::SwitchEvent se{
-      .time_ms = 300,
-      .which = drm::input::SwitchEvent::Switch::Lid,
-      .active = true,
-  };
+  drm::input::SwitchEvent se;
+  se.time_ms = 300;
+  se.which = drm::input::SwitchEvent::Switch::Lid;
+  se.active = true;
   drm::input::InputEvent const event{se};
   EXPECT_TRUE(std::holds_alternative<drm::input::SwitchEvent>(event));
 }
@@ -112,7 +116,9 @@ TEST(EventDispatcherTest, DispatchCallsAllHandlers) {
   dispatcher.add_handler([&](const drm::input::InputEvent&) { ++count1; });
   dispatcher.add_handler([&](const drm::input::InputEvent&) { ++count2; });
 
-  drm::input::KeyboardEvent ke{.key = 1, .pressed = true};
+  drm::input::KeyboardEvent ke;
+  ke.key = 1;
+  ke.pressed = true;
   dispatcher.dispatch(drm::input::InputEvent{ke});
 
   EXPECT_EQ(count1, 1);
@@ -126,7 +132,9 @@ TEST(EventDispatcherTest, AsHandlerForwardsEvents) {
   dispatcher.add_handler([&](const drm::input::InputEvent&) { ++count; });
 
   auto handler = dispatcher.as_handler();
-  drm::input::KeyboardEvent ke{.key = 1, .pressed = true};
+  drm::input::KeyboardEvent ke;
+  ke.key = 1;
+  ke.pressed = true;
   handler(drm::input::InputEvent{ke});
 
   EXPECT_EQ(count, 1);
@@ -140,7 +148,7 @@ TEST(KeyboardTest, CreateWithDefaults) {
 }
 
 TEST(KeyboardTest, CreateWithLayout) {
-  auto result = drm::input::Keyboard::create({.layout = "us"});
+  auto result = drm::input::Keyboard::create({{}, {}, "us"});
   ASSERT_TRUE(result.has_value());
 }
 
@@ -150,12 +158,14 @@ TEST(KeyboardTest, CreateFromInvalidFileFails) {
 }
 
 TEST(KeyboardTest, ProcessKeyFillsSymAndUtf8) {
-  auto kb_result = drm::input::Keyboard::create({.layout = "us"});
+  auto kb_result = drm::input::Keyboard::create({{}, {}, "us"});
   ASSERT_TRUE(kb_result.has_value());
   auto& kb = *kb_result;
 
   // KEY_A = 30 in Linux input codes
-  drm::input::KeyboardEvent ke{.key = 30, .pressed = true};
+  drm::input::KeyboardEvent ke;
+  ke.key = 30;
+  ke.pressed = true;
   kb.process_key(ke);
 
   // After processing, sym should be XKB_KEY_a (0x61) and utf8 should be "a"
@@ -164,7 +174,7 @@ TEST(KeyboardTest, ProcessKeyFillsSymAndUtf8) {
 }
 
 TEST(KeyboardTest, ModifierStateAfterKeyRelease) {
-  auto kb_result = drm::input::Keyboard::create({.layout = "us"});
+  auto kb_result = drm::input::Keyboard::create({{}, {}, "us"});
   ASSERT_TRUE(kb_result.has_value());
   auto& kb = *kb_result;
 
@@ -172,12 +182,16 @@ TEST(KeyboardTest, ModifierStateAfterKeyRelease) {
   EXPECT_FALSE(kb.ctrl_active());
 
   // Press shift (KEY_LEFTSHIFT = 42)
-  drm::input::KeyboardEvent shift_down{.key = 42, .pressed = true};
+  drm::input::KeyboardEvent shift_down;
+  shift_down.key = 42;
+  shift_down.pressed = true;
   kb.process_key(shift_down);
   EXPECT_TRUE(kb.shift_active());
 
   // Release shift
-  drm::input::KeyboardEvent shift_up{.key = 42, .pressed = false};
+  drm::input::KeyboardEvent shift_up;
+  shift_up.key = 42;
+  shift_up.pressed = false;
   kb.process_key(shift_up);
   EXPECT_FALSE(kb.shift_active());
 }
@@ -187,7 +201,7 @@ TEST(KeyboardTest, ModifierStateAfterKeyRelease) {
 TEST(SeatTest, OpenWithInvalidSeatFails) {
   // Opening a seat requires root privileges typically.
   // On CI without input devices, this should fail gracefully.
-  auto result = drm::input::Seat::open({.seat_name = "nonexistent_seat_99"});
+  auto result = drm::input::Seat::open({"nonexistent_seat_99"});
   // May succeed or fail depending on environment — just verify no crash.
   if (result.has_value()) {
     EXPECT_GE(result->fd(), 0);

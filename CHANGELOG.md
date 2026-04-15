@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.1.0 — C++17 migration
+
+- **Project language target lowered from C++23 to C++17** (Phase D of the C++17
+  migration). The library still picks up `std::expected`, `std::span`, and
+  `std::print` when the toolchain has them; otherwise the `drm::expected`,
+  `drm::span`, `drm::print`, and `drm::format` adapter headers transparently
+  fall back to `tl::expected`, `tcb::span`, and `{fmt}`.
+- Source tree `drm-cxx/` renamed to `src/`. Public `<drm-cxx/...>` include
+  layout is unchanged for consumers — served at build time via a `drm-cxx`
+  symlink into `src/` in the build tree and at install time via the normal
+  `${includedir}/drm-cxx` install layout. Polyfill headers are vendored
+  under `${includedir}/drm-cxx/vendor` so downstream consumers don't need
+  `tl-expected` / `tcb-span` installed separately.
+- `std::move_only_function` replaced with `std::function` in `Seat`,
+  `EventDispatcher`, and `PageFlip` handler types. Existing call sites and
+  lambdas continue to work unchanged (all were copy-constructible).
+- `std::erase_if`, `std::string::starts_with`, and `Container::contains`
+  call sites rewritten with their C++17 equivalents; transparent
+  heterogeneous `unordered_map::find(string_view)` replaced with a
+  `std::string` materialization at the single call site that used it.
+
 ## v1.0.0
 
 Initial release of drm-cxx, a C++23 native re-implementation of drmpp.
@@ -53,7 +74,7 @@ Initial release of drm-cxx, a C++23 native re-implementation of drmpp.
 - `drm::vulkan::DrmSurface` — surface handle placeholder
 
 ### Infrastructure
-- `std::print` logging with `drm::LogLevel` runtime gating
+- `drm::print` / `std::print` logging with `drm::LogLevel` runtime gating
 - pkg-config generation
 - GTest unit test suite (13 suites, 100+ tests)
 - CI: GCC-13/14, Clang-16/17 matrix
@@ -61,7 +82,7 @@ Initial release of drm-cxx, a C++23 native re-implementation of drmpp.
 
 ### Breaking changes from drmpp
 - Namespace: `drmpp::` -> `drm::`
-- All returns use `std::expected<T, std::error_code>`
+- All returns use `drm::expected<T, std::error_code>` (aliases `std::expected` on C++23, `tl::expected` on C++17)
 - No libliftoff, bsdrm, libsync, spdlog, or rapidjson dependencies
-- Callbacks use `std::move_only_function<>` instead of virtual dispatch
+- Callbacks use `std::function<>` handlers instead of virtual dispatch
 - Header paths: `#include <drm-cxx/...>` canonical layout

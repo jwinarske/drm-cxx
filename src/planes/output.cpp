@@ -25,8 +25,12 @@ Layer& Output::add_layer() {
 }
 
 void Output::remove_layer(const Layer& layer) {
-  std::erase_if(layer_ptrs_, [&](const Layer* l) { return l == &layer; });
-  std::erase_if(owned_layers_, [&](const auto& l) { return l.get() == &layer; });
+  layer_ptrs_.erase(std::remove_if(layer_ptrs_.begin(), layer_ptrs_.end(),
+                                   [&](const Layer* l) { return l == &layer; }),
+                    layer_ptrs_.end());
+  owned_layers_.erase(std::remove_if(owned_layers_.begin(), owned_layers_.end(),
+                                     [&](const auto& l) { return l.get() == &layer; }),
+                      owned_layers_.end());
 }
 
 void Output::set_composition_layer(Layer& layer) {

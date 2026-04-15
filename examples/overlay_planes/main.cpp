@@ -10,6 +10,7 @@
 
 #include "../select_device.hpp"
 #include "core/device.hpp"
+#include "drm-cxx/detail/format.hpp"
 #include "modeset/atomic.hpp"
 #include "planes/allocator.hpp"
 #include "planes/layer.hpp"
@@ -18,7 +19,6 @@
 
 #include <cstdint>
 #include <cstdlib>
-#include "drm-cxx/detail/format.hpp"
 
 int main(int argc, char* argv[]) {
   const auto path = drm::examples::select_device(argc, argv);

@@ -29,7 +29,7 @@ Checks: >
 
 WarningsAsErrors: '*'
 
-HeaderFilterRegex: 'drm-cxx/.*'
+HeaderFilterRegex: '(src|drm-cxx)/.*'
 
 CheckOptions:
   - key: readability-identifier-naming.ClassCase

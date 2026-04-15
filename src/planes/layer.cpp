@@ -54,7 +54,10 @@ std::optional<uint32_t> Layer::assigned_plane_id() const noexcept {
 }
 
 std::optional<uint64_t> Layer::property(std::string_view name) const {
-  auto it = properties_.find(name);
+  // Transparent heterogeneous unordered_map lookup is C++20. Under C++17
+  // we construct a temporary std::string; property() is not on the hot
+  // atomic-commit path.
+  auto it = properties_.find(std::string(name));
   if (it == properties_.end()) {
     return std::nullopt;
   }
@@ -114,11 +117,11 @@ uint32_t Layer::height() const {
 }
 
 Rect Layer::crtc_rect() const {
-  return {
-      .x = static_cast<int32_t>(property("CRTC_X").value_or(0)),
-      .y = static_cast<int32_t>(property("CRTC_Y").value_or(0)),
-      .w = width(),
-      .h = height(),
+  return Rect{
+      static_cast<int32_t>(property("CRTC_X").value_or(0)),
+      static_cast<int32_t>(property("CRTC_Y").value_or(0)),
+      width(),
+      height(),
   };
 }
 

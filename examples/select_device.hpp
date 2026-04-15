@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "drm-cxx/detail/format.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -13,8 +15,6 @@
 #include <optional>
 #include <string>
 #include <vector>
-
-#include "drm-cxx/detail/format.hpp"
 
 namespace drm::examples {
 
@@ -28,7 +28,7 @@ inline std::vector<std::string> enumerate_cards() {
 
   for (const auto& entry : std::filesystem::directory_iterator(dri_dir)) {
     const auto name = entry.path().filename().string();
-    if (name.starts_with("card")) {
+    if (name.compare(0, 4, "card") == 0) {
       cards.push_back(entry.path().string());
     }
   }

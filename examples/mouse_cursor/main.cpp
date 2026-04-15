@@ -13,6 +13,7 @@
 #include "core/device.hpp"
 #include "core/property_store.hpp"
 #include "core/resources.hpp"
+#include "drm-cxx/detail/format.hpp"
 #include "input/pointer.hpp"
 #include "input/seat.hpp"
 
@@ -33,8 +34,6 @@
 #include <sys/mman.h>
 #include <system_error>
 #include <variant>
-
-#include "drm-cxx/detail/format.hpp"
 
 // ---------------------------------------------------------------------------
 // Signal handling

@@ -3,10 +3,10 @@
 
 #pragma once
 
+#include "drm-cxx/detail/format.hpp"
+
 #include <cstdint>
 #include <utility>
-
-#include "drm-cxx/detail/format.hpp"
 
 namespace drm {
 

@@ -6,10 +6,10 @@
 // Enumerates Vulkan displays and display planes, showing how
 // they can be cross-referenced with DRM planes.
 
+#include "drm-cxx/detail/format.hpp"
 #include "vulkan/display.hpp"
 
 #include <cstdlib>
-#include "drm-cxx/detail/format.hpp"
 
 int main() {
   const auto result = drm::vulkan::Display::create();
@@ -23,7 +23,8 @@ int main() {
   for (const auto& [display_handle, name, width, height] : display.displays()) {
     drm::println("  Display '{}': {}x{} (handle=0x{:x})", name, width, height, display_handle);
 
-    for (auto planes = display.planes_for_display(display_handle); const auto* p : planes) {
+    auto planes = display.planes_for_display(display_handle);
+    for (const auto* p : planes) {
       drm::println("    Plane {}: stack_index={}", p->plane_index, p->current_stack_index);
     }
   }

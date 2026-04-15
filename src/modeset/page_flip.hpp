@@ -15,8 +15,7 @@ class Device;
 
 class PageFlip {
  public:
-  using Handler =
-      std::move_only_function<void(uint32_t crtc_id, uint64_t sequence, uint64_t timestamp_ns)>;
+  using Handler = std::function<void(uint32_t crtc_id, uint64_t sequence, uint64_t timestamp_ns)>;
 
   explicit PageFlip(const Device& dev);
 

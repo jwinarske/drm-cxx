@@ -8,4 +8,5 @@ Description: @PROJECT_DESCRIPTION@
 Version: @PROJECT_VERSION@
 Requires: libdrm gbm libinput libudev xkbcommon libdisplay-info@PC_VULKAN_REQUIRES@@PC_FMT_REQUIRES@
 Libs: -L${libdir} -ldrm-cxx
+Libs.private:@PC_FMT_LIBS_PRIVATE@
 Cflags: -I${includedir}

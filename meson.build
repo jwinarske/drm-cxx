@@ -6,7 +6,7 @@ project('drm-cxx', ['cpp'],
   meson_version : '>=1.3.0',
   license : 'MIT',
   default_options : [
-    'cpp_std=c++23',
+    'cpp_std=c++17',
     'b_lto=true',
     'warning_level=3',
   ],
@@ -14,9 +14,8 @@ project('drm-cxx', ['cpp'],
 
 cpp = meson.get_compiler('cpp')
 
-# Enforce C++23 features are truly available
-assert(cpp.has_argument('-std=c++23') or cpp.has_argument('-std=c++2b'),
-  'A C++23-capable compiler is required (GCC >= 13, Clang >= 17)')
+assert(cpp.has_argument('-std=c++17'),
+  'A C++17-capable compiler is required (GCC >= 9, Clang >= 10)')
 
 add_project_arguments(
   cpp.get_supported_arguments([
@@ -43,9 +42,10 @@ if not di_dep.found()
 endif
 
 # C++17-compatible polyfills for C++23 std::expected and C++20 std::span.
-# Used unconditionally via the drm-cxx/detail/{expected,span}.hpp adapter
-# headers; when the compiler provides the std versions, the adapter aliases
-# them directly and these subprojects simply go unused at compile time.
+# The drm-cxx/detail/{expected,span}.hpp adapter headers pick the std
+# versions when the compiler provides them (__cpp_lib_expected /
+# __cpp_lib_span are set), otherwise they fall back to these subprojects
+# — so under cpp_std=c++17 they activate, under c++23 they are dead code.
 tl_expected_dep = dependency('tl-expected', required : false)
 if not tl_expected_dep.found()
   tl_expected_proj = subproject('tl-expected')
@@ -59,9 +59,9 @@ if not tcb_span_dep.found()
 endif
 
 # {fmt} backs the drm-cxx/detail/format.hpp adapter when the toolchain lacks
-# std::print / std::format (i.e. anything below C++23 / libstdc++ 14). Detect
-# up front so the dep is only pulled on the fallback path; under C++23 the
-# adapter aliases std::* directly and fmt is unused.
+# std::print / std::format (i.e. anything below C++23 / libstdc++ 14). Under
+# cpp_std=c++17 this path is always taken; under c++23 on libstdc++ 14+
+# the adapter aliases std::* directly and fmt is unused.
 has_std_print = cpp.compiles(
   '#include <print>\nint main(){ std::println("{}", 1); }',
   name : 'std::print / std::println available',
@@ -71,8 +71,18 @@ if has_std_print
 else
   fmt_dep = dependency('fmt', required : false)
   if not fmt_dep.found()
-    fmt_proj = subproject('fmt', default_options : ['default_library=static'])
-    fmt_dep = fmt_proj.get_variable('fmt_dep')
+    # fmt ships only a CMakeLists.txt, so wrap it as a CMake subproject.
+    cmake = import('cmake')
+    fmt_opts = cmake.subproject_options()
+    fmt_opts.add_cmake_defines({
+      'FMT_TEST'                 : 'OFF',
+      'FMT_DOC'                  : 'OFF',
+      'CMAKE_POSITION_INDEPENDENT_CODE' : 'ON',
+    })
+    fmt_opts.set_override_option('werror', 'false')
+    fmt_opts.set_override_option('warning_level', '0')
+    fmt_proj = cmake.subproject('fmt', options : fmt_opts)
+    fmt_dep = fmt_proj.dependency('fmt')
   endif
 endif
 
@@ -102,7 +112,7 @@ config_h = configure_file(
 )
 
 #── Source ────────────────────────────────────────────────────
-subdir('drm-cxx')
+subdir('src')
 
 if get_option('examples')
   subdir('examples')

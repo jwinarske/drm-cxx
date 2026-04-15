@@ -204,10 +204,10 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
         std::unordered_map<Layer*, bool> assigned_layers;
 
         for (const auto& cand : candidates) {
-          if (used_planes.contains(cand.plane->id)) {
+          if (used_planes.count(cand.plane->id) != 0) {
             continue;
           }
-          if (assigned_layers.contains(cand.layer)) {
+          if (assigned_layers.count(cand.layer) != 0) {
             continue;
           }
 
@@ -230,10 +230,9 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
               std::vector<std::pair<uint32_t, Layer*>>(assignment.begin(), assignment.end());
 
           // Sort by layer priority (lowest priority dropped first)
-          std::sort(assigned_vec.begin(), assigned_vec.end(),
-                    [](const auto& a, const auto& b) {
-                      return layer_priority(*a.second) < layer_priority(*b.second);
-                    });
+          std::sort(assigned_vec.begin(), assigned_vec.end(), [](const auto& a, const auto& b) {
+            return layer_priority(*a.second) < layer_priority(*b.second);
+          });
 
           for (auto& it : assigned_vec) {
             assignment.erase(it.first);
@@ -258,9 +257,12 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     }
 
     // Remove used planes from available
-    for (auto& [plane_id, _] : assignment) {
-      std::erase_if(available_planes,
-                    [plane_id](const PlaneCapabilities* p) { return p->id == plane_id; });
+    for (auto& kv : assignment) {
+      const uint32_t plane_id = kv.first;
+      available_planes.erase(
+          std::remove_if(available_planes.begin(), available_planes.end(),
+                         [plane_id](const PlaneCapabilities* p) { return p->id == plane_id; }),
+          available_planes.end());
     }
   }
 
@@ -292,7 +294,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   if (any_composited && (output.composition_layer() != nullptr)) {
     // Find primary plane for this crtc
     for (const auto* plane : registry_.for_crtc(crtc_index)) {
-      if (plane->type == DRMPlaneType::PRIMARY && !best_assignment.contains(plane->id)) {
+      if (plane->type == DRMPlaneType::PRIMARY && best_assignment.count(plane->id) == 0) {
         output.composition_layer()->assigned_plane_ = plane->id;
         if (auto r = apply_layer_to_plane(*output.composition_layer(), plane->id, req); !r) {
           return drm::unexpected(r.error());
@@ -463,11 +465,10 @@ int Allocator::static_upper_bound(drm::span<Layer* const> remaining_layers,
                                   uint32_t crtc_index) {
   int bound = 0;
   for (const Layer* layer : remaining_layers) {
-    bool const any =
-        std::any_of(available_planes.begin(), available_planes.end(),
-                    [&](const PlaneCapabilities* p) {
-                      return plane_statically_compatible(*p, *layer, crtc_index);
-                    });
+    bool const any = std::any_of(available_planes.begin(), available_planes.end(),
+                                 [&](const PlaneCapabilities* p) {
+                                   return plane_statically_compatible(*p, *layer, crtc_index);
+                                 });
     if (any) {
       ++bound;
     }
@@ -611,7 +612,7 @@ bool Allocator::backtrack(std::vector<Layer*>& layers,
 
   // Try assigning this layer to each compatible plane
   for (const auto* plane : planes) {
-    if (assignment.contains(plane->id)) {
+    if (assignment.count(plane->id) != 0) {
       continue;
     }
     if (!plane_statically_compatible(*plane, *layer, crtc_index)) {
