@@ -11,8 +11,11 @@
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
+#include "drm-cxx/detail/format.hpp"
 #include "log.hpp"
 #include "modeset/mode.hpp"
+
+#include <drm-cxx/detail/span.hpp>
 
 #include <xf86drmMode.h>
 
@@ -24,8 +27,6 @@
 #include <functional>
 #include <libudev.h>
 #include <memory>
-#include <print>
-#include <span>
 #include <string>
 #include <sys/epoll.h>
 #include <system_error>
@@ -242,7 +243,7 @@ static void print_connector_status(int drm_fd) {
     return;
   }
 
-  std::println("  Connectors ({}):", res->count_connectors);
+  drm::println("  Connectors ({}):", res->count_connectors);
   for (int i = 0; i < res->count_connectors; ++i) {
     auto conn = drm::get_connector(drm_fd, res->connectors[i]);
     if (!conn) {
@@ -261,13 +262,13 @@ static void print_connector_status(int drm_fd) {
         break;
     }
 
-    std::println("    [{}] connector-{}: {} ({} modes)", i, conn->connector_id, status,
+    drm::println("    [{}] connector-{}: {} ({} modes)", i, conn->connector_id, status,
                  conn->count_modes);
 
     if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0) {
-      const auto modes = std::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
+      const auto modes = drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
       if (const auto pref = drm::select_preferred_mode(modes)) {
-        std::println("      preferred: {}x{}@{}Hz", pref->width(), pref->height(), pref->refresh());
+        drm::println("      preferred: {}x{}@{}Hz", pref->width(), pref->height(), pref->refresh());
       }
     }
   }
@@ -284,13 +285,13 @@ int main(const int argc, char* argv[]) {
 
   auto dev_result = drm::Device::open(*path);
   if (!dev_result) {
-    std::println(stderr, "Failed to open {}", *path);
+    drm::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
   auto& dev = *dev_result;
 
-  std::println("Monitoring hotplug events on {}  (Ctrl-C to quit)", *path);
-  std::println("Current state:");
+  drm::println("Monitoring hotplug events on {}  (Ctrl-C to quit)", *path);
+  drm::println("Current state:");
   print_connector_status(dev.fd());
 
   // Install signal handlers for graceful shutdown
@@ -299,12 +300,12 @@ int main(const int argc, char* argv[]) {
 
   UdevHotplugMonitor monitor(
       {"drm"}, [&dev](const char* action, const char* devnode, const char* subsystem) {
-        std::println("\n[hotplug] action={}, devnode={}, subsystem={}", action,
+        drm::println("\n[hotplug] action={}, devnode={}, subsystem={}", action,
                      devnode ? devnode : "(none)", subsystem);
 
         // On any DRM event, re-query connector status
         if (std::string_view(action) == "change") {
-          std::println("Connector status after hotplug:");
+          drm::println("Connector status after hotplug:");
           print_connector_status(dev.fd());
         }
       });
@@ -314,7 +315,7 @@ int main(const int argc, char* argv[]) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
-  std::println("\nShutting down...");
+  drm::println("\nShutting down...");
   monitor.stop();
 
   return EXIT_SUCCESS;

@@ -3,13 +3,14 @@
 
 #include "modeset/mode.hpp"
 
+#include <drm-cxx/detail/span.hpp>
+
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <gtest/gtest.h>
-#include <span>
 
 namespace {
 
@@ -30,7 +31,7 @@ drmModeModeInfo make_mode(uint16_t w, uint16_t h, uint32_t refresh, uint32_t typ
 
 TEST(ModeInfoTest, Accessors) {
   auto m = make_mode(1920, 1080, 60, DRM_MODE_TYPE_PREFERRED);
-  drm::ModeInfo const info{.drm_mode = m};
+  drm::ModeInfo const info{m};
 
   EXPECT_EQ(info.width(), 1920U);
   EXPECT_EQ(info.height(), 1080U);
@@ -41,12 +42,12 @@ TEST(ModeInfoTest, Accessors) {
 
 TEST(ModeInfoTest, InterlacedFlag) {
   auto m = make_mode(1920, 1080, 30, 0, DRM_MODE_FLAG_INTERLACE);
-  drm::ModeInfo const info{.drm_mode = m};
+  drm::ModeInfo const info{m};
   EXPECT_TRUE(info.interlaced());
 }
 
 TEST(ModeSelectionTest, EmptyModesReturnsError) {
-  std::span<const drmModeModeInfo> const empty;
+  drm::span<const drmModeModeInfo> const empty;
   auto result = drm::select_preferred_mode(empty);
   EXPECT_FALSE(result.has_value());
 }

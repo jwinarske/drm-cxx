@@ -1,0 +1,9 @@
+[wrap-git]
+url = https://github.com/TartanLlama/expected.git
+revision = v1.1.0
+depth = 1
+
+patch_directory = tl-expected
+
+[provide]
+tl-expected = tl_expected_dep

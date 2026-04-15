@@ -11,16 +11,17 @@
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
+#include "drm-cxx/detail/format.hpp"
 #include "modeset/atomic.hpp"
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
+
+#include <drm-cxx/detail/span.hpp>
 
 #include <xf86drmMode.h>
 
 #include <cstdint>
 #include <cstdlib>
-#include <print>
-#include <span>
 #include <utility>
 
 int main(const int argc, char* argv[]) {
@@ -32,29 +33,29 @@ int main(const int argc, char* argv[]) {
   // Open DRM device
   auto dev_result = drm::Device::open(*path);
   if (!dev_result) {
-    std::println(stderr, "Failed to open {}", *path);
+    drm::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
   auto& dev = *dev_result;
 
   // Enable capabilities
   if (const auto r = dev.enable_universal_planes(); !r) {
-    std::println(stderr, "Failed to enable universal planes");
+    drm::println(stderr, "Failed to enable universal planes");
     return EXIT_FAILURE;
   }
   if (const auto r = dev.enable_atomic(); !r) {
-    std::println(stderr, "Failed to enable atomic modesetting");
+    drm::println(stderr, "Failed to enable atomic modesetting");
     return EXIT_FAILURE;
   }
 
   // Get resources
   const auto res = drm::get_resources(dev.fd());
   if (!res) {
-    std::println(stderr, "Failed to get DRM resources");
+    drm::println(stderr, "Failed to get DRM resources");
     return EXIT_FAILURE;
   }
 
-  std::println("Found {} connectors, {} CRTCs, {} encoders", res->count_connectors,
+  drm::println("Found {} connectors, {} CRTCs, {} encoders", res->count_connectors,
                res->count_crtcs, res->count_encoders);
 
   // Find the first connected connector
@@ -62,63 +63,64 @@ int main(const int argc, char* argv[]) {
   for (int i = 0; i < res->count_connectors; ++i) {
     if (auto c = drm::get_connector(dev.fd(), res->connectors[i]);
         c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
-      std::println("Connector {}: {} modes", c->connector_id, c->count_modes);
+      drm::println("Connector {}: {} modes", c->connector_id, c->count_modes);
       conn = std::move(c);
       break;
     }
   }
 
   if (!conn) {
-    std::println(stderr, "No connected connector found");
+    drm::println(stderr, "No connected connector found");
     return EXIT_FAILURE;
   }
 
   // Select preferred mode
-  const auto modes = std::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
+  const auto modes = drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes);
   const auto mode_result = drm::select_preferred_mode(modes);
   if (!mode_result) {
-    std::println(stderr, "No suitable mode found");
+    drm::println(stderr, "No suitable mode found");
     return EXIT_FAILURE;
   }
   const auto& mode = *mode_result;
-  std::println("Selected mode: {}x{}@{}Hz{}", mode.width(), mode.height(), mode.refresh(),
+  drm::println("Selected mode: {}x{}@{}Hz{}", mode.width(), mode.height(), mode.refresh(),
                mode.preferred() ? " (preferred)" : "");
 
   // List all available modes
-  for (const auto all_modes = drm::get_all_modes(modes); const auto& m : all_modes) {
-    std::println("  {}x{}@{}Hz{}{}", m.width(), m.height(), m.refresh(),
+  const auto all_modes = drm::get_all_modes(modes);
+  for (const auto& m : all_modes) {
+    drm::println("  {}x{}@{}Hz{}{}", m.width(), m.height(), m.refresh(),
                  m.preferred() ? " [preferred]" : "", m.interlaced() ? " [interlaced]" : "");
   }
 
   // Find encoder and CRTC
   if (conn->encoder_id == 0U) {
-    std::println(stderr, "No encoder attached to connector");
+    drm::println(stderr, "No encoder attached to connector");
     return EXIT_FAILURE;
   }
 
   const auto enc = drm::get_encoder(dev.fd(), conn->encoder_id);
   if (!enc) {
-    std::println(stderr, "Failed to get encoder");
+    drm::println(stderr, "Failed to get encoder");
     return EXIT_FAILURE;
   }
 
   auto crtc = drm::get_crtc(dev.fd(), enc->crtc_id);
   if (!crtc) {
-    std::println(stderr, "Failed to get CRTC");
+    drm::println(stderr, "Failed to get CRTC");
     return EXIT_FAILURE;
   }
 
-  std::println("Using CRTC {} with encoder {}", crtc->crtc_id, enc->encoder_id);
+  drm::println("Using CRTC {} with encoder {}", crtc->crtc_id, enc->encoder_id);
 
   // Set up page flip handler
   drm::PageFlip page_flip(dev);
   page_flip.set_handler([](uint32_t crtc_id, uint64_t seq, uint64_t ts_ns) {
-    std::println("Page flip on CRTC {}: seq={}, timestamp={}ns", crtc_id, seq, ts_ns);
+    drm::println("Page flip on CRTC {}: seq={}, timestamp={}ns", crtc_id, seq, ts_ns);
   });
 
-  std::println("\nAtomic modeset example complete.");
-  std::println("(Full modeset commit requires a framebuffer, which is not");
-  std::println("created in this example. See overlay_planes for allocator usage.)");
+  drm::println("\nAtomic modeset example complete.");
+  drm::println("(Full modeset commit requires a framebuffer, which is not");
+  drm::println("created in this example. See overlay_planes for allocator usage.)");
 
   return EXIT_SUCCESS;
 }

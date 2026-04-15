@@ -21,6 +21,10 @@ subprojects/tcb-span/
 subprojects/tl-expected/
 subprojects/packagecache/
 
+# CMake
+CMakeUserPresets.json
+compile_commands.json
+
 # Editor / IDE artifacts
 .vscode/
 .idea/

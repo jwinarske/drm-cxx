@@ -10,6 +10,7 @@
 
 #include "../select_device.hpp"
 #include "core/device.hpp"
+#include "drm-cxx/detail/format.hpp"
 #include "modeset/atomic.hpp"
 #include "planes/allocator.hpp"
 #include "planes/layer.hpp"
@@ -18,7 +19,6 @@
 
 #include <cstdint>
 #include <cstdlib>
-#include <print>
 
 int main(int argc, char* argv[]) {
   const auto path = drm::examples::select_device(argc, argv);
@@ -29,30 +29,30 @@ int main(int argc, char* argv[]) {
   // Open DRM device
   auto dev_result = drm::Device::open(*path);
   if (!dev_result) {
-    std::println(stderr, "Failed to open {}", *path);
+    drm::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
   auto& dev = *dev_result;
 
   // Enable universal planes + atomic
   if (auto r = dev.enable_universal_planes(); !r) {
-    std::println(stderr, "Failed to enable universal planes");
+    drm::println(stderr, "Failed to enable universal planes");
     return EXIT_FAILURE;
   }
   if (auto r = dev.enable_atomic(); !r) {
-    std::println(stderr, "Failed to enable atomic modesetting");
+    drm::println(stderr, "Failed to enable atomic modesetting");
     return EXIT_FAILURE;
   }
 
   // Enumerate planes
   auto reg_result = drm::planes::PlaneRegistry::enumerate(dev);
   if (!reg_result) {
-    std::println(stderr, "Failed to enumerate planes");
+    drm::println(stderr, "Failed to enumerate planes");
     return EXIT_FAILURE;
   }
   auto& registry = *reg_result;
 
-  std::println("Found {} planes:", registry.all().size());
+  drm::println("Found {} planes:", registry.all().size());
   for (const auto& plane : registry.all()) {
     const char* type_str = "OVERLAY";
     if (plane.type == drm::planes::DRMPlaneType::PRIMARY) {
@@ -61,17 +61,17 @@ int main(int argc, char* argv[]) {
       type_str = "CURSOR";
     }
 
-    std::println("  Plane {}: type={}, formats={}, crtc_mask=0x{:x}", plane.id, type_str,
+    drm::println("  Plane {}: type={}, formats={}, crtc_mask=0x{:x}", plane.id, type_str,
                  plane.formats.size(), plane.possible_crtcs);
 
     if (plane.zpos_min || plane.zpos_max) {
-      std::println("    zpos: [{}, {}]", plane.zpos_min.value_or(0), plane.zpos_max.value_or(0));
+      drm::println("    zpos: [{}, {}]", plane.zpos_min.value_or(0), plane.zpos_max.value_or(0));
     }
     if (plane.supports_rotation) {
-      std::println("    supports rotation");
+      drm::println("    supports rotation");
     }
     if (plane.supports_scaling) {
-      std::println("    supports scaling");
+      drm::println("    supports scaling");
     }
   }
 
@@ -112,17 +112,17 @@ int main(int argc, char* argv[]) {
 
   auto result = allocator.apply(output, req, 0);
   if (!result) {
-    std::println(stderr, "Allocator failed");
+    drm::println(stderr, "Allocator failed");
     return EXIT_FAILURE;
   }
 
-  std::println("\nAllocator assigned {} layers to hardware planes", *result);
+  drm::println("\nAllocator assigned {} layers to hardware planes", *result);
 
   for (const auto* layer : output.layers()) {
     if (auto plane = layer->assigned_plane_id()) {
-      std::println("  Layer -> plane {}", *plane);
+      drm::println("  Layer -> plane {}", *plane);
     } else if (layer->needs_composition()) {
-      std::println("  Layer -> needs software composition");
+      drm::println("  Layer -> needs software composition");
     }
   }
 

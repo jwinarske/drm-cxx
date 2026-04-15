@@ -13,6 +13,7 @@
 #include "core/device.hpp"
 #include "core/property_store.hpp"
 #include "core/resources.hpp"
+#include "drm-cxx/detail/format.hpp"
 #include "input/pointer.hpp"
 #include "input/seat.hpp"
 
@@ -29,7 +30,6 @@
 #include <cstring>
 #include <linux/input-event-codes.h>
 #include <poll.h>
-#include <print>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <system_error>
@@ -71,7 +71,7 @@ static DumbBuffer create_dumb_buffer(int fd, uint32_t w, const uint32_t h) {
   create.bpp = 32;
 
   if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) {
-    std::println(stderr, "Failed to create dumb buffer: {}", std::system_category().message(errno));
+    drm::println(stderr, "Failed to create dumb buffer: {}", std::system_category().message(errno));
     return buf;
   }
 
@@ -100,7 +100,7 @@ static bool add_fb(DumbBuffer& buf, uint32_t format) {
   uint32_t offsets[4] = {0};
   if (drmModeAddFB2(buf.drm_fd, buf.width, buf.height, format, handles, strides, offsets,
                     &buf.fb_id, 0) != 0) {
-    std::println(stderr, "addFB2: {}", std::system_category().message(errno));
+    drm::println(stderr, "addFB2: {}", std::system_category().message(errno));
     return false;
   }
   return true;
@@ -238,7 +238,7 @@ static bool sw_cursor_move(int fd, uint32_t plane_id, uint32_t crtc_id, uint32_t
   auto add = [&](uint32_t obj, const char* name, uint64_t val) -> bool {
     auto prop_id = props.property_id(obj, name);
     if (!prop_id) {
-      if (first) std::println(stderr, "  plane {} missing property '{}'", obj, name);
+      if (first) drm::println(stderr, "  plane {} missing property '{}'", obj, name);
       return false;
     }
     drmModeAtomicAddProperty(req, obj, *prop_id, val);
@@ -267,7 +267,7 @@ static bool sw_cursor_move(int fd, uint32_t plane_id, uint32_t crtc_id, uint32_t
 
   const int ret = drmModeAtomicCommit(fd, req, flags, nullptr);
   if (ret != 0 && first) {
-    std::println(stderr, "sw_cursor first commit: {}", std::system_category().message(errno));
+    drm::println(stderr, "sw_cursor first commit: {}", std::system_category().message(errno));
   }
   drmModeAtomicFree(req);
   return ret == 0;
@@ -314,24 +314,24 @@ int main(int argc, char* argv[]) {
 
   auto dev_result = drm::Device::open(*path);
   if (!dev_result) {
-    std::println(stderr, "Failed to open {}", *path);
+    drm::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
   auto& dev = *dev_result;
 
   if (auto r = dev.enable_universal_planes(); !r) {
-    std::println(stderr, "Failed to enable universal planes");
+    drm::println(stderr, "Failed to enable universal planes");
     return EXIT_FAILURE;
   }
   if (auto r = dev.enable_atomic(); !r) {
-    std::println(stderr, "Failed to enable atomic modesetting");
+    drm::println(stderr, "Failed to enable atomic modesetting");
     return EXIT_FAILURE;
   }
 
   // Find a connected connector with an active CRTC
   const auto res = drm::get_resources(dev.fd());
   if (!res) {
-    std::println(stderr, "Failed to get DRM resources");
+    drm::println(stderr, "Failed to get DRM resources");
     return EXIT_FAILURE;
   }
 
@@ -357,11 +357,11 @@ int main(int argc, char* argv[]) {
     crtc_id = enc->crtc_id;
     mode_w = crtc->mode.hdisplay;
     mode_h = crtc->mode.vdisplay;
-    std::println("Using CRTC {} ({}x{})", crtc_id, mode_w, mode_h);
+    drm::println("Using CRTC {} ({}x{})", crtc_id, mode_w, mode_h);
     break;
   }
   if (crtc_id == 0) {
-    std::println(stderr, "No active CRTC found");
+    drm::println(stderr, "No active CRTC found");
     return EXIT_FAILURE;
   }
 
@@ -384,23 +384,23 @@ int main(int argc, char* argv[]) {
         draw_cursor_sprite(px, cw, ch, cursor_buf.stride);
         munmap(px, cursor_buf.size);
       } else {
-        std::println(stderr, "Failed to map HW cursor buffer");
+        drm::println(stderr, "Failed to map HW cursor buffer");
         destroy_dumb_buffer(cursor_buf);
         cursor_buf = {};
       }
       if (cursor_buf.handle != 0 &&
           drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, cw, ch) == 0) {
         hw_cursor = true;
-        std::println("Using hardware cursor ({}x{})", cw, ch);
+        drm::println("Using hardware cursor ({}x{})", cw, ch);
       } else {
-        std::println("Hardware cursor unavailable ({}), falling back to overlay...",
+        drm::println("Hardware cursor unavailable ({}), falling back to overlay...",
                      std::system_category().message(errno));
         destroy_dumb_buffer(cursor_buf);
         cursor_buf = {};
       }
     }
   } else {
-    std::println("--sw flag: skipping hardware cursor");
+    drm::println("--sw flag: skipping hardware cursor");
   }
 
   // --- Software cursor via overlay plane ---
@@ -410,7 +410,7 @@ int main(int argc, char* argv[]) {
   if (!hw_cursor) {
     overlay_plane_id = find_overlay_plane(dev.fd(), crtc_id);
     if (overlay_plane_id == 0) {
-      std::println(stderr, "No overlay plane available for software cursor");
+      drm::println(stderr, "No overlay plane available for software cursor");
       return EXIT_FAILURE;
     }
 
@@ -434,17 +434,17 @@ int main(int argc, char* argv[]) {
 
     if (auto r = prop_store.cache_properties(dev.fd(), overlay_plane_id, DRM_MODE_OBJECT_PLANE);
         !r) {
-      std::println(stderr, "Failed to cache plane properties");
+      drm::println(stderr, "Failed to cache plane properties");
       destroy_dumb_buffer(cursor_buf);
       return EXIT_FAILURE;
     }
-    std::println("Using software cursor via overlay plane {}", overlay_plane_id);
+    drm::println("Using software cursor via overlay plane {}", overlay_plane_id);
   }
 
   // --- Input ---
   auto seat_result = drm::input::Seat::open();
   if (!seat_result) {
-    std::println(stderr, "Failed to open input seat (need root or input group)");
+    drm::println(stderr, "Failed to open input seat (need root or input group)");
     if (hw_cursor) {
       drmModeSetCursor(dev.fd(), crtc_id, 0, 0, 0);
     }
@@ -473,7 +473,7 @@ int main(int argc, char* argv[]) {
   };
 
   move_cursor(pointer.x(), pointer.y());
-  std::println("Cursor active ({}x{}) — move mouse, Escape to quit", mode_w, mode_h);
+  drm::println("Cursor active ({}x{}) — move mouse, Escape to quit", mode_w, mode_h);
 
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);
@@ -490,7 +490,7 @@ int main(int argc, char* argv[]) {
       } else if (const auto* b = std::get_if<drm::input::PointerButtonEvent>(pe)) {
         pointer.set_button(b->button, b->pressed);
         if (b->pressed) {
-          std::println("Button 0x{:x} at ({:.0f}, {:.0f})", b->button, pointer.x(), pointer.y());
+          drm::println("Button 0x{:x} at ({:.0f}, {:.0f})", b->button, pointer.x(), pointer.y());
         }
       }
     }
@@ -511,12 +511,12 @@ int main(int argc, char* argv[]) {
       if (errno == EINTR) {
         continue;
       }
-      std::println(stderr, "poll: {}", std::system_category().message(errno));
+      drm::println(stderr, "poll: {}", std::system_category().message(errno));
       break;
     }
     if (ret > 0 && ((pfd.revents & POLLIN) != 0)) {
       if (auto r = seat.dispatch(); !r) {
-        std::println(stderr, "dispatch failed");
+        drm::println(stderr, "dispatch failed");
         break;
       }
     }
@@ -533,7 +533,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  std::println("\nRemoving cursor...");
+  drm::println("\nRemoving cursor...");
   if (hw_cursor) {
     drmModeSetCursor(dev.fd(), crtc_id, 0, 0, 0);
   } else if (overlay_plane_id != 0) {

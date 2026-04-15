@@ -1,0 +1,45 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(PkgConfig)
+
+pkg_check_modules(drm            REQUIRED IMPORTED_TARGET libdrm)
+pkg_check_modules(gbm            REQUIRED IMPORTED_TARGET gbm)
+pkg_check_modules(libinput       REQUIRED IMPORTED_TARGET libinput)
+pkg_check_modules(libudev        REQUIRED IMPORTED_TARGET libudev)
+pkg_check_modules(xkbcommon      REQUIRED IMPORTED_TARGET xkbcommon)
+pkg_check_modules(libdisplayinfo REQUIRED IMPORTED_TARGET libdisplay-info)
+
+set(DRM_CXX_VULKAN @DRM_CXX_VULKAN@)
+if(DRM_CXX_VULKAN)
+  pkg_check_modules(vulkan REQUIRED IMPORTED_TARGET vulkan)
+endif()
+
+set(DRM_CXX_HAS_STD_PRINT @DRM_CXX_HAS_STD_PRINT@)
+if(NOT DRM_CXX_HAS_STD_PRINT)
+  # drm-cxx may have linked fmt via {find_package(fmt CONFIG),
+  # pkg_check_modules, FetchContent}, and the exported targets file
+  # therefore references either fmt::fmt or PkgConfig::fmt. Try both
+  # providers and then bridge the two names so whichever form is
+  # referenced resolves.
+  find_package(fmt CONFIG QUIET)
+  if(NOT TARGET fmt::fmt)
+    pkg_check_modules(fmt QUIET IMPORTED_TARGET fmt)
+  endif()
+  if(TARGET fmt::fmt AND NOT TARGET PkgConfig::fmt)
+    add_library(PkgConfig::fmt ALIAS fmt::fmt)
+  elseif(TARGET PkgConfig::fmt AND NOT TARGET fmt::fmt)
+    add_library(fmt::fmt ALIAS PkgConfig::fmt)
+  endif()
+  if(NOT TARGET fmt::fmt)
+    set(drm-cxx_FOUND FALSE)
+    set(drm-cxx_NOT_FOUND_MESSAGE
+        "drm-cxx requires {fmt} but it could not be located via CMake config or pkg-config")
+    return()
+  endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/drm-cxx-targets.cmake")
+
+check_required_components(drm-cxx)

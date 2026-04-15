@@ -1,0 +1,10 @@
+// SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
+// SPDX-License-Identifier: MIT
+
+#pragma once
+
+#define DRM_CXX_VERSION       "@PROJECT_VERSION@"
+#define DRM_CXX_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define DRM_CXX_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define DRM_CXX_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define HAVE_VULKAN           @HAVE_VULKAN@

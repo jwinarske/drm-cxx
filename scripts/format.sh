@@ -27,7 +27,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mapfile -d '' FILES < <(
     find \
-        "${REPO_ROOT}/drm-cxx" \
+        "${REPO_ROOT}/src" \
         "${REPO_ROOT}/tests" \
         "${REPO_ROOT}/examples" \
         \( -name '*.cpp' -o -name '*.hpp' \) \
