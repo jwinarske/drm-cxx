@@ -22,15 +22,15 @@ drm::expected<ConnectorInfo, std::error_code> parse_edid(drm::span<const uint8_t
   // EDID blocks are 128 bytes; reject obviously malformed data.
   static constexpr uint8_t edid_header[] = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
   if (edid_blob.size() < 128) {
-    return drm::unexpected(std::make_error_code(std::errc::invalid_argument));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
   if (std::memcmp(edid_blob.data(), edid_header, sizeof(edid_header)) != 0) {
-    return drm::unexpected(std::make_error_code(std::errc::invalid_argument));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
 
   auto* info = di_info_parse_edid(edid_blob.data(), edid_blob.size());
   if (info == nullptr) {
-    return drm::unexpected(std::make_error_code(std::errc::invalid_argument));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
 
   ConnectorInfo result;

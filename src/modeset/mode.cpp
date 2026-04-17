@@ -40,7 +40,7 @@ uint32_t ModeInfo::clock_khz() const noexcept {
 drm::expected<ModeInfo, std::error_code> select_preferred_mode(
     drm::span<const drmModeModeInfo> modes) {
   if (modes.empty()) {
-    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
 
   // First pass: look for a mode flagged as preferred
@@ -67,7 +67,7 @@ drm::expected<ModeInfo, std::error_code> select_mode(drm::span<const drmModeMode
                                                      uint32_t target_width, uint32_t target_height,
                                                      uint32_t target_refresh) {
   if (modes.empty()) {
-    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
 
   const drmModeModeInfo* best = nullptr;
@@ -99,7 +99,7 @@ drm::expected<ModeInfo, std::error_code> select_mode(drm::span<const drmModeMode
   }
 
   if (best == nullptr) {
-    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
 
   return ModeInfo{*best};

@@ -49,13 +49,13 @@ void PageFlip::set_handler(Handler handler) {
 
 drm::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   if (drm_fd_ < 0) {
-    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   // Use epoll for the wait
   int const epfd = epoll_create1(EPOLL_CLOEXEC);
   if (epfd < 0) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
 
   struct epoll_event ev{};
@@ -63,7 +63,7 @@ drm::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   ev.data.fd = drm_fd_;
   if (epoll_ctl(epfd, EPOLL_CTL_ADD, drm_fd_, &ev) < 0) {
     ::close(epfd);
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
 
   struct epoll_event events[1];
@@ -71,10 +71,10 @@ drm::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   ::close(epfd);
 
   if (nfds < 0) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
   if (nfds == 0) {
-    return drm::unexpected(std::make_error_code(std::errc::timed_out));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::timed_out));
   }
 
   // Handle DRM events
@@ -84,7 +84,7 @@ drm::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
   ctx.page_flip_handler2 = page_flip_handler_v2;
 
   if (drmHandleEvent(drm_fd_, &ctx) != 0) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
 
   return {};

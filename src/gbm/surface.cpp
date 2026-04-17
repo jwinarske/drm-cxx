@@ -44,7 +44,7 @@ drm::expected<Surface, std::error_code> Surface::create(GbmDevice& dev, uint32_t
                                                         uint32_t flags) {
   auto* surf = gbm_surface_create(dev.raw(), width, height, format, flags);
   if (surf == nullptr) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
   return Surface(surf);
 }
@@ -55,12 +55,12 @@ struct gbm_surface* Surface::raw() const noexcept {
 
 drm::expected<Buffer, std::error_code> Surface::lock_front_buffer() {
   if (surf_ == nullptr) {
-    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   auto* bo = gbm_surface_lock_front_buffer(surf_);
   if (bo == nullptr) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
 
   return Buffer(bo, surf_);

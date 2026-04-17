@@ -115,7 +115,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   }
 
   if (previous_allocation_.empty()) {
-    return drm::unexpected(std::make_error_code(std::errc::resource_unavailable_try_again));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::resource_unavailable_try_again));
   }
 
   if (try_test_commit(previous_allocation_, output, req, flags)) {
@@ -135,7 +135,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
     output.mark_clean();
     return assigned;
   }
-  return drm::unexpected(std::make_error_code(std::errc::resource_unavailable_try_again));
+  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::resource_unavailable_try_again));
 }
 
 // ── Full search with all improvements ─────────────────────────
@@ -271,7 +271,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     layer->assigned_plane_ = plane_id;
     layer->needs_composition_ = false;
     if (auto r = apply_layer_to_plane(*layer, plane_id, req); !r) {
-      return drm::unexpected(r.error());
+      return drm::unexpected<std::error_code>(r.error());
     }
   }
 
@@ -297,7 +297,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
       if (plane->type == DRMPlaneType::PRIMARY && best_assignment.count(plane->id) == 0) {
         output.composition_layer()->assigned_plane_ = plane->id;
         if (auto r = apply_layer_to_plane(*output.composition_layer(), plane->id, req); !r) {
-          return drm::unexpected(r.error());
+          return drm::unexpected<std::error_code>(r.error());
         }
         break;
       }

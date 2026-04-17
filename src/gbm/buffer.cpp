@@ -85,11 +85,11 @@ uint32_t Buffer::format() const noexcept {
 
 drm::expected<int, std::error_code> Buffer::fd() const {
   if (bo_ == nullptr) {
-    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
   int const dma_fd = gbm_bo_get_fd(bo_);
   if (dma_fd < 0) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
   return dma_fd;
 }

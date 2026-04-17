@@ -45,14 +45,14 @@ drm::expected<Device, std::error_code> Device::open(std::string_view path) {
   std::string const path_str(path);
   int const fd = ::open(path_str.c_str(), O_RDWR | O_CLOEXEC);
   if (fd < 0) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
 
   // Verify this is actually a DRM device
   auto* version = drmGetVersion(fd);
   if (version == nullptr) {
     ::close(fd);
-    return drm::unexpected(std::make_error_code(std::errc::no_such_device));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
   drmFreeVersion(version);
 
@@ -68,11 +68,11 @@ int Device::fd() const noexcept {
 
 drm::expected<void, std::error_code> Device::set_client_cap(uint64_t cap, uint64_t value) const {
   if (fd_ < 0) {
-    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
   int const ret = drmSetClientCap(fd_, cap, value);
   if (ret != 0) {
-    return drm::unexpected(std::error_code(ret < 0 ? -ret : errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(ret < 0 ? -ret : errno, std::system_category()));
   }
   return {};
 }

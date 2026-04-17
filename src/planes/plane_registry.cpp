@@ -102,7 +102,7 @@ drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
 
   auto* plane_res = drmModeGetPlaneResources(fd);
   if (plane_res == nullptr) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
 
   PlaneRegistry registry;

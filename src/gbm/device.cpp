@@ -37,12 +37,12 @@ GbmDevice& GbmDevice::operator=(GbmDevice&& other) noexcept {
 
 drm::expected<GbmDevice, std::error_code> GbmDevice::create(int drm_fd) {
   if (drm_fd < 0) {
-    return drm::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
   auto* dev = gbm_create_device(drm_fd);
   if (dev == nullptr) {
-    return drm::unexpected(std::error_code(errno, std::system_category()));
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
 
   return GbmDevice(dev);
