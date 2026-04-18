@@ -8,6 +8,7 @@ set(DRM_CXX_SOURCES
   core/format.cpp
   modeset/atomic.cpp
   modeset/mode.cpp
+  modeset/modeset.cpp
   modeset/page_flip.cpp
   planes/plane_registry.cpp
   planes/layer.cpp
@@ -126,6 +127,7 @@ install(FILES
 install(FILES
     modeset/atomic.hpp
     modeset/mode.hpp
+    modeset/modeset.hpp
     modeset/page_flip.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/modeset)
 

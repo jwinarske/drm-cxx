@@ -5,6 +5,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 
+#include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <cerrno>
@@ -36,6 +37,7 @@ drm::expected<void, std::error_code> PropertyStore::cache_properties(int fd, uin
         props->props[i],
         prop->name,
         props->prop_values[i],
+        prop->flags,
     });
 
     drmModeFreeProperty(prop);
@@ -49,7 +51,8 @@ drm::expected<uint32_t, std::error_code> PropertyStore::property_id(uint32_t obj
                                                                     std::string_view name) const {
   auto it = store_.find(object_id);
   if (it == store_.end()) {
-    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_file_or_directory));
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::no_such_file_or_directory));
   }
 
   for (const auto& prop : it->second) {
@@ -58,14 +61,16 @@ drm::expected<uint32_t, std::error_code> PropertyStore::property_id(uint32_t obj
     }
   }
 
-  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_file_or_directory));
+  return drm::unexpected<std::error_code>(
+      std::make_error_code(std::errc::no_such_file_or_directory));
 }
 
 drm::expected<uint64_t, std::error_code> PropertyStore::property_value(
     uint32_t object_id, std::string_view name) const {
   auto it = store_.find(object_id);
   if (it == store_.end()) {
-    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_file_or_directory));
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::no_such_file_or_directory));
   }
 
   for (const auto& prop : it->second) {
@@ -74,7 +79,26 @@ drm::expected<uint64_t, std::error_code> PropertyStore::property_value(
     }
   }
 
-  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_file_or_directory));
+  return drm::unexpected<std::error_code>(
+      std::make_error_code(std::errc::no_such_file_or_directory));
+}
+
+drm::expected<bool, std::error_code> PropertyStore::is_immutable(uint32_t object_id,
+                                                                 std::string_view name) const {
+  auto it = store_.find(object_id);
+  if (it == store_.end()) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::no_such_file_or_directory));
+  }
+
+  for (const auto& prop : it->second) {
+    if (prop.name == name) {
+      return (prop.flags & DRM_MODE_PROP_IMMUTABLE) != 0U;
+    }
+  }
+
+  return drm::unexpected<std::error_code>(
+      std::make_error_code(std::errc::no_such_file_or_directory));
 }
 
 const std::vector<PropertyInfo>* PropertyStore::properties(uint32_t object_id) const {

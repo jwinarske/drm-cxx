@@ -5,7 +5,6 @@
 
 #include "../core/property_store.hpp"
 #include "layer.hpp"
-#include "output.hpp"
 #include "plane_registry.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
@@ -13,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <system_error>
 #include <unordered_map>
@@ -58,32 +58,45 @@ class Allocator {
   // Configurable test commit budget (default: 16)
   void set_max_test_commits(std::size_t max) noexcept;
 
+  // Optional hook invoked before every internal TEST commit. Lets the
+  // caller decorate each freshly built test request with state that must
+  // be present for the TEST to succeed but isn't carried inside the
+  // per-plane layer properties. Typical use: on the very first atomic
+  // commit the CRTC is still inactive, so a plane-only request would
+  // fail with EINVAL; the caller installs a preparer that attaches
+  // MODE_ID / ACTIVE / connector.CRTC_ID when `flags` include
+  // DRM_MODE_ATOMIC_ALLOW_MODESET. Returning an error aborts the TEST.
+  using TestPreparer =
+      std::function<drm::expected<void, std::error_code>(AtomicRequest&, uint32_t flags)>;
+  void set_test_preparer(TestPreparer preparer);
+
  private:
   // §13.3 Warm-start: try previous frame's allocation
   drm::expected<std::size_t, std::error_code> apply_previous_allocation(Output& output,
                                                                         AtomicRequest& req,
-                                                                        uint32_t flags);
+                                                                        uint32_t flags,
+                                                                        uint32_t crtc_index);
 
   // Full search with all improvements
   drm::expected<std::size_t, std::error_code> full_search(Output& output, AtomicRequest& req,
-                                                          uint32_t flags);
+                                                          uint32_t flags, uint32_t crtc_index);
 
   // §13.5 Bipartite pre-solve
-  std::vector<std::pair<Layer*, const PlaneCapabilities*>> bipartite_preseed(Output& output,
-                                                                             uint32_t crtc_index);
+  std::vector<std::pair<Layer*, const PlaneCapabilities*>> bipartite_preseed(
+      Output& output, uint32_t crtc_index) const;
 
   std::vector<std::pair<Layer*, const PlaneCapabilities*>> bipartite_preseed_group(
       std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
-      uint32_t crtc_index);
+      uint32_t crtc_index) const;
 
   // §13.2 Best-first search order
   std::vector<CandidatePair> rank_candidates(Output& output, uint32_t crtc_index) const;
 
-  std::vector<CandidatePair> rank_candidates_group(
+  [[nodiscard]] std::vector<CandidatePair> rank_candidates_group(
       const std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
       uint32_t crtc_index) const;
 
-  int score_pair(const PlaneCapabilities& plane, const Layer& layer) const;
+  [[nodiscard]] int score_pair(const PlaneCapabilities& plane, const Layer& layer) const;
 
   // §13.6 Content-type layer priority
   static int layer_priority(const Layer& layer);
@@ -106,13 +119,27 @@ class Allocator {
                  std::unordered_map<uint32_t, Layer*>& assignment, std::size_t depth,
                  std::size_t best_so_far, AtomicRequest& req, uint32_t flags, uint32_t crtc_index);
 
-  // Build atomic request from assignment and test-commit
-  bool try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment, Output& output,
-                       AtomicRequest& req, uint32_t flags);
+  // Test-commit a tentative assignment. Builds a fresh AtomicRequest
+  // internally that (a) disables every CRTC-compatible non-cursor plane
+  // absent from `assignment`, then (b) applies each assigned layer's
+  // properties. Running TEST without the disabled would inherit stale
+  // state from the previously committed plane (old FB, CRTC_ID, zpos),
+  // producing spurious EINVAL when migrating a layer between planes on
+  // the same CRTC — two active planes, same zpos, same CRTC.
+  bool try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment, uint32_t flags,
+                       uint32_t crtc_index);
 
   // Apply layer properties to a plane in the atomic request
   drm::expected<void, std::error_code> apply_layer_to_plane(const Layer& layer, uint32_t plane_id,
-                                                            AtomicRequest& req);
+                                                            AtomicRequest& req) const;
+
+  // Emit FB_ID=0 / CRTC_ID=0 on every CRTC-compatible non-cursor plane
+  // that isn't in `keep`. Used both inside try_test_commit (so TESTs
+  // reflect the final committed state) and after a winning assignment is
+  // applied to the caller's request (so the COMMIT also clears dropped
+  // planes instead of letting them inherit stale state).
+  void disable_unused_planes(AtomicRequest& req, uint32_t crtc_index,
+                             const std::unordered_map<uint32_t, Layer*>& keep) const;
 
   const Device& dev_;
   PlaneRegistry& registry_;
@@ -127,6 +154,8 @@ class Allocator {
 
   std::size_t max_test_commits_{16};
   std::size_t test_commits_this_frame_{0};
+
+  TestPreparer test_preparer_;
 };
 
 }  // namespace drm::planes
