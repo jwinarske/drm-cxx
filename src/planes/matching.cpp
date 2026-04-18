@@ -3,6 +3,7 @@
 
 #include "matching.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <optional>
@@ -19,13 +20,11 @@ BipartiteMatching::BipartiteMatching(std::size_t n_left, std::size_t n_right)
       dist_(n_left + 1) {}
 
 void BipartiteMatching::add_edge(std::size_t u, std::size_t v) {
-  adj_[u].push_back(v);
+  adj_[u].emplace_back(v, 0);
 }
 
-void BipartiteMatching::add_edge(std::size_t u, std::size_t v, [[maybe_unused]] int score) {
-  // Score is used for ordering in the adjacency list.
-  // For now we just add the edge; sorting happens before solve if needed.
-  adj_[u].push_back(v);
+void BipartiteMatching::add_edge(std::size_t u, std::size_t v, int score) {
+  adj_[u].emplace_back(v, score);
 }
 
 bool BipartiteMatching::bfs() {
@@ -48,7 +47,8 @@ bool BipartiteMatching::bfs() {
     queue.pop();
 
     if (dist_[u] < dist_[n_left_]) {
-      for (std::size_t const v : adj_[u]) {
+      for (const auto& [v, score] : adj_[u]) {
+        (void)score;
         std::size_t const pair_v = match_right_[v];
         std::size_t const idx = (pair_v == nil) ? n_left_ : pair_v;
         if (dist_[idx] == std::numeric_limits<std::size_t>::max()) {
@@ -69,7 +69,8 @@ bool BipartiteMatching::dfs(std::size_t u) {
     return true;  // Sentinel: free right node
   }
 
-  for (std::size_t const v : adj_[u]) {
+  for (const auto& [v, score] : adj_[u]) {
+    (void)score;
     std::size_t const pair_v = match_right_[v];
     std::size_t const idx = (pair_v == nil) ? n_left_ : pair_v;
 
@@ -86,6 +87,16 @@ bool BipartiteMatching::dfs(std::size_t u) {
 
 std::size_t BipartiteMatching::solve() {
   matched_ = 0;
+
+  // Sort each adjacency list by score descending so DFS visits the
+  // caller's preferred right nodes first. Stable sort preserves
+  // insertion order for equal scores. Without this, Hopcroft-Karp
+  // produces a maximum-cardinality matching in arbitrary pairing —
+  // which is wrong when the caller expressed a preference via score.
+  for (auto& edges : adj_) {
+    std::stable_sort(edges.begin(), edges.end(),
+                     [](const auto& a, const auto& b) { return a.second > b.second; });
+  }
 
   while (bfs()) {
     for (std::size_t u = 0; u < n_left_; ++u) {

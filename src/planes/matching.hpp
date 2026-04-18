@@ -50,8 +50,11 @@ class BipartiteMatching {
   std::size_t n_left_;
   std::size_t n_right_;
 
-  // Adjacency list: adj_[u] = list of right nodes u can match to
-  std::vector<std::vector<std::size_t>> adj_;
+  // Adjacency list: adj_[u] = list of (right_node, score) pairs.
+  // Sorted by score descending in solve() so DFS visits high-score
+  // right nodes first — tie-breaks Hopcroft-Karp's otherwise-arbitrary
+  // choice toward the caller's preferred plane for each layer.
+  std::vector<std::vector<std::pair<std::size_t, int>>> adj_;
 
   // Matching state
   static constexpr std::size_t nil = static_cast<std::size_t>(-1);

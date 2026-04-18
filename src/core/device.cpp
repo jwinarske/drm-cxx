@@ -72,7 +72,8 @@ drm::expected<void, std::error_code> Device::set_client_cap(uint64_t cap, uint64
   }
   int const ret = drmSetClientCap(fd_, cap, value);
   if (ret != 0) {
-    return drm::unexpected<std::error_code>(std::error_code(ret < 0 ? -ret : errno, std::system_category()));
+    return drm::unexpected<std::error_code>(
+        std::error_code(ret < 0 ? -ret : errno, std::system_category()));
   }
   return {};
 }
