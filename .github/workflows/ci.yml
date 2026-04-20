@@ -112,12 +112,13 @@ jobs:
           meson setup thorvg-src/build thorvg-src \
             --prefix="$GITHUB_WORKSPACE/thorvg-install" \
             --buildtype=release \
-            -Dloaders=svg,lottie,ttf \            -Dengines=sw \
+            -Dengines=cpu \
+            -Dloaders=svg,lottie,ttf \
+            -Dsavers= \
             -Dbindings=capi \
-            -Dthreads=true \
-            -Dstatic=false \
-            -Dexamples=false \
-            -Dtests=false
+            -Dtools= \
+            -Dtests=false \
+            -Dstatic=false
           meson install -C thorvg-src/build
 
       - name: Export thorvg environment
