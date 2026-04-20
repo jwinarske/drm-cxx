@@ -117,6 +117,7 @@ jobs:
             -Dsavers= \
             -Dbindings=capi \
             -Dtools= \
+            -Dextra=lottie_exp \
             -Dtests=false \
             -Dstatic=false
           meson install -C thorvg-src/build
