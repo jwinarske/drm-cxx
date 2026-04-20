@@ -3,11 +3,13 @@
 //
 // mouse_cursor — shows a cursor that tracks the mouse via libinput.
 //
-// Usage: mouse_cursor [--sw] [/dev/dri/cardN]
+// Usage: mouse_cursor [--sw] [--theme NAME] [--cursor NAME] [--size N]
+//                    [/dev/dri/cardN]
 //
-// Tries hardware cursor first. If it fails (or --sw is given), falls back
-// to a software cursor rendered via an overlay plane + atomic modesetting.
-// Press Escape or Ctrl-C to quit.
+// Loads a cursor from an installed XCursor theme (Adwaita by default) and
+// tracks the mouse via libinput. Tries hardware cursor first; if it fails
+// (or --sw is given), falls back to a software cursor rendered via an
+// overlay plane + atomic modesetting. Press Escape or Ctrl-C to quit.
 
 #include "../select_device.hpp"
 #include "core/device.hpp"
@@ -17,6 +19,7 @@
 #include "input/pointer.hpp"
 #include "input/seat.hpp"
 #include "session/seat.hpp"
+#include "xcursor_loader.hpp"
 
 #include <drm.h>
 #include <drm_fourcc.h>
@@ -118,51 +121,26 @@ static uint32_t* map_dumb_buffer(const DumbBuffer& buf) {
   return (ptr == MAP_FAILED) ? nullptr : ptr;
 }
 
-// Classic angled pointer bitmap (12x17), drawn in the top-left corner.
-// Both HW and SW paths use this same sprite at the same pixel size.
-static constexpr uint32_t kSpriteW = 12;
-static constexpr uint32_t kSpriteH = 17;
-
-// clang-format off
-static constexpr uint32_t kB = 0xFF000000;  // black
-static constexpr uint32_t kW = 0xFFFFFFFF;  // white
-static constexpr uint32_t k_ = 0x00000000;  // transparent
-
-static constexpr uint32_t kSprite[kSpriteH][kSpriteW] = {
-  {kB,k_,k_,k_,k_,k_,k_,k_,k_,k_,k_,k_},
-  {kB,kB,k_,k_,k_,k_,k_,k_,k_,k_,k_,k_},
-  {kB,kW,kB,k_,k_,k_,k_,k_,k_,k_,k_,k_},
-  {kB,kW,kW,kB,k_,k_,k_,k_,k_,k_,k_,k_},
-  {kB,kW,kW,kW,kB,k_,k_,k_,k_,k_,k_,k_},
-  {kB,kW,kW,kW,kW,kB,k_,k_,k_,k_,k_,k_},
-  {kB,kW,kW,kW,kW,kW,kB,k_,k_,k_,k_,k_},
-  {kB,kW,kW,kW,kW,kW,kW,kB,k_,k_,k_,k_},
-  {kB,kW,kW,kW,kW,kW,kW,kW,kB,k_,k_,k_},
-  {kB,kW,kW,kW,kW,kW,kW,kW,kW,kB,k_,k_},
-  {kB,kW,kW,kW,kW,kW,kB,kB,kB,kB,kB,k_},
-  {kB,kW,kW,kB,kW,kW,kB,k_,k_,k_,k_,k_},
-  {kB,kW,kB,k_,kB,kW,kW,kB,k_,k_,k_,k_},
-  {kB,kB,k_,k_,kB,kW,kW,kB,k_,k_,k_,k_},
-  {kB,k_,k_,k_,k_,kB,kW,kW,kB,k_,k_,k_},
-  {k_,k_,k_,k_,k_,kB,kW,kW,kB,k_,k_,k_},
-  {k_,k_,k_,k_,k_,k_,kB,kB,k_,k_,k_,k_},
-};
-// clang-format on
-
-static void draw_cursor_sprite(uint32_t* pixels, uint32_t buf_w, uint32_t buf_h,
-                               uint32_t stride_bytes) {
-  const uint32_t stride_px = stride_bytes / 4;
-  if (stride_px < buf_w) {
-    return;  // sanity check
+// Blit a cursor frame into a dumb buffer. Zeroes the whole buffer first so
+// stale pixels from any prior frame don't leak around a smaller new frame,
+// then centers the frame if it is smaller than the buffer. If the frame is
+// larger, it clips at the top-left (the caller's hotspot-offset math must
+// account for the zero centering offset in that case).
+static void blit_frame(const CursorFrame& f, uint32_t* dst, uint32_t buf_w, uint32_t buf_h,
+                       uint32_t stride_bytes) {
+  const auto stride_px = static_cast<std::size_t>(stride_bytes / 4);
+  for (std::size_t y = 0; y < buf_h; ++y) {
+    std::memset(dst + (y * stride_px), 0, static_cast<std::size_t>(buf_w) * 4);
   }
-  for (uint32_t y = 0; y < buf_h; ++y) {
-    for (uint32_t x = 0; x < buf_w; ++x) {
-      uint32_t color = 0x00000000;
-      if (x < kSpriteW && y < kSpriteH) {
-        color = kSprite[y][x];
-      }
-      pixels[y * stride_px + x] = color;
-    }
+
+  const uint32_t w = std::min(f.width, buf_w);
+  const uint32_t h = std::min(f.height, buf_h);
+  const std::size_t x_off = (buf_w > f.width) ? (buf_w - f.width) / 2 : 0;
+  const std::size_t y_off = (buf_h > f.height) ? (buf_h - f.height) / 2 : 0;
+
+  for (std::size_t y = 0; y < h; ++y) {
+    std::memcpy(dst + ((y + y_off) * stride_px) + x_off,
+                &f.pixels[y * static_cast<std::size_t>(f.width)], static_cast<std::size_t>(w) * 4);
   }
 }
 
@@ -231,14 +209,13 @@ static uint32_t find_overlay_plane(const int fd, const uint32_t crtc_id) {
 // ---------------------------------------------------------------------------
 // Software cursor: position overlay plane via atomic commit
 // ---------------------------------------------------------------------------
-// Buffer dimensions for the SW cursor. The sprite dimensions (kSpriteW/H)
-// are defined above with the bitmap. Many drivers require minimum buffer
-// widths (often 64-pixel aligned), so we allocate a larger buffer.
-static constexpr uint32_t k_buf_w = 64;  // driver-friendly minimum
-static constexpr uint32_t k_buf_h = 64;
+// Many drivers require minimum buffer widths (often 64-pixel aligned), so the
+// SW path allocates at least this size even when the cursor frame is smaller.
+static constexpr uint32_t k_sw_min_buf = 64;
 
 static bool sw_cursor_move(int fd, uint32_t plane_id, uint32_t crtc_id, uint32_t fb_id, int x,
-                           int y, drm::PropertyStore& props, bool first) {
+                           int y, uint32_t buf_w, uint32_t buf_h, drm::PropertyStore& props,
+                           bool first) {
   auto* req = drmModeAtomicAlloc();
   if (!req) return false;
 
@@ -256,16 +233,16 @@ static bool sw_cursor_move(int fd, uint32_t plane_id, uint32_t crtc_id, uint32_t
   add(plane_id, "CRTC_ID", crtc_id);
   add(plane_id, "CRTC_X", static_cast<uint64_t>(x));
   add(plane_id, "CRTC_Y", static_cast<uint64_t>(y));
-  // Use the full buffer size — pixels outside the 12x17 sprite are
+  // Use the full buffer size — pixels outside the cursor frame are
   // transparent (alpha=0), so the cursor appears the correct size.
-  // Using the sprite dimensions directly fails on many drivers due to
+  // Using the frame dimensions directly fails on many drivers due to
   // minimum plane size requirements or lack of sub-buffer SRC support.
-  add(plane_id, "CRTC_W", k_buf_w);
-  add(plane_id, "CRTC_H", k_buf_h);
+  add(plane_id, "CRTC_W", buf_w);
+  add(plane_id, "CRTC_H", buf_h);
   add(plane_id, "SRC_X", 0);
   add(plane_id, "SRC_Y", 0);
-  add(plane_id, "SRC_W", static_cast<uint64_t>(k_buf_w) << 16);
-  add(plane_id, "SRC_H", static_cast<uint64_t>(k_buf_h) << 16);
+  add(plane_id, "SRC_W", static_cast<uint64_t>(buf_w) << 16);
+  add(plane_id, "SRC_H", static_cast<uint64_t>(buf_h) << 16);
 
   // First commit enabling the plane needs ALLOW_MODESET.
   // Use blocking (synchronous) commits — NONBLOCK causes EBUSY when
@@ -300,17 +277,35 @@ static void sw_cursor_hide(int fd, const uint32_t plane_id, const drm::PropertyS
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-  // Parse --sw flag before passing to select_device
+  // Pre-parse our flags and strip them from argv so select_device only sees
+  // the optional device path.
   bool force_sw = false;
-  for (int i = 1; i < argc; ++i) {
+  const char* cli_theme = nullptr;
+  const char* cli_cursor = "default";
+  int cli_size = 0;  // 0 = use hardware cap (HW) or k_sw_min_buf (SW)
+
+  auto strip = [&](int i, int n) {
+    for (int j = i; j + n < argc; ++j) {
+      argv[j] = argv[j + n];
+    }
+    argc -= n;
+  };
+
+  for (int i = 1; i < argc;) {
     if (std::strcmp(argv[i], "--sw") == 0) {
       force_sw = true;
-      // Remove --sw from argv so select_device doesn't see it
-      for (int j = i; j < argc - 1; ++j) {
-        argv[j] = argv[j + 1];
-      }
-      --argc;
-      --i;
+      strip(i, 1);
+    } else if (std::strcmp(argv[i], "--theme") == 0 && i + 1 < argc) {
+      cli_theme = argv[i + 1];
+      strip(i, 2);
+    } else if (std::strcmp(argv[i], "--cursor") == 0 && i + 1 < argc) {
+      cli_cursor = argv[i + 1];
+      strip(i, 2);
+    } else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+      cli_size = std::atoi(argv[i + 1]);
+      strip(i, 2);
+    } else {
+      ++i;
     }
   }
 
@@ -394,49 +389,71 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // --- Try hardware cursor (unless --sw) ---
-  // hw_cursor_w/h are captured here so the resume handler can re-upload
-  // the cursor sprite via drmModeSetCursor with the same dimensions.
-  bool hw_cursor = false;
-  DumbBuffer cursor_buf{};
-  uint32_t hw_cursor_w = 0;
-  uint32_t hw_cursor_h = 0;
-
+  // --- Resolve cursor caps (HW path) ---
+  // Hardware cursor dimensions are fixed per-driver (DRM_CAP_CURSOR_WIDTH/HEIGHT).
+  // SW overlay has no such cap; we just need a driver-friendly minimum.
+  uint64_t cap_w = 64;
+  uint64_t cap_h = 64;
   if (!force_sw) {
-    uint64_t cap_w = 64;
-    uint64_t cap_h = 64;
     drmGetCap(dev.fd(), DRM_CAP_CURSOR_WIDTH, &cap_w);
     drmGetCap(dev.fd(), DRM_CAP_CURSOR_HEIGHT, &cap_h);
-    hw_cursor_w = static_cast<uint32_t>(cap_w);
-    hw_cursor_h = static_cast<uint32_t>(cap_h);
+  }
 
-    cursor_buf = create_dumb_buffer(dev.fd(), hw_cursor_w, hw_cursor_h);
+  // --- Load the cursor from an XCursor theme ---
+  // A theme of nullptr falls through to libxcursor's defaults
+  // (XCURSOR_THEME env, then "default").
+  int target_size = cli_size;
+  if (target_size <= 0) {
+    target_size = static_cast<int>(force_sw ? k_sw_min_buf : cap_w);
+  }
+  auto loaded = LoadedCursor::load(cli_cursor, cli_theme, target_size);
+  if (!loaded) {
+    drm::println(stderr, "Failed to load cursor '{}' from theme '{}' at size {}", cli_cursor,
+                 cli_theme != nullptr ? cli_theme : "(default)", target_size);
+    return EXIT_FAILURE;
+  }
+  const CursorFrame& frame = loaded->first();
+  drm::println("Cursor '{}' loaded: {}x{}, hotspot ({}, {}){}", cli_cursor, frame.width,
+               frame.height, frame.xhot, frame.yhot, loaded->animated() ? " (animated)" : "");
+
+  // --- Allocate cursor buffer + mapping ---
+  // buf_w/buf_h are captured at outer scope so the VT-switch resume
+  // handler can realloc the cursor buffer with the same dimensions.
+  bool hw_cursor = false;
+  DumbBuffer cursor_buf{};
+  uint32_t buf_w = 0;
+  uint32_t buf_h = 0;
+  uint32_t* mapped = nullptr;
+
+  if (!force_sw) {
+    buf_w = static_cast<uint32_t>(cap_w);
+    buf_h = static_cast<uint32_t>(cap_h);
+    cursor_buf = create_dumb_buffer(dev.fd(), buf_w, buf_h);
     if (cursor_buf.handle != 0) {
-      auto* px = map_dumb_buffer(cursor_buf);
-      if (px) {
-        draw_cursor_sprite(px, hw_cursor_w, hw_cursor_h, cursor_buf.stride);
-        munmap(px, cursor_buf.size);
-      } else {
+      mapped = map_dumb_buffer(cursor_buf);
+      if (mapped == nullptr) {
         drm::println(stderr, "Failed to map HW cursor buffer");
         destroy_dumb_buffer(cursor_buf);
         cursor_buf = {};
-      }
-      if (cursor_buf.handle != 0 &&
-          drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, hw_cursor_w, hw_cursor_h) == 0) {
-        hw_cursor = true;
-        drm::println("Using hardware cursor ({}x{})", hw_cursor_w, hw_cursor_h);
       } else {
-        drm::println("Hardware cursor unavailable ({}), falling back to overlay...",
-                     std::system_category().message(errno));
-        destroy_dumb_buffer(cursor_buf);
-        cursor_buf = {};
+        blit_frame(frame, mapped, buf_w, buf_h, cursor_buf.stride);
+        if (drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, buf_w, buf_h) == 0) {
+          hw_cursor = true;
+          drm::println("Using hardware cursor ({}x{})", buf_w, buf_h);
+        } else {
+          drm::println("Hardware cursor unavailable ({}), falling back to overlay...",
+                       std::system_category().message(errno));
+          munmap(mapped, cursor_buf.size);
+          mapped = nullptr;
+          destroy_dumb_buffer(cursor_buf);
+          cursor_buf = {};
+        }
       }
     }
   } else {
     drm::println("--sw flag: skipping hardware cursor");
   }
 
-  // --- Software cursor via overlay plane ---
   uint32_t overlay_plane_id = 0;
   drm::PropertyStore prop_store;
 
@@ -447,20 +464,22 @@ int main(int argc, char* argv[]) {
       return EXIT_FAILURE;
     }
 
-    cursor_buf = create_dumb_buffer(dev.fd(), k_buf_w, k_buf_h);
+    buf_w = std::max(k_sw_min_buf, frame.width);
+    buf_h = std::max(k_sw_min_buf, frame.height);
+    cursor_buf = create_dumb_buffer(dev.fd(), buf_w, buf_h);
     if (cursor_buf.handle == 0) {
       return EXIT_FAILURE;
     }
 
-    if (auto* px = map_dumb_buffer(cursor_buf)) {
-      draw_cursor_sprite(px, k_buf_w, k_buf_h, cursor_buf.stride);
-      munmap(px, cursor_buf.size);
-    } else {
+    mapped = map_dumb_buffer(cursor_buf);
+    if (mapped == nullptr) {
       destroy_dumb_buffer(cursor_buf);
       return EXIT_FAILURE;
     }
+    blit_frame(frame, mapped, buf_w, buf_h, cursor_buf.stride);
 
     if (!add_fb(cursor_buf, DRM_FORMAT_ARGB8888)) {
+      munmap(mapped, cursor_buf.size);
       destroy_dumb_buffer(cursor_buf);
       return EXIT_FAILURE;
     }
@@ -468,10 +487,12 @@ int main(int argc, char* argv[]) {
     if (auto r = prop_store.cache_properties(dev.fd(), overlay_plane_id, DRM_MODE_OBJECT_PLANE);
         !r) {
       drm::println(stderr, "Failed to cache plane properties");
+      munmap(mapped, cursor_buf.size);
       destroy_dumb_buffer(cursor_buf);
       return EXIT_FAILURE;
     }
-    drm::println("Using software cursor via overlay plane {}", overlay_plane_id);
+    drm::println("Using software cursor via overlay plane {} ({}x{} buffer)", overlay_plane_id,
+                 buf_w, buf_h);
   }
 
   // --- Input ---
@@ -492,6 +513,9 @@ int main(int argc, char* argv[]) {
     if (overlay_plane_id != 0U) {
       sw_cursor_hide(dev.fd(), overlay_plane_id, prop_store);
     }
+    if (mapped != nullptr) {
+      munmap(mapped, cursor_buf.size);
+    }
     destroy_dumb_buffer(cursor_buf);
     return EXIT_FAILURE;
   }
@@ -500,15 +524,22 @@ int main(int argc, char* argv[]) {
   drm::input::Pointer pointer;
   pointer.reset_position(static_cast<double>(mode_w) / 2.0, static_cast<double>(mode_h) / 2.0);
 
+  // Centering offset applied by blit_frame when the frame is smaller than
+  // the buffer. The move lambda has to subtract it from the click point in
+  // addition to the frame's own hotspot so the visible cursor tip lands on
+  // the target pixel.
+  const int x_off = (buf_w > frame.width) ? static_cast<int>((buf_w - frame.width) / 2) : 0;
+  const int y_off = (buf_h > frame.height) ? static_cast<int>((buf_h - frame.height) / 2) : 0;
+
   bool first_sw_commit = true;
   auto move_cursor = [&](const double cx, const double cy) {
-    const int ix = static_cast<int>(cx);
-    const int iy = static_cast<int>(cy);
+    const int ix = static_cast<int>(cx) - (frame.xhot + x_off);
+    const int iy = static_cast<int>(cy) - (frame.yhot + y_off);
     if (hw_cursor) {
       drmModeMoveCursor(dev.fd(), crtc_id, ix, iy);
     } else {
-      sw_cursor_move(dev.fd(), overlay_plane_id, crtc_id, cursor_buf.fb_id, ix, iy, prop_store,
-                     first_sw_commit);
+      sw_cursor_move(dev.fd(), overlay_plane_id, crtc_id, cursor_buf.fb_id, ix, iy, buf_w, buf_h,
+                     prop_store, first_sw_commit);
       first_sw_commit = false;
     }
   };
@@ -604,7 +635,10 @@ int main(int argc, char* argv[]) {
       // fields we still use (ioctls on the old fd would return
       // -ENODEV; there's no clean way to release those kernel objects
       // and we don't need to — the fd close in logind did it for us).
+      // The old mmap was torn down when the fd closed; drop the pointer
+      // without munmap — its size is gone with the old cursor_buf.
       cursor_buf = DumbBuffer{};
+      mapped = nullptr;
 
       dev_holder = drm::Device::from_fd(new_fd);
       if (auto r = dev.enable_universal_planes(); !r) {
@@ -616,23 +650,22 @@ int main(int argc, char* argv[]) {
         break;
       }
 
-      const uint32_t buf_w = hw_cursor ? hw_cursor_w : k_buf_w;
-      const uint32_t buf_h = hw_cursor ? hw_cursor_h : k_buf_h;
+      // buf_w/buf_h at outer scope retain the dimensions chosen at
+      // startup (HW cap for HW cursor, max(min, frame) for SW overlay).
       cursor_buf = create_dumb_buffer(dev.fd(), buf_w, buf_h);
       if (cursor_buf.handle == 0) {
         drm::println(stderr, "resume: cursor buffer realloc failed");
         break;
       }
-      if (auto* px = map_dumb_buffer(cursor_buf)) {
-        draw_cursor_sprite(px, buf_w, buf_h, cursor_buf.stride);
-        munmap(px, cursor_buf.size);
-      } else {
+      mapped = map_dumb_buffer(cursor_buf);
+      if (mapped == nullptr) {
         drm::println(stderr, "resume: cursor map failed");
         break;
       }
+      blit_frame(frame, mapped, buf_w, buf_h, cursor_buf.stride);
 
       if (hw_cursor) {
-        if (drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, hw_cursor_w, hw_cursor_h) != 0) {
+        if (drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, buf_w, buf_h) != 0) {
           drm::println(stderr, "resume: drmModeSetCursor failed ({})",
                        std::system_category().message(errno));
           break;
@@ -670,6 +703,10 @@ int main(int argc, char* argv[]) {
     drmModeSetCursor(dev.fd(), crtc_id, 0, 0, 0);
   } else if (overlay_plane_id != 0) {
     sw_cursor_hide(dev.fd(), overlay_plane_id, prop_store);
+  }
+  if (mapped != nullptr) {
+    munmap(mapped, cursor_buf.size);
+    mapped = nullptr;
   }
   destroy_dumb_buffer(cursor_buf);
   return EXIT_SUCCESS;

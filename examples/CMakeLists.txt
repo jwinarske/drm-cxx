@@ -1,21 +1,29 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 
-foreach(_ex atomic_modeset hotplug_monitor mouse_cursor overlay_planes)
+foreach(_ex atomic_modeset hotplug_monitor overlay_planes)
   add_executable(${_ex} ${_ex}/main.cpp)
   target_link_libraries(${_ex} PRIVATE drm-cxx::drm-cxx)
   target_include_directories(${_ex} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
 
-# XCursor loader + smoke test for the mouse_cursor example.
-# mouse_cursor itself picks up the dep in a later step of xcursor_plan.md.
+# XCursor dep + delay-field probe, shared by mouse_cursor and xcursor_smoke.
 pkg_check_modules(xcursor REQUIRED IMPORTED_TARGET xcursor)
 
 include(CheckStructHasMember)
 set(CMAKE_REQUIRED_INCLUDES ${xcursor_INCLUDE_DIRS})
 check_struct_has_member("XcursorImage" delay "X11/Xcursor/Xcursor.h"
-                        HAS_XCURSOR_DELAY LANGUAGE C)
+                        HAS_XCURSOR_DELAY LANGUAGE CXX)
 unset(CMAKE_REQUIRED_INCLUDES)
+
+add_executable(mouse_cursor
+  mouse_cursor/main.cpp
+  mouse_cursor/xcursor_loader.cpp)
+target_link_libraries(mouse_cursor PRIVATE drm-cxx::drm-cxx PkgConfig::xcursor)
+target_include_directories(mouse_cursor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(HAS_XCURSOR_DELAY)
+  target_compile_definitions(mouse_cursor PRIVATE HAS_XCURSOR_DELAY)
+endif()
 
 add_executable(xcursor_smoke
   mouse_cursor/xcursor_smoke.cpp
