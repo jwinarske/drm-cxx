@@ -65,15 +65,15 @@
 #include <thorvg-1/thorvg.h>
 
 // drm-cxx
-#include <drm-cxx/detail/format.hpp>
-#include <drm-cxx/detail/span.hpp>
-
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "input/seat.hpp"
 #include "modeset/atomic.hpp"
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
+
+#include <drm-cxx/detail/format.hpp>
+#include <drm-cxx/detail/span.hpp>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -393,9 +393,8 @@ inline uint32_t compute_fps_ema() {
 // (argv[1] == "gl" / "wg") is ignored with a note — we only support
 // software raster into a dumb buffer on this backend.
 // --------------------------------------------------------------------------
-inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false,
-                uint32_t width = 800, uint32_t height = 800, uint32_t threadsCnt = 4,
-                bool /*print*/ = false) {
+inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uint32_t width = 800,
+                uint32_t height = 800, uint32_t threadsCnt = 4, bool /*print*/ = false) {
   if (demo == nullptr) {
     drm::println(stderr, "tvgdemo::main: null Demo");
     return EXIT_FAILURE;
@@ -453,8 +452,8 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false,
     return EXIT_FAILURE;
   }
   const uint32_t crtc_id = enc->crtc_id;
-  const auto mode_res = drm::select_preferred_mode(
-      drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes));
+  const auto mode_res =
+      drm::select_preferred_mode(drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes));
   if (!mode_res) {
     drm::println(stderr, "No mode selected");
     return EXIT_FAILURE;
@@ -594,8 +593,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false,
   // libinput seat
   auto seat_res = drm::input::Seat::open();
   if (!seat_res) {
-    drm::println(stderr,
-                 "Failed to open input seat (need root or 'input' group membership)");
+    drm::println(stderr, "Failed to open input seat (need root or 'input' group membership)");
     tvg::Initializer::term();
     return EXIT_FAILURE;
   }
