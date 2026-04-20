@@ -88,7 +88,7 @@ drm::expected<Display, std::error_code> Display::create() {
   app_info.pApplicationName = "drm-cxx";
   app_info.apiVersion = VK_API_VERSION_1_0;
 
-  const char* extensions[] = {VK_KHR_DISPLAY_EXTENSION_NAME};
+  const char* const extensions[] = {VK_KHR_DISPLAY_EXTENSION_NAME};
 
   VkInstanceCreateInfo create_info{};
   create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -118,7 +118,7 @@ drm::expected<Display, std::error_code> Display::create() {
       dev_count == 0) {
     return display;
   }
-  VkPhysicalDevice phys_dev = devices[0];
+  VkPhysicalDevice phys_dev = devices.front();
   display.physical_device_ = phys_dev;
 
   // Enumerate displays
@@ -162,7 +162,7 @@ drm::expected<Display, std::error_code> Display::create() {
     for (uint32_t i = 0; i < plane_count; ++i) {
       DisplayPlaneInfo pi{};
       pi.plane_index = i;
-      pi.current_stack_index = plane_props[i].currentStackIndex;
+      pi.current_stack_index = plane_props.at(i).currentStackIndex;
 
       // Get supported displays for this plane
       uint32_t supported_count = 0;

@@ -138,7 +138,8 @@ inline std::array<bool, KEY_MAX + 1>& keystate_storage() {
 // --------------------------------------------------------------------------
 // progress — helper from upstream, used by some demos (kept for parity).
 // --------------------------------------------------------------------------
-inline float progress(const uint32_t elapsed, const float durationInSec, const bool rewind = false) {
+inline float progress(const uint32_t elapsed, const float durationInSec,
+                      const bool rewind = false) {
   const auto duration = static_cast<uint32_t>(durationInSec * 1000.0F);
   if (elapsed == 0 || duration == 0) {
     return 0.0F;
@@ -183,7 +184,7 @@ struct Demo {
 
   void scandir(const char* path) {
     char buf[PATH_MAX];
-    auto *rpath = realpath(path, buf);
+    auto* rpath = realpath(path, buf);
     if (rpath == nullptr) {
       return;
     }
@@ -257,8 +258,8 @@ inline DumbBuffer create_dumb(int fd, uint32_t w, uint32_t h) {
     drm::println(stderr, "MAP_DUMB: {}", std::system_category().message(errno));
     return b;
   }
-  auto* p = static_cast<uint32_t*>(
-      mmap(nullptr, b.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, static_cast<off_t>(mreq.offset)));
+  auto* p = static_cast<uint32_t*>(mmap(nullptr, b.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                                        static_cast<off_t>(mreq.offset)));
   if (p == MAP_FAILED) {
     drm::println(stderr, "mmap: {}", std::system_category().message(errno));
     return b;
@@ -339,7 +340,8 @@ inline uint32_t find_primary_plane(int fd, uint32_t crtc_id) {
 // ACTIVE, CRTC_ID, FB_ID, CRTC_X/Y/W/H, SRC_X/Y/W/H on first-frame
 // modeset. We don't use PropertyStore here because we only need a handful
 // of names across three objects (plane, CRTC, connector).
-inline uint32_t prop_id(const int fd, const uint32_t obj_id, const uint32_t obj_type, const char* name) {
+inline uint32_t prop_id(const int fd, const uint32_t obj_id, const uint32_t obj_type,
+                        const char* name) {
   auto* props = drmModeObjectGetProperties(fd, obj_id, obj_type);
   if (props == nullptr) {
     return 0;

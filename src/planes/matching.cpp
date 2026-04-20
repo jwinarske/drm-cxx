@@ -20,39 +20,39 @@ BipartiteMatching::BipartiteMatching(std::size_t n_left, std::size_t n_right)
       dist_(n_left + 1) {}
 
 void BipartiteMatching::add_edge(std::size_t u, std::size_t v) {
-  adj_[u].emplace_back(v, 0);
+  adj_.at(u).emplace_back(v, 0);
 }
 
 void BipartiteMatching::add_edge(std::size_t u, std::size_t v, int score) {
-  adj_[u].emplace_back(v, score);
+  adj_.at(u).emplace_back(v, score);
 }
 
 bool BipartiteMatching::bfs() {
   std::queue<std::size_t> queue;
 
   for (std::size_t u = 0; u < n_left_; ++u) {
-    if (match_left_[u] == nil) {
-      dist_[u] = 0;
+    if (match_left_.at(u) == nil) {
+      dist_.at(u) = 0;
       queue.push(u);
     } else {
-      dist_[u] = std::numeric_limits<std::size_t>::max();
+      dist_.at(u) = std::numeric_limits<std::size_t>::max();
     }
   }
 
   // dist_[n_left_] is the sentinel distance for "free right node reached"
-  dist_[n_left_] = std::numeric_limits<std::size_t>::max();
+  dist_.at(n_left_) = std::numeric_limits<std::size_t>::max();
 
   while (!queue.empty()) {
     std::size_t const u = queue.front();
     queue.pop();
 
-    if (dist_[u] < dist_[n_left_]) {
-      for (const auto& [v, score] : adj_[u]) {
+    if (dist_.at(u) < dist_.at(n_left_)) {
+      for (const auto& [v, score] : adj_.at(u)) {
         (void)score;
-        std::size_t const pair_v = match_right_[v];
+        std::size_t const pair_v = match_right_.at(v);
         std::size_t const idx = (pair_v == nil) ? n_left_ : pair_v;
-        if (dist_[idx] == std::numeric_limits<std::size_t>::max()) {
-          dist_[idx] = dist_[u] + 1;
+        if (dist_.at(idx) == std::numeric_limits<std::size_t>::max()) {
+          dist_.at(idx) = dist_.at(u) + 1;
           if (idx != n_left_) {
             queue.push(idx);
           }
@@ -61,7 +61,7 @@ bool BipartiteMatching::bfs() {
     }
   }
 
-  return dist_[n_left_] != std::numeric_limits<std::size_t>::max();
+  return dist_.at(n_left_) != std::numeric_limits<std::size_t>::max();
 }
 
 bool BipartiteMatching::dfs(std::size_t u) {
@@ -69,19 +69,19 @@ bool BipartiteMatching::dfs(std::size_t u) {
     return true;  // Sentinel: free right node
   }
 
-  for (const auto& [v, score] : adj_[u]) {
+  for (const auto& [v, score] : adj_.at(u)) {
     (void)score;
-    std::size_t const pair_v = match_right_[v];
+    std::size_t const pair_v = match_right_.at(v);
     std::size_t const idx = (pair_v == nil) ? n_left_ : pair_v;
 
-    if (dist_[idx] == dist_[u] + 1 && dfs(idx)) {
-      match_right_[v] = u;
-      match_left_[u] = v;
+    if (dist_.at(idx) == dist_.at(u) + 1 && dfs(idx)) {
+      match_right_.at(v) = u;
+      match_left_.at(u) = v;
       return true;
     }
   }
 
-  dist_[u] = std::numeric_limits<std::size_t>::max();
+  dist_.at(u) = std::numeric_limits<std::size_t>::max();
   return false;
 }
 
@@ -100,7 +100,7 @@ std::size_t BipartiteMatching::solve() {
 
   while (bfs()) {
     for (std::size_t u = 0; u < n_left_; ++u) {
-      if (match_left_[u] == nil && dfs(u)) {
+      if (match_left_.at(u) == nil && dfs(u)) {
         ++matched_;
       }
     }
@@ -110,17 +110,17 @@ std::size_t BipartiteMatching::solve() {
 }
 
 std::optional<std::size_t> BipartiteMatching::match_for_left(std::size_t u) const {
-  if (u >= n_left_ || match_left_[u] == nil) {
+  if (u >= n_left_ || match_left_.at(u) == nil) {
     return std::nullopt;
   }
-  return match_left_[u];
+  return match_left_.at(u);
 }
 
 std::optional<std::size_t> BipartiteMatching::match_for_right(std::size_t v) const {
-  if (v >= n_right_ || match_right_[v] == nil) {
+  if (v >= n_right_ || match_right_.at(v) == nil) {
     return std::nullopt;
   }
-  return match_right_[v];
+  return match_right_.at(v);
 }
 
 std::size_t BipartiteMatching::matched_count() const noexcept {

@@ -60,8 +60,9 @@ int main(const int argc, char* argv[]) {
 
   // Find the first connected connector
   drm::Connector conn{nullptr, &drmModeFreeConnector};
-  for (int i = 0; i < res->count_connectors; ++i) {
-    if (auto c = drm::get_connector(dev.fd(), res->connectors[i]);
+  const auto connector_ids = drm::span<const uint32_t>(res->connectors, res->count_connectors);
+  for (const auto connector_id : connector_ids) {
+    if (auto c = drm::get_connector(dev.fd(), connector_id);
         c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
       drm::println("Connector {}: {} modes", c->connector_id, c->count_modes);
       conn = std::move(c);

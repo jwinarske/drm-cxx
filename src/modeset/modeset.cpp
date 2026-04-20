@@ -7,6 +7,7 @@
 #include "modeset/atomic.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 
 #include <drm_mode.h>
 #include <xf86drmMode.h>
@@ -27,9 +28,10 @@ uint32_t find_property_id(const int fd, const uint32_t obj_id, const uint32_t ob
   if (props == nullptr) {
     return 0;
   }
+  const auto prop_ids = drm::span<const uint32_t>(props->props, props->count_props);
   uint32_t found = 0;
   for (uint32_t i = 0; i < props->count_props && found == 0; ++i) {
-    drmModePropertyPtr p = drmModeGetProperty(fd, props->props[i]);
+    drmModePropertyPtr p = drmModeGetProperty(fd, prop_ids[i]);
     if (p == nullptr) {
       continue;
     }

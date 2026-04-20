@@ -61,15 +61,29 @@ are byte-for-byte identical to upstream.
 
 ## Build requirements
 
-- **ThorVG 1.0.4+** built with at least:
-  `-Dloaders=svg,ttf,jpg -Dengines=sw`
+- **ThorVG 1.0.4+** — the probe is `pkg_check_modules(... thorvg-1>=1.0.4)`
+  (upstream 1.x installs `thorvg-1.pc`, not `thorvg.pc`). Build with at
+  least `-Dloaders=svg,ttf -Dengines=cpu -Dbindings=capi`.
 - The existing drm-cxx requirements (libdrm, libinput, libudev,
-  xkbcommon)
+  xkbcommon).
 
-On Fedora:
+Fedora's `thorvg-devel` is currently 0.15.x (module name `thorvg`, not
+`thorvg-1`) and does **not** satisfy this probe. Build from source:
 
+```sh
+git clone --depth 1 --branch v1.0.4 https://github.com/thorvg/thorvg.git
+cd thorvg
+meson setup build -Dengines=cpu -Dloaders=svg,lottie,ttf -Dbindings=capi
+sudo meson install -C build        # default prefix: /usr/local
 ```
-dnf install thorvg-devel
+
+The default prefix puts `thorvg-1.pc` under `/usr/local/lib64/pkgconfig/`,
+which isn't on pkg-config's default search path on Fedora. Export it
+before configuring drm-cxx:
+
+```sh
+export PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig:$PKG_CONFIG_PATH
+pkg-config --modversion thorvg-1   # should print 1.0.4
 ```
 
 ## Build options
