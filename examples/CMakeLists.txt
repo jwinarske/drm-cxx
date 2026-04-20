@@ -7,6 +7,24 @@ foreach(_ex atomic_modeset hotplug_monitor mouse_cursor overlay_planes)
   target_include_directories(${_ex} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
 
+# XCursor loader + smoke test for the mouse_cursor example.
+# mouse_cursor itself picks up the dep in a later step of xcursor_plan.md.
+pkg_check_modules(xcursor REQUIRED IMPORTED_TARGET xcursor)
+
+include(CheckStructHasMember)
+set(CMAKE_REQUIRED_INCLUDES ${xcursor_INCLUDE_DIRS})
+check_struct_has_member("XcursorImage" delay "X11/Xcursor/Xcursor.h"
+                        HAS_XCURSOR_DELAY LANGUAGE C)
+unset(CMAKE_REQUIRED_INCLUDES)
+
+add_executable(xcursor_smoke
+  mouse_cursor/xcursor_smoke.cpp
+  mouse_cursor/xcursor_loader.cpp)
+target_link_libraries(xcursor_smoke PRIVATE PkgConfig::xcursor)
+if(HAS_XCURSOR_DELAY)
+  target_compile_definitions(xcursor_smoke PRIVATE HAS_XCURSOR_DELAY)
+endif()
+
 if(DRM_CXX_VULKAN)
   add_executable(vulkan_display vulkan_display/main.cpp)
   target_link_libraries(vulkan_display PRIVATE drm-cxx::drm-cxx)

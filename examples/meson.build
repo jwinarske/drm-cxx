@@ -21,6 +21,23 @@ executable('mouse_cursor',
   dependencies : [drm_cxx_dep],
 )
 
+# XCursor loader + smoke test for the mouse_cursor example.
+# mouse_cursor itself picks up the dep in a later step of xcursor_plan.md.
+xcursor_dep = dependency('xcursor', required : true)
+
+xcursor_smoke_args = []
+if cpp.has_member('XcursorImage', 'delay',
+    prefix : '#include <X11/Xcursor/Xcursor.h>',
+    dependencies : xcursor_dep)
+  xcursor_smoke_args += '-DHAS_XCURSOR_DELAY'
+endif
+
+executable('xcursor_smoke',
+  ['mouse_cursor/xcursor_smoke.cpp', 'mouse_cursor/xcursor_loader.cpp'],
+  dependencies : xcursor_dep,
+  cpp_args : xcursor_smoke_args,
+)
+
 if get_option('vulkan')
   executable('vulkan_display',
     'vulkan_display/main.cpp',
