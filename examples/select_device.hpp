@@ -27,8 +27,7 @@ inline std::vector<std::string> enumerate_cards() {
   }
 
   for (const auto& entry : std::filesystem::directory_iterator(dri_dir)) {
-    const auto name = entry.path().filename().string();
-    if (name.compare(0, 4, "card") == 0) {
+    if (const auto name = entry.path().filename().string(); name.compare(0, 4, "card") == 0) {
       cards.push_back(entry.path().string());
     }
   }

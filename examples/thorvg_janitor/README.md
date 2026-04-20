@@ -108,9 +108,11 @@ master on the selected CRTC and needs read access to `/dev/input/event*`.
 thorvg_janitor [/dev/dri/cardN]
 ```
 
-If the device argument is omitted, `/dev/dri/card0` is used. The
-engine selector from upstream (`gl` / `wg` as `argv[1]`) is accepted
-but ignored with a note — this backend is SW-only. Game logical size
+If the device argument is omitted, `drm::examples::select_device`
+enumerates `/dev/dri/card*` — auto-selecting when exactly one card is
+present and prompting otherwise. The engine selector from upstream
+(`gl` / `wg` / `sw` as a plain token) is accepted but ignored with a
+note — this backend is SW-only. Game logical size
 is fixed by `tvggame.cpp` constants (`SWIDTH`/`SHEIGHT`); the
 framebuffer is allocated at the display's preferred mode and the game
 draws into that coordinate space.

@@ -30,21 +30,17 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <list>
 #include <memory>
-#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
 #include <variant>
-#include <vector>
 
 // POSIX / Linux
 #include <dirent.h>
@@ -52,7 +48,6 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 // DRM
@@ -62,9 +57,10 @@
 #include <xf86drmMode.h>
 
 // ThorVG
-#include <thorvg-1/thorvg.h>
+#include <thorvg.h>
 
 // drm-cxx
+#include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "input/seat.hpp"
@@ -89,25 +85,25 @@ namespace tvgdemo {
 // --------------------------------------------------------------------------
 // verify — same shape as upstream so vendored code's verify() calls work
 // --------------------------------------------------------------------------
-inline bool verify(tvg::Result result, std::string failMsg = "") {
+inline bool verify(const tvg::Result result, const std::string& failMsg = "") {
   switch (result) {
     case tvg::Result::FailedAllocation:
-      std::cout << "FailedAllocation! " << failMsg << std::endl;
+      std::cout << "FailedAllocation! " << failMsg << '\n';
       return false;
     case tvg::Result::InsufficientCondition:
-      std::cout << "InsufficientCondition! " << failMsg << std::endl;
+      std::cout << "InsufficientCondition! " << failMsg << '\n';
       return false;
     case tvg::Result::InvalidArguments:
-      std::cout << "InvalidArguments! " << failMsg << std::endl;
+      std::cout << "InvalidArguments! " << failMsg << '\n';
       return false;
     case tvg::Result::MemoryCorruption:
-      std::cout << "MemoryCorruption! " << failMsg << std::endl;
+      std::cout << "MemoryCorruption! " << failMsg << '\n';
       return false;
     case tvg::Result::NonSupport:
-      std::cout << "NonSupport! " << failMsg << std::endl;
+      std::cout << "NonSupport! " << failMsg << '\n';
       return false;
     case tvg::Result::Unknown:
-      std::cout << "Unknown! " << failMsg << std::endl;
+      std::cout << "Unknown! " << failMsg << '\n';
       return false;
     default:
       break;
@@ -122,7 +118,7 @@ inline bool verify(tvg::Result result, std::string failMsg = "") {
 // need; a bool array sized to KEY_MAX keeps indexing trivial and avoids
 // any hashing overhead in the hot path. tvggame.cpp polls this each frame
 // via the KEY_A / KEY_UP / etc. constants from <linux/input-event-codes.h>
-// — those names are a straight rename from the game's SDL_SCANCODE_* uses
+// — those names are a straight renamed from the game's SDL_SCANCODE_* uses
 // (see the 2-hunk patch header in tvggame.cpp).
 // --------------------------------------------------------------------------
 namespace detail {
@@ -142,16 +138,16 @@ inline std::array<bool, KEY_MAX + 1>& keystate_storage() {
 // --------------------------------------------------------------------------
 // progress — helper from upstream, used by some demos (kept for parity).
 // --------------------------------------------------------------------------
-inline float progress(uint32_t elapsed, float durationInSec, bool rewind = false) {
-  auto duration = uint32_t(durationInSec * 1000.0f);
+inline float progress(const uint32_t elapsed, const float durationInSec, const bool rewind = false) {
+  const auto duration = static_cast<uint32_t>(durationInSec * 1000.0F);
   if (elapsed == 0 || duration == 0) {
-    return 0.0f;
+    return 0.0F;
   }
-  bool forward = ((elapsed / duration) % 2 == 0);
+  const bool forward = ((elapsed / duration) % 2 == 0);
   if (elapsed % duration == 0) {
-    return forward ? 0.0f : 1.0f;
+    return forward ? 0.0F : 1.0F;
   }
-  auto p = (float(elapsed % duration) / (float)duration);
+  const auto p = (static_cast<float>(elapsed % duration) / static_cast<float>(duration));
   if (rewind) {
     return forward ? p : (1 - p);
   }
@@ -179,7 +175,7 @@ struct Demo {
   Demo(Demo&&) = delete;
   Demo& operator=(Demo&&) = delete;
 
-  float timestamp() {
+  static float timestamp() {
     static const auto start = std::chrono::steady_clock::now();
     const auto now = std::chrono::steady_clock::now();
     return std::chrono::duration<float>(now - start).count();
@@ -187,16 +183,16 @@ struct Demo {
 
   void scandir(const char* path) {
     char buf[PATH_MAX];
-    auto rpath = realpath(path, buf);
-    if (!rpath) {
+    auto *rpath = realpath(path, buf);
+    if (rpath == nullptr) {
       return;
     }
     DIR* dir = opendir(rpath);
     if (!dir) {
-      std::cout << "Couldn't open directory \"" << rpath << "\"." << std::endl;
+      std::cout << "Couldn't open directory \"" << rpath << "\"." << '\n';
       return;
     }
-    for (struct dirent* entry = readdir(dir); entry != nullptr; entry = readdir(dir)) {
+    for (const dirent* entry = readdir(dir); entry != nullptr; entry = readdir(dir)) {
       if (*entry->d_name == '.' || *entry->d_name == '$') {
         continue;
       }
@@ -247,9 +243,9 @@ inline DumbBuffer create_dumb(int fd, uint32_t w, uint32_t h) {
   b.stride = req.pitch;
   b.size = req.size;
 
-  uint32_t handles[4] = {b.handle};
-  uint32_t pitches[4] = {b.stride};
-  uint32_t offsets[4] = {0};
+  const uint32_t handles[4] = {b.handle};
+  const uint32_t pitches[4] = {b.stride};
+  constexpr uint32_t offsets[4] = {};
   if (drmModeAddFB2(fd, w, h, DRM_FORMAT_ARGB8888, handles, pitches, offsets, &b.fb_id, 0) != 0) {
     drm::println(stderr, "addFB2: {}", std::system_category().message(errno));
     return b;
@@ -262,7 +258,7 @@ inline DumbBuffer create_dumb(int fd, uint32_t w, uint32_t h) {
     return b;
   }
   auto* p = static_cast<uint32_t*>(
-      mmap(nullptr, b.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, off_t(mreq.offset)));
+      mmap(nullptr, b.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, static_cast<off_t>(mreq.offset)));
   if (p == MAP_FAILED) {
     drm::println(stderr, "mmap: {}", std::system_category().message(errno));
     return b;
@@ -290,7 +286,7 @@ inline void destroy_dumb(DumbBuffer& b) {
 
 // Locate the PRIMARY plane bound (or bindable) to a given CRTC.
 inline uint32_t find_primary_plane(int fd, uint32_t crtc_id) {
-  auto res = drm::get_resources(fd);
+  const auto res = drm::get_resources(fd);
   if (!res) {
     return 0;
   }
@@ -314,10 +310,9 @@ inline uint32_t find_primary_plane(int fd, uint32_t crtc_id) {
     if (plane == nullptr) {
       continue;
     }
-    const bool crtc_ok = (plane->possible_crtcs & (1U << crtc_index)) != 0;
-    if (crtc_ok) {
-      auto* props = drmModeObjectGetProperties(fd, plane->plane_id, DRM_MODE_OBJECT_PLANE);
-      if (props != nullptr) {
+    if (const bool crtc_ok = (plane->possible_crtcs & (1U << crtc_index)) != 0) {
+      if (auto* props = drmModeObjectGetProperties(fd, plane->plane_id, DRM_MODE_OBJECT_PLANE);
+          props != nullptr) {
         for (uint32_t j = 0; j < props->count_props; ++j) {
           auto* prop = drmModeGetProperty(fd, props->props[j]);
           if (prop != nullptr && std::strcmp(prop->name, "type") == 0 &&
@@ -344,7 +339,7 @@ inline uint32_t find_primary_plane(int fd, uint32_t crtc_id) {
 // ACTIVE, CRTC_ID, FB_ID, CRTC_X/Y/W/H, SRC_X/Y/W/H on first-frame
 // modeset. We don't use PropertyStore here because we only need a handful
 // of names across three objects (plane, CRTC, connector).
-inline uint32_t prop_id(int fd, uint32_t obj_id, uint32_t obj_type, const char* name) {
+inline uint32_t prop_id(const int fd, const uint32_t obj_id, const uint32_t obj_type, const char* name) {
   auto* props = drmModeObjectGetProperties(fd, obj_id, obj_type);
   if (props == nullptr) {
     return 0;
@@ -369,14 +364,14 @@ inline uint32_t prop_id(int fd, uint32_t obj_id, uint32_t obj_type, const char* 
 inline uint32_t compute_fps_ema() {
   using clock = std::chrono::steady_clock;
   static double ema_dt = 1.0 / 60.0;
-  static const double half_life = 0.25;
+  static constexpr double half_life = 0.25;
   static auto prev = clock::now();
 
-  auto now = clock::now();
+  const auto now = clock::now();
   double dt = std::chrono::duration<double>(now - prev).count();
   prev = now;
   dt = std::max(0.0, std::min(dt, 0.25));
-  double alpha = 1.0 - std::exp(-std::log(2.0) * dt / half_life);
+  const double alpha = 1.0 - std::exp(-std::log(2.0) * dt / half_life);
   ema_dt += alpha * (dt - ema_dt);
   return static_cast<uint32_t>(1.0 / ema_dt) + 1;
 }
@@ -401,21 +396,30 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   }
   std::unique_ptr<Demo> demo_owner(demo);
 
-  if (argc > 1 && (std::strcmp(argv[1], "gl") == 0 || std::strcmp(argv[1], "wg") == 0)) {
-    drm::println("Note: '{}' engine requested; this backend is SW-only, ignoring", argv[1]);
-  }
-
-  const char* device_path = "/dev/dri/card0";
+  // Strip upstream engine-selector keywords (gl/wg/sw) from argv so
+  // drm::examples::select_device only sees a DRM device path (or nothing)
+  // and can auto-select or prompt. This backend is SW-only.
   for (int i = 1; i < argc; ++i) {
-    if (std::strncmp(argv[i], "/dev/dri/", 9) == 0) {
-      device_path = argv[i];
+    if (std::strcmp(argv[i], "gl") == 0 || std::strcmp(argv[i], "wg") == 0 ||
+        std::strcmp(argv[i], "sw") == 0) {
+      drm::println("Note: '{}' engine requested; this backend is SW-only, ignoring", argv[i]);
+      for (int j = i; j < argc - 1; ++j) {
+        argv[j] = argv[j + 1];
+      }
+      --argc;
+      --i;
     }
   }
 
+  const auto device_path = drm::examples::select_device(argc, argv);
+  if (!device_path) {
+    return EXIT_FAILURE;
+  }
+
   // DRM device
-  auto dev_result = drm::Device::open(device_path);
+  auto dev_result = drm::Device::open(*device_path);
   if (!dev_result) {
-    drm::println(stderr, "Failed to open {}", device_path);
+    drm::println(stderr, "Failed to open {}", *device_path);
     return EXIT_FAILURE;
   }
   auto& dev = *dev_result;
@@ -523,7 +527,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   if (!verify(tvg::Initializer::init(threadsCnt), "Failed to init ThorVG engine!")) {
     return EXIT_FAILURE;
   }
-  std::unique_ptr<tvg::SwCanvas> canvas(tvg::SwCanvas::gen(tvg::EngineOption(0)));
+  std::unique_ptr<tvg::SwCanvas> canvas(tvg::SwCanvas::gen(static_cast<tvg::EngineOption>(0)));
   if (!canvas) {
     drm::println(stderr, "SwCanvas::gen failed (engine disabled?)");
     tvg::Initializer::term();
@@ -551,10 +555,10 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     return EXIT_FAILURE;
   }
 
-  auto commit_frame = [&](bool first_frame) -> bool {
+  auto commit_frame = [&](const bool first_frame) -> bool {
     drm::AtomicRequest req(dev);
-    auto add = [&](uint32_t obj, uint32_t prop, uint64_t val) {
-      auto r = req.add_property(obj, prop, val);
+    auto add = [&](const uint32_t obj, const uint32_t prop, const uint64_t val) {
+      const auto r = req.add_property(obj, prop, val);
       return r.has_value();
     };
     bool ok = true;
@@ -566,8 +570,8 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     ok &= add(plane_id, p_ch, fb_h);
     ok &= add(plane_id, p_sx, 0);
     ok &= add(plane_id, p_sy, 0);
-    ok &= add(plane_id, p_sw, uint64_t(fb_w) << 16);
-    ok &= add(plane_id, p_sh, uint64_t(fb_h) << 16);
+    ok &= add(plane_id, p_sw, static_cast<uint64_t>(fb_w) << 16);
+    ok &= add(plane_id, p_sh, static_cast<uint64_t>(fb_h) << 16);
     if (first_frame) {
       ok &= add(crtc_id, c_mode, mode_blob);
       ok &= add(crtc_id, c_active, 1);
@@ -582,8 +586,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     } else {
       flags |= DRM_MODE_ATOMIC_NONBLOCK;
     }
-    auto r = req.commit(flags);
-    if (!r) {
+    if (auto r = req.commit(flags); !r) {
       drm::println(stderr, "atomic commit failed: {}", r.error().message());
       return false;
     }
@@ -599,8 +602,8 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   }
   auto& seat = *seat_res;
   bool quit = false;
-  int32_t ptr_x = int32_t(fb_w) / 2;
-  int32_t ptr_y = int32_t(fb_h) / 2;
+  int32_t ptr_x = static_cast<int32_t>(fb_w) / 2;
+  int32_t ptr_y = static_cast<int32_t>(fb_h) / 2;
   bool needs_redraw = false;
   seat.set_event_handler([&](const drm::input::InputEvent& event) {
     if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event)) {
@@ -612,8 +615,8 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
       }
     } else if (const auto* pe = std::get_if<drm::input::PointerEvent>(&event)) {
       if (const auto* m = std::get_if<drm::input::PointerMotionEvent>(pe)) {
-        ptr_x = std::clamp(ptr_x + int32_t(m->dx), 0, int32_t(fb_w) - 1);
-        ptr_y = std::clamp(ptr_y + int32_t(m->dy), 0, int32_t(fb_h) - 1);
+        ptr_x = std::clamp(ptr_x + static_cast<int32_t>(m->dx), 0, static_cast<int32_t>(fb_w) - 1);
+        ptr_y = std::clamp(ptr_y + static_cast<int32_t>(m->dy), 0, static_cast<int32_t>(fb_h) - 1);
         needs_redraw |= demo_owner->motion(canvas.get(), ptr_x, ptr_y);
       } else if (const auto* b = std::get_if<drm::input::PointerButtonEvent>(pe)) {
         if (b->pressed) {
@@ -657,8 +660,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   while (!quit) {
     // Drain any input + page-flip events with a short timeout so we don't
     // starve the display when the user is idle.
-    const int ret = poll(pfds, 2, flip_pending ? -1 : 0);
-    if (ret < 0) {
+    if (const int ret = poll(pfds, 2, flip_pending ? -1 : 0); ret < 0) {
       if (errno == EINTR) {
         continue;
       }
