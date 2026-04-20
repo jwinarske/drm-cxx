@@ -28,6 +28,7 @@
 #include <xf86drmMode.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
@@ -131,6 +132,15 @@ static uint32_t* map_dumb_buffer(const DumbBuffer& buf) {
 struct ThemeResult {
   std::optional<LoadedCursor> cursor;
   const char* theme_used{nullptr};  // label only; "(system default)" for nullptr slot
+};
+
+// Shapes that middle-click cycles through and digit keys 1..9 jump to.
+// Chosen to cover the common intentional shapes (pointers, text, wait) plus
+// a couple that illustrate different hotspots (crosshair, grabbing) and
+// animation (wait, progress).
+static constexpr std::array<const char*, 9> kCycle = {
+    "default", "pointer",  "text",        "crosshair", "help",
+    "wait",    "progress", "not-allowed", "grabbing",
 };
 
 static ThemeResult load_with_fallback(const char* name, int size, const char* user_theme) {
@@ -434,18 +444,31 @@ int main(int argc, char* argv[]) {
   if (target_size <= 0) {
     target_size = static_cast<int>(force_sw ? k_sw_min_buf : cap_w);
   }
-  auto [loaded, theme_used] = load_with_fallback(cli_cursor, target_size, cli_theme);
-  if (!loaded) {
+  auto initial = load_with_fallback(cli_cursor, target_size, cli_theme);
+  if (!initial.cursor) {
     drm::println(stderr,
                  "Failed to load cursor '{}' at size {} from any theme (tried {}, "
                  "Bibata-Modern-Classic, Adwaita, default, libxcursor defaults)",
                  cli_cursor, target_size, cli_theme != nullptr ? cli_theme : "(no --theme)");
     return EXIT_FAILURE;
   }
-  drm::println("Cursors: {} from theme '{}'", cli_cursor, theme_used);
-  const CursorFrame& frame = loaded->first();
-  drm::println("Cursor '{}' loaded: {}x{}, hotspot ({}, {}){}", cli_cursor, frame.width,
-               frame.height, frame.xhot, frame.yhot, loaded->animated() ? " (animated)" : "");
+  std::optional<LoadedCursor> current_cursor = std::move(initial.cursor);
+  drm::println("Cursors: {} from theme '{}'", cli_cursor, initial.theme_used);
+  {
+    const CursorFrame& f = current_cursor->first();
+    drm::println("Cursor '{}' loaded: {}x{}, hotspot ({}, {}){}", cli_cursor, f.width, f.height,
+                 f.xhot, f.yhot, current_cursor->animated() ? " (animated)" : "");
+  }
+
+  // Match cli_cursor against kCycle so the first middle-click advances to the
+  // next shape in the list rather than restarting from index 0.
+  std::size_t current_idx = 0;
+  for (std::size_t i = 0; i < kCycle.size(); ++i) {
+    if (std::strcmp(kCycle[i], cli_cursor) == 0) {
+      current_idx = i;
+      break;
+    }
+  }
 
   // --- Allocate cursor buffer + mapping ---
   // buf_w/buf_h are captured at outer scope so the VT-switch resume
@@ -467,7 +490,7 @@ int main(int argc, char* argv[]) {
         destroy_dumb_buffer(cursor_buf);
         cursor_buf = {};
       } else {
-        blit_frame(frame, mapped, buf_w, buf_h, cursor_buf.stride);
+        blit_frame(current_cursor->first(), mapped, buf_w, buf_h, cursor_buf.stride);
         if (drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, buf_w, buf_h) == 0) {
           hw_cursor = true;
           drm::println("Using hardware cursor ({}x{})", buf_w, buf_h);
@@ -495,8 +518,8 @@ int main(int argc, char* argv[]) {
       return EXIT_FAILURE;
     }
 
-    buf_w = std::max(k_sw_min_buf, frame.width);
-    buf_h = std::max(k_sw_min_buf, frame.height);
+    buf_w = std::max(k_sw_min_buf, current_cursor->first().width);
+    buf_h = std::max(k_sw_min_buf, current_cursor->first().height);
     cursor_buf = create_dumb_buffer(dev.fd(), buf_w, buf_h);
     if (cursor_buf.handle == 0) {
       return EXIT_FAILURE;
@@ -507,7 +530,7 @@ int main(int argc, char* argv[]) {
       destroy_dumb_buffer(cursor_buf);
       return EXIT_FAILURE;
     }
-    blit_frame(frame, mapped, buf_w, buf_h, cursor_buf.stride);
+    blit_frame(current_cursor->first(), mapped, buf_w, buf_h, cursor_buf.stride);
 
     if (!add_fb(cursor_buf, DRM_FORMAT_ARGB8888)) {
       munmap(mapped, cursor_buf.size);
@@ -555,17 +578,17 @@ int main(int argc, char* argv[]) {
   drm::input::Pointer pointer;
   pointer.reset_position(static_cast<double>(mode_w) / 2.0, static_cast<double>(mode_h) / 2.0);
 
-  // Centering offset applied by blit_frame when the frame is smaller than
-  // the buffer. The move lambda has to subtract it from the click point in
-  // addition to the frame's own hotspot so the visible cursor tip lands on
-  // the target pixel.
-  const int x_off = (buf_w > frame.width) ? static_cast<int>((buf_w - frame.width) / 2) : 0;
-  const int y_off = (buf_h > frame.height) ? static_cast<int>((buf_h - frame.height) / 2) : 0;
-
+  // Recompute the centering offset each frame: when runtime cursor selection
+  // (middle-click or digit keys) swaps in a cursor with different dimensions,
+  // the offset and hotspot both change. Keeping this out of a capture keeps
+  // the move lambda correct across every shape change.
   bool first_sw_commit = true;
   auto move_cursor = [&](const double cx, const double cy) {
-    const int ix = static_cast<int>(cx) - (frame.xhot + x_off);
-    const int iy = static_cast<int>(cy) - (frame.yhot + y_off);
+    const CursorFrame& f = current_cursor->first();
+    const int x_off = (buf_w > f.width) ? static_cast<int>((buf_w - f.width) / 2) : 0;
+    const int y_off = (buf_h > f.height) ? static_cast<int>((buf_h - f.height) / 2) : 0;
+    const int ix = static_cast<int>(cx) - (f.xhot + x_off);
+    const int iy = static_cast<int>(cy) - (f.yhot + y_off);
     if (hw_cursor) {
       drmModeMoveCursor(dev.fd(), crtc_id, ix, iy);
     } else {
@@ -576,7 +599,8 @@ int main(int argc, char* argv[]) {
   };
 
   move_cursor(pointer.x(), pointer.y());
-  drm::println("Cursor active ({}x{}) — move mouse, Escape to quit", mode_w, mode_h);
+  drm::println("Cursor active ({}x{}) — move mouse, middle-click or 1-9 to cycle, Escape to quit",
+               mode_w, mode_h);
 
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);
@@ -584,6 +608,31 @@ int main(int argc, char* argv[]) {
   // Track whether the pointer moved this iteration — commit once after
   // all pending events are drained, not on every motion event.
   bool cursor_dirty = false;
+
+  // Swap the rendered cursor in place. Shared by the middle-click cycler and
+  // the digit-key jumps. The dumb buffer and its mapping stay the same; only
+  // the pixels and the logical cursor identity change. On HW we call
+  // drmModeSetCursor again with the same handle+size to force the driver to
+  // re-read the buffer (same-handle re-uploads are driver-dependent; the
+  // README's "What could go wrong" section notes this).
+  auto load_and_apply = [&](std::size_t idx) {
+    auto r = load_with_fallback(kCycle[idx], target_size, cli_theme);
+    if (!r.cursor) {
+      drm::println(stderr, "Cursor '{}' not found in any theme", kCycle[idx]);
+      return;
+    }
+    current_cursor = std::move(r.cursor);
+    current_idx = idx;
+    const CursorFrame& f = current_cursor->first();
+    drm::println("Cursor: {} from theme '{}' ({}x{}, hotspot ({}, {})){}", kCycle[idx],
+                 r.theme_used, f.width, f.height, f.xhot, f.yhot,
+                 current_cursor->animated() ? " [animated]" : "");
+    blit_frame(f, mapped, buf_w, buf_h, cursor_buf.stride);
+    if (hw_cursor) {
+      drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, buf_w, buf_h);
+    }
+    cursor_dirty = true;
+  };
 
   input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
     if (const auto* pe = std::get_if<drm::input::PointerEvent>(&event)) {
@@ -593,13 +642,22 @@ int main(int argc, char* argv[]) {
       } else if (const auto* b = std::get_if<drm::input::PointerButtonEvent>(pe)) {
         pointer.set_button(b->button, b->pressed);
         if (b->pressed) {
-          drm::println("Button 0x{:x} at ({:.0f}, {:.0f})", b->button, pointer.x(), pointer.y());
+          if (b->button == BTN_MIDDLE) {
+            load_and_apply((current_idx + 1) % kCycle.size());
+          } else {
+            drm::println("Button 0x{:x} at ({:.0f}, {:.0f})", b->button, pointer.x(), pointer.y());
+          }
         }
       }
     }
     if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event)) {
-      if (ke->key == KEY_ESC && ke->pressed) {
-        g_quit = 1;
+      if (ke->pressed) {
+        if (ke->key == KEY_ESC) {
+          g_quit = 1;
+        } else if (ke->key >= KEY_1 && ke->key <= KEY_9) {
+          const auto digit = static_cast<std::size_t>(ke->key - KEY_1);
+          load_and_apply(std::min(digit, kCycle.size() - 1));
+        }
       }
     }
   });
@@ -693,7 +751,7 @@ int main(int argc, char* argv[]) {
         drm::println(stderr, "resume: cursor map failed");
         break;
       }
-      blit_frame(frame, mapped, buf_w, buf_h, cursor_buf.stride);
+      blit_frame(current_cursor->first(), mapped, buf_w, buf_h, cursor_buf.stride);
 
       if (hw_cursor) {
         if (drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, buf_w, buf_h) != 0) {
