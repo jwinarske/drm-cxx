@@ -121,6 +121,36 @@ static uint32_t* map_dumb_buffer(const DumbBuffer& buf) {
   return (ptr == MAP_FAILED) ? nullptr : ptr;
 }
 
+// Theme fallback chain for cursor loading.
+// --theme wins if it resolves; otherwise try two common distro themes,
+// then libxcursor's built-in "default" symlink, then let libxcursor pick
+// whatever it finds on XCURSOR_PATH. The last two slots are important
+// because "default" is a symlink that's present on most systems but can
+// point at a theme that doesn't ship the requested cursor name, and
+// (nullptr) defers to libxcursor's full search logic.
+struct ThemeResult {
+  std::optional<LoadedCursor> cursor;
+  const char* theme_used{nullptr};  // label only; "(system default)" for nullptr slot
+};
+
+static ThemeResult load_with_fallback(const char* name, int size, const char* user_theme) {
+  const char* candidates[] = {
+      user_theme, "Bibata-Modern-Classic", "Adwaita", "default", nullptr,
+  };
+  for (const char* t : candidates) {
+    // Skip the user_theme slot when no --theme was given: the trailing
+    // nullptr slot already covers libxcursor-defaults, so trying the
+    // empty first slot would just be a duplicate call.
+    if (t == user_theme && user_theme == nullptr) {
+      continue;
+    }
+    if (auto c = LoadedCursor::load(name, t, size)) {
+      return {std::move(c), t != nullptr ? t : "(system default)"};
+    }
+  }
+  return {std::nullopt, nullptr};
+}
+
 // Blit a cursor frame into a dumb buffer. Zeroes the whole buffer first so
 // stale pixels from any prior frame don't leak around a smaller new frame,
 // then centers the frame if it is smaller than the buffer. If the frame is
@@ -400,18 +430,19 @@ int main(int argc, char* argv[]) {
   }
 
   // --- Load the cursor from an XCursor theme ---
-  // A theme of nullptr falls through to libxcursor's defaults
-  // (XCURSOR_THEME env, then "default").
   int target_size = cli_size;
   if (target_size <= 0) {
     target_size = static_cast<int>(force_sw ? k_sw_min_buf : cap_w);
   }
-  auto loaded = LoadedCursor::load(cli_cursor, cli_theme, target_size);
+  auto [loaded, theme_used] = load_with_fallback(cli_cursor, target_size, cli_theme);
   if (!loaded) {
-    drm::println(stderr, "Failed to load cursor '{}' from theme '{}' at size {}", cli_cursor,
-                 cli_theme != nullptr ? cli_theme : "(default)", target_size);
+    drm::println(stderr,
+                 "Failed to load cursor '{}' at size {} from any theme (tried {}, "
+                 "Bibata-Modern-Classic, Adwaita, default, libxcursor defaults)",
+                 cli_cursor, target_size, cli_theme != nullptr ? cli_theme : "(no --theme)");
     return EXIT_FAILURE;
   }
+  drm::println("Cursors: {} from theme '{}'", cli_cursor, theme_used);
   const CursorFrame& frame = loaded->first();
   drm::println("Cursor '{}' loaded: {}x{}, hotspot ({}, {}){}", cli_cursor, frame.width,
                frame.height, frame.xhot, frame.yhot, loaded->animated() ? " (animated)" : "");
