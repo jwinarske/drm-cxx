@@ -27,3 +27,17 @@ if get_option('vulkan')
     dependencies : drm_cxx_dep,
   )
 endif
+
+# ThorVG Janitor example — scaffold only (see examples/thorvg_janitor/README.md).
+# Upstream ThorVG is auto-detected; set -Dthorvg_janitor=disabled to skip the
+# probe entirely, or -Dthorvg_janitor=enabled to hard-require ThorVG.
+thorvg_feature = get_option('thorvg_janitor')
+if not thorvg_feature.disabled()
+  thorvg_dep = dependency('thorvg', required : thorvg_feature.enabled(),
+                          version : '>=1.0.4')
+  if thorvg_dep.found()
+    subdir('thorvg_janitor')
+  else
+    message('thorvg_janitor: thorvg not found, skipping (pass -Dthorvg_janitor=enabled to hard-fail)')
+  endif
+endif

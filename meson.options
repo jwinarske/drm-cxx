@@ -1,3 +1,4 @@
-option('vulkan',   type : 'boolean', value : true,  description : 'Build Vulkan display support')
-option('examples', type : 'boolean', value : true,  description : 'Build example programs')
-option('tests',    type : 'boolean', value : true,  description : 'Build unit and integration tests')
+option('vulkan',         type : 'boolean', value : true,   description : 'Build Vulkan display support')
+option('examples',       type : 'boolean', value : true,   description : 'Build example programs')
+option('tests',          type : 'boolean', value : true,   description : 'Build unit and integration tests')
+option('thorvg_janitor', type : 'feature', value : 'auto', description : 'Build the ThorVG Janitor example (needs thorvg)')

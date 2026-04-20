@@ -12,3 +12,24 @@ if(DRM_CXX_VULKAN)
   target_link_libraries(vulkan_display PRIVATE drm-cxx::drm-cxx)
   target_include_directories(vulkan_display PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
+
+# ThorVG Janitor example — scaffold only (see examples/thorvg_janitor/README.md).
+# AUTO = probe thorvg, build if found; ON = hard-require; OFF = skip entirely.
+set(DRM_CXX_BUILD_THORVG_JANITOR "AUTO" CACHE STRING
+    "Build the ThorVG Janitor example: AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_BUILD_THORVG_JANITOR PROPERTY STRINGS AUTO ON OFF)
+
+if(NOT DRM_CXX_BUILD_THORVG_JANITOR STREQUAL "OFF")
+  if(DRM_CXX_BUILD_THORVG_JANITOR STREQUAL "ON")
+    pkg_check_modules(thorvg REQUIRED IMPORTED_TARGET thorvg>=1.0.4)
+  else()
+    pkg_check_modules(thorvg IMPORTED_TARGET thorvg>=1.0.4)
+  endif()
+  if(TARGET PkgConfig::thorvg)
+    add_subdirectory(thorvg_janitor)
+  else()
+    message(STATUS
+      "thorvg_janitor: thorvg not found, skipping "
+      "(set DRM_CXX_BUILD_THORVG_JANITOR=ON to hard-fail)")
+  endif()
+endif()
