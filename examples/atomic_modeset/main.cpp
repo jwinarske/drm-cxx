@@ -8,6 +8,7 @@
 // Opens a DRM device, finds a connected connector, selects the preferred
 // mode, and performs an atomic modeset. Then waits for a page flip event.
 
+#include "../logind_session.hpp"
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -29,6 +30,12 @@ int main(const int argc, char* argv[]) {
   if (!path) {
     return EXIT_FAILURE;
   }
+
+  // Claim a logind session if we're running under one. The session is held
+  // for the lifetime of main; logind triggers a VT-switch handoff back to
+  // the text console on process death (including SIGKILL), so the TTY
+  // doesn't freeze on a stale framebuffer.
+  auto logind = drm::examples::LogindSession::open();
 
   // Open DRM device
   auto dev_result = drm::Device::open(*path);

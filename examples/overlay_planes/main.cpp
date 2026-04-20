@@ -8,6 +8,7 @@
 // Opens a DRM device, enumerates planes, creates virtual layers,
 // and runs the allocator to assign layers to hardware planes.
 
+#include "../logind_session.hpp"
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "drm-cxx/detail/format.hpp"
@@ -25,6 +26,9 @@ int main(int argc, char* argv[]) {
   if (!path) {
     return EXIT_FAILURE;
   }
+
+  // See atomic_modeset for why we claim a logind session.
+  auto logind = drm::examples::LogindSession::open();
 
   // Open DRM device
   auto dev_result = drm::Device::open(*path);

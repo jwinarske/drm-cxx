@@ -21,21 +21,25 @@ namespace drm {
 
 void page_flip_handler(int /*fd*/, unsigned int /*sequence*/, const unsigned int tv_sec,
                        const unsigned int tv_usec, void* user_data) {
-  if (const auto* pf = static_cast<PageFlip*>(user_data); pf->handler_) {
-    uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
-                                  (static_cast<uint64_t>(tv_usec) * 1'000ULL);
-    // We pass 0 for crtc_id and sequence here; the v2 handler below is preferred
-    pf->handler_(0, 0, timestamp_ns);
+  const auto* pf = static_cast<PageFlip*>(user_data);
+  if (pf == nullptr || !pf->handler_) {
+    return;
   }
+  uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
+                                (static_cast<uint64_t>(tv_usec) * 1'000ULL);
+  // We pass 0 for crtc_id and sequence here; the v2 handler below is preferred
+  pf->handler_(0, 0, timestamp_ns);
 }
 
 void page_flip_handler_v2(int /*fd*/, const unsigned int sequence, const unsigned int tv_sec,
                           const unsigned int tv_usec, const unsigned int crtc_id, void* user_data) {
-  if (const auto* pf = static_cast<PageFlip*>(user_data); pf->handler_) {
-    uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
-                                  (static_cast<uint64_t>(tv_usec) * 1'000ULL);
-    pf->handler_(crtc_id, sequence, timestamp_ns);
+  const auto* pf = static_cast<PageFlip*>(user_data);
+  if (pf == nullptr || !pf->handler_) {
+    return;
   }
+  uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
+                                (static_cast<uint64_t>(tv_usec) * 1'000ULL);
+  pf->handler_(crtc_id, sequence, timestamp_ns);
 }
 
 PageFlip::PageFlip(const Device& dev) : drm_fd_(dev.fd()) {}

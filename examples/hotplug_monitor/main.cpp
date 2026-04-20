@@ -8,6 +8,7 @@
 // Monitors the "drm" udev subsystem for add/remove/change events,
 // then re-queries the DRM device to report connector status.
 
+#include "../logind_session.hpp"
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -282,6 +283,9 @@ int main(const int argc, char* argv[]) {
   if (!path) {
     return EXIT_FAILURE;
   }
+
+  // See atomic_modeset for why we claim a logind session.
+  auto logind = drm::examples::LogindSession::open();
 
   auto dev_result = drm::Device::open(*path);
   if (!dev_result) {

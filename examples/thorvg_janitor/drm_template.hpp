@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,6 +61,7 @@
 #include <thorvg.h>
 
 // drm-cxx
+#include "../logind_session.hpp"
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -132,7 +134,7 @@ inline std::array<bool, KEY_MAX + 1>& keystate_storage() {
   if (code < 0 || code > KEY_MAX) {
     return false;
   }
-  return detail::keystate_storage()[static_cast<std::size_t>(code)];
+  return detail::keystate_storage().at(static_cast<std::size_t>(code));
 }
 
 // --------------------------------------------------------------------------
@@ -156,7 +158,7 @@ inline float progress(const uint32_t elapsed, const float durationInSec,
 }
 
 // --------------------------------------------------------------------------
-// Demo — virtual base matching upstream's shape exactly.
+// Demo — virtual base matching upstreams shape exactly.
 // --------------------------------------------------------------------------
 struct Demo {
   uint32_t elapsed = 0;
@@ -184,12 +186,12 @@ struct Demo {
 
   void scandir(const char* path) {
     char buf[PATH_MAX];
-    auto* rpath = realpath(path, buf);
+    const auto* rpath = realpath(path, buf);
     if (rpath == nullptr) {
       return;
     }
     DIR* dir = opendir(rpath);
-    if (!dir) {
+    if (dir == nullptr) {
       std::cout << "Couldn't open directory \"" << rpath << "\"." << '\n';
       return;
     }
@@ -311,7 +313,7 @@ inline uint32_t find_primary_plane(int fd, uint32_t crtc_id) {
     if (plane == nullptr) {
       continue;
     }
-    if (const bool crtc_ok = (plane->possible_crtcs & (1U << crtc_index)) != 0) {
+    if ((plane->possible_crtcs & (1U << crtc_index)) != 0) {
       if (auto* props = drmModeObjectGetProperties(fd, plane->plane_id, DRM_MODE_OBJECT_PLANE);
           props != nullptr) {
         for (uint32_t j = 0; j < props->count_props; ++j) {
@@ -385,7 +387,7 @@ inline uint32_t compute_fps_ema() {
 // DRM device open, modeset, ThorVG init, input seat, and the render loop.
 // Returns 0 on clean exit, nonzero on any setup or commit failure.
 //
-// Signature kept bit-for-bit compatible with upstream template.h so no
+// Signature kept bit-for-bit compatible with upstream template.h, so no
 // change in the vendored call site is needed. The engine-selector arg1
 // (argv[1] == "gl" / "wg") is ignored with a note — we only support
 // software raster into a dumb buffer on this backend.
@@ -417,6 +419,12 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   if (!device_path) {
     return EXIT_FAILURE;
   }
+
+  // Claim a logind session so that a hard-kill (SIGKILL) of this process
+  // triggers the VT switch-back to the text console via logind's session
+  // cleanup on DBus disconnect. No-op (returns nullopt) when we're not
+  // running under a logind-managed session.
+  auto logind = drm::examples::LogindSession::open();
 
   // DRM device
   auto dev_result = drm::Device::open(*device_path);
@@ -470,14 +478,6 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   drm::println("Mode: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.refresh(),
                conn->connector_id, crtc_id);
 
-  // The game asked for a specific (width, height) for its logical canvas; we
-  // honor that by rendering the canvas into the full-resolution framebuffer
-  // — ThorVG's SwCanvas is told the true stride and dimensions, and the
-  // game draws at its coordinate space inside. If the game's size differs
-  // from the mode, the extra pixels stay cleared.
-  (void)width;
-  (void)height;
-
   // Find primary plane
   const uint32_t plane_id = detail::find_primary_plane(dev.fd(), crtc_id);
   if (plane_id == 0) {
@@ -493,15 +493,31 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   }
 
   // Two dumb buffers, ARGB8888 at mode resolution
-  detail::DumbBuffer buf[2];
-  buf[0] = detail::create_dumb(dev.fd(), fb_w, fb_h);
-  buf[1] = detail::create_dumb(dev.fd(), fb_w, fb_h);
-  if (buf[0].mapped == nullptr || buf[1].mapped == nullptr) {
+  std::array<detail::DumbBuffer, 2> buf{};
+  buf.at(0) = detail::create_dumb(dev.fd(), fb_w, fb_h);
+  buf.at(1) = detail::create_dumb(dev.fd(), fb_w, fb_h);
+  if (buf.at(0).mapped == nullptr || buf.at(1).mapped == nullptr) {
     drm::println(stderr, "Failed to allocate dumb buffers");
     return EXIT_FAILURE;
   }
-  std::memset(buf[0].mapped, 0, buf[0].size);
-  std::memset(buf[1].mapped, 0, buf[1].size);
+  std::memset(buf.at(0).mapped, 0, buf.at(0).size);
+  std::memset(buf.at(1).mapped, 0, buf.at(1).size);
+
+  // Honor the game's requested (width, height) as the logical canvas size.
+  // We render into that subregion of the mode-sized dumb buffer — centered,
+  // with the surrounding pixels left as the zero-fill above. Keeps the SW
+  // raster cost proportional to the game's intended resolution rather than
+  // the display's; the difference is ~2x pixels on a 3440x1440 panel vs.
+  // the game's native 2048x1152, and shows up as frame-rate cliffs on
+  // high-particle-count events (e.g. ship impact spawning many Explosions).
+  const uint32_t canvas_w = std::min<uint32_t>(width, fb_w);
+  const uint32_t canvas_h = std::min<uint32_t>(height, fb_h);
+  const uint32_t stride_px = buf.at(0).stride / 4;
+  const uint32_t x_off = (fb_w - canvas_w) / 2;
+  const uint32_t y_off = (fb_h - canvas_h) / 2;
+  const auto canvas_origin = [&](const int idx) -> uint32_t* {
+    return buf.at(static_cast<std::size_t>(idx)).mapped + (y_off * stride_px) + x_off;
+  };
 
   // Property ids we will keep pumping every commit
   const int fd = dev.fd();
@@ -539,7 +555,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   // Bind canvas to the initial back buffer.
   int back = 0;
   int front = 1;
-  if (!verify(canvas->target(buf[back].mapped, buf[back].stride / 4, fb_w, fb_h,
+  if (!verify(canvas->target(canvas_origin(back), stride_px, canvas_w, canvas_h,
                              tvg::ColorSpace::ARGB8888))) {
     tvg::Initializer::term();
     return EXIT_FAILURE;
@@ -547,7 +563,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
 
   // Give the demo its initial content and pre-render frame 0 so the first
   // atomic commit displays something real.
-  if (!demo_owner->content(canvas.get(), fb_w, fb_h)) {
+  if (!demo_owner->content(canvas.get(), canvas_w, canvas_h)) {
     drm::println(stderr, "demo.content returned false");
     tvg::Initializer::term();
     return EXIT_FAILURE;
@@ -557,14 +573,25 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     return EXIT_FAILURE;
   }
 
+  // PageFlip: mark flip_pending = false on each event so the main loop
+  // knows the back buffer that was scanned out is safe to reuse. Declared
+  // up here so commit_frame can pass &page_flip as the commit's user_data
+  // — libdrm routes that pointer back to page_flip_handler_v2 when the
+  // flip completes.
+  drm::PageFlip page_flip(dev);
+  bool flip_pending = false;
+  page_flip.set_handler(
+      [&](uint32_t /*crtc*/, uint64_t /*seq*/, uint64_t /*ts_ns*/) { flip_pending = false; });
+
   auto commit_frame = [&](const bool first_frame) -> bool {
+    const auto& back_buf = buf.at(static_cast<std::size_t>(back));
     drm::AtomicRequest req(dev);
     auto add = [&](const uint32_t obj, const uint32_t prop, const uint64_t val) {
       const auto r = req.add_property(obj, prop, val);
       return r.has_value();
     };
     bool ok = true;
-    ok &= add(plane_id, p_fb, buf[back].fb_id);
+    ok &= add(plane_id, p_fb, back_buf.fb_id);
     ok &= add(plane_id, p_crtc, crtc_id);
     ok &= add(plane_id, p_cx, 0);
     ok &= add(plane_id, p_cy, 0);
@@ -588,7 +615,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     } else {
       flags |= DRM_MODE_ATOMIC_NONBLOCK;
     }
-    if (auto r = req.commit(flags); !r) {
+    if (auto r = req.commit(flags, &page_flip); !r) {
       drm::println(stderr, "atomic commit failed: {}", r.error().message());
       return false;
     }
@@ -609,8 +636,8 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   bool needs_redraw = false;
   seat.set_event_handler([&](const drm::input::InputEvent& event) {
     if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event)) {
-      if (ke->key >= 0 && ke->key <= KEY_MAX) {
-        detail::keystate_storage()[size_t(ke->key)] = ke->pressed;
+      if (ke->key <= KEY_MAX) {
+        detail::keystate_storage().at(static_cast<std::size_t>(ke->key)) = ke->pressed;
       }
       if (ke->key == KEY_ESC && ke->pressed) {
         quit = true;
@@ -630,17 +657,10 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     }
   });
 
-  // PageFlip: mark flip_pending = false on each event so the main loop
-  // knows the back buffer that was scanned out is safe to reuse.
-  drm::PageFlip page_flip(dev);
-  bool flip_pending = false;
-  page_flip.set_handler(
-      [&](uint32_t /*crtc*/, uint64_t /*seq*/, uint64_t /*ts_ns*/) { flip_pending = false; });
-
   // First frame: full modeset + page-flip event request
   if (!commit_frame(true)) {
-    detail::destroy_dumb(buf[0]);
-    detail::destroy_dumb(buf[1]);
+    detail::destroy_dumb(buf.at(0));
+    detail::destroy_dumb(buf.at(1));
     drmModeDestroyPropertyBlob(fd, mode_blob);
     tvg::Initializer::term();
     return EXIT_FAILURE;
@@ -690,6 +710,19 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     demo_owner->elapsed = elapsed;
     demo_owner->fps = detail::compute_fps_ema();
 
+    // Rebind the canvas to the buffer we'll draw into this frame
+    // BEFORE the game mutates the scene and calls canvas->update().
+    // With threadsCnt > 0, canvas->update() may dispatch work to the
+    // threadpool; calling target() afterwards returns
+    // InsufficientCondition because the canvas is still "performing
+    // rendering". Since we sync'd before the previous commit, the
+    // canvas is idle here and target() is safe.
+    if (!verify(canvas->target(canvas_origin(back), stride_px, canvas_w, canvas_h,
+                               tvg::ColorSpace::ARGB8888),
+                "target rebind")) {
+      break;
+    }
+
     // Ask the game to advance simulation; redraw if it changed (or if an
     // input event already marked the frame dirty). Games that animate
     // every frame (like Janitor) generally return true here.
@@ -699,11 +732,15 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     needs_redraw |= demo_owner->update(canvas.get(), elapsed);
 
     if (needs_redraw) {
-      if (!verify(canvas->target(buf[back].mapped, buf[back].stride / 4, fb_w, fb_h,
-                                 tvg::ColorSpace::ARGB8888))) {
-        break;
-      }
-      if (!verify(canvas->draw(clearBuffer)) || !verify(canvas->sync())) {
+      // Force a clear every frame: we ping-pong two DRM buffers, so the
+      // back buffer we're about to paint still holds the scene from two
+      // frames ago. ThorVG's scene graph doesn't cover every pixel of
+      // the canvas, so any pixel the scene doesn't explicitly paint
+      // would retain that stale content and show as ghosting. The
+      // upstream-facing clearBuffer arg doesn't know about our swap
+      // chain — override it here.
+      (void)clearBuffer;
+      if (!verify(canvas->draw(true), "draw") || !verify(canvas->sync(), "sync")) {
         break;
       }
       needs_redraw = false;
@@ -720,8 +757,8 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   // destroying the dumb buffers, and release the mode blob last.
   canvas.reset();
   tvg::Initializer::term();
-  detail::destroy_dumb(buf[0]);
-  detail::destroy_dumb(buf[1]);
+  detail::destroy_dumb(buf.at(0));
+  detail::destroy_dumb(buf.at(1));
   drmModeDestroyPropertyBlob(fd, mode_blob);
   return EXIT_SUCCESS;
 }

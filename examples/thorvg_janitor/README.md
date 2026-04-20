@@ -13,7 +13,7 @@ uses libinput for keyboard + pointer.
 
 ## Rendering path
 
-`drm_template.hpp` replaces upstream's SDL-based `template.h`. The
+`drm_template.hpp` replaces upstreams SDL-based `template.h`. The
 rendering loop:
 
 1. Opens the DRM device, enables atomic + universal planes, picks the
@@ -37,7 +37,7 @@ rendering loop:
 Keyboard input: libinput press/release events populate a
 `KEY_MAX`-sized bool array keyed by Linux keycode, which `tvggame.cpp`
 polls through `tvgdemo::key_pressed(KEY_A)` and friends. The original
-SDL `SDL_SCANCODE_*` ↔ drm-cxx `KEY_*` mapping is a straight rename
+SDL `SDL_SCANCODE_*` ↔ drm-cxx `KEY_*` mapping is a straight renamed
 (e.g. `SDL_SCANCODE_A` → `KEY_A`).
 
 Pointer input: motion and button events feed the Demo's `motion` /
@@ -115,6 +115,49 @@ master on the selected CRTC and needs read access to `/dev/input/event*`.
   back in is required after first adding yourself to those groups.
 - Running over SSH will fail in `Seat::open()` because logind does not
   assign a seat to a non-interactive login.
+
+## logind session
+
+When the build finds `sdbus-c++` (>= 2.0), every example — this one
+included — calls `drm::examples::LogindSession::open()` at startup
+and holds the session for the process lifetime. That gets us two
+things:
+
+- **SIGKILL recovery.** If the janitor is killed with `kill -9`, its
+  DBus connection drops; logind notices, calls `ReleaseControl`
+  on our behalf, and triggers a VT switch-back to the text console.
+  Without this, the scanout stays frozen on the last rendered frame
+  until the user `chvt`'s manually.
+- **VT-switch awareness (planned).** The helper already wires the
+  `PauseDevice` / `ResumeDevice` signal handlers; future iterations
+  will re-acquire framebuffers after a VT switch.
+
+If `sdbus-c++` isn't found at build time — or if the process isn't
+running under a logind session at runtime — `LogindSession::open()`
+returns `std::nullopt` and the example falls back to the old direct
+`drm::Device::open()` path unchanged.
+
+### Building sdbus-c++
+
+Ubuntu 24.04's apt and Fedora's dnf both ship older (v1.x) packages
+that don't match the v2.x API this helper uses. Build from source:
+
+```sh
+git clone --depth 1 --branch v2.2.1 \
+  https://github.com/Kistler-Group/sdbus-cpp.git
+cmake -S sdbus-cpp -B sdbus-cpp/build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DSDBUSCPP_BUILD_DOCS=OFF \
+  -DSDBUSCPP_BUILD_TESTS=OFF \
+  -DSDBUSCPP_BUILD_CODEGEN=OFF
+cmake --build sdbus-cpp/build
+sudo cmake --install sdbus-cpp/build   # default prefix: /usr/local
+```
+
+Same `PKG_CONFIG_PATH` caveat as thorvg — export
+`/usr/local/lib64/pkgconfig` (Fedora) or
+`/usr/local/lib/x86_64-linux-gnu/pkgconfig` (Ubuntu) before
+configuring drm-cxx.
 
 ## Running
 

@@ -9,6 +9,7 @@
 // to a software cursor rendered via an overlay plane + atomic modesetting.
 // Press Escape or Ctrl-C to quit.
 
+#include "../logind_session.hpp"
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/property_store.hpp"
@@ -311,6 +312,9 @@ int main(int argc, char* argv[]) {
   if (!path) {
     return EXIT_FAILURE;
   }
+
+  // See atomic_modeset for why we claim a logind session.
+  auto logind = drm::examples::LogindSession::open();
 
   auto dev_result = drm::Device::open(*path);
   if (!dev_result) {
