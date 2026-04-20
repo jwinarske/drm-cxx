@@ -28,6 +28,7 @@ class LoadedCursor {
   static std::optional<LoadedCursor> load(const char* name, const char* theme, int size);
 
   [[nodiscard]] const CursorFrame& frame_at(uint64_t now_ms) const;
+  [[nodiscard]] const CursorFrame& frame_at_index(std::size_t i) const { return frames_[i]; }
 
   [[nodiscard]] bool animated() const { return frames_.size() > 1; }
   [[nodiscard]] uint32_t cycle_ms() const { return cycle_ms_; }

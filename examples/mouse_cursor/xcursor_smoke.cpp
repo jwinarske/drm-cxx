@@ -13,6 +13,8 @@
 
 #include "xcursor_loader.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
@@ -41,5 +43,30 @@ int main(int argc, char** argv) {
   std::printf("first.yhot: %d\n", f.yhot);
   std::printf("cycle_ms  : %u\n", cursor->cycle_ms());
   std::printf("animated  : %s\n", cursor->animated() ? "yes" : "no");
+
+  if (!cursor->animated()) {
+    return 0;
+  }
+
+  // Animated path: verify every frame parsed and that frame_at() walks
+  // them correctly across one full cycle.
+  std::printf("\n-- per-frame --\n");
+  std::printf("idx  w x h    hotspot   delay_ms\n");
+  for (std::size_t i = 0; i < cursor->frame_count(); ++i) {
+    const CursorFrame& fi = cursor->frame_at_index(i);
+    std::printf("%3zu  %u x %u   (%2d, %2d)   %u\n", i, fi.width, fi.height, fi.xhot, fi.yhot,
+                fi.delay_ms);
+  }
+
+  std::printf("\n-- frame_at() sampling --\n");
+  const uint64_t cycle = cursor->cycle_ms();
+  const uint64_t samples[] = {0,         cycle / 4, cycle / 2,           (3 * cycle) / 4,
+                              cycle - 1, cycle,     cycle + (cycle / 3), cycle * 2};
+  for (const uint64_t t : samples) {
+    const CursorFrame& at = cursor->frame_at(t);
+    const auto idx = static_cast<std::size_t>(&at - &cursor->frame_at_index(0));
+    std::printf("t=%-8lu -> frame %3zu (delay %u)\n", static_cast<unsigned long>(t), idx,
+                at.delay_ms);
+  }
   return 0;
 }
