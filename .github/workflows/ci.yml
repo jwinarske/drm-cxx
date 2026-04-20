@@ -90,8 +90,41 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: cmake ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
+          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
           version: 1.0
+
+      # ThorVG 1.0.4 isn't packaged on ubuntu-24.04; build from source and cache
+      # the install prefix so subsequent CI runs skip the rebuild.
+      - name: Cache thorvg install
+        id: cache-thorvg
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/thorvg-install
+          key: thorvg-v1.0.4-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.version }}
+
+      - name: Build thorvg from source
+        if: steps.cache-thorvg.outputs.cache-hit != 'true'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          git clone --depth 1 --branch v1.0.4 https://github.com/thorvg/thorvg.git thorvg-src
+          meson setup thorvg-src/build thorvg-src \
+            --prefix="$GITHUB_WORKSPACE/thorvg-install" \
+            --buildtype=release \
+            -Dloaders=svg,lottie,ttf \            -Dengines=sw \
+            -Dbindings=capi \
+            -Dthreads=true \
+            -Dstatic=false \
+            -Dexamples=false \
+            -Dtests=false
+          meson install -C thorvg-src/build
+
+      - name: Export thorvg environment
+        run: |
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/thorvg-install/lib/pkgconfig:$GITHUB_WORKSPACE/thorvg-install/lib64/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
@@ -101,7 +134,8 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DDRM_CXX_VULKAN=ON \
             -DDRM_CXX_BUILD_EXAMPLES=ON \
-            -DDRM_CXX_BUILD_TESTS=ON
+            -DDRM_CXX_BUILD_TESTS=ON \
+            -DDRM_CXX_BUILD_THORVG_JANITOR=ON
 
       - name: Build
         run: cmake --build build

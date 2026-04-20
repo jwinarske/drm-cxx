@@ -60,7 +60,7 @@ drm::expected<Display, std::error_code> Display::create() {
   auto* vk_create_instance =
       reinterpret_cast<PFN_vkCreateInstance>(dlsym(RTLD_DEFAULT, "vkCreateInstance"));
   if (vk_create_instance == nullptr) {
-    return drm::unexpected(std::make_error_code(std::errc::not_supported));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
 
   auto* vk_enumerate_physical_devices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
@@ -79,7 +79,7 @@ drm::expected<Display, std::error_code> Display::create() {
       (vk_get_physical_device_display_properties_khr == nullptr) ||
       (vk_get_physical_device_display_plane_properties_khr == nullptr) ||
       (vk_get_display_plane_supported_displays_khr == nullptr)) {
-    return drm::unexpected(std::make_error_code(std::errc::not_supported));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
 
   // Create a minimal Vulkan instance
@@ -100,7 +100,7 @@ drm::expected<Display, std::error_code> Display::create() {
   VkInstance instance{};
   VkResult const result = vk_create_instance(&create_info, nullptr, &instance);
   if (result != VK_SUCCESS) {
-    return drm::unexpected(std::make_error_code(std::errc::not_supported));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
   display.instance_ = instance;
 
