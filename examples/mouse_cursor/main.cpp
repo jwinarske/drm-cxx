@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -457,7 +458,7 @@ int main(int argc, char* argv[]) {
   {
     const CursorFrame& f = current_cursor->first();
     drm::println("Cursor '{}' loaded: {}x{}, hotspot ({}, {}){}", cli_cursor, f.width, f.height,
-                 f.xhot, f.yhot, current_cursor->animated() ? " (animated)" : "");
+                 f.xhot, f.yhot, current_cursor->animated() ? " [animated]" : "");
   }
 
   // Match cli_cursor against kCycle so the first middle-click advances to the
@@ -609,6 +610,19 @@ int main(int argc, char* argv[]) {
   // all pending events are drained, not on every motion event.
   bool cursor_dirty = false;
 
+  // Animation state. last_frame_ptr lets the main loop detect when the
+  // current frame (selected by time-in-cycle) differs from what's already
+  // in the cursor buffer — only then do we re-blit and force a re-upload.
+  // anim_start is captured fresh from steady_clock here so that animation
+  // time is measured from cursor startup, not process startup.
+  const auto anim_start = std::chrono::steady_clock::now();
+  auto now_ms = [&]() -> uint64_t {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - anim_start)
+                                     .count());
+  };
+  const CursorFrame* last_frame_ptr = &current_cursor->first();
+
   // Swap the rendered cursor in place. Shared by the middle-click cycler and
   // the digit-key jumps. The dumb buffer and its mapping stay the same; only
   // the pixels and the logical cursor identity change. On HW we call
@@ -632,6 +646,9 @@ int main(int argc, char* argv[]) {
       drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, buf_w, buf_h);
     }
     cursor_dirty = true;
+    // Reset the animation tracker so the next loop iteration treats the
+    // blit we just did as authoritative and doesn't redraw over it.
+    last_frame_ptr = &f;
   };
 
   input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
@@ -692,7 +709,11 @@ int main(int argc, char* argv[]) {
   pfds[1].events = POLLIN;
 
   while (g_quit == 0) {
-    int const ret = poll(pfds, 2, 100);
+    // Shorten the timeout for animated cursors so the loop wakes often
+    // enough to step frames at roughly display-refresh cadence. The idle
+    // (non-animated) timeout stays coarse to minimise wakeups.
+    const int poll_timeout = current_cursor->animated() ? 16 : 100;
+    int const ret = poll(pfds, 2, poll_timeout);
     if (ret < 0) {
       if (errno == EINTR) {
         continue;
@@ -772,6 +793,23 @@ int main(int argc, char* argv[]) {
         first_sw_commit = true;
       }
       cursor_dirty = true;  // commit below re-positions the cursor
+    }
+
+    // Animation step: if the current cursor is animated and the frame that
+    // should be showing now differs from what we last blit, re-blit it and
+    // force the HW path to re-upload. The SW path rides on cursor_dirty's
+    // next atomic commit (the FB ID is unchanged but the backing pixels
+    // are new, and the commit re-scans the buffer).
+    if (current_cursor->animated()) {
+      const CursorFrame& f = current_cursor->frame_at(now_ms());
+      if (&f != last_frame_ptr) {
+        blit_frame(f, mapped, buf_w, buf_h, cursor_buf.stride);
+        if (hw_cursor) {
+          drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, buf_w, buf_h);
+        }
+        last_frame_ptr = &f;
+        cursor_dirty = true;
+      }
     }
 
     // Commit cursor position once per loop iteration, after all pending
