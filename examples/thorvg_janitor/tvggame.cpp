@@ -19,7 +19,13 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-#include "template.h"
+// Upstream `template.h` (SDL-based) replaced with the drm-cxx DRM/KMS +
+// libinput backend; see drm_template.hpp in this directory for the full
+// replacement surface. The rest of this file is unmodified from upstream
+// except for the keystate block a few hundred lines below, which swaps
+// SDL_GetKeyboardState + SDL_SCANCODE_* for tvgdemo::key_pressed() + the
+// equivalent Linux KEY_* codes from <linux/input-event-codes.h>.
+#include "drm_template.hpp"
 #include "assets.h"
 
 /************************************************************************/
@@ -1075,13 +1081,16 @@ struct ThorJanitor : tvgdemo::Demo
     {
         player.shoot = false;
 
-        const Uint8 *keystate = SDL_GetKeyboardState(NULL);
-        if (keystate) {
+        // Upstream polled SDL_GetKeyboardState(NULL) here and indexed into the
+        // returned Uint8 array via SDL_SCANCODE_*. The DRM backend (see
+        // drm_template.hpp) maintains its own Linux-keycode-indexed state
+        // populated from libinput; we poll it via tvgdemo::key_pressed(KEY_*).
+        {
             auto diff = elapsed - tick.last;
-            if (keystate[SDL_SCANCODE_A]) player.shoot = true;
-            if (keystate[SDL_SCANCODE_RIGHT]) player.right(diff);
-            if (keystate[SDL_SCANCODE_LEFT]) player.left(diff);
-            if (keystate[SDL_SCANCODE_UP]) player.forward(zone, diff);
+            if (tvgdemo::key_pressed(KEY_A)) player.shoot = true;
+            if (tvgdemo::key_pressed(KEY_RIGHT)) player.right(diff);
+            if (tvgdemo::key_pressed(KEY_LEFT)) player.left(diff);
+            if (tvgdemo::key_pressed(KEY_UP)) player.forward(zone, diff);
         }
     }
 

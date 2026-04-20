@@ -1,43 +1,70 @@
 # thorvg_janitor
 
-A drm-cxx port of ThorVG's Janitor game, intended as a substantive example
-that exercises ThorVG's software raster onto a KMS plane.
+A drm-cxx port of ThorVG's Janitor game — a substantive example that
+renders ThorVG's software canvas directly onto a KMS primary plane and
+uses libinput for keyboard + pointer.
 
-## Status
+## Controls
 
-**Scaffold only.** The directory exists, the upstream game sources are
-vendored in, the build system finds ThorVG when present and skips
-gracefully when not, and a placeholder `thorvg_janitor` target builds and
-runs — but the DRM backend (`drm_template.hpp`) is a stub that prints a
-message and exits. `tvggame.cpp` is not yet wired into the build; it sits
-here so the full port can be landed against a known-good upstream tree.
+- **Left / Right** — steer
+- **Up** — thrust
+- **A** — fire
+- **Escape** — quit
 
-What works today:
+## Rendering path
 
-- `meson setup` / `cmake` configure cleanly with or without ThorVG.
-- `-Dthorvg_janitor=auto` (Meson) or `DRM_CXX_BUILD_THORVG_JANITOR=AUTO`
-  (CMake) log whether ThorVG was found.
-- The `thorvg_janitor` binary exits with a "scaffold stub" message so
-  anyone running it gets a clear signal rather than a crash.
+`drm_template.hpp` replaces upstream's SDL-based `template.h`. The
+rendering loop:
 
-What does not work yet:
+1. Opens the DRM device, enables atomic + universal planes, picks the
+   connected connector, resolves the preferred mode, and finds a CRTC's
+   PRIMARY plane.
+2. Allocates **two** ARGB8888 dumb buffers at mode resolution, mmaps
+   both for CPU writes, wraps them in DRM framebuffers.
+3. Initializes ThorVG's `SwCanvas` pointed at the first back buffer.
+4. On the first frame: atomic commit with `MODE_ID` blob + `CRTC.ACTIVE
+   = 1` + connector `CRTC_ID` + primary plane's `FB_ID`/`CRTC_X/Y/W/H`/
+   `SRC_X/Y/W/H`, flagged with `DRM_MODE_ATOMIC_ALLOW_MODESET |
+   DRM_MODE_PAGE_FLIP_EVENT`.
+5. On subsequent frames: re-targets the canvas at the *other* buffer,
+   draws, commits with `DRM_MODE_ATOMIC_NONBLOCK |
+   DRM_MODE_PAGE_FLIP_EVENT`, and rotates.
+6. Between commits the loop waits on a `poll()` set containing both the
+   libinput seat fd and the DRM fd. Page-flip events are drained via
+   `drm::PageFlip::dispatch(0)`; only after the driver reports the flip
+   complete does the loop commit the next frame.
 
-- No DRM output. No ThorVG canvas bound to anything. No input handling.
-- `tvggame.cpp` and `assets.h` are vendored but not compiled.
+Keyboard input: libinput press/release events populate a
+`KEY_MAX`-sized bool array keyed by Linux keycode, which `tvggame.cpp`
+polls through `tvgdemo::key_pressed(KEY_A)` and friends. The original
+SDL `SDL_SCANCODE_*` ↔ drm-cxx `KEY_*` mapping is a straight rename
+(e.g. `SDL_SCANCODE_A` → `KEY_A`).
 
-## Upstream
+Pointer input: motion and button events feed the Demo's `motion` /
+`clickdown` / `clickup` callbacks.
 
-Source of `tvggame.cpp`, `assets.h`, `title.png`, and `LICENSE`:
-<https://github.com/thorvg/thorvg.janitor>, MIT-licensed. `LICENSE` in this
-directory is the upstream's `LICENSE` preserved verbatim for attribution.
+## Upstream sources
 
-## Build requirements (future)
+`tvggame.cpp`, `assets.h`, `title.png`, and `LICENSE` are vendored from
+<https://github.com/thorvg/thorvg.janitor>, MIT-licensed. `LICENSE`
+here is the upstream's text verbatim for attribution.
 
-When the backend lands, build requirements will be:
+Modifications to the upstream sources: exactly two hunks in
+`tvggame.cpp`:
 
-- ThorVG **1.0.4** or newer, built with at least:
+1. `#include "template.h"` → `#include "drm_template.hpp"`
+2. The `SDL_GetKeyboardState` block → `tvgdemo::key_pressed(KEY_*)`
+   calls, with a short comment explaining the rename.
+
+Everything else in `tvggame.cpp` and all of `assets.h` / `title.png`
+are byte-for-byte identical to upstream.
+
+## Build requirements
+
+- **ThorVG 1.0.4+** built with at least:
   `-Dloaders=svg,ttf,jpg -Dengines=sw`
-- The existing drm-cxx requirements (libdrm, libinput, libudev, xkbcommon)
+- The existing drm-cxx requirements (libdrm, libinput, libudev,
+  xkbcommon)
 
 On Fedora:
 
@@ -45,47 +72,45 @@ On Fedora:
 dnf install thorvg-devel
 ```
 
-On Debian/Ubuntu ThorVG is currently self-built; expect to install from
-source or a PPA.
-
 ## Build options
 
 Meson:
 
-- `-Dthorvg_janitor=auto` (default) — build if ThorVG is found, otherwise
-  skip with a "thorvg not found, skipping" note at configure time.
+- `-Dthorvg_janitor=auto` (default) — build if ThorVG is found,
+  otherwise skip with a `thorvg_janitor: thorvg not found, skipping`
+  message at configure time.
 - `-Dthorvg_janitor=enabled` — hard error if ThorVG is missing.
 - `-Dthorvg_janitor=disabled` — never build, never probe.
 
 CMake:
 
-- `DRM_CXX_BUILD_THORVG_JANITOR=AUTO` (default) — same auto-probe behavior.
+- `DRM_CXX_BUILD_THORVG_JANITOR=AUTO` (default) — same auto-probe
+  behavior.
 - `DRM_CXX_BUILD_THORVG_JANITOR=ON` — hard error if ThorVG is missing.
 - `DRM_CXX_BUILD_THORVG_JANITOR=OFF` — never build.
 
-## Layout (current)
+## Permissions
+
+Same as the other KMS examples in this repo: the binary takes DRM
+master on the selected CRTC and needs read access to `/dev/input/event*`.
+
+- A free VT is the simplest environment. Ctrl+Alt+F3, log in, run
+  `thorvg_janitor`.
+- The user must be in the `video` group (for `/dev/dri/card*`) and
+  either in `input` or running as root (for libinput). Logging out and
+  back in is required after first adding yourself to those groups.
+- Running over SSH will fail in `Seat::open()` because logind does not
+  assign a seat to a non-interactive login.
+
+## Running
 
 ```
-examples/thorvg_janitor/
-├── LICENSE              (upstream, MIT)
-├── README.md            (this file)
-├── assets.h             (upstream, vendored, not compiled yet)
-├── drm_template.hpp     (drm-cxx replacement for upstream template.h — stub)
-├── main.cpp             (minimal entry point for the scaffold binary)
-├── title.png            (upstream asset, referenced by assets.h)
-└── tvggame.cpp          (upstream, vendored, not compiled yet)
+thorvg_janitor [/dev/dri/cardN]
 ```
 
-## Layout (target, once the backend lands)
-
-```
-examples/thorvg_janitor/
-├── LICENSE
-├── README.md            (rewritten: runtime controls, hardware notes)
-├── assets.h             (compiled)
-├── drm_template.hpp     (real backend: DRM device, atomic commits,
-│                         page-flip gating, libinput integration)
-├── drm_template.cpp     (if any out-of-line impl needed)
-├── title.png
-└── tvggame.cpp          (compiled, two hunks patched: #include + key polling)
-```
+If the device argument is omitted, `/dev/dri/card0` is used. The
+engine selector from upstream (`gl` / `wg` as `argv[1]`) is accepted
+but ignored with a note — this backend is SW-only. Game logical size
+is fixed by `tvggame.cpp` constants (`SWIDTH`/`SHEIGHT`); the
+framebuffer is allocated at the display's preferred mode and the game
+draws into that coordinate space.
