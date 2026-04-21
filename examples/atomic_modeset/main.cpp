@@ -8,7 +8,6 @@
 // Opens a DRM device, finds a connected connector, selects the preferred
 // mode, and performs an atomic modeset. Then waits for a page flip event.
 
-#include "../logind_session.hpp"
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -16,6 +15,7 @@
 #include "modeset/atomic.hpp"
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
+#include "session/seat.hpp"
 
 #include <drm-cxx/detail/span.hpp>
 
@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <utility>
 
 int main(const int argc, char* argv[]) {
@@ -31,19 +32,32 @@ int main(const int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Claim a logind session if we're running under one. The session is held
-  // for the lifetime of main; logind triggers a VT-switch handoff back to
-  // the text console on process death (including SIGKILL), so the TTY
-  // doesn't freeze on a stale framebuffer.
-  auto logind = drm::examples::LogindSession::open();
+  // Claim a seat session if we can. libseat auto-selects the available
+  // backend (logind on systemd, seatd on non-systemd, builtin for
+  // root/tty-owner). Held for the lifetime of main so the seat provider
+  // releases our control cleanly on SIGKILL.
+  auto seat = drm::session::Seat::open();
 
-  // Open DRM device
-  auto dev_result = drm::Device::open(*path);
-  if (!dev_result) {
+  // Prefer the seat's revocable device fd when available. On VT switch
+  // it's revoked cleanly; master is also managed by the seat provider
+  // so we avoid racing drmSetMaster. When no seat backend is present,
+  // fall back to plain drm::Device::open.
+  const auto seat_dev = seat ? seat->take_device(*path) : std::nullopt;
+  auto dev_holder = [&]() -> std::optional<drm::Device> {
+    if (seat_dev) {
+      return drm::Device::from_fd(seat_dev->fd);
+    }
+    auto r = drm::Device::open(*path);
+    if (!r) {
+      return std::nullopt;
+    }
+    return std::move(*r);
+  }();
+  if (!dev_holder) {
     drm::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
-  auto& dev = *dev_result;
+  auto& dev = *dev_holder;
 
   // Enable capabilities
   if (const auto r = dev.enable_universal_planes(); !r) {

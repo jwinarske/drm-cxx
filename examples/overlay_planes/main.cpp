@@ -8,7 +8,6 @@
 // Opens a DRM device, enumerates planes, creates virtual layers,
 // and runs the allocator to assign layers to hardware planes.
 
-#include "../logind_session.hpp"
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "drm-cxx/detail/format.hpp"
@@ -17,9 +16,12 @@
 #include "planes/layer.hpp"
 #include "planes/output.hpp"
 #include "planes/plane_registry.hpp"
+#include "session/seat.hpp"
 
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
+#include <utility>
 
 int main(int argc, char* argv[]) {
   const auto path = drm::examples::select_device(argc, argv);
@@ -27,16 +29,28 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // See atomic_modeset for why we claim a logind session.
-  auto logind = drm::examples::LogindSession::open();
+  // See atomic_modeset for why we claim a seat session.
+  auto seat = drm::session::Seat::open();
 
-  // Open DRM device
-  auto dev_result = drm::Device::open(*path);
-  if (!dev_result) {
+  // Prefer the seat's revocable device fd — on VT switch it's revoked
+  // cleanly and master is managed by the seat provider. Fall back to
+  // plain open() when no seat backend is available.
+  const auto seat_dev = seat ? seat->take_device(*path) : std::nullopt;
+  auto dev_holder = [&]() -> std::optional<drm::Device> {
+    if (seat_dev) {
+      return drm::Device::from_fd(seat_dev->fd);
+    }
+    auto r = drm::Device::open(*path);
+    if (!r) {
+      return std::nullopt;
+    }
+    return std::move(*r);
+  }();
+  if (!dev_holder) {
     drm::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
-  auto& dev = *dev_result;
+  auto& dev = *dev_holder;
 
   // Enable universal planes + atomic
   if (auto r = dev.enable_universal_planes(); !r) {

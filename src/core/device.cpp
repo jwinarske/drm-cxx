@@ -18,25 +18,28 @@
 
 namespace drm {
 
-Device::Device(int fd) noexcept : fd_(fd) {}
+Device::Device(int fd, bool owns_fd) noexcept : fd_(fd), owns_fd_(owns_fd) {}
 
 Device::~Device() {
-  if (fd_ >= 0) {
+  if (fd_ >= 0 && owns_fd_) {
     ::close(fd_);
   }
 }
 
-Device::Device(Device&& other) noexcept : fd_(other.fd_) {
+Device::Device(Device&& other) noexcept : fd_(other.fd_), owns_fd_(other.owns_fd_) {
   other.fd_ = -1;
+  other.owns_fd_ = false;
 }
 
 Device& Device::operator=(Device&& other) noexcept {
   if (this != &other) {
-    if (fd_ >= 0) {
+    if (fd_ >= 0 && owns_fd_) {
       ::close(fd_);
     }
     fd_ = other.fd_;
+    owns_fd_ = other.owns_fd_;
     other.fd_ = -1;
+    other.owns_fd_ = false;
   }
   return *this;
 }
@@ -59,7 +62,11 @@ drm::expected<Device, std::error_code> Device::open(std::string_view path) {
   // Set ourselves as DRM master if possible (non-fatal if it fails)
   drmSetMaster(fd);
 
-  return Device(fd);
+  return Device(fd, /*owns_fd=*/true);
+}
+
+Device Device::from_fd(const int fd) noexcept {
+  return {fd, /*owns_fd=*/false};
 }
 
 int Device::fd() const noexcept {

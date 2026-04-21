@@ -2,4 +2,4 @@ option('vulkan',         type : 'boolean', value : true,   description : 'Build 
 option('examples',       type : 'boolean', value : true,   description : 'Build example programs')
 option('tests',          type : 'boolean', value : true,   description : 'Build unit and integration tests')
 option('thorvg_janitor', type : 'feature', value : 'auto', description : 'Build the ThorVG Janitor example (needs thorvg)')
-option('examples_logind', type : 'feature', value : 'auto', description : 'Link examples against sdbus-c++ for logind session support')
+option('session', type : 'feature', value : 'auto', description : 'Build drm::session::Seat on top of libseat (auto-mux of logind/seatd/builtin)')

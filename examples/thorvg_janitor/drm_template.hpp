@@ -38,6 +38,7 @@
 #include <iostream>
 #include <list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -61,7 +62,6 @@
 #include <thorvg.h>
 
 // drm-cxx
-#include "../logind_session.hpp"
 #include "../select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -69,6 +69,7 @@
 #include "modeset/atomic.hpp"
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
+#include "session/seat.hpp"
 
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
@@ -420,19 +421,45 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     return EXIT_FAILURE;
   }
 
-  // Claim a logind session so that a hard-kill (SIGKILL) of this process
-  // triggers the VT switch-back to the text console via logind's session
-  // cleanup on DBus disconnect. No-op (returns nullopt) when we're not
-  // running under a logind-managed session.
-  auto logind = drm::examples::LogindSession::open();
+  // Claim a seat session so that a hard-kill (SIGKILL) of this process
+  // triggers the VT switch-back to the text console via the seat
+  // provider's session cleanup on connection drop. No-op (returns
+  // nullopt) when no seat backend is available.
+  auto seat = drm::session::Seat::open();
 
-  // DRM device
-  auto dev_result = drm::Device::open(*device_path);
-  if (!dev_result) {
+  // VT-switch pause/resume state. `session_paused` gates rendering while
+  // the session is inactive; `needs_modeset` promotes the next commit
+  // back to a full modeset (master was dropped); `pending_resume_fd`
+  // carries the new DRM fd handed to us by SeatSession's resume
+  // callback so the main loop can tear down per-fd state (mode blob,
+  // dumb buffers, FB IDs) and rebuild on the fresh fd outside the
+  // libseat dispatch call-stack.
+  bool session_paused = false;
+  bool needs_modeset = false;
+  bool flip_pending = false;
+  int pending_resume_fd = -1;
+
+  // DRM device. Prefer a revocable seat-session fd when available —
+  // the seat provider (logind/seatd/builtin) manages master handoff on
+  // VT switch without racing us. Fall back to plain open() when no
+  // backend is available. SeatSession owns the fd; Device::from_fd
+  // wraps it without taking ownership.
+  const auto seat_dev = seat ? seat->take_device(*device_path) : std::nullopt;
+  auto dev_holder = [&]() -> std::optional<drm::Device> {
+    if (seat_dev) {
+      return drm::Device::from_fd(seat_dev->fd);
+    }
+    auto r = drm::Device::open(*device_path);
+    if (!r) {
+      return std::nullopt;
+    }
+    return std::move(*r);
+  }();
+  if (!dev_holder) {
     drm::println(stderr, "Failed to open {}", *device_path);
     return EXIT_FAILURE;
   }
-  auto& dev = *dev_result;
+  auto& dev = *dev_holder;
   if (auto r = dev.enable_universal_planes(); !r) {
     drm::println(stderr, "enable_universal_planes failed");
     return EXIT_FAILURE;
@@ -577,9 +604,9 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   // knows the back buffer that was scanned out is safe to reuse. Declared
   // up here so commit_frame can pass &page_flip as the commit's user_data
   // — libdrm routes that pointer back to page_flip_handler_v2 when the
-  // flip completes.
+  // flip completes. `flip_pending` is hoisted above (the pause callback
+  // clears it when the session is preempted mid-flight).
   drm::PageFlip page_flip(dev);
-  bool flip_pending = false;
   page_flip.set_handler(
       [&](uint32_t /*crtc*/, uint64_t /*seq*/, uint64_t /*ts_ns*/) { flip_pending = false; });
 
@@ -622,19 +649,48 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     return true;
   };
 
-  // libinput seat
-  auto seat_res = drm::input::Seat::open();
-  if (!seat_res) {
+  // libinput seat (distinct from the libseat "seat session" above;
+  // this one manages kbd/mouse devices via libinput). If a SeatSession
+  // is live, route libinput's privileged opens through it so input fds
+  // get the same revocation/resume treatment as the DRM fd on VT
+  // switch.
+  drm::input::InputDeviceOpener libinput_opener;
+  if (seat) {
+    libinput_opener = seat->input_opener();
+  }
+  auto input_seat_res = drm::input::Seat::open({}, std::move(libinput_opener));
+  if (!input_seat_res) {
     drm::println(stderr, "Failed to open input seat (need root or 'input' group membership)");
     tvg::Initializer::term();
     return EXIT_FAILURE;
   }
-  auto& seat = *seat_res;
+  auto& input_seat = *input_seat_res;
   bool quit = false;
   int32_t ptr_x = static_cast<int32_t>(fb_w) / 2;
   int32_t ptr_y = static_cast<int32_t>(fb_h) / 2;
   bool needs_redraw = false;
-  seat.set_event_handler([&](const drm::input::InputEvent& event) {
+
+  // Install seat pause/resume callbacks now that both `flip_pending`
+  // and `input_seat` are live. Pause: stop rendering, drop the
+  // pending flip state, and tell libinput to release every input fd
+  // (libinput_suspend closes them via close_restricted, which hands
+  // them back to libseat). Resume: stash the new fd, flag a full
+  // modeset, and let libinput re-open inputs to pick up fresh fds.
+  // SeatSession acks libseat's pause internally.
+  if (seat) {
+    seat->set_pause_callback([&]() {
+      session_paused = true;
+      flip_pending = false;
+      (void)input_seat.suspend();
+    });
+    seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
+      pending_resume_fd = new_fd;
+      session_paused = false;
+      needs_modeset = true;
+      (void)input_seat.resume();
+    });
+  }
+  input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
     if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event)) {
       if (ke->key <= KEY_MAX) {
         detail::keystate_storage().at(static_cast<std::size_t>(ke->key)) = ke->pressed;
@@ -661,7 +717,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   if (!commit_frame(true)) {
     detail::destroy_dumb(buf.at(0));
     detail::destroy_dumb(buf.at(1));
-    drmModeDestroyPropertyBlob(fd, mode_blob);
+    drmModeDestroyPropertyBlob(dev.fd(), mode_blob);
     tvg::Initializer::term();
     return EXIT_FAILURE;
   }
@@ -669,20 +725,28 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   std::swap(back, front);  // buf[front] is now on-screen; buf[back] is the one we'll draw into
   drm::println("Running — Escape to quit.");
 
-  // Main loop.
-  pollfd pfds[2]{};
-  pfds[0].fd = seat.fd();
+  // Main loop. Third slot is the seat-session wakeup fd (present only
+  // when a seat backend was actually claimed); it stays -1 in the
+  // fallback path, and poll() ignores negative fds. Slot 1 (the DRM
+  // fd) is re-pointed on resume when the seat hands us a fresh fd.
+  pollfd pfds[3]{};
+  pfds[0].fd = input_seat.fd();
   pfds[0].events = POLLIN;
-  pfds[1].fd = fd;
+  pfds[1].fd = dev.fd();
   pfds[1].events = POLLIN;
+  pfds[2].fd = seat ? seat->poll_fd() : -1;
+  pfds[2].events = POLLIN;
 
   const auto loop_start = std::chrono::steady_clock::now();
   uint32_t prev_elapsed = 0;
 
   while (!quit) {
-    // Drain any input + page-flip events with a short timeout so we don't
-    // starve the display when the user is idle.
-    if (const int ret = poll(pfds, 2, flip_pending ? -1 : 0); ret < 0) {
+    // Block indefinitely while either a flip is in flight or the session
+    // is paused — we have nothing useful to do until an event arrives
+    // (flip completion, input, or a seat resume). Otherwise poll
+    // non-blocking so the render cadence stays driven by the clock.
+    const int timeout = (flip_pending || session_paused) ? -1 : 0;
+    if (const int ret = poll(pfds, 3, timeout); ret < 0) {
       if (errno == EINTR) {
         continue;
       }
@@ -690,16 +754,92 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
       break;
     }
     if ((pfds[0].revents & POLLIN) != 0) {
-      if (auto r = seat.dispatch(); !r) {
-        drm::println(stderr, "seat.dispatch failed");
+      if (auto r = input_seat.dispatch(); !r) {
+        drm::println(stderr, "input_seat.dispatch failed");
         break;
       }
     }
     if ((pfds[1].revents & POLLIN) != 0) {
       (void)page_flip.dispatch(0);
     }
-    if (flip_pending) {
-      // Still waiting on vblank; don't queue another commit yet.
+    if ((pfds[2].revents & POLLIN) != 0 && seat) {
+      // Drains pause/resume signals; the callbacks update
+      // session_paused / needs_modeset / flip_pending /
+      // pending_resume_fd synchronously.
+      seat->dispatch();
+    }
+
+    // After a ResumeDevice signal we own a fresh DRM fd. Every piece
+    // of per-fd state tied to the old (now revoked) fd is dead —
+    // framebuffer registrations, dumb buffer handles, the MODE_ID
+    // property blob, and the mmap'd regions (the backing GEM was
+    // released when the fd closed). Rebuild all of that here, outside
+    // the DBus dispatch call-stack, so errors propagate cleanly and
+    // the canvas isn't mid-draw. KMS object IDs (plane, crtc,
+    // connector) and property IDs are per-device and stay stable, so
+    // those don't need re-resolving.
+    if (pending_resume_fd != -1) {
+      const int new_fd = pending_resume_fd;
+      pending_resume_fd = -1;
+
+      for (auto& b : buf) {
+        if (b.mapped != nullptr) {
+          munmap(b.mapped, b.size);
+          b.mapped = nullptr;
+        }
+        b.handle = 0;
+        b.fb_id = 0;
+        b.drm_fd = -1;
+      }
+      mode_blob = 0;
+
+      dev_holder = drm::Device::from_fd(new_fd);
+      pfds[1].fd = dev.fd();
+      if (auto r = dev.enable_universal_planes(); !r) {
+        drm::println(stderr, "resume: enable_universal_planes failed");
+        break;
+      }
+      if (auto r = dev.enable_atomic(); !r) {
+        drm::println(stderr, "resume: enable_atomic failed");
+        break;
+      }
+
+      if (drmModeCreatePropertyBlob(dev.fd(), &mode.drm_mode, sizeof(mode.drm_mode), &mode_blob) !=
+          0) {
+        drm::println(stderr, "resume: CreatePropertyBlob(MODE): {}",
+                     std::system_category().message(errno));
+        break;
+      }
+
+      buf.at(0) = detail::create_dumb(dev.fd(), fb_w, fb_h);
+      buf.at(1) = detail::create_dumb(dev.fd(), fb_w, fb_h);
+      if (buf.at(0).mapped == nullptr || buf.at(1).mapped == nullptr) {
+        drm::println(stderr, "resume: dumb buffer realloc failed");
+        break;
+      }
+      std::memset(buf.at(0).mapped, 0, buf.at(0).size);
+      std::memset(buf.at(1).mapped, 0, buf.at(1).size);
+
+      // PageFlip caches the fd it was constructed against; rebuild so
+      // drmHandleEvent targets the new fd. Re-install the handler —
+      // move-assign drops the previous one.
+      page_flip = drm::PageFlip(dev);
+      page_flip.set_handler(
+          [&](uint32_t /*crtc*/, uint64_t /*seq*/, uint64_t /*ts_ns*/) { flip_pending = false; });
+
+      if (!verify(canvas->target(canvas_origin(back), stride_px, canvas_w, canvas_h,
+                                 tvg::ColorSpace::ARGB8888),
+                  "resume canvas rebind")) {
+        break;
+      }
+      // needs_modeset was set by the resume callback — first commit
+      // after this point rides the first_frame=true path.
+    }
+
+    if (flip_pending || session_paused) {
+      // Either waiting on vblank or the session is inactive — in both
+      // cases don't queue another commit. Resume will flip
+      // session_paused back and the next iteration proceeds.
       continue;
     }
 
@@ -746,7 +886,12 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
       needs_redraw = false;
     }
 
-    if (!commit_frame(false)) {
+    // After a seat resume, master was dropped — re-seed the full
+    // modeset (MODE_ID + CRTC.ACTIVE + connector.CRTC_ID) on this
+    // commit, then revert to plane-only page flips.
+    const bool do_modeset = needs_modeset;
+    needs_modeset = false;
+    if (!commit_frame(do_modeset)) {
       break;
     }
     flip_pending = true;
@@ -754,12 +899,18 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   }
 
   // Teardown order matters: drop canvas before term, detach FBs before
-  // destroying the dumb buffers, and release the mode blob last.
+  // destroying the dumb buffers, and release the mode blob last. Use
+  // `dev.fd()` rather than the cached `fd` so resume-swapped fds are
+  // honored. Each DumbBuffer carries its own fd (captured at
+  // create_dumb), so destroy_dumb is automatically correct across
+  // resume.
   canvas.reset();
   tvg::Initializer::term();
   detail::destroy_dumb(buf.at(0));
   detail::destroy_dumb(buf.at(1));
-  drmModeDestroyPropertyBlob(fd, mode_blob);
+  if (mode_blob != 0) {
+    drmModeDestroyPropertyBlob(dev.fd(), mode_blob);
+  }
   return EXIT_SUCCESS;
 }
 

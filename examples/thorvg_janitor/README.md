@@ -113,51 +113,47 @@ master on the selected CRTC and needs read access to `/dev/input/event*`.
 - The user must be in the `video` group (for `/dev/dri/card*`) and
   either in `input` or running as root (for libinput). Logging out and
   back in is required after first adding yourself to those groups.
-- Running over SSH will fail in `Seat::open()` because logind does not
-  assign a seat to a non-interactive login.
+- Running over SSH will not get a seat session because logind does not
+  assign a seat to a non-interactive login. The fallback `Device::open`
+  path still works if the user has direct device permissions.
 
-## logind session
+## Seat session
 
-When the build finds `sdbus-c++` (>= 2.0), every example — this one
-included — calls `drm::examples::LogindSession::open()` at startup
-and holds the session for the process lifetime. That gets us two
-things:
+When the build finds `libseat`, every example — this one included —
+calls `drm::session::Seat::open()` at startup and holds the
+seat for the process lifetime. libseat auto-selects between three
+backends so the same code works across systemd / non-systemd targets:
+
+- **logind** (DBus to `org.freedesktop.login1`) on systemd hosts.
+- **seatd** (Unix-socket protocol) on Alpine, void, and embedded
+  targets where seatd is the seat manager.
+- **builtin** (no daemon — direct VT and device manipulation) for
+  root-owned or tty-owner processes.
+
+Three things this gets us:
 
 - **SIGKILL recovery.** If the janitor is killed with `kill -9`, its
-  DBus connection drops; logind notices, calls `ReleaseControl`
+  seat connection drops; the seat provider notices, releases control
   on our behalf, and triggers a VT switch-back to the text console.
   Without this, the scanout stays frozen on the last rendered frame
   until the user `chvt`'s manually.
-- **VT-switch awareness (planned).** The helper already wires the
-  `PauseDevice` / `ResumeDevice` signal handlers; future iterations
-  will re-acquire framebuffers after a VT switch.
+- **Revocable device fds.** The DRM fd handed out by libseat is
+  revoked cleanly on VT-switch-out — ioctls fail rather than racing
+  whoever else gets master.
+- **VT-switch resume.** The example listens for the seat's
+  `enable_seat` event and rebuilds per-fd state (mode blob, dumb
+  buffers, framebuffers) on the fresh fd libseat hands back.
 
-If `sdbus-c++` isn't found at build time — or if the process isn't
-running under a logind session at runtime — `LogindSession::open()`
-returns `std::nullopt` and the example falls back to the old direct
-`drm::Device::open()` path unchanged.
+If `libseat` isn't found at build time — or no backend is available at
+runtime (e.g. SSH login on a systemd box) — `Seat::open()`
+returns `std::nullopt` and the example falls back to a plain
+`drm::Device::open()`.
 
-### Building sdbus-c++
+### Installing libseat
 
-Ubuntu 24.04's apt and Fedora's dnf both ship older (v1.x) packages
-that don't match the v2.x API this helper uses. Build from source:
-
-```sh
-git clone --depth 1 --branch v2.2.1 \
-  https://github.com/Kistler-Group/sdbus-cpp.git
-cmake -S sdbus-cpp -B sdbus-cpp/build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DSDBUSCPP_BUILD_DOCS=OFF \
-  -DSDBUSCPP_BUILD_TESTS=OFF \
-  -DSDBUSCPP_BUILD_CODEGEN=OFF
-cmake --build sdbus-cpp/build
-sudo cmake --install sdbus-cpp/build   # default prefix: /usr/local
-```
-
-Same `PKG_CONFIG_PATH` caveat as thorvg — export
-`/usr/local/lib64/pkgconfig` (Fedora) or
-`/usr/local/lib/x86_64-linux-gnu/pkgconfig` (Ubuntu) before
-configuring drm-cxx.
+`libseat` is packaged as `libseat-dev` on Ubuntu 24.04+ and
+`libseat-devel` on Fedora 39+. Install from your distro's package
+manager — no source build required.
 
 ## Running
 

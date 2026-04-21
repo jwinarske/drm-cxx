@@ -90,7 +90,7 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libsystemd-dev ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
+          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
           version: 1.0
 
       # ThorVG 1.0.4 isn't packaged on ubuntu-24.04; build from source and cache
@@ -122,38 +122,14 @@ jobs:
             -Dstatic=false
           meson install -C thorvg-src/build
 
-      # sdbus-c++ 2.x isn't in Ubuntu 24.04's apt repo (ships v1.x). Build
-      # upstream v2.2.1 from source so the examples can link against the
-      # logind-session helper. Same cache strategy as thorvg.
-      - name: Cache sdbus-c++ install
-        id: cache-sdbus-cpp
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/sdbus-cpp-install
-          key: sdbus-cpp-v2.2.1-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.version }}
-
-      - name: Build sdbus-c++ from source
-        if: steps.cache-sdbus-cpp.outputs.cache-hit != 'true'
-        env:
-          CC: ${{ matrix.cc }}
-          CXX: ${{ matrix.cxx }}
-        run: |
-          git clone --depth 1 --branch v2.2.1 https://github.com/Kistler-Group/sdbus-cpp.git sdbus-cpp-src
-          cmake -S sdbus-cpp-src -B sdbus-cpp-src/build -G Ninja \
-            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/sdbus-cpp-install" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON \
-            -DSDBUSCPP_BUILD_DOCS=OFF \
-            -DSDBUSCPP_BUILD_TESTS=OFF \
-            -DSDBUSCPP_BUILD_CODEGEN=OFF
-          cmake --build sdbus-cpp-src/build
-          cmake --install sdbus-cpp-src/build
-
+      # libseat replaces the old sdbus-c++-from-source dance: it's packaged
+      # on Ubuntu 24.04 as libseat-dev and pulled in via apt above. Only
+      # thorvg still needs an install prefix exported.
       - name: Export third-party environment
         run: |
-          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/thorvg-install/lib/pkgconfig:$GITHUB_WORKSPACE/thorvg-install/lib64/pkgconfig:$GITHUB_WORKSPACE/sdbus-cpp-install/lib/pkgconfig:$GITHUB_WORKSPACE/sdbus-cpp-install/lib64/pkgconfig:$GITHUB_WORKSPACE/sdbus-cpp-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
-          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$GITHUB_WORKSPACE/sdbus-cpp-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$GITHUB_WORKSPACE/sdbus-cpp-install/lib:$GITHUB_WORKSPACE/sdbus-cpp-install/lib64:$GITHUB_WORKSPACE/sdbus-cpp-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/thorvg-install/lib/pkgconfig:$GITHUB_WORKSPACE/thorvg-install/lib64/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
@@ -165,7 +141,7 @@ jobs:
             -DDRM_CXX_BUILD_EXAMPLES=ON \
             -DDRM_CXX_BUILD_TESTS=ON \
             -DDRM_CXX_BUILD_THORVG_JANITOR=ON \
-            -DDRM_CXX_BUILD_EXAMPLES_LOGIND=ON
+            -DDRM_CXX_SESSION=ON
 
       - name: Build
         run: cmake --build build

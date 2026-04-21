@@ -6,15 +6,15 @@
 // Enumerates Vulkan displays and display planes, showing how
 // they can be cross-referenced with DRM planes.
 
-#include "../logind_session.hpp"
 #include "drm-cxx/detail/format.hpp"
+#include "session/seat.hpp"
 #include "vulkan/display.hpp"
 
 #include <cstdlib>
 
 int main() {
-  // See atomic_modeset for why we claim a logind session.
-  auto logind = drm::examples::LogindSession::open();
+  // See atomic_modeset for why we claim a seat session.
+  auto seat = drm::session::Seat::open();
 
   const auto result = drm::vulkan::Display::create();
   if (!result) {

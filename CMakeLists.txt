@@ -17,6 +17,15 @@ option(DRM_CXX_BUILD_EXAMPLES "Build example programs"       ${PROJECT_IS_TOP_LE
 option(DRM_CXX_BUILD_TESTS    "Build unit tests"             ${PROJECT_IS_TOP_LEVEL})
 option(DRM_CXX_INSTALL        "Generate install rules"       ${PROJECT_IS_TOP_LEVEL})
 
+# Optional seat-session support via libseat. When enabled, drm-cxx ships
+# a drm::session::Seat that muxes logind/seatd/builtin backends; when
+# disabled (or libseat is missing at configure time), Seat::open() is a
+# runtime no-op that returns nullopt. Auto mode probes; ON hard-fails
+# if libseat is absent; OFF skips the probe entirely.
+set(DRM_CXX_SESSION "AUTO" CACHE STRING
+    "Build drm::session::Seat on top of libseat: AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_SESSION PROPERTY STRINGS AUTO ON OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -53,6 +62,21 @@ find_library(DL_LIBRARY NAMES dl REQUIRED)
 
 if(DRM_CXX_VULKAN)
   pkg_check_modules(vulkan REQUIRED IMPORTED_TARGET vulkan)
+endif()
+
+# libseat probe — optional, per DRM_CXX_SESSION. Sourced strictly from
+# the system via pkg-config; not vendored.
+if(NOT DRM_CXX_SESSION STREQUAL "OFF")
+  if(DRM_CXX_SESSION STREQUAL "ON")
+    pkg_check_modules(libseat REQUIRED IMPORTED_TARGET libseat)
+  else()
+    pkg_check_modules(libseat IMPORTED_TARGET libseat)
+  endif()
+endif()
+if(TARGET PkgConfig::libseat)
+  set(DRM_CXX_HAS_LIBSEAT 1)
+else()
+  set(DRM_CXX_HAS_LIBSEAT 0)
 endif()
 
 # {fmt} backs the drm-cxx/detail/format.hpp adapter when the toolchain lacks
