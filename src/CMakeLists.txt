@@ -22,6 +22,7 @@ set(DRM_CXX_SOURCES
   display/edid.cpp
   display/hotplug_monitor.cpp
   session/seat.cpp
+  time/clock.cpp
   gbm/device.cpp
   gbm/surface.cpp
   gbm/buffer.cpp
@@ -31,6 +32,13 @@ if(DRM_CXX_VULKAN)
   list(APPEND DRM_CXX_SOURCES
     vulkan/display.cpp
     vulkan/drm_surface.cpp)
+endif()
+
+if(DRM_CXX_HAS_XCURSOR)
+  list(APPEND DRM_CXX_SOURCES
+    cursor/theme.cpp
+    cursor/cursor.cpp
+    cursor/renderer.cpp)
 endif()
 
 include(GNUInstallDirs)
@@ -95,6 +103,21 @@ else()
   message(STATUS
     "drm-cxx: libseat not found — drm::session::Seat::open() will return nullopt "
     "at runtime (set DRM_CXX_SESSION=ON to hard-fail)")
+endif()
+
+# libxcursor: linked PRIVATE and included as -isystem so its public
+# header warnings don't hit our -Werror build. Matches the libseat
+# pattern.
+if(DRM_CXX_HAS_XCURSOR)
+  get_target_property(_xcursor_incs PkgConfig::xcursor INTERFACE_INCLUDE_DIRECTORIES)
+  if(_xcursor_incs)
+    set_property(TARGET PkgConfig::xcursor
+                 APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_xcursor_incs})
+  endif()
+  target_link_libraries(drm-cxx PRIVATE PkgConfig::xcursor)
+  if(DRM_CXX_HAS_XCURSOR_DELAY)
+    target_compile_definitions(drm-cxx PRIVATE HAS_XCURSOR_DELAY)
+  endif()
 endif()
 
 if(DRM_CXX_VULKAN)
@@ -178,6 +201,18 @@ install(FILES
 install(FILES
     session/seat.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/session)
+
+install(FILES
+    time/clock.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/time)
+
+if(DRM_CXX_HAS_XCURSOR)
+  install(FILES
+      cursor/theme.hpp
+      cursor/cursor.hpp
+      cursor/renderer.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/cursor)
+endif()
 
 install(FILES
     gbm/device.hpp

@@ -223,7 +223,8 @@ jobs:
           meson setup builddir \
             -Dvulkan=true \
             -Dexamples=true \
-            -Dtests=false
+            -Dtests=false \
+            -Db_lto=false
 
       - name: Build (generate compile_commands.json)
         run: ninja -C builddir
