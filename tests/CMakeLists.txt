@@ -31,6 +31,12 @@ set(DRM_CXX_TESTS
   test_display
   test_gbm)
 
+if(DRM_CXX_HAS_XCURSOR)
+  list(APPEND DRM_CXX_TESTS
+    test_cursor_theme
+    test_cursor_cursor)
+endif()
+
 foreach(_t ${DRM_CXX_TESTS})
   add_executable(${_t} unit/${_t}.cpp)
   target_link_libraries(${_t} PRIVATE

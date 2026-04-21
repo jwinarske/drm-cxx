@@ -1,27 +1,35 @@
 # mouse_cursor
 
 Shows a cursor that tracks the mouse via libinput on a DRM/KMS display.
-Loads cursors from an installed XCursor theme (no vendored sprite) and
-supports both hardware cursors and a software fallback via an overlay
-plane.
+Loads cursors from an installed XCursor theme through the library's
+`drm::cursor` module and drives whichever KMS path the chosen CRTC
+makes available (dedicated cursor plane, atomic overlay, or legacy
+`drmModeSetCursor`).
 
 ## Build dependencies
 
-- `libxcursor` (runtime + dev headers)
-  - Debian/Ubuntu: `apt install libxcursor-dev`
-  - Fedora:       `dnf install libXcursor-devel`
-  - Arch:         `pacman -S libxcursor`
+The example has no direct `libxcursor` dep — the library's `drm::cursor`
+module does. As long as drm-cxx itself was built with `-Dcursor=enabled`
+or `DRM_CXX_CURSOR=ON` (both default to auto-detect), no extra packages
+are needed here.
 
-Both the CMake and Meson builds probe for it via pkg-config and will
-fail configuration if it is missing.
+If drm-cxx was configured without cursor support, this example won't
+build either. To enable it:
+
+- Debian/Ubuntu: `apt install libxcursor-dev`
+- Fedora:       `dnf install libXcursor-devel`
+- Arch:         `pacman -S libxcursor`
+
+Then reconfigure the top-level build.
 
 ## Theme data
 
-libxcursor reads cursors from `$XCURSOR_PATH`, defaulting to
-`~/.icons`, `~/.local/share/icons`, and `/usr/share/icons`. At least
-one theme needs to be installed. `adwaita-icon-theme` is a reasonable
-baseline (~11 MB; present on most desktop installs). For a visually
-distinct alternative try `bibata-cursor-theme`.
+The library's XDG walk inspects `$XCURSOR_PATH` if set, otherwise
+`~/.icons`, `$XDG_DATA_HOME/icons`, every `$XDG_DATA_DIRS/icons` entry,
+and `/usr/share/pixmaps`. At least one theme with a `cursors/`
+subdirectory needs to be installed. `adwaita-icon-theme` is a
+reasonable baseline (~11 MB; present on most desktop installs). For a
+visually distinct alternative try `bibata-cursor-theme`.
 
 On a server install with no theme data, install one:
 
@@ -31,25 +39,32 @@ On a server install with no theme data, install one:
     # Fedora
     dnf install adwaita-cursor-theme
 
-If the fallback chain cannot find anything, the program aborts at
-startup with a list of the themes it tried.
+The library's resolver follows each theme's `Inherits=` chain and falls
+back through every indexed theme in discovery order. If nothing
+matches, the program aborts at startup.
 
 ## Running
 
-    mouse_cursor [--sw] [--theme NAME] [--cursor NAME] [--size N]
-                 [/dev/dri/cardN]
+    mouse_cursor [--theme NAME] [--cursor NAME] [--size N]
+                 [--plane ID] [/dev/dri/cardN]
 
 Flags:
 
 | Flag             | Effect                                                                      |
 |------------------|-----------------------------------------------------------------------------|
-| `--sw`           | Skip hardware cursor; render via an overlay plane + atomic commits.         |
-| `--theme NAME`   | XCursor theme to try first. Falls back to Bibata, Adwaita, default, then libxcursor's built-ins. |
-| `--cursor NAME`  | Initial shape (`default` if unspecified). Any name in the installed theme works. |
-| `--size N`       | Requested cursor size in pixels. Overrides `DRM_CAP_CURSOR_WIDTH` on the HW path. |
+| `--theme NAME`   | Preferred theme. The resolver walks its `Inherits=` chain and falls back through every indexed theme if the requested cursor name isn't present. |
+| `--cursor NAME`  | Initial shape (`default` if unspecified). Any name in any installed theme works — alias classes are applied (`pointer`↔`hand2`, `e-resize`↔`right_side`, etc.). |
+| `--size N`       | Requested cursor size in pixels. Feeds both `Cursor::load` (which picks the nearest on-disk size libxcursor ships) and `RendererConfig::preferred_size`. |
+| `--plane ID`     | Force a specific KMS plane id, bypassing the library's plane selection (CURSOR → OVERLAY → legacy). Useful for exercising a non-default path. |
 
 The device path is optional — if omitted, the first suitable
 `/dev/dri/card*` is picked.
+
+The startup log line reports which path the renderer landed on:
+
+    Cursor path: atomic CURSOR plane (plane 31)
+
+or `atomic OVERLAY plane` / `legacy drmModeSetCursor`.
 
 Runtime controls, once the cursor is on screen:
 
@@ -85,33 +100,41 @@ does not have:
 (compositor, display manager) probably holds master. Switch VTs
 (Ctrl+Alt+F2..F6) and try from there.
 
-**Hardware cursor renders once but animated shapes freeze.** Some
-drivers don't re-read the cursor buffer when only the pixels change,
-even with `drmModeSetCursor` called again on the same handle. Workaround:
-run with `--sw` to render via the overlay plane. Mention the driver +
-kernel version if you file an issue.
+**`No XCursor themes found on system search path`.** No directory on
+the XDG walk contains a `cursors/` subdir or an `index.theme`. Install
+`adwaita-icon-theme` or set `XCURSOR_PATH` explicitly.
 
-**`Failed to load cursor '...' at size ... from any theme`.** The
-cursor name you asked for isn't present in any installed theme. Try
-`default`, `pointer`, or install `adwaita-icon-theme`.
+**`Failed to load cursor '...' (theme hint '...', size ...)`.** The
+cursor name isn't present in any installed theme, even after walking
+the `Inherits=` chain and applying the alias table. Try `default`,
+`pointer`, or install `adwaita-icon-theme`.
 
-**Theme installed under `~/.icons` not picked up.** libxcursor honors
-`XCURSOR_PATH` only if the variable is set. Export it before running:
+**Theme installed under `~/.icons` not picked up.** The library's
+default walk does include `~/.icons`. If a theme there isn't visible,
+either its directory is missing a `cursors/` subdirectory (the library
+skips cursor-less themes) or `$XCURSOR_PATH` is set to something that
+omits it. Unset it or add your path explicitly:
 
     export XCURSOR_PATH=~/.icons:/usr/share/icons
     mouse_cursor --theme MyTheme
 
 **Cursor looks small on a high-DPI display.** The HW cursor plane is
-sized by the driver (`DRM_CAP_CURSOR_WIDTH`). If libxcursor returns a
-smaller pre-rasterized frame than the plane, the example centers it
-(intentionally) and the rest of the plane is transparent. Pass
-`--size N` to ask libxcursor for a specific pre-rendered size if the
-theme ships one.
+sized by the driver (`DRM_CAP_CURSOR_WIDTH`). If the theme ships a
+smaller pre-rasterized frame than the plane, the library centers it
+and the rest of the plane stays transparent. Pass `--size N` to ask
+libxcursor for a specific pre-rendered size if the theme ships one,
+or switch to a theme with larger variants.
+
+**Different driver, different path chosen.** The library's selection
+order is CURSOR plane → OVERLAY plane → legacy. If the startup log
+reports the legacy path on a modern driver, it means universal planes
+or atomic modesetting failed to enable — check the prior error lines.
 
 ## Related
 
-`xcursor_smoke` is a companion binary that loads a named cursor from a
-theme and prints metadata (frame count, per-frame `w×h` / hotspot /
+`xcursor_smoke` is a companion binary that resolves a named cursor
+through `drm::cursor::Theme` and `drm::cursor::Cursor` and prints
+metadata (theme chain, frame count, per-frame `w×h` / hotspot /
 delay, `frame_at()` sampling across one cycle). Useful for checking
 that a theme has the cursors you expect before running the full
 example:

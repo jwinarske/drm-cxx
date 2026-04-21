@@ -193,7 +193,7 @@ drm::expected<void, std::error_code> Renderer::Impl::alloc_buffer(std::uint32_t 
 
   // Zero-fill so the first blit only has to write the cursor's own
   // pixels — the rest stays transparent (alpha=0) instead of being
-  // uninitialised mmap contents.
+  // uninitialized mmap contents.
   std::memset(mapped, 0, buf_size);
   return {};
 }

@@ -96,3 +96,19 @@ test('test_gbm',
     dependencies : test_deps,
   ),
 )
+
+if has_xcursor
+  test('test_cursor_theme',
+    executable('test_cursor_theme',
+      'unit/test_cursor_theme.cpp',
+      dependencies : test_deps,
+    ),
+  )
+
+  test('test_cursor_cursor',
+    executable('test_cursor_cursor',
+      'unit/test_cursor_cursor.cpp',
+      dependencies : test_deps,
+    ),
+  )
+endif
