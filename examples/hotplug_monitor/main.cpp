@@ -27,12 +27,13 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
-#include <poll.h>
 #include <string>
+#include <sys/poll.h>
 #include <system_error>
 
 namespace {
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile std::sig_atomic_t g_quit = 0;
 
 void signal_handler(int /*sig*/) {
