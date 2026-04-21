@@ -39,11 +39,11 @@ inline std::vector<std::string> enumerate_cards() {
 /// Select a DRM device path.
 ///
 /// If a command-line argument is provided, use it directly.
-/// Otherwise enumerate /dev/dri/card* devices: auto-select if exactly one,
+/// Otherwise, list /dev/dri/card* devices: auto-select if exactly one,
 /// prompt the user to choose if multiple.
 ///
 /// Returns std::nullopt on error (no devices found or invalid input).
-inline std::optional<std::string> select_device(int argc, char* argv[]) {
+inline std::optional<std::string> select_device(const int argc, char* argv[]) {
   if (argc > 1) {
     return std::string(argv[1]);
   }
@@ -74,8 +74,8 @@ inline std::optional<std::string> select_device(int argc, char* argv[]) {
   }
 
   std::size_t idx = 0;
-  const auto [ptr, ec] = std::from_chars(line.data(), line.data() + line.size(), idx);
-  if (ec != std::errc{} || idx >= cards.size()) {
+  if (const auto [ptr, ec] = std::from_chars(line.data(), line.data() + line.size(), idx);
+      ec != std::errc{} || idx >= cards.size()) {
     drm::println(stderr, "Invalid selection: {}", line);
     return std::nullopt;
   }

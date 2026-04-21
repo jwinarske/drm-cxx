@@ -90,7 +90,7 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
+          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
           version: 1.0
 
       # ThorVG 1.0.4 isn't packaged on ubuntu-24.04; build from source and cache
@@ -212,7 +212,7 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev clang-19 clang-tidy-19 clang-format-19
+          packages: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev clang-19 clang-tidy-19 clang-format-19
           version: 1.0
 
       - name: Configure
@@ -222,15 +222,18 @@ jobs:
         run: |
           meson setup builddir \
             -Dvulkan=true \
-            -Dexamples=false \
+            -Dexamples=true \
             -Dtests=false
 
       - name: Build (generate compile_commands.json)
         run: ninja -C builddir
 
+      # Tidy src + every example except the vendored thorvg_janitor tree
+      # (has its own LICENSE and tracks upstream; pruning it here matches
+      # the -isystem rationale for {fmt}).
       - name: clang-tidy
         run: |
-          find src -name '*.cpp' | \
+          find src examples -name '*.cpp' -not -path 'examples/thorvg_janitor/*' | \
             xargs clang-tidy-19 -p builddir
 
       - name: clang-format
