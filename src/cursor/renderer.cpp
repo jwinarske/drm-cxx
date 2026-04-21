@@ -101,6 +101,14 @@ struct Renderer::Impl {
   // --- cached plane props (atomic paths only) -----------------------
   drm::PropertyStore props;
 
+  // HOTSPOT_X / HOTSPOT_Y are optional (virtualized drivers only). We
+  // resolve their property ids once at create + session-resume time so
+  // the per-event stage_position doesn't pay for a lookup that is
+  // almost always going to miss on bare metal. nullopt = the plane
+  // does not expose this property at all.
+  std::optional<std::uint32_t> hotspot_x_prop;
+  std::optional<std::uint32_t> hotspot_y_prop;
+
   // --- cursor binding + animation -----------------------------------
   std::optional<Cursor> cursor;
   drm::Clock::time_point anim_start;
@@ -133,6 +141,13 @@ struct Renderer::Impl {
   // --- position staging (caller-commit mode) ------------------------
   drm::expected<void, std::error_code> stage_position(drm::AtomicRequest& req, int crtc_x,
                                                       int crtc_y) const;
+
+  // Probe the just-cached plane properties for HOTSPOT_X / HOTSPOT_Y.
+  // Fills hotspot_x_prop / hotspot_y_prop; both remain nullopt on
+  // bare-metal planes. Cheap — the property_id lookup is a small
+  // vector scan. Called from create() and on_session_resumed() right
+  // after props.cache_properties().
+  void probe_hotspot_properties() noexcept;
 
   // Translate a CRTC coordinate to the plane-destination coordinate,
   // accounting for the current frame's hotspot and the centering
@@ -271,6 +286,20 @@ std::pair<int, int> Renderer::Impl::hotspot_adjust(int crtc_x, int crtc_y) const
   return {crtc_x - (last_frame->xhot + x_off), crtc_y - (last_frame->yhot + y_off)};
 }
 
+void Renderer::Impl::probe_hotspot_properties() noexcept {
+  hotspot_x_prop.reset();
+  hotspot_y_prop.reset();
+  if (path == PlanePath::kLegacy) {
+    return;
+  }
+  if (auto id = props.property_id(plane_id, "HOTSPOT_X")) {
+    hotspot_x_prop = *id;
+  }
+  if (auto id = props.property_id(plane_id, "HOTSPOT_Y")) {
+    hotspot_y_prop = *id;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Impl: commit + stage
 // ---------------------------------------------------------------------------
@@ -321,6 +350,36 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   }
   if (auto r = add("SRC_H", static_cast<std::uint64_t>(buf_h) << 16U); !r) {
     return r;
+  }
+
+  // HOTSPOT_X / HOTSPOT_Y — virtualized-driver hint. Only written if
+  // the plane exposes the properties (probed once at create/resume).
+  // The buffer-local hotspot is the frame's own hotspot plus the
+  // centering offset applied in blit_frame, so the host VMM reads a
+  // coordinate in the same space as CRTC_X/CRTC_Y + buffer size.
+  // Pre-blit (last_frame == nullptr) we skip the write — there's no
+  // meaningful hotspot yet and we'd rather leave the prior value
+  // than clobber it with a stale zero.
+  if (last_frame != nullptr) {
+    const int x_off =
+        (buf_w > last_frame->width) ? static_cast<int>((buf_w - last_frame->width) / 2) : 0;
+    const int y_off =
+        (buf_h > last_frame->height) ? static_cast<int>((buf_h - last_frame->height) / 2) : 0;
+    // xhot/yhot are int in the XCursor format but are always >= 0 in
+    // practice (libxcursor surfaces them as XCursorDim, unsigned).
+    // Clamp defensively so a malformed file can't overflow the cast.
+    const std::uint64_t hx = static_cast<std::uint64_t>(std::max(0, last_frame->xhot + x_off));
+    const std::uint64_t hy = static_cast<std::uint64_t>(std::max(0, last_frame->yhot + y_off));
+    if (hotspot_x_prop) {
+      if (auto r = req.add_property(plane_id, *hotspot_x_prop, hx); !r) {
+        return r;
+      }
+    }
+    if (hotspot_y_prop) {
+      if (auto r = req.add_property(plane_id, *hotspot_y_prop, hy); !r) {
+        return r;
+      }
+    }
   }
   return {};
 }
@@ -531,6 +590,7 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
       impl->free_buffer();
       return drm::unexpected<std::error_code>(r.error());
     }
+    impl->probe_hotspot_properties();
 
     // Rotation: set the plane's rotation property now if the plane
     // exposes it. Planes that don't expose it can only run k0;
@@ -807,6 +867,7 @@ drm::expected<void, std::error_code> Renderer::on_session_resumed(int new_fd) {
         !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
+    impl_->probe_hotspot_properties();
   }
 
   impl_->paused = false;
@@ -847,6 +908,10 @@ std::uint32_t Renderer::plane_id() const noexcept {
 
 Rotation Renderer::rotation() const noexcept {
   return impl_->rotation;
+}
+
+bool Renderer::has_hotspot_properties() const noexcept {
+  return impl_->hotspot_x_prop.has_value() && impl_->hotspot_y_prop.has_value();
 }
 
 }  // namespace drm::cursor

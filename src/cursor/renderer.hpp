@@ -45,6 +45,20 @@
 //     replaced while we weren't looking).
 //   - on_session_paused() stops drawing but keeps the Cursor pointer
 //     and the animation start time so resume is seamless.
+//
+// Virtualized-plane hotspot hinting:
+//   - When the chosen plane exposes the HOTSPOT_X / HOTSPOT_Y
+//     properties (virtio-gpu, vmwgfx, and other virtualized display
+//     drivers) Renderer writes the buffer-local hotspot coordinates
+//     alongside CRTC_X / CRTC_Y on every commit. The host VMM reads
+//     these to align its native mouse cursor with the guest's
+//     logical pointer tip — without them, the host and guest agree
+//     on where the sprite is drawn but disagree on where the tip is,
+//     producing ~xhot pixels of offset between click and target.
+//     Hotspot math on CRTC_X / CRTC_Y is unchanged (the sprite's
+//     top-left corner still goes to `requested - hotspot`); HOTSPOT
+//     is purely informational to the host. Bare-metal planes don't
+//     expose these properties and the write is silently skipped.
 
 #pragma once
 
@@ -216,6 +230,13 @@ class Renderer {
   [[nodiscard]] PlanePath path() const noexcept;
   [[nodiscard]] std::uint32_t plane_id() const noexcept;
   [[nodiscard]] Rotation rotation() const noexcept;
+
+  /// True when the selected plane exposes the HOTSPOT_X / HOTSPOT_Y
+  /// properties — typically only virtualized display drivers do.
+  /// Compositors running in a VM can check this to confirm the host
+  /// will see the guest's cursor tip alignment; bare-metal compositors
+  /// can ignore it. Always false on the legacy drmModeSetCursor path.
+  [[nodiscard]] bool has_hotspot_properties() const noexcept;
 
  private:
   struct Impl;
