@@ -248,6 +248,50 @@ TEST_F(ThemeTest, InheritsParserIgnoresCommentsAndOtherSections) {
   EXPECT_EQ(r->theme_name, "pp");
 }
 
+TEST_F(ThemeTest, ResolveMemoizesAcrossRepeatedCalls) {
+  // Caching contract: a resolved (name, preferred_theme) pair is
+  // memoized for the Theme's lifetime, so a follow-up resolve with
+  // the same inputs returns the original result even if the backing
+  // cursor file disappears between calls. Callers who need a fresh
+  // read are expected to construct a new Theme, which is cheap.
+  const auto foo = make_theme("foo");
+  touch_cursor(foo, "pointer");
+
+  auto theme = discover();
+  ASSERT_TRUE(theme.has_value());
+
+  auto first = theme->resolve("pointer", "foo");
+  ASSERT_TRUE(first.has_value());
+  const auto first_source = first->source;
+
+  std::error_code ec;
+  fs::remove(foo / "cursors" / "pointer", ec);
+  ASSERT_FALSE(ec);
+
+  auto second = theme->resolve("pointer", "foo");
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(second->theme_name, "foo");
+  EXPECT_EQ(second->source, first_source);
+}
+
+TEST_F(ThemeTest, ResolveMemoizesNegativeResults) {
+  // Negative caching: a failed lookup should also be remembered so a
+  // compositor that probes for an absent shape doesn't re-walk the
+  // chain on every request. Verified by creating the cursor after the
+  // first (failing) resolve — the cached failure wins over the
+  // now-present file.
+  const auto foo = make_theme("foo");
+  auto theme = discover();
+  ASSERT_TRUE(theme.has_value());
+
+  auto first = theme->resolve("pointer", "foo");
+  EXPECT_FALSE(first.has_value());
+
+  touch_cursor(foo, "pointer");
+  auto second = theme->resolve("pointer", "foo");
+  EXPECT_FALSE(second.has_value());
+}
+
 TEST_F(ThemeTest, ResolveChainReportsDedupedWalkOrder) {
   // Diamond inheritance: c inherits a and b; a inherits z; b inherits z.
   // z should appear once in the chain regardless of the two paths to it.

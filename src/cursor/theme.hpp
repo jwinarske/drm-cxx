@@ -21,6 +21,14 @@
 //     name; drm::cursor::Cursor::load() does the actual libxcursor
 //     call. Keeps Theme cheap (no megabytes of pixel data) and
 //     testable without a running display.
+//
+// Caching:
+//   resolve() memoizes both successful and failing lookups keyed by
+//   (cursor_name, preferred_theme) for the Theme's lifetime. Callers
+//   that cycle through a fixed shape set pay the BFS walk + filesystem
+//   probes only on the first request for each pair. The cache is not
+//   invalidated if cursor files appear or disappear on disk between
+//   calls — construct a fresh Theme (which is cheap) to re-scan.
 
 #pragma once
 
