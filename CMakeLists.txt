@@ -26,6 +26,13 @@ set(DRM_CXX_SESSION "AUTO" CACHE STRING
     "Build drm::session::Seat on top of libseat: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_SESSION PROPERTY STRINGS AUTO ON OFF)
 
+# Optional drm::cursor module (XCursor theme resolver + KMS cursor
+# renderer). Needs libxcursor; when absent or DRM_CXX_CURSOR=OFF the
+# headers still install but the .cpp TUs are left out of the library.
+set(DRM_CXX_CURSOR "AUTO" CACHE STRING
+    "Build drm::cursor on top of libxcursor: AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_CURSOR PROPERTY STRINGS AUTO ON OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -77,6 +84,26 @@ if(TARGET PkgConfig::libseat)
   set(DRM_CXX_HAS_LIBSEAT 1)
 else()
   set(DRM_CXX_HAS_LIBSEAT 0)
+endif()
+
+# libxcursor probe for drm::cursor.
+if(NOT DRM_CXX_CURSOR STREQUAL "OFF")
+  if(DRM_CXX_CURSOR STREQUAL "ON")
+    pkg_check_modules(xcursor REQUIRED IMPORTED_TARGET xcursor)
+  else()
+    pkg_check_modules(xcursor IMPORTED_TARGET xcursor)
+  endif()
+endif()
+if(TARGET PkgConfig::xcursor)
+  set(DRM_CXX_HAS_XCURSOR 1)
+  include(CheckStructHasMember)
+  set(CMAKE_REQUIRED_INCLUDES ${xcursor_INCLUDE_DIRS})
+  check_struct_has_member("XcursorImage" delay "X11/Xcursor/Xcursor.h"
+    DRM_CXX_HAS_XCURSOR_DELAY LANGUAGE CXX)
+  unset(CMAKE_REQUIRED_INCLUDES)
+else()
+  set(DRM_CXX_HAS_XCURSOR 0)
+  message(STATUS "drm-cxx: libxcursor not found — drm::cursor will not be built")
 endif()
 
 # {fmt} backs the drm-cxx/detail/format.hpp adapter when the toolchain lacks

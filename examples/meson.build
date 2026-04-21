@@ -16,26 +16,16 @@ executable('hotplug_monitor',
   dependencies : [drm_cxx_dep],
 )
 
-# XCursor dep + delay-field probe, shared by mouse_cursor and xcursor_smoke.
-xcursor_dep = dependency('xcursor', required : true)
-
-xcursor_cpp_args = []
-if cpp.has_member('XcursorImage', 'delay',
-    prefix : '#include <X11/Xcursor/Xcursor.h>',
-    dependencies : xcursor_dep)
-  xcursor_cpp_args += '-DHAS_XCURSOR_DELAY'
-endif
-
+# mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
+# module — no direct libxcursor dep needed here, the library owns that.
 executable('mouse_cursor',
-  ['mouse_cursor/main.cpp', 'mouse_cursor/xcursor_loader.cpp'],
-  dependencies : [drm_cxx_dep, xcursor_dep],
-  cpp_args : xcursor_cpp_args,
+  'mouse_cursor/main.cpp',
+  dependencies : [drm_cxx_dep],
 )
 
 executable('xcursor_smoke',
-  ['mouse_cursor/xcursor_smoke.cpp', 'mouse_cursor/xcursor_loader.cpp'],
-  dependencies : xcursor_dep,
-  cpp_args : xcursor_cpp_args,
+  'mouse_cursor/xcursor_smoke.cpp',
+  dependencies : [drm_cxx_dep],
 )
 
 if get_option('vulkan')

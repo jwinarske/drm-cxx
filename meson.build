@@ -82,7 +82,18 @@ else
     fmt_opts.set_override_option('werror', 'false')
     fmt_opts.set_override_option('warning_level', '0')
     fmt_proj = cmake.subproject('fmt', options : fmt_opts)
-    fmt_dep = fmt_proj.dependency('fmt')
+    # Wrap the subproject's static fmt target with link_whole so every
+    # archive member lands in the final library. Under clang + LTO,
+    # archive-based linking can fail to pull in members referenced
+    # only from late-instantiated templates — e.g. fmt::vprintln from
+    # a fmt::println<std::string>(FILE*, ...) call site that inlines
+    # after archive resolution has finished — so the final link ends
+    # with an undefined-reference error even though the symbol is in
+    # libfmt.a. link_whole unconditionally pulls every member.
+    fmt_dep = declare_dependency(
+      link_whole : fmt_proj.target('fmt'),
+      include_directories : include_directories('subprojects/fmt/include'),
+    )
   endif
 endif
 
@@ -109,6 +120,26 @@ endif
 has_libseat = libseat_dep.found()
 if not has_libseat
   message('drm-cxx: libseat not found — drm::session::Seat will be a runtime no-op')
+endif
+
+# libxcursor probe for drm::cursor. The renderer's KMS side needs no
+# extra deps (just libdrm, already required), but the theme loader
+# calls XcursorFilenameLoadImages to rasterize .cursor files.
+cursor_feature = get_option('cursor')
+if not cursor_feature.disabled()
+  xcursor_lib_dep = dependency('xcursor', required : cursor_feature.enabled(),
+                               include_type : 'system')
+else
+  xcursor_lib_dep = disabler()
+endif
+has_xcursor = xcursor_lib_dep.found()
+if has_xcursor
+  xcursor_delay_arg = cpp.has_member('XcursorImage', 'delay',
+    prefix : '#include <X11/Xcursor/Xcursor.h>',
+    dependencies : xcursor_lib_dep) ? '-DHAS_XCURSOR_DELAY' : ''
+else
+  xcursor_delay_arg = ''
+  message('drm-cxx: libxcursor not found — drm::cursor will not be built')
 endif
 
 #── Configuration ─────────────────────────────────────────────

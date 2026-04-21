@@ -21,6 +21,7 @@ drm_cxx_sources = files(
   'display/edid.cpp',
   'display/hotplug_monitor.cpp',
   'session/seat.cpp',
+  'time/clock.cpp',
   'gbm/device.cpp',
   'gbm/surface.cpp',
   'gbm/buffer.cpp',
@@ -69,11 +70,27 @@ if has_libseat
   drm_cxx_deps += libseat_dep
 endif
 
+# drm::cursor is a feature: the .cpp files only compile when libxcursor
+# is present. Public headers stay in the tree but callers linking a
+# cursor-less build hit an unresolved symbol at load() / create() time.
+cursor_cpp_args = []
+if has_xcursor
+  drm_cxx_sources += files(
+    'cursor/theme.cpp',
+    'cursor/cursor.cpp',
+    'cursor/renderer.cpp',
+  )
+  drm_cxx_deps += xcursor_lib_dep
+  if xcursor_delay_arg != ''
+    cursor_cpp_args += xcursor_delay_arg
+  endif
+endif
+
 drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
-  cpp_args : session_cpp_args,
+  cpp_args : session_cpp_args + cursor_cpp_args,
   install : true,
 )
 
@@ -142,6 +159,20 @@ install_headers(
   'session/seat.hpp',
   subdir : 'drm-cxx/session',
 )
+
+install_headers(
+  'time/clock.hpp',
+  subdir : 'drm-cxx/time',
+)
+
+if has_xcursor
+  install_headers(
+    'cursor/theme.hpp',
+    'cursor/cursor.hpp',
+    'cursor/renderer.hpp',
+    subdir : 'drm-cxx/cursor',
+  )
+endif
 
 install_headers(
   'gbm/device.hpp',
