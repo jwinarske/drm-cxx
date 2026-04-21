@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -68,11 +69,35 @@ struct SeatOptions {
   std::string_view keymap_path;  // Empty = use RMLVO defaults
 };
 
+// ── InputDeviceOpener ──────────────────────────────────────────
+//
+// Hook for routing libinput's privileged device opens (and matching
+// closes) through a seat/session manager instead of direct syscalls.
+// The two callbacks correspond 1:1 to libinput's
+// `open_restricted`/`close_restricted` contract. Empty callbacks mean
+// "use ::open / ::close directly" — the default.
+//
+// Example: plugging a libseat-backed SeatSession in so every
+// /dev/input/event* libinput touches is revoked on VT switch.
+struct InputDeviceOpener {
+  std::function<int(const char* path, int flags)> open;
+  std::function<void(int fd)> close;
+
+  [[nodiscard]] bool empty() const noexcept { return !open && !close; }
+};
+
 // ── Seat ───────────────────────────────────────────────────────
 
 class Seat {
  public:
+  /// Open the seat using the default opener (direct ::open/::close).
   static drm::expected<Seat, std::error_code> open(SeatOptions opts = {});
+
+  /// Open the seat with a caller-provided opener. Use this to route
+  /// libinput's privileged opens through libseat (or another session
+  /// manager). Both callbacks must be set or both left empty — a
+  /// mismatched pair rejects with std::errc::invalid_argument.
+  static drm::expected<Seat, std::error_code> open(SeatOptions opts, InputDeviceOpener opener);
 
   void set_event_handler(EventHandler handler);
 
@@ -100,6 +125,10 @@ class Seat {
   void* li_{};
   void* udev_{};
   EventHandler handler_;
+  // Heap-allocated so its address is stable across Seat moves;
+  // libinput's open/close_restricted callbacks get this pointer via
+  // user_data and dereference it on every device open.
+  std::unique_ptr<InputDeviceOpener> opener_;
   int fd_{-1};
 };
 

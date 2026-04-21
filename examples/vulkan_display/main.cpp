@@ -7,11 +7,15 @@
 // they can be cross-referenced with DRM planes.
 
 #include "drm-cxx/detail/format.hpp"
+#include "session/seat.hpp"
 #include "vulkan/display.hpp"
 
 #include <cstdlib>
 
 int main() {
+  // See atomic_modeset for why we claim a seat session.
+  auto seat = drm::session::Seat::open();
+
   const auto result = drm::vulkan::Display::create();
   if (!result) {
     drm::println(stderr, "Failed to create Vulkan display (Vulkan may not be available)");

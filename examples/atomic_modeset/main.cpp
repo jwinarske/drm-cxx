@@ -15,6 +15,7 @@
 #include "modeset/atomic.hpp"
 #include "modeset/mode.hpp"
 #include "modeset/page_flip.hpp"
+#include "session/seat.hpp"
 
 #include <drm-cxx/detail/span.hpp>
 
@@ -22,6 +23,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <utility>
 
 int main(const int argc, char* argv[]) {
@@ -30,13 +32,32 @@ int main(const int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Open DRM device
-  auto dev_result = drm::Device::open(*path);
-  if (!dev_result) {
+  // Claim a seat session if we can. libseat auto-selects the available
+  // backend (logind on systemd, seatd on non-systemd, builtin for
+  // root/tty-owner). Held for the lifetime of main so the seat provider
+  // releases our control cleanly on SIGKILL.
+  auto seat = drm::session::Seat::open();
+
+  // Prefer the seat's revocable device fd when available. On VT switch
+  // it's revoked cleanly; master is also managed by the seat provider
+  // so we avoid racing drmSetMaster. When no seat backend is present,
+  // fall back to plain drm::Device::open.
+  const auto seat_dev = seat ? seat->take_device(*path) : std::nullopt;
+  auto dev_holder = [&]() -> std::optional<drm::Device> {
+    if (seat_dev) {
+      return drm::Device::from_fd(seat_dev->fd);
+    }
+    auto r = drm::Device::open(*path);
+    if (!r) {
+      return std::nullopt;
+    }
+    return std::move(*r);
+  }();
+  if (!dev_holder) {
     drm::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
-  auto& dev = *dev_result;
+  auto& dev = *dev_holder;
 
   // Enable capabilities
   if (const auto r = dev.enable_universal_planes(); !r) {
@@ -60,8 +81,9 @@ int main(const int argc, char* argv[]) {
 
   // Find the first connected connector
   drm::Connector conn{nullptr, &drmModeFreeConnector};
-  for (int i = 0; i < res->count_connectors; ++i) {
-    if (auto c = drm::get_connector(dev.fd(), res->connectors[i]);
+  const auto connector_ids = drm::span<const uint32_t>(res->connectors, res->count_connectors);
+  for (const auto connector_id : connector_ids) {
+    if (auto c = drm::get_connector(dev.fd(), connector_id);
         c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
       drm::println("Connector {}: {} modes", c->connector_id, c->count_modes);
       conn = std::move(c);

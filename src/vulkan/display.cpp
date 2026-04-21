@@ -60,7 +60,7 @@ drm::expected<Display, std::error_code> Display::create() {
   auto* vk_create_instance =
       reinterpret_cast<PFN_vkCreateInstance>(dlsym(RTLD_DEFAULT, "vkCreateInstance"));
   if (vk_create_instance == nullptr) {
-    return drm::unexpected(std::make_error_code(std::errc::not_supported));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
 
   auto* vk_enumerate_physical_devices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
@@ -79,7 +79,7 @@ drm::expected<Display, std::error_code> Display::create() {
       (vk_get_physical_device_display_properties_khr == nullptr) ||
       (vk_get_physical_device_display_plane_properties_khr == nullptr) ||
       (vk_get_display_plane_supported_displays_khr == nullptr)) {
-    return drm::unexpected(std::make_error_code(std::errc::not_supported));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
 
   // Create a minimal Vulkan instance
@@ -88,7 +88,7 @@ drm::expected<Display, std::error_code> Display::create() {
   app_info.pApplicationName = "drm-cxx";
   app_info.apiVersion = VK_API_VERSION_1_0;
 
-  const char* extensions[] = {VK_KHR_DISPLAY_EXTENSION_NAME};
+  const char* const extensions[] = {VK_KHR_DISPLAY_EXTENSION_NAME};
 
   VkInstanceCreateInfo create_info{};
   create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -100,7 +100,7 @@ drm::expected<Display, std::error_code> Display::create() {
   VkInstance instance{};
   VkResult const result = vk_create_instance(&create_info, nullptr, &instance);
   if (result != VK_SUCCESS) {
-    return drm::unexpected(std::make_error_code(std::errc::not_supported));
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
   display.instance_ = instance;
 
@@ -118,7 +118,7 @@ drm::expected<Display, std::error_code> Display::create() {
       dev_count == 0) {
     return display;
   }
-  VkPhysicalDevice phys_dev = devices[0];
+  VkPhysicalDevice phys_dev = devices.front();
   display.physical_device_ = phys_dev;
 
   // Enumerate displays
@@ -162,7 +162,7 @@ drm::expected<Display, std::error_code> Display::create() {
     for (uint32_t i = 0; i < plane_count; ++i) {
       DisplayPlaneInfo pi{};
       pi.plane_index = i;
-      pi.current_stack_index = plane_props[i].currentStackIndex;
+      pi.current_stack_index = plane_props.at(i).currentStackIndex;
 
       // Get supported displays for this plane
       uint32_t supported_count = 0;

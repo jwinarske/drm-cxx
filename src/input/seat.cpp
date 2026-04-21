@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <libudev.h>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <unistd.h>
@@ -26,7 +27,16 @@ auto* ud(void* p) {
   return static_cast<struct udev*>(p);
 }
 
-int open_restricted(const char* path, int flags, void* /*user_data*/) {
+// Trampolines bridging libinput's C callback ABI to our
+// InputDeviceOpener. user_data is a pointer to the Seat-owned
+// InputDeviceOpener (heap-allocated so its address survives moves).
+// Both callbacks are present; whether they delegate to ::open or to a
+// caller-provided lambda depends on how the opener was constructed.
+int on_open_restricted(const char* path, int flags, void* user_data) {
+  const auto* opener = static_cast<const InputDeviceOpener*>(user_data);
+  if (opener != nullptr && opener->open) {
+    return opener->open(path, flags);
+  }
   int const fd = ::open(path, flags | O_CLOEXEC);
   if (fd < 0) {
     return -errno;
@@ -34,13 +44,18 @@ int open_restricted(const char* path, int flags, void* /*user_data*/) {
   return fd;
 }
 
-void close_restricted(int fd, void* /*user_data*/) {
+void on_close_restricted(int fd, void* user_data) {
+  const auto* opener = static_cast<const InputDeviceOpener*>(user_data);
+  if (opener != nullptr && opener->close) {
+    opener->close(fd);
+    return;
+  }
   ::close(fd);
 }
 
 const struct libinput_interface li_interface = {
-    open_restricted,
-    close_restricted,
+    on_open_restricted,
+    on_close_restricted,
 };
 
 }  // namespace
@@ -55,7 +70,11 @@ Seat::~Seat() {
 }
 
 Seat::Seat(Seat&& other) noexcept
-    : li_(other.li_), udev_(other.udev_), handler_(std::move(other.handler_)), fd_(other.fd_) {
+    : li_(other.li_),
+      udev_(other.udev_),
+      handler_(std::move(other.handler_)),
+      opener_(std::move(other.opener_)),
+      fd_(other.fd_) {
   other.li_ = nullptr;
   other.udev_ = nullptr;
   other.fd_ = -1;
@@ -73,6 +92,7 @@ Seat& Seat::operator=(Seat&& other) noexcept {
     li_ = other.li_;
     udev_ = other.udev_;
     handler_ = std::move(other.handler_);
+    opener_ = std::move(other.opener_);
     fd_ = other.fd_;
 
     other.li_ = nullptr;
@@ -83,14 +103,28 @@ Seat& Seat::operator=(Seat&& other) noexcept {
 }
 
 drm::expected<Seat, std::error_code> Seat::open(SeatOptions opts) {
+  return Seat::open(opts, InputDeviceOpener{});
+}
+
+drm::expected<Seat, std::error_code> Seat::open(SeatOptions opts, InputDeviceOpener opener) {
+  // A mismatched pair (only one of open/close set) is always a bug:
+  // whoever allocated the fd must also be the one freeing it. Reject
+  // up front rather than have libinput paper over it.
+  if (static_cast<bool>(opener.open) != static_cast<bool>(opener.close)) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+
   Seat seat;
+  // Heap-allocate the opener so its address is stable for libinput's
+  // user_data, regardless of how Seat moves later.
+  seat.opener_ = std::make_unique<InputDeviceOpener>(std::move(opener));
 
   seat.udev_ = udev_new();
   if (seat.udev_ == nullptr) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
 
-  seat.li_ = libinput_udev_create_context(&li_interface, nullptr, ud(seat.udev_));
+  seat.li_ = libinput_udev_create_context(&li_interface, seat.opener_.get(), ud(seat.udev_));
   if (seat.li_ == nullptr) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }

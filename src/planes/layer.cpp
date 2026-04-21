@@ -12,9 +12,9 @@
 
 namespace drm::planes {
 
-Layer& Layer::set_property(std::string_view name, uint64_t value) {
-  auto [it, inserted] = properties_.emplace(std::string(name), value);
-  if (!inserted && it->second != value) {
+Layer& Layer::set_property(const std::string_view name, uint64_t value) {
+  if (auto [it, inserted] = properties_.emplace(std::string(name), value);
+      !inserted && it->second != value) {
     it->second = value;
     dirty_ = true;
   } else if (inserted) {
@@ -24,7 +24,7 @@ Layer& Layer::set_property(std::string_view name, uint64_t value) {
 }
 
 Layer& Layer::disable() noexcept {
-  properties_["FB_ID"] = 0;
+  properties_.insert_or_assign("FB_ID", uint64_t{0});
   dirty_ = true;
   return *this;
 }
@@ -57,7 +57,7 @@ std::optional<uint64_t> Layer::property(std::string_view name) const {
   // Transparent heterogeneous unordered_map lookup is C++20. Under C++17
   // we construct a temporary std::string; property() is not on the hot
   // atomic-commit path.
-  auto it = properties_.find(std::string(name));
+  const auto it = properties_.find(std::string(name));
   if (it == properties_.end()) {
     return std::nullopt;
   }
@@ -70,28 +70,27 @@ const Layer::PropertyMap& Layer::properties() const noexcept {
 
 std::optional<uint32_t> Layer::format() const {
   // The format is set as a separate property hint by the compositor.
-  auto fmt = property("pixel_format");
-  if (fmt) {
+  if (const auto fmt = property("pixel_format")) {
     return static_cast<uint32_t>(*fmt);
   }
   return std::nullopt;
 }
 
 uint64_t Layer::modifier() const {
-  auto val = property("FB_MODIFIER");
+  const auto val = property("FB_MODIFIER");
   return val.value_or(0);
 }
 
 uint64_t Layer::rotation() const {
-  auto val = property("rotation");
+  const auto val = property("rotation");
   return val.value_or(0);  // 0 = DRM_MODE_ROTATE_0
 }
 
 bool Layer::requires_scaling() const {
-  auto src_w = property("SRC_W");
-  auto crtc_w = property("CRTC_W");
-  auto src_h = property("SRC_H");
-  auto crtc_h = property("CRTC_H");
+  const auto src_w = property("SRC_W");
+  const auto crtc_w = property("CRTC_W");
+  const auto src_h = property("SRC_H");
+  const auto crtc_h = property("CRTC_H");
 
   if (!src_w || !crtc_w || !src_h || !crtc_h) {
     return false;
@@ -107,12 +106,12 @@ bool Layer::requires_scaling() const {
 }
 
 uint32_t Layer::width() const {
-  auto val = property("CRTC_W");
+  const auto val = property("CRTC_W");
   return val ? static_cast<uint32_t>(*val) : 0;
 }
 
 uint32_t Layer::height() const {
-  auto val = property("CRTC_H");
+  const auto val = property("CRTC_H");
   return val ? static_cast<uint32_t>(*val) : 0;
 }
 

@@ -21,32 +21,34 @@
 
 namespace drm::planes {
 
-bool PlaneCapabilities::supports_format(uint32_t fmt) const {
+bool PlaneCapabilities::supports_format(const uint32_t fmt) const {
   return std::find(formats.begin(), formats.end(), fmt) != formats.end();
 }
 
-bool PlaneCapabilities::compatible_with_crtc(uint32_t crtc_index) const {
+bool PlaneCapabilities::compatible_with_crtc(const uint32_t crtc_index) const {
   return (possible_crtcs & (1U << crtc_index)) != 0;
 }
 
 namespace {
 
-DRMPlaneType parse_plane_type(int fd, uint32_t plane_id) {
+DRMPlaneType parse_plane_type(const int fd, const uint32_t plane_id) {
   auto* props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
   if (props == nullptr) {
     return DRMPlaneType::OVERLAY;
   }
 
+  const auto prop_ids = drm::span<const uint32_t>(props->props, props->count_props);
+  const auto prop_vals = drm::span<const uint64_t>(props->prop_values, props->count_props);
+
   DRMPlaneType result = DRMPlaneType::OVERLAY;
   for (uint32_t i = 0; i < props->count_props; ++i) {
-    auto* prop = drmModeGetProperty(fd, props->props[i]);
+    auto* prop = drmModeGetProperty(fd, prop_ids[i]);
     if (prop == nullptr) {
       continue;
     }
 
     if (std::strcmp(prop->name, "type") == 0) {
-      auto val = props->prop_values[i];
-      if (val == DRM_PLANE_TYPE_PRIMARY) {
+      if (const auto val = prop_vals[i]; val == DRM_PLANE_TYPE_PRIMARY) {
         result = DRMPlaneType::PRIMARY;
       } else if (val == DRM_PLANE_TYPE_CURSOR) {
         result = DRMPlaneType::CURSOR;
@@ -62,14 +64,17 @@ DRMPlaneType parse_plane_type(int fd, uint32_t plane_id) {
   return result;
 }
 
-void detect_plane_capabilities(int fd, uint32_t plane_id, PlaneCapabilities& caps) {
+void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapabilities& caps) {
   auto* props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
   if (props == nullptr) {
     return;
   }
 
+  const auto prop_ids = drm::span<const uint32_t>(props->props, props->count_props);
+  const auto prop_vals = drm::span<const uint64_t>(props->prop_values, props->count_props);
+
   for (uint32_t i = 0; i < props->count_props; ++i) {
-    auto* prop = drmModeGetProperty(fd, props->props[i]);
+    auto* prop = drmModeGetProperty(fd, prop_ids[i]);
     if (prop == nullptr) {
       continue;
     }
@@ -77,11 +82,12 @@ void detect_plane_capabilities(int fd, uint32_t plane_id, PlaneCapabilities& cap
     if (std::strcmp(prop->name, "zpos") == 0) {
       // For range properties, extract min/max
       if (((prop->flags & DRM_MODE_PROP_RANGE) != 0U) && prop->count_values >= 2) {
-        caps.zpos_min = prop->values[0];
-        caps.zpos_max = prop->values[1];
+        const auto prop_values = drm::span<const uint64_t>(prop->values, prop->count_values);
+        caps.zpos_min = prop_values[0];
+        caps.zpos_max = prop_values[1];
       } else {
-        caps.zpos_min = props->prop_values[i];
-        caps.zpos_max = props->prop_values[i];
+        caps.zpos_min = prop_vals[i];
+        caps.zpos_max = prop_vals[i];
       }
     } else if (std::strcmp(prop->name, "rotation") == 0) {
       caps.supports_rotation = true;
@@ -108,8 +114,10 @@ drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
   PlaneRegistry registry;
   registry.planes_.reserve(plane_res->count_planes);
 
+  const auto plane_ids = drm::span<const uint32_t>(plane_res->planes, plane_res->count_planes);
+
   for (uint32_t i = 0; i < plane_res->count_planes; ++i) {
-    auto* plane = drmModeGetPlane(fd, plane_res->planes[i]);
+    auto* plane = drmModeGetPlane(fd, plane_ids[i]);
     if (plane == nullptr) {
       continue;
     }

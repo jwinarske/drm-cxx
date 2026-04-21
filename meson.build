@@ -97,6 +97,20 @@ if get_option('vulkan')
   endif
 endif
 
+# libseat probe for drm::session::Seat. Sourced strictly from the
+# system via pkg-config; not vendored.
+session_feature = get_option('session')
+if not session_feature.disabled()
+  libseat_dep = dependency('libseat', required : session_feature.enabled(),
+                           include_type : 'system')
+else
+  libseat_dep = disabler()
+endif
+has_libseat = libseat_dep.found()
+if not has_libseat
+  message('drm-cxx: libseat not found — drm::session::Seat will be a runtime no-op')
+endif
+
 #── Configuration ─────────────────────────────────────────────
 conf = configuration_data()
 conf.set('DRM_CXX_VERSION', meson.project_version())

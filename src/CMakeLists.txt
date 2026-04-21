@@ -20,6 +20,8 @@ set(DRM_CXX_SOURCES
   input/pointer.cpp
   input/event_dispatcher.cpp
   display/edid.cpp
+  display/hotplug_monitor.cpp
+  session/seat.cpp
   gbm/device.cpp
   gbm/surface.cpp
   gbm/buffer.cpp
@@ -75,6 +77,25 @@ target_link_libraries(drm-cxx
   PRIVATE
     ${RT_LIBRARY}
     ${DL_LIBRARY})
+
+# libseat is PRIVATE — consumers of drm-cxx don't need to link against
+# it themselves. The gate define is PRIVATE too so the session/seat.cpp
+# TU picks the real vs. stub branch; the public header compiles
+# identically either way.
+if(DRM_CXX_HAS_LIBSEAT)
+  get_target_property(_libseat_incs PkgConfig::libseat INTERFACE_INCLUDE_DIRECTORIES)
+  if(_libseat_incs)
+    set_property(TARGET PkgConfig::libseat
+                 APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_libseat_incs})
+  endif()
+  target_link_libraries(drm-cxx PRIVATE PkgConfig::libseat)
+  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_LIBSEAT=1)
+else()
+  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_LIBSEAT=0)
+  message(STATUS
+    "drm-cxx: libseat not found — drm::session::Seat::open() will return nullopt "
+    "at runtime (set DRM_CXX_SESSION=ON to hard-fail)")
+endif()
 
 if(DRM_CXX_VULKAN)
   target_link_libraries(drm-cxx PUBLIC PkgConfig::vulkan)
@@ -151,7 +172,12 @@ install(FILES
     display/connector_info.hpp
     display/edid.hpp
     display/hdr_metadata.hpp
+    display/hotplug_monitor.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/display)
+
+install(FILES
+    session/seat.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/session)
 
 install(FILES
     gbm/device.hpp

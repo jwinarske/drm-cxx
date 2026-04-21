@@ -16,6 +16,7 @@
 #include "drm-cxx/detail/format.hpp"
 #include "input/pointer.hpp"
 #include "input/seat.hpp"
+#include "session/seat.hpp"
 
 #include <drm.h>
 #include <drm_fourcc.h>
@@ -168,8 +169,8 @@ static void draw_cursor_sprite(uint32_t* pixels, uint32_t buf_w, uint32_t buf_h,
 // ---------------------------------------------------------------------------
 // Find an overlay plane that supports ARGB8888 for the given CRTC
 // ---------------------------------------------------------------------------
-static uint32_t find_overlay_plane(int fd, uint32_t crtc_id) {
-  auto res = drm::get_resources(fd);
+static uint32_t find_overlay_plane(const int fd, const uint32_t crtc_id) {
+  const auto res = drm::get_resources(fd);
   if (!res) return 0;
 
   int crtc_index = -1;
@@ -179,27 +180,31 @@ static uint32_t find_overlay_plane(int fd, uint32_t crtc_id) {
       break;
     }
   }
-  if (crtc_index < 0) return 0;
+  if (crtc_index < 0) {
+    return 0;
+  }
 
   auto* plane_res = drmModeGetPlaneResources(fd);
-  if (!plane_res) return 0;
+  if (!plane_res) {
+    return 0;
+  }
 
   uint32_t result = 0;
   for (uint32_t i = 0; i < plane_res->count_planes && result == 0; ++i) {
     auto* plane = drmModeGetPlane(fd, plane_res->planes[i]);
-    if (!plane) continue;
+    if (!plane) {
+      continue;
+    }
 
-    bool crtc_ok = (plane->possible_crtcs & (1u << crtc_index)) != 0;
-    bool in_use = plane->crtc_id != 0;
+    const bool crtc_ok = (plane->possible_crtcs & (1U << crtc_index)) != 0;
 
-    if (crtc_ok && !in_use) {
-      auto* props = drmModeObjectGetProperties(fd, plane->plane_id, DRM_MODE_OBJECT_PLANE);
-      if (props) {
+    if (const bool in_use = plane->crtc_id != 0; crtc_ok && !in_use) {
+      if (auto* props = drmModeObjectGetProperties(fd, plane->plane_id, DRM_MODE_OBJECT_PLANE)) {
         for (uint32_t j = 0; j < props->count_props; ++j) {
           auto* prop = drmModeGetProperty(fd, props->props[j]);
           if (prop && std::strcmp(prop->name, "type") == 0) {
-            auto val = props->prop_values[j];
-            if (val == DRM_PLANE_TYPE_OVERLAY || val == DRM_PLANE_TYPE_CURSOR) {
+            if (auto val = props->prop_values[j];
+                val == DRM_PLANE_TYPE_OVERLAY || val == DRM_PLANE_TYPE_CURSOR) {
               for (uint32_t f = 0; f < plane->count_formats; ++f) {
                 if (plane->formats[f] == DRM_FORMAT_ARGB8888) {
                   result = plane->plane_id;
@@ -210,7 +215,9 @@ static uint32_t find_overlay_plane(int fd, uint32_t crtc_id) {
             drmModeFreeProperty(prop);
             break;
           }
-          if (prop) drmModeFreeProperty(prop);
+          if (prop) {
+            drmModeFreeProperty(prop);
+          }
         }
         drmModeFreeObjectProperties(props);
       }
@@ -227,8 +234,8 @@ static uint32_t find_overlay_plane(int fd, uint32_t crtc_id) {
 // Buffer dimensions for the SW cursor. The sprite dimensions (kSpriteW/H)
 // are defined above with the bitmap. Many drivers require minimum buffer
 // widths (often 64-pixel aligned), so we allocate a larger buffer.
-static constexpr uint32_t kBufW = 64;  // driver-friendly minimum
-static constexpr uint32_t kBufH = 64;
+static constexpr uint32_t k_buf_w = 64;  // driver-friendly minimum
+static constexpr uint32_t k_buf_h = 64;
 
 static bool sw_cursor_move(int fd, uint32_t plane_id, uint32_t crtc_id, uint32_t fb_id, int x,
                            int y, drm::PropertyStore& props, bool first) {
@@ -253,12 +260,12 @@ static bool sw_cursor_move(int fd, uint32_t plane_id, uint32_t crtc_id, uint32_t
   // transparent (alpha=0), so the cursor appears the correct size.
   // Using the sprite dimensions directly fails on many drivers due to
   // minimum plane size requirements or lack of sub-buffer SRC support.
-  add(plane_id, "CRTC_W", kBufW);
-  add(plane_id, "CRTC_H", kBufH);
+  add(plane_id, "CRTC_W", k_buf_w);
+  add(plane_id, "CRTC_H", k_buf_h);
   add(plane_id, "SRC_X", 0);
   add(plane_id, "SRC_Y", 0);
-  add(plane_id, "SRC_W", static_cast<uint64_t>(kBufW) << 16);
-  add(plane_id, "SRC_H", static_cast<uint64_t>(kBufH) << 16);
+  add(plane_id, "SRC_W", static_cast<uint64_t>(k_buf_w) << 16);
+  add(plane_id, "SRC_H", static_cast<uint64_t>(k_buf_h) << 16);
 
   // First commit enabling the plane needs ALLOW_MODESET.
   // Use blocking (synchronous) commits — NONBLOCK causes EBUSY when
@@ -312,12 +319,34 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  auto dev_result = drm::Device::open(*path);
-  if (!dev_result) {
+  // See atomic_modeset for why we claim a seat session.
+  auto seat = drm::session::Seat::open();
+
+  // VT-switch state. `pending_resume_fd` carries the fd handed to us by
+  // SeatSession's resume callback into the main loop, where the cursor
+  // buffer + plane setup is rebuilt outside the libseat dispatch stack.
+  bool session_paused = false;
+  int pending_resume_fd = -1;
+
+  // Prefer the seat's revocable fd when available; fall back to plain
+  // open() otherwise. SeatSession owns the fd; Device::from_fd wraps
+  // it without taking over lifetime.
+  const auto seat_dev = seat ? seat->take_device(*path) : std::nullopt;
+  auto dev_holder = [&]() -> std::optional<drm::Device> {
+    if (seat_dev) {
+      return drm::Device::from_fd(seat_dev->fd);
+    }
+    auto r = drm::Device::open(*path);
+    if (!r) {
+      return std::nullopt;
+    }
+    return std::move(*r);
+  }();
+  if (!dev_holder) {
     drm::println(stderr, "Failed to open {}", *path);
     return EXIT_FAILURE;
   }
-  auto& dev = *dev_result;
+  auto& dev = *dev_holder;
 
   if (auto r = dev.enable_universal_planes(); !r) {
     drm::println(stderr, "Failed to enable universal planes");
@@ -366,22 +395,26 @@ int main(int argc, char* argv[]) {
   }
 
   // --- Try hardware cursor (unless --sw) ---
+  // hw_cursor_w/h are captured here so the resume handler can re-upload
+  // the cursor sprite via drmModeSetCursor with the same dimensions.
   bool hw_cursor = false;
   DumbBuffer cursor_buf{};
+  uint32_t hw_cursor_w = 0;
+  uint32_t hw_cursor_h = 0;
 
   if (!force_sw) {
     uint64_t cap_w = 64;
     uint64_t cap_h = 64;
     drmGetCap(dev.fd(), DRM_CAP_CURSOR_WIDTH, &cap_w);
     drmGetCap(dev.fd(), DRM_CAP_CURSOR_HEIGHT, &cap_h);
-    auto cw = static_cast<uint32_t>(cap_w);
-    auto ch = static_cast<uint32_t>(cap_h);
+    hw_cursor_w = static_cast<uint32_t>(cap_w);
+    hw_cursor_h = static_cast<uint32_t>(cap_h);
 
-    cursor_buf = create_dumb_buffer(dev.fd(), cw, ch);
+    cursor_buf = create_dumb_buffer(dev.fd(), hw_cursor_w, hw_cursor_h);
     if (cursor_buf.handle != 0) {
       auto* px = map_dumb_buffer(cursor_buf);
       if (px) {
-        draw_cursor_sprite(px, cw, ch, cursor_buf.stride);
+        draw_cursor_sprite(px, hw_cursor_w, hw_cursor_h, cursor_buf.stride);
         munmap(px, cursor_buf.size);
       } else {
         drm::println(stderr, "Failed to map HW cursor buffer");
@@ -389,9 +422,9 @@ int main(int argc, char* argv[]) {
         cursor_buf = {};
       }
       if (cursor_buf.handle != 0 &&
-          drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, cw, ch) == 0) {
+          drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, hw_cursor_w, hw_cursor_h) == 0) {
         hw_cursor = true;
-        drm::println("Using hardware cursor ({}x{})", cw, ch);
+        drm::println("Using hardware cursor ({}x{})", hw_cursor_w, hw_cursor_h);
       } else {
         drm::println("Hardware cursor unavailable ({}), falling back to overlay...",
                      std::system_category().message(errno));
@@ -414,13 +447,13 @@ int main(int argc, char* argv[]) {
       return EXIT_FAILURE;
     }
 
-    cursor_buf = create_dumb_buffer(dev.fd(), kBufW, kBufH);
+    cursor_buf = create_dumb_buffer(dev.fd(), k_buf_w, k_buf_h);
     if (cursor_buf.handle == 0) {
       return EXIT_FAILURE;
     }
 
     if (auto* px = map_dumb_buffer(cursor_buf)) {
-      draw_cursor_sprite(px, kBufW, kBufH, cursor_buf.stride);
+      draw_cursor_sprite(px, k_buf_w, k_buf_h, cursor_buf.stride);
       munmap(px, cursor_buf.size);
     } else {
       destroy_dumb_buffer(cursor_buf);
@@ -442,8 +475,16 @@ int main(int argc, char* argv[]) {
   }
 
   // --- Input ---
-  auto seat_result = drm::input::Seat::open();
-  if (!seat_result) {
+  // When a SeatSession is live, route libinput's privileged opens
+  // through it so input fds get the same revocation/resume treatment
+  // as the DRM fd on VT switch. Otherwise the default opener (direct
+  // ::open) keeps the non-seat path working.
+  drm::input::InputDeviceOpener input_opener;
+  if (seat) {
+    input_opener = seat->input_opener();
+  }
+  auto input_seat_result = drm::input::Seat::open({}, std::move(input_opener));
+  if (!input_seat_result) {
     drm::println(stderr, "Failed to open input seat (need root or input group)");
     if (hw_cursor) {
       drmModeSetCursor(dev.fd(), crtc_id, 0, 0, 0);
@@ -454,7 +495,7 @@ int main(int argc, char* argv[]) {
     destroy_dumb_buffer(cursor_buf);
     return EXIT_FAILURE;
   }
-  auto& seat = *seat_result;
+  auto& input_seat = *input_seat_result;
 
   drm::input::Pointer pointer;
   pointer.reset_position(static_cast<double>(mode_w) / 2.0, static_cast<double>(mode_h) / 2.0);
@@ -482,7 +523,7 @@ int main(int argc, char* argv[]) {
   // all pending events are drained, not on every motion event.
   bool cursor_dirty = false;
 
-  seat.set_event_handler([&](const drm::input::InputEvent& event) {
+  input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
     if (const auto* pe = std::get_if<drm::input::PointerEvent>(&event)) {
       if (const auto* m = std::get_if<drm::input::PointerMotionEvent>(pe)) {
         pointer.accumulate_motion(m->dx, m->dy);
@@ -501,12 +542,37 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  pollfd pfd{};
-  pfd.fd = seat.fd();
-  pfd.events = POLLIN;
+  // Install seat pause/resume callbacks now that every piece of state
+  // the handlers need is live. Resume just stashes the new fd — the
+  // full rebuild (dev swap, cursor_buf re-create, HW cursor re-upload
+  // or SW overlay re-addFB + re-cache) happens in the main loop below,
+  // outside the libseat dispatch call-stack. SeatSession acks the pause
+  // internally, so the pause callback just flips the flag and tells
+  // libinput to stop using its fds (libinput_suspend closes every
+  // device fd via close_restricted, which releases them back to
+  // libseat).
+  if (seat) {
+    seat->set_pause_callback([&]() {
+      session_paused = true;
+      (void)input_seat.suspend();
+    });
+    seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
+      pending_resume_fd = new_fd;
+      session_paused = false;
+      // libinput_resume re-opens every device via open_restricted,
+      // picking up fresh fds from libseat in the process.
+      (void)input_seat.resume();
+    });
+  }
+
+  pollfd pfds[2]{};
+  pfds[0].fd = input_seat.fd();
+  pfds[0].events = POLLIN;
+  pfds[1].fd = seat ? seat->poll_fd() : -1;
+  pfds[1].events = POLLIN;
 
   while (g_quit == 0) {
-    int const ret = poll(&pfd, 1, 100);
+    int const ret = poll(pfds, 2, 100);
     if (ret < 0) {
       if (errno == EINTR) {
         continue;
@@ -514,17 +580,83 @@ int main(int argc, char* argv[]) {
       drm::println(stderr, "poll: {}", std::system_category().message(errno));
       break;
     }
-    if (ret > 0 && ((pfd.revents & POLLIN) != 0)) {
-      if (auto r = seat.dispatch(); !r) {
+    if ((pfds[0].revents & POLLIN) != 0) {
+      if (auto r = input_seat.dispatch(); !r) {
         drm::println(stderr, "dispatch failed");
         break;
       }
     }
+    if ((pfds[1].revents & POLLIN) != 0 && seat) {
+      seat->dispatch();
+    }
+
+    // Post-resume rebuild. The old cursor_buf's GEM handle died with
+    // the old fd; for SW cursor the FB_ID and the cached prop_store
+    // entries are also dead. Recreate the cursor dumb buffer on the
+    // new fd, re-upload the sprite, and re-install it (HW: SetCursor;
+    // SW: addFB + cache_properties, and flip first_sw_commit so the
+    // next move_cursor commit re-arms every plane property).
+    if (pending_resume_fd != -1) {
+      const int new_fd = pending_resume_fd;
+      pending_resume_fd = -1;
+
+      // The old cursor_buf referenced revoked-fd state. Zero the
+      // fields we still use (ioctls on the old fd would return
+      // -ENODEV; there's no clean way to release those kernel objects
+      // and we don't need to — the fd close in logind did it for us).
+      cursor_buf = DumbBuffer{};
+
+      dev_holder = drm::Device::from_fd(new_fd);
+      if (auto r = dev.enable_universal_planes(); !r) {
+        drm::println(stderr, "resume: enable_universal_planes failed");
+        break;
+      }
+      if (auto r = dev.enable_atomic(); !r) {
+        drm::println(stderr, "resume: enable_atomic failed");
+        break;
+      }
+
+      const uint32_t buf_w = hw_cursor ? hw_cursor_w : k_buf_w;
+      const uint32_t buf_h = hw_cursor ? hw_cursor_h : k_buf_h;
+      cursor_buf = create_dumb_buffer(dev.fd(), buf_w, buf_h);
+      if (cursor_buf.handle == 0) {
+        drm::println(stderr, "resume: cursor buffer realloc failed");
+        break;
+      }
+      if (auto* px = map_dumb_buffer(cursor_buf)) {
+        draw_cursor_sprite(px, buf_w, buf_h, cursor_buf.stride);
+        munmap(px, cursor_buf.size);
+      } else {
+        drm::println(stderr, "resume: cursor map failed");
+        break;
+      }
+
+      if (hw_cursor) {
+        if (drmModeSetCursor(dev.fd(), crtc_id, cursor_buf.handle, hw_cursor_w, hw_cursor_h) != 0) {
+          drm::println(stderr, "resume: drmModeSetCursor failed ({})",
+                       std::system_category().message(errno));
+          break;
+        }
+      } else {
+        if (!add_fb(cursor_buf, DRM_FORMAT_ARGB8888)) {
+          drm::println(stderr, "resume: addFB2 failed");
+          break;
+        }
+        if (auto r = prop_store.cache_properties(dev.fd(), overlay_plane_id, DRM_MODE_OBJECT_PLANE);
+            !r) {
+          drm::println(stderr, "resume: cache_properties failed");
+          break;
+        }
+        first_sw_commit = true;
+      }
+      cursor_dirty = true;  // commit below re-positions the cursor
+    }
 
     // Commit cursor position once per loop iteration, after all pending
     // input events have been drained. This avoids one atomic commit per
-    // motion event (mice can report >1000 events/sec).
-    if (cursor_dirty) {
+    // motion event (mice can report >1000 events/sec). Skipped while
+    // paused — we have no master and the commit would fail.
+    if (cursor_dirty && !session_paused) {
       const double cx = std::clamp(pointer.x(), 0.0, static_cast<double>(mode_w - 1));
       const double cy = std::clamp(pointer.y(), 0.0, static_cast<double>(mode_h - 1));
       pointer.reset_position(cx, cy);

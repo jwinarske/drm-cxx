@@ -9,6 +9,7 @@
 
 #include <xf86drm.h>
 
+#include <array>
 #include <cerrno>
 #include <cstdint>
 #include <sys/epoll.h>
@@ -18,25 +19,27 @@
 
 namespace drm {
 
-void page_flip_handler(int /*fd*/, unsigned int /*sequence*/, unsigned int tv_sec,
-                       unsigned int tv_usec, void* user_data) {
-  auto* pf = static_cast<PageFlip*>(user_data);
-  if (pf->handler_) {
-    uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
-                                  (static_cast<uint64_t>(tv_usec) * 1'000ULL);
-    // We pass 0 for crtc_id and sequence here; the v2 handler below is preferred
-    pf->handler_(0, 0, timestamp_ns);
+void page_flip_handler(int /*fd*/, unsigned int /*sequence*/, const unsigned int tv_sec,
+                       const unsigned int tv_usec, void* user_data) {
+  const auto* pf = static_cast<PageFlip*>(user_data);
+  if (pf == nullptr || !pf->handler_) {
+    return;
   }
+  uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
+                                (static_cast<uint64_t>(tv_usec) * 1'000ULL);
+  // We pass 0 for crtc_id and sequence here; the v2 handler below is preferred
+  pf->handler_(0, 0, timestamp_ns);
 }
 
-void page_flip_handler_v2(int /*fd*/, unsigned int sequence, unsigned int tv_sec,
-                          unsigned int tv_usec, unsigned int crtc_id, void* user_data) {
-  auto* pf = static_cast<PageFlip*>(user_data);
-  if (pf->handler_) {
-    uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
-                                  (static_cast<uint64_t>(tv_usec) * 1'000ULL);
-    pf->handler_(crtc_id, sequence, timestamp_ns);
+void page_flip_handler_v2(int /*fd*/, const unsigned int sequence, const unsigned int tv_sec,
+                          const unsigned int tv_usec, const unsigned int crtc_id, void* user_data) {
+  const auto* pf = static_cast<PageFlip*>(user_data);
+  if (pf == nullptr || !pf->handler_) {
+    return;
   }
+  uint64_t const timestamp_ns = (static_cast<uint64_t>(tv_sec) * 1'000'000'000ULL) +
+                                (static_cast<uint64_t>(tv_usec) * 1'000ULL);
+  pf->handler_(crtc_id, sequence, timestamp_ns);
 }
 
 PageFlip::PageFlip(const Device& dev) : drm_fd_(dev.fd()) {}
@@ -47,7 +50,7 @@ void PageFlip::set_handler(Handler handler) {
   handler_ = std::move(handler);
 }
 
-drm::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
+drm::expected<void, std::error_code> PageFlip::dispatch(const int timeout_ms) const {
   if (drm_fd_ < 0) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
@@ -66,8 +69,8 @@ drm::expected<void, std::error_code> PageFlip::dispatch(int timeout_ms) const {
     return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
 
-  struct epoll_event events[1];
-  int const nfds = epoll_wait(epfd, events, 1, timeout_ms);
+  std::array<struct epoll_event, 1> events{};
+  int const nfds = epoll_wait(epfd, events.data(), 1, timeout_ms);
   ::close(epfd);
 
   if (nfds < 0) {

@@ -19,6 +19,8 @@ drm_cxx_sources = files(
   'input/pointer.cpp',
   'input/event_dispatcher.cpp',
   'display/edid.cpp',
+  'display/hotplug_monitor.cpp',
+  'session/seat.cpp',
   'gbm/device.cpp',
   'gbm/surface.cpp',
   'gbm/buffer.cpp',
@@ -58,10 +60,20 @@ if get_option('vulkan')
   drm_cxx_deps += vk_dep
 endif
 
+# libseat dep + define — PRIVATE, the public header compiles either
+# way. Stub branch kicks in on the .cpp side when the define is 0.
+session_cpp_args = has_libseat \
+  ? ['-DDRM_CXX_HAS_LIBSEAT=1'] \
+  : ['-DDRM_CXX_HAS_LIBSEAT=0']
+if has_libseat
+  drm_cxx_deps += libseat_dep
+endif
+
 drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
+  cpp_args : session_cpp_args,
   install : true,
 )
 
@@ -122,7 +134,13 @@ install_headers(
   'display/connector_info.hpp',
   'display/edid.hpp',
   'display/hdr_metadata.hpp',
+  'display/hotplug_monitor.hpp',
   subdir : 'drm-cxx/display',
+)
+
+install_headers(
+  'session/seat.hpp',
+  subdir : 'drm-cxx/session',
 )
 
 install_headers(

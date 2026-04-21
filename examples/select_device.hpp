@@ -8,12 +8,13 @@
 #include "drm-cxx/detail/format.hpp"
 
 #include <algorithm>
-#include <cerrno>
-#include <cstdlib>
+#include <charconv>
+#include <cstddef>
 #include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace drm::examples {
@@ -27,8 +28,7 @@ inline std::vector<std::string> enumerate_cards() {
   }
 
   for (const auto& entry : std::filesystem::directory_iterator(dri_dir)) {
-    const auto name = entry.path().filename().string();
-    if (name.compare(0, 4, "card") == 0) {
+    if (const auto name = entry.path().filename().string(); name.compare(0, 4, "card") == 0) {
       cards.push_back(entry.path().string());
     }
   }
@@ -55,13 +55,13 @@ inline std::optional<std::string> select_device(int argc, char* argv[]) {
   }
 
   if (cards.size() == 1) {
-    drm::println("Using {}", cards[0]);
-    return cards[0];
+    drm::println("Using {}", cards.front());
+    return cards.front();
   }
 
   drm::println("Available DRM devices:");
   for (std::size_t i = 0; i < cards.size(); ++i) {
-    drm::println("  [{}] {}", i, cards[i]);
+    drm::println("  [{}] {}", i, cards.at(i));
   }
 
   drm::print("Select device [0-{}]: ", cards.size() - 1);
@@ -73,15 +73,14 @@ inline std::optional<std::string> select_device(int argc, char* argv[]) {
     return std::nullopt;
   }
 
-  char* end = nullptr;
-  errno = 0;
-  const auto idx = std::strtoul(line.c_str(), &end, 10);
-  if (end == line.c_str() || errno == ERANGE || idx >= cards.size()) {
+  std::size_t idx = 0;
+  const auto [ptr, ec] = std::from_chars(line.data(), line.data() + line.size(), idx);
+  if (ec != std::errc{} || idx >= cards.size()) {
     drm::println(stderr, "Invalid selection: {}", line);
     return std::nullopt;
   }
 
-  return cards[idx];
+  return cards.at(idx);
 }
 
 }  // namespace drm::examples
