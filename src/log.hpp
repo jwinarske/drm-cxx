@@ -23,7 +23,7 @@ namespace detail {
 
 inline LogLevel& current_log_level() {
   static LogLevel level =
-#if defined(DRM_CXX_LOG_LEVEL)
+#ifdef DRM_CXX_LOG_LEVEL
       static_cast<LogLevel>(DRM_CXX_LOG_LEVEL);
 #else
       LogLevel::Info;

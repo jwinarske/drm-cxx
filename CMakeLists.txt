@@ -33,6 +33,15 @@ set(DRM_CXX_CURSOR "AUTO" CACHE STRING
     "Build drm::cursor on top of libxcursor: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_CURSOR PROPERTY STRINGS AUTO ON OFF)
 
+# Optional Blend2D-backed modules (drm::capture first, drm::csd next).
+# Needs blend2d (pulled via its CMake config — no pkg-config upstream).
+# Gated together because both modules share the same Blend2D dep; a user
+# flipping this on gets capture today and csd later without having to
+# learn a second option.
+set(DRM_CXX_BLEND2D "AUTO" CACHE STRING
+    "Build drm::capture (and later drm::csd) on top of Blend2D: AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_BLEND2D PROPERTY STRINGS AUTO ON OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -104,6 +113,48 @@ if(TARGET PkgConfig::xcursor)
 else()
   set(DRM_CXX_HAS_XCURSOR 0)
   message(STATUS "drm-cxx: libxcursor not found — drm::cursor will not be built")
+endif()
+
+# Blend2D probe for drm::capture (and future drm::csd). Upstream Blend2D
+# ships a CMake package config but no pkg-config file, so this path uses
+# find_package(CONFIG) rather than pkg_check_modules. Fedora's
+# blend2d-devel, Arch's blend2d, and upstream's install target all drop
+# /usr/lib*/cmake/blend2d/blend2d-config.cmake so find_package picks up
+# `blend2d::blend2d` as an imported target.
+if(NOT DRM_CXX_BLEND2D STREQUAL "OFF")
+  if(DRM_CXX_BLEND2D STREQUAL "ON")
+    find_package(blend2d CONFIG REQUIRED)
+  else()
+    find_package(blend2d CONFIG QUIET)
+  endif()
+endif()
+if(TARGET blend2d::blend2d)
+  # find_package succeeded, but some distributions ship the CMake
+  # config in a separate package from the headers themselves — and a
+  # tidy runner that can't reach the headers will fail the whole TU.
+  # Verify the umbrella header is actually includable before advertising
+  # the gate as ON.
+  include(CheckIncludeFileCXX)
+  get_target_property(_b2d_inc blend2d::blend2d INTERFACE_INCLUDE_DIRECTORIES)
+  set(CMAKE_REQUIRED_INCLUDES ${_b2d_inc})
+  check_include_file_cxx("blend2d/blend2d.h" DRM_CXX_BLEND2D_HEADER_REACHABLE)
+  if(NOT DRM_CXX_BLEND2D_HEADER_REACHABLE)
+    check_include_file_cxx("blend2d.h" DRM_CXX_BLEND2D_FLAT_HEADER_REACHABLE)
+  endif()
+  unset(CMAKE_REQUIRED_INCLUDES)
+  if(DRM_CXX_BLEND2D_HEADER_REACHABLE OR DRM_CXX_BLEND2D_FLAT_HEADER_REACHABLE)
+    set(DRM_CXX_HAS_BLEND2D 1)
+  else()
+    set(DRM_CXX_HAS_BLEND2D 0)
+    message(STATUS
+      "drm-cxx: blend2d::blend2d target found but neither <blend2d/blend2d.h> "
+      "nor <blend2d.h> is reachable — treating as not installed")
+  endif()
+else()
+  set(DRM_CXX_HAS_BLEND2D 0)
+  if(NOT DRM_CXX_BLEND2D STREQUAL "OFF")
+    message(STATUS "drm-cxx: blend2d not found — drm::capture will not be built")
+  endif()
 endif()
 
 # {fmt} backs the drm-cxx/detail/format.hpp adapter when the toolchain lacks

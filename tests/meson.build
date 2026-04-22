@@ -112,3 +112,22 @@ if has_xcursor
     ),
   )
 endif
+
+if has_blend2d
+  test('test_capture_snapshot',
+    executable('test_capture_snapshot',
+      'unit/test_capture_snapshot.cpp',
+      dependencies : test_deps,
+    ),
+  )
+
+  # VKMS smoke test. Self-skips when the vkms module isn't loaded, so
+  # this stays green on boxes / CI runners that haven't modprobed it.
+  # Under `meson test` the skip is reported as PASSED (skipped).
+  test('test_capture_vkms',
+    executable('test_capture_vkms',
+      'integration/test_capture_vkms.cpp',
+      dependencies : test_deps,
+    ),
+  )
+endif

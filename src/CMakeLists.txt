@@ -41,6 +41,12 @@ if(DRM_CXX_HAS_XCURSOR)
     cursor/renderer.cpp)
 endif()
 
+if(DRM_CXX_HAS_BLEND2D)
+  list(APPEND DRM_CXX_SOURCES
+    capture/snapshot.cpp
+    capture/png.cpp)
+endif()
+
 include(GNUInstallDirs)
 
 add_library(drm-cxx ${DRM_CXX_SOURCES})
@@ -118,6 +124,21 @@ if(DRM_CXX_HAS_XCURSOR)
   if(DRM_CXX_HAS_XCURSOR_DELAY)
     target_compile_definitions(drm-cxx PRIVATE HAS_XCURSOR_DELAY)
   endif()
+endif()
+
+# Blend2D: PRIVATE link + -isystem so its public headers (blend2d.h,
+# blend2d/*.h) don't trip clang-tidy or -Werror. Matches libseat /
+# libxcursor / fmt treatment.
+if(DRM_CXX_HAS_BLEND2D)
+  get_target_property(_blend2d_incs blend2d::blend2d INTERFACE_INCLUDE_DIRECTORIES)
+  if(_blend2d_incs)
+    set_property(TARGET blend2d::blend2d
+                 APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_blend2d_incs})
+  endif()
+  target_link_libraries(drm-cxx PRIVATE blend2d::blend2d)
+  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_BLEND2D=1)
+else()
+  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_BLEND2D=0)
 endif()
 
 if(DRM_CXX_VULKAN)
@@ -212,6 +233,13 @@ if(DRM_CXX_HAS_XCURSOR)
       cursor/cursor.hpp
       cursor/renderer.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/cursor)
+endif()
+
+if(DRM_CXX_HAS_BLEND2D)
+  install(FILES
+      capture/snapshot.hpp
+      capture/png.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/capture)
 endif()
 
 install(FILES
