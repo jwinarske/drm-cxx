@@ -71,6 +71,24 @@ std::uint32_t plane_current_crtc(int fd, std::uint32_t plane_id) {
   return current;
 }
 
+// Translate the public Rotation enum into the DRM_MODE_ROTATE_* bitmask
+// used by the plane's rotation property. Defined here (not in the
+// plane-selection anon namespace further down) so stage_position() —
+// which now writes the rotation prop on every commit — can see it.
+std::uint64_t rotation_to_drm_mask(Rotation r) {
+  switch (r) {
+    case Rotation::k0:
+      return DRM_MODE_ROTATE_0;
+    case Rotation::k90:
+      return DRM_MODE_ROTATE_90;
+    case Rotation::k180:
+      return DRM_MODE_ROTATE_180;
+    case Rotation::k270:
+      return DRM_MODE_ROTATE_270;
+  }
+  return DRM_MODE_ROTATE_0;
+}
+
 }  // namespace
 
 struct Renderer::Impl {
@@ -101,8 +119,33 @@ struct Renderer::Impl {
   // --- cached plane props (atomic paths only) -----------------------
   drm::PropertyStore props;
 
+  // HOTSPOT_X / HOTSPOT_Y are optional (virtualized drivers only). We
+  // resolve their property ids once at create + session-resume time so
+  // the per-event stage_position doesn't pay for a lookup that is
+  // almost always going to miss on bare metal. nullopt = the plane
+  // does not expose this property at all.
+  std::optional<std::uint32_t> hotspot_x_prop;
+  std::optional<std::uint32_t> hotspot_y_prop;
+
+  // "rotation" is optional on the plane: planes that don't expose it
+  // can only run Rotation::k0. Cached alongside the hotspot ids so
+  // set_rotation() can validate without a property_id scan on the
+  // set path, and stage_position() can write the current value as
+  // part of its normal property list instead of a separate setup
+  // commit. Resurveyed at every session resume because property ids
+  // can change when the DRM fd is replaced.
+  std::optional<std::uint32_t> rotation_prop;
+
   // --- cursor binding + animation -----------------------------------
-  std::optional<Cursor> cursor;
+  // shared_ptr so multi-CRTC compositors can load once and hand the
+  // same Cursor to every per-head Renderer. Const-qualified because
+  // Cursor is immutable after load; the shared_ptr owns a const object
+  // so concurrent reads across threads are safe without any locking
+  // on the Cursor itself. last_frame points into the shared Cursor's
+  // pixel storage — safe because that storage is allocated once at
+  // Cursor::load time and never resized, and this Renderer keeps a
+  // strong reference for as long as last_frame is in use.
+  std::shared_ptr<const Cursor> cursor;
   drm::Clock::time_point anim_start;
   const Frame* last_frame{nullptr};
 
@@ -134,10 +177,40 @@ struct Renderer::Impl {
   drm::expected<void, std::error_code> stage_position(drm::AtomicRequest& req, int crtc_x,
                                                       int crtc_y) const;
 
+  // Probe the just-cached plane properties for the optional fields
+  // the Renderer tracks per-Impl — currently HOTSPOT_X / HOTSPOT_Y
+  // (virtualized drivers only) and rotation (hardware-specific).
+  // Each `*_prop` slot becomes nullopt if the plane does not expose
+  // that property. Called from create() and on_session_resumed()
+  // right after props.cache_properties().
+  void probe_plane_properties() noexcept;
+
   // Translate a CRTC coordinate to the plane-destination coordinate,
   // accounting for the current frame's hotspot and the centering
   // offset when the frame is smaller than the backing buffer.
   [[nodiscard]] std::pair<int, int> hotspot_adjust(int crtc_x, int crtc_y) const;
+
+  // Rotation applied in software by blit_frame. Returns Rotation::k0
+  // when either (a) the user requested k0 or (b) the plane exposes
+  // the hardware rotation property — in both cases blit_frame lays
+  // pixels out in source orientation and rotation_prop (if present)
+  // does the actual rotation at scanout. Non-k0 is returned only
+  // when the plane can't rotate in hardware and we have to pre-rotate
+  // the pixel buffer ourselves.
+  [[nodiscard]] Rotation effective_sw_rotation() const noexcept;
+
+  // Hotspot coordinate expressed in the backing buffer's own
+  // coordinate space, accounting for both the centering offset and
+  // any software rotation applied in blit_frame. Used by
+  // hotspot_adjust (to translate the CRTC position into the plane's
+  // top-left corner) and by stage_position (to write HOTSPOT_X /
+  // HOTSPOT_Y for virtualized driver planes). Returns {0, 0} when
+  // no frame has been blit yet.
+  struct BufferHotspot {
+    int x{0};
+    int y{0};
+  };
+  [[nodiscard]] BufferHotspot buffer_hotspot() const noexcept;
 };
 
 // ---------------------------------------------------------------------------
@@ -228,20 +301,71 @@ void Renderer::Impl::blit_frame(const Frame& f) {
 
   // Wipe the full buffer — a smaller-than-buffer frame must not leak
   // stale pixels around its edges (prior frames in an animation or a
-  // different shape from a shape-cycle call).
+  // different shape from a shape-cycle call). Rotation changes also
+  // rely on this wipe: the post-rotation sprite may not overlap the
+  // pre-rotation sprite's footprint, and any stale pixels outside
+  // the new footprint would otherwise ghost on screen.
   for (std::size_t y = 0; y < buf_h; ++y) {
     std::memset(mapped + (y * stride_px), 0, static_cast<std::size_t>(buf_w) * 4);
   }
 
-  const std::uint32_t w = std::min(f.width, buf_w);
-  const std::uint32_t h = std::min(f.height, buf_h);
-  const std::size_t x_off = (buf_w > f.width) ? (buf_w - f.width) / 2 : 0;
-  const std::size_t y_off = (buf_h > f.height) ? (buf_h - f.height) / 2 : 0;
+  // Rotated sprite dimensions: k90 and k270 swap width and height,
+  // k0 and k180 keep them. `last_frame` is set before we return so
+  // buffer_hotspot() can see the current frame.
+  const Rotation rot = effective_sw_rotation();
+  const bool swap_dims = (rot == Rotation::k90 || rot == Rotation::k270);
+  const std::uint32_t rot_w = swap_dims ? f.height : f.width;
+  const std::uint32_t rot_h = swap_dims ? f.width : f.height;
 
-  for (std::size_t y = 0; y < h; ++y) {
-    const std::size_t src_offset = y * static_cast<std::size_t>(f.width);
-    std::memcpy(mapped + ((y + y_off) * stride_px) + x_off, f.pixels.data() + src_offset,
-                static_cast<std::size_t>(w) * 4);
+  const std::uint32_t w = std::min(rot_w, buf_w);
+  const std::uint32_t h = std::min(rot_h, buf_h);
+  const std::size_t x_off = (buf_w > rot_w) ? (buf_w - rot_w) / 2 : 0;
+  const std::size_t y_off = (buf_h > rot_h) ? (buf_h - rot_h) / 2 : 0;
+
+  if (rot == Rotation::k0) {
+    // Fast path: full-row memcpy when no pre-rotation is needed.
+    for (std::size_t y = 0; y < h; ++y) {
+      const std::size_t src_offset = y * static_cast<std::size_t>(f.width);
+      std::memcpy(mapped + ((y + y_off) * stride_px) + x_off, f.pixels.data() + src_offset,
+                  static_cast<std::size_t>(w) * 4);
+    }
+  } else {
+    // Software pre-rotation — per-pixel remap. Each destination pixel
+    // pulls from the source via the inverse rotation so pixel reads
+    // and writes go through the fast (sequential-write) direction.
+    // Cost is trivially low at cursor sizes: 64x64 = 4 K iterations,
+    // each a handful of integer ops plus one 32-bit load+store.
+    //
+    // Inverse-rotation formulas (clockwise naming):
+    //   k90 fwd (sx,sy) → (H-1-sy, sx); inverse dst(dx,dy) → src(dy, H-1-dx)
+    //   k180 fwd (sx,sy) → (W-1-sx, H-1-sy); inverse (W-1-dx, H-1-dy)
+    //   k270 fwd (sx,sy) → (sy, W-1-sx); inverse dst(dx,dy) → src(W-1-dy, dx)
+    const std::size_t src_w = f.width;
+    const std::size_t src_h = f.height;
+    for (std::size_t dy = 0; dy < h; ++dy) {
+      for (std::size_t dx = 0; dx < w; ++dx) {
+        std::size_t sx = 0;
+        std::size_t sy = 0;
+        switch (rot) {
+          case Rotation::k90:
+            sx = dy;
+            sy = src_h - 1 - dx;
+            break;
+          case Rotation::k180:
+            sx = src_w - 1 - dx;
+            sy = src_h - 1 - dy;
+            break;
+          case Rotation::k270:
+            sx = src_w - 1 - dy;
+            sy = dx;
+            break;
+          case Rotation::k0:
+            // Handled by the fast path above — unreachable here.
+            break;
+        }
+        mapped[((dy + y_off) * stride_px) + (dx + x_off)] = f.pixels[(sy * src_w) + sx];
+      }
+    }
   }
 
   last_frame = &f;
@@ -264,11 +388,83 @@ std::pair<int, int> Renderer::Impl::hotspot_adjust(int crtc_x, int crtc_y) const
   if (last_frame == nullptr) {
     return {crtc_x, crtc_y};
   }
-  const int x_off =
-      (buf_w > last_frame->width) ? static_cast<int>((buf_w - last_frame->width) / 2) : 0;
-  const int y_off =
-      (buf_h > last_frame->height) ? static_cast<int>((buf_h - last_frame->height) / 2) : 0;
-  return {crtc_x - (last_frame->xhot + x_off), crtc_y - (last_frame->yhot + y_off)};
+  const auto h = buffer_hotspot();
+  return {crtc_x - h.x, crtc_y - h.y};
+}
+
+Rotation Renderer::Impl::effective_sw_rotation() const noexcept {
+  // Legacy path doesn't support any rotation at all; set_rotation and
+  // create() both reject non-k0 up front, so this is defensive.
+  if (path == PlanePath::kLegacy) {
+    return Rotation::k0;
+  }
+  // Hardware rotation property present → the kernel handles it at
+  // scanout; blit_frame writes pixels in source orientation.
+  if (rotation_prop) {
+    return Rotation::k0;
+  }
+  // Atomic plane without the rotation property → pre-rotate in software.
+  return rotation;
+}
+
+Renderer::Impl::BufferHotspot Renderer::Impl::buffer_hotspot() const noexcept {
+  if (last_frame == nullptr) {
+    return {};
+  }
+
+  // Apply the same rotation to the hotspot that blit_frame applied to
+  // the pixels. For hardware rotation (effective_sw_rotation == k0 even
+  // though impl_->rotation != k0) we still ship the source-orientation
+  // hotspot: the kernel rotates both the pixels and the hotspot together
+  // via the rotation property, so what HOTSPOT_X/Y sees is pre-rotation.
+  const Rotation rot = effective_sw_rotation();
+  const int fw = static_cast<int>(last_frame->width);
+  const int fh = static_cast<int>(last_frame->height);
+  int rx = last_frame->xhot;
+  int ry = last_frame->yhot;
+  std::uint32_t rw = last_frame->width;
+  std::uint32_t rh = last_frame->height;
+  switch (rot) {
+    case Rotation::k0:
+      break;
+    case Rotation::k90:
+      rx = fh - 1 - last_frame->yhot;
+      ry = last_frame->xhot;
+      rw = last_frame->height;
+      rh = last_frame->width;
+      break;
+    case Rotation::k180:
+      rx = fw - 1 - last_frame->xhot;
+      ry = fh - 1 - last_frame->yhot;
+      break;
+    case Rotation::k270:
+      rx = last_frame->yhot;
+      ry = fw - 1 - last_frame->xhot;
+      rw = last_frame->height;
+      rh = last_frame->width;
+      break;
+  }
+  const int x_off = (buf_w > rw) ? static_cast<int>((buf_w - rw) / 2) : 0;
+  const int y_off = (buf_h > rh) ? static_cast<int>((buf_h - rh) / 2) : 0;
+  return {rx + x_off, ry + y_off};
+}
+
+void Renderer::Impl::probe_plane_properties() noexcept {
+  hotspot_x_prop.reset();
+  hotspot_y_prop.reset();
+  rotation_prop.reset();
+  if (path == PlanePath::kLegacy) {
+    return;
+  }
+  if (auto id = props.property_id(plane_id, "HOTSPOT_X")) {
+    hotspot_x_prop = *id;
+  }
+  if (auto id = props.property_id(plane_id, "HOTSPOT_Y")) {
+    hotspot_y_prop = *id;
+  }
+  if (auto id = props.property_id(plane_id, "rotation")) {
+    rotation_prop = *id;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +517,44 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   }
   if (auto r = add("SRC_H", static_cast<std::uint64_t>(buf_h) << 16U); !r) {
     return r;
+  }
+
+  // rotation — optional (some planes don't expose it). Written on
+  // every commit so the value is re-armed on the first post-resume
+  // commit (fresh fd lost the prior kernel state) and so set_rotation
+  // doesn't need its own commit path. Validated at create time: a
+  // plane without this property can only run Rotation::k0.
+  if (rotation_prop) {
+    if (auto r = req.add_property(plane_id, *rotation_prop, rotation_to_drm_mask(rotation)); !r) {
+      return r;
+    }
+  }
+
+  // HOTSPOT_X / HOTSPOT_Y — virtualized-driver hint. Only written if
+  // the plane exposes the properties (probed once at create/resume).
+  // Pre-blit (last_frame == nullptr) we skip the write — there's no
+  // meaningful hotspot yet and we'd rather leave the prior value
+  // than clobber it with a stale zero. buffer_hotspot() handles the
+  // centering offset and, when we're pre-rotating in software, also
+  // accounts for rotation — so HOTSPOT_X/Y always describes where the
+  // tip lives in the buffer as it is actually pixel-blit.
+  if (last_frame != nullptr) {
+    const auto h = buffer_hotspot();
+    // xhot/yhot are int in the XCursor format but are always >= 0 in
+    // practice (libxcursor surfaces them as XCursorDim, unsigned).
+    // Clamp defensively so a malformed file can't overflow the cast.
+    const std::uint64_t hx = static_cast<std::uint64_t>(std::max(0, h.x));
+    const std::uint64_t hy = static_cast<std::uint64_t>(std::max(0, h.y));
+    if (hotspot_x_prop) {
+      if (auto r = req.add_property(plane_id, *hotspot_x_prop, hx); !r) {
+        return r;
+      }
+    }
+    if (hotspot_y_prop) {
+      if (auto r = req.add_property(plane_id, *hotspot_y_prop, hy); !r) {
+        return r;
+      }
+    }
   }
   return {};
 }
@@ -445,20 +679,6 @@ drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& de
   return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
 }
 
-std::uint64_t rotation_to_drm_mask(Rotation r) {
-  switch (r) {
-    case Rotation::k0:
-      return DRM_MODE_ROTATE_0;
-    case Rotation::k90:
-      return DRM_MODE_ROTATE_90;
-    case Rotation::k180:
-      return DRM_MODE_ROTATE_180;
-    case Rotation::k270:
-      return DRM_MODE_ROTATE_270;
-  }
-  return DRM_MODE_ROTATE_0;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -531,43 +751,14 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
       impl->free_buffer();
       return drm::unexpected<std::error_code>(r.error());
     }
+    impl->probe_plane_properties();
 
-    // Rotation: set the plane's rotation property now if the plane
-    // exposes it. Planes that don't expose it can only run k0;
-    // anything else is rejected up front rather than at first commit.
-    if (cfg.rotation != Rotation::k0) {
-      auto prop_id = impl->props.property_id(impl->plane_id, "rotation");
-      if (!prop_id) {
-        impl->free_buffer();
-        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
-      }
-      // The rotation property is set inside every commit via the
-      // cached property id; we just recorded whether the plane has
-      // the knob at all. commit_position / stage_position ride on
-      // the cached property list, so no extra work here.
-      //
-      // Note: we don't stage rotation inside stage_position() because
-      // that lives in the hot path and the value only changes on
-      // set_rotation() (deferred to V2). For V1 we commit rotation
-      // once at create() via a separate atomic test-commit so the
-      // plane is configured before the first real frame.
-      const drm::Device tmp = drm::Device::from_fd(dev.fd());
-      drm::AtomicRequest setup_req(tmp);
-      if (!setup_req.valid()) {
-        impl->free_buffer();
-        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
-      }
-      if (auto r =
-              setup_req.add_property(impl->plane_id, *prop_id, rotation_to_drm_mask(cfg.rotation));
-          !r) {
-        impl->free_buffer();
-        return drm::unexpected<std::error_code>(r.error());
-      }
-      if (auto r = setup_req.commit(DRM_MODE_ATOMIC_ALLOW_MODESET); !r) {
-        impl->free_buffer();
-        return drm::unexpected<std::error_code>(r.error());
-      }
-    }
+    // Rotation: hardware rotation is driven through the cached
+    // rotation_prop by stage_position; planes that don't expose it
+    // fall back to software pre-rotation inside blit_frame. Either
+    // path handles non-k0 on atomic planes, so no up-front rejection
+    // here — only legacy SetCursor, which has no way to apply a
+    // rotation at all, still rejects non-k0 below.
   } else if (cfg.rotation != Rotation::k0) {
     // Legacy SetCursor has no rotation knob.
     impl->free_buffer();
@@ -616,18 +807,27 @@ Renderer::~Renderer() {
 }
 
 drm::expected<void, std::error_code> Renderer::set_cursor(Cursor cursor) {
-  // emplace returns a reference to the newly-constructed value — lets us
-  // bind a name without tripping the tidy unchecked-optional-access
-  // check (which otherwise flags every subsequent access, even .value()).
-  const Cursor& bound = impl_->cursor.emplace(std::move(cursor));
+  // The single-owner path wraps the moved-in Cursor in a shared_ptr so
+  // the two set_cursor overloads can share one assignment + first-blit
+  // implementation. Allocation happens once per set_cursor call, which
+  // is a shape-swap path (middle-click, digit-key) rather than a
+  // per-event hot path.
+  return set_cursor(std::make_shared<Cursor>(std::move(cursor)));
+}
+
+drm::expected<void, std::error_code> Renderer::set_cursor(std::shared_ptr<const Cursor> cursor) {
+  if (!cursor) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  impl_->cursor = std::move(cursor);
   impl_->anim_start = impl_->clock->now();
 
-  // Blit the first frame eagerly so the next commit has real pixels;
-  // last_frame points into impl_->cursor's frame vector, which is
-  // move-stable (std::optional in-place emplacement preserves the
-  // Cursor's Impl pointer, and frames are stored in a vector<Frame>
-  // that isn't resized post-load).
-  impl_->blit_frame(bound.first());
+  // Blit the first frame eagerly so the next commit has real pixels.
+  // last_frame points into the shared Cursor's frame vector, whose
+  // storage is stable for the Cursor's lifetime — the shared_ptr we
+  // just assigned keeps it alive until the next set_cursor or until
+  // this Renderer is destroyed.
+  impl_->blit_frame(impl_->cursor->first());
   impl_->first_commit_needed = true;
 
   // Legacy needs an explicit re-upload of the new buffer contents
@@ -635,6 +835,10 @@ drm::expected<void, std::error_code> Renderer::set_cursor(Cursor cursor) {
   // re-uploads after a SetCursor are driver-dependent. Do nothing
   // here; commit_position() re-calls SetCursor on first_commit_needed.
   return {};
+}
+
+std::shared_ptr<const Cursor> Renderer::current_cursor() const noexcept {
+  return impl_->cursor;
 }
 
 // ---------------------------------------------------------------------------
@@ -807,6 +1011,7 @@ drm::expected<void, std::error_code> Renderer::on_session_resumed(int new_fd) {
         !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
+    impl_->probe_plane_properties();
   }
 
   impl_->paused = false;
@@ -815,12 +1020,8 @@ drm::expected<void, std::error_code> Renderer::on_session_resumed(int new_fd) {
   // Re-blit whatever frame the animation is on right now, so the
   // first post-resume commit carries the correct pixels. Skipped
   // when no cursor is bound (caller will call set_cursor() later).
-  // The local reference collapses tidy's view of the optional access
-  // pattern to a single variable so the guard on the next line is
-  // recognized (tidy struggles to track narrowing through impl_->).
-  auto& cur_opt = impl_->cursor;
-  if (cur_opt.has_value()) {
-    const Cursor& bound = *cur_opt;
+  if (impl_->cursor) {
+    const Cursor& bound = *impl_->cursor;
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(impl_->clock->now() -
                                                                                impl_->anim_start);
     const Frame& f = bound.animated() ? bound.frame_at(elapsed) : bound.first();
@@ -847,6 +1048,49 @@ std::uint32_t Renderer::plane_id() const noexcept {
 
 Rotation Renderer::rotation() const noexcept {
   return impl_->rotation;
+}
+
+drm::expected<void, std::error_code> Renderer::set_rotation(Rotation rotation) {
+  if (impl_->rotation == rotation) {
+    return {};
+  }
+  // Legacy drmModeSetCursor has no rotation channel at all — the
+  // buffer is uploaded by handle, not by pixel content we control
+  // past that point. Atomic planes handle both modes: hardware
+  // rotation via the cached rotation_prop, or software pre-rotation
+  // in blit_frame when the plane doesn't expose it.
+  if (rotation != Rotation::k0 && impl_->path == PlanePath::kLegacy) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+  }
+  impl_->rotation = rotation;
+
+  // If software pre-rotation is in play (either the new or the old
+  // rotation flips through blit_frame), the buffer's current contents
+  // don't match the new orientation — re-blit so the next commit
+  // ships rotated pixels. The check is a cheap property-id probe.
+  if (!impl_->rotation_prop && impl_->last_frame != nullptr) {
+    impl_->blit_frame(*impl_->last_frame);
+  }
+
+  // Commit immediately if there's something to display so the new
+  // rotation takes effect without waiting for the next mouse event.
+  // If no cursor is bound, the cursor is hidden, or the session is
+  // paused, the stored value picks up on the next commit after
+  // set_cursor() / show() / on_session_resumed() — stage_position
+  // always re-emits the rotation prop when cached, and blit_frame
+  // re-rotates when it isn't.
+  if (impl_->cursor && impl_->visible && !impl_->paused) {
+    return impl_->commit_position(impl_->last_x, impl_->last_y);
+  }
+  return {};
+}
+
+bool Renderer::has_hotspot_properties() const noexcept {
+  return impl_->hotspot_x_prop.has_value() && impl_->hotspot_y_prop.has_value();
+}
+
+bool Renderer::has_hardware_rotation() const noexcept {
+  return impl_->rotation_prop.has_value();
 }
 
 }  // namespace drm::cursor

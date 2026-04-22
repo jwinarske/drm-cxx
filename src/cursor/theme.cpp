@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -33,12 +34,44 @@ struct Theme::Impl {
     std::vector<std::string> inherits;
   };
 
+  // Memoization key for resolve(). The cursor name and preferred
+  // theme together fully determine the resolve() outcome — the BFS
+  // root and alias expansion depend on nothing else (XCURSOR_THEME
+  // and "default" fallbacks only kick in when preferred_theme is
+  // empty, and those env lookups are captured once via the empty-
+  // string key). Keyed as a struct so both strings can live
+  // side-by-side without a separator-smuggling hack.
+  struct CacheKey {
+    std::string cursor_name;
+    std::string preferred_theme;
+    bool operator==(const CacheKey& other) const noexcept {
+      return cursor_name == other.cursor_name && preferred_theme == other.preferred_theme;
+    }
+  };
+  struct CacheKeyHash {
+    std::size_t operator()(const CacheKey& k) const noexcept {
+      // Boost-style hash_combine. Both components are caller-bounded
+      // strings so collision resistance matters less than speed.
+      const auto h1 = std::hash<std::string>{}(k.cursor_name);
+      const auto h2 = std::hash<std::string>{}(k.preferred_theme);
+      return h1 ^ (h2 + 0x9e3779b9U + (h1 << 6U) + (h1 >> 2U));
+    }
+  };
+
   // Kept as a vector (not map) so discovery order — which is the
   // fallback iteration order when no inherits chain matches — is
   // deterministic and reflects search-path priority.
   std::vector<Record> themes;
   std::unordered_map<std::string, std::size_t> by_name;
   std::vector<std::filesystem::path> search_paths;
+
+  // Populated lazily by resolve(); mutable because resolve() is
+  // logically const from the caller's perspective (pure function of
+  // on-disk state captured at discover time). Theme is not documented
+  // as thread-safe, so no synchronization.
+  mutable std::unordered_map<CacheKey, drm::expected<ThemeResolution, std::error_code>,
+                             CacheKeyHash>
+      resolve_cache;
 };
 
 Theme::Theme(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -355,11 +388,29 @@ drm::expected<ThemeResolution, std::error_code> Theme::resolve(
   // of rejecting ambiguous names here is one comparison. `..` alone
   // is the classic escape; `/` or `\` anywhere in the name means the
   // caller treated it as a path, not an identifier.
+  //
+  // Run the guard before any cache touch: a malformed name never
+  // reaches the cache, so a caller that spams bogus names can't
+  // bloat the map.
   if (cursor_name.empty() || cursor_name == "." || cursor_name == ".." ||
       cursor_name.find('/') != std::string_view::npos ||
       cursor_name.find('\\') != std::string_view::npos) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
+
+  const Impl::CacheKey key{std::string(cursor_name), std::string(preferred_theme)};
+  if (const auto it = impl_->resolve_cache.find(key); it != impl_->resolve_cache.end()) {
+    return it->second;
+  }
+
+  // Helper: store result in the cache and return it. Done via a lambda
+  // so the three exit paths (theme-chain hit, spec-fallback hit,
+  // exhausted) share one memoization site.
+  auto memoize = [&](drm::expected<ThemeResolution, std::error_code> result)
+      -> drm::expected<ThemeResolution, std::error_code> {
+    impl_->resolve_cache.emplace(key, result);
+    return result;
+  };
 
   // Effective starting theme: the caller's request wins, then
   // $XCURSOR_THEME, then "default" (which nearly every distro provides
@@ -426,7 +477,7 @@ drm::expected<ThemeResolution, std::error_code> Theme::resolve(
     std::filesystem::path found;
     for (const auto& dir : record.dirs) {
       if (try_cursors_dir(dir / "cursors", found)) {
-        return ThemeResolution{theme, std::move(found), std::move(chain)};
+        return memoize(ThemeResolution{theme, std::move(found), std::move(chain)});
       }
     }
   }
@@ -449,12 +500,12 @@ drm::expected<ThemeResolution, std::error_code> Theme::resolve(
     }
     chain.push_back(record.name);
     if (matched) {
-      return ThemeResolution{record.name, std::move(found), std::move(chain)};
+      return memoize(ThemeResolution{record.name, std::move(found), std::move(chain)});
     }
   }
 
-  return drm::unexpected<std::error_code>(
-      std::make_error_code(std::errc::no_such_file_or_directory));
+  return memoize(
+      drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_file_or_directory)));
 }
 
 }  // namespace drm::cursor

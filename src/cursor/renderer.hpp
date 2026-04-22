@@ -45,6 +45,49 @@
 //     replaced while we weren't looking).
 //   - on_session_paused() stops drawing but keeps the Cursor pointer
 //     and the animation start time so resume is seamless.
+//
+// Multi-CRTC sharing:
+//   - Renderer holds its Cursor as shared_ptr<const Cursor>, so a
+//     compositor with N heads can load once and hand the same
+//     shared_ptr to every per-CRTC Renderer instead of loading the
+//     same shape N times. Use set_cursor(std::shared_ptr<const Cursor>)
+//     for that path. The single-owner entry point set_cursor(Cursor)
+//     still works — it wraps the moved-in Cursor internally and is
+//     the right choice for compositors that don't need sharing.
+//   - The shared Cursor is immutable (all accessors are const) so
+//     concurrent reads are safe even across threads. Renderer itself
+//     is not thread-safe — one Renderer per thread if you're driving
+//     CRTCs from multiple threads.
+//
+// Rotation:
+//   - Atomic planes that expose the "rotation" property rotate at
+//     scanout — Renderer writes the current value on every commit
+//     and the kernel handles it for free.
+//   - Atomic planes without the property fall back to software
+//     pre-rotation: blit_frame lays the pixels into the dumb buffer
+//     already rotated, the hotspot math rotates with them, and the
+//     plane itself is a bog-standard k0 commit. Cost is one extra
+//     per-pixel remap inside blit_frame (trivial at cursor sizes)
+//     plus a re-blit on set_rotation() so the buffer matches the
+//     new orientation.
+//   - Legacy drmModeSetCursor has no rotation channel — non-k0 is
+//     rejected by create() and set_rotation() on that path.
+//   - has_hardware_rotation() distinguishes the two atomic modes for
+//     callers that want to report which one is live.
+//
+// Virtualized-plane hotspot hinting:
+//   - When the chosen plane exposes the HOTSPOT_X / HOTSPOT_Y
+//     properties (virtio-gpu, vmwgfx, and other virtualized display
+//     drivers) Renderer writes the buffer-local hotspot coordinates
+//     alongside CRTC_X / CRTC_Y on every commit. The host VMM reads
+//     these to align its native mouse cursor with the guest's
+//     logical pointer tip — without them, the host and guest agree
+//     on where the sprite is drawn but disagree on where the tip is,
+//     producing ~xhot pixels of offset between click and target.
+//     Hotspot math on CRTC_X / CRTC_Y is unchanged (the sprite's
+//     top-left corner still goes to `requested - hotspot`); HOTSPOT
+//     is purely informational to the host. Bare-metal planes don't
+//     expose these properties and the write is silently skipped.
 
 #pragma once
 
@@ -145,8 +188,24 @@ class Renderer {
   /// `std::move(c)` or directly from `Cursor::load(...).value()`.
   /// Shape-cycling callers keep their own cache and move one in per
   /// swap. Re-blits the first frame, resets the animation start time,
-  /// and marks the next commit as needing to re-upload.
+  /// and marks the next commit as needing to re-upload. Internally
+  /// the moved-in Cursor is wrapped in a shared_ptr so sharing with
+  /// other Renderers remains possible via current_cursor().
   [[nodiscard]] drm::expected<void, std::error_code> set_cursor(Cursor cursor);
+
+  /// Bind a shared Cursor. Use this in multi-CRTC compositors to load
+  /// a shape once (`std::make_shared<Cursor>(Cursor::load(...).value())`)
+  /// and hand the same shared_ptr to every per-CRTC Renderer, instead
+  /// of parsing the XCursor file and allocating the pixel buffer N
+  /// times. Returns std::errc::invalid_argument if `cursor` is null.
+  [[nodiscard]] drm::expected<void, std::error_code> set_cursor(
+      std::shared_ptr<const Cursor> cursor);
+
+  /// Snapshot of the currently bound Cursor, or nullptr if none. Lets
+  /// a compositor that started with set_cursor(Cursor) still propagate
+  /// the shape to a late-joining Renderer without re-parsing the
+  /// XCursor file.
+  [[nodiscard]] std::shared_ptr<const Cursor> current_cursor() const noexcept;
 
   // --- Self-commit mode ---------------------------------------------
 
@@ -216,6 +275,29 @@ class Renderer {
   [[nodiscard]] PlanePath path() const noexcept;
   [[nodiscard]] std::uint32_t plane_id() const noexcept;
   [[nodiscard]] Rotation rotation() const noexcept;
+
+  /// Change rotation after create(). Returns std::errc::not_supported
+  /// on the legacy path (drmModeSetCursor has no rotation knob);
+  /// atomic planes accept any value and route through hardware if the
+  /// plane exposes the "rotation" property, or through software
+  /// pre-rotation in blit_frame if it doesn't. On success, the new
+  /// value takes effect immediately when a Cursor is bound + visible
+  /// + not paused; otherwise the stored value is picked up on the
+  /// next commit after set_cursor() / show() / on_session_resumed().
+  [[nodiscard]] drm::expected<void, std::error_code> set_rotation(Rotation rotation);
+
+  /// True when the selected plane rotates in hardware (the "rotation"
+  /// property is present). False means either the legacy path
+  /// (rotation isn't supported at all) or software pre-rotation
+  /// (non-k0 rotates via blit_frame, at a small per-blit CPU cost).
+  [[nodiscard]] bool has_hardware_rotation() const noexcept;
+
+  /// True when the selected plane exposes the HOTSPOT_X / HOTSPOT_Y
+  /// properties — typically only virtualized display drivers do.
+  /// Compositors running in a VM can check this to confirm the host
+  /// will see the guest's cursor tip alignment; bare-metal compositors
+  /// can ignore it. Always false on the legacy drmModeSetCursor path.
+  [[nodiscard]] bool has_hotspot_properties() const noexcept;
 
  private:
   struct Impl;

@@ -135,6 +135,33 @@ if(NOT DRM_CXX_HAS_STD_PRINT)
       SOURCE_DIR     "${PROJECT_SOURCE_DIR}/subprojects/fmt")
     FetchContent_MakeAvailable(fmt)
   endif()
+
+  # Promote whichever fmt target we ended up with to system-include so
+  # its own -Werror-visible diagnostics (readability-named-parameter,
+  # missing-std-forward in fmt/format.h) don't hit consumers running
+  # clang-tidy under the project's strict config. Mirrors the libseat
+  # and libxcursor treatment in src/CMakeLists.txt. Meson already does
+  # this automatically for its subproject wraps, which is why CI tidy
+  # is clean there; this brings the CMake build to parity.
+  #
+  # fmt::fmt from FetchContent is an ALIAS to the `fmt` target — we
+  # resolve the alias before setting properties, since set_property
+  # refuses to touch aliases directly.
+  foreach(_fmt_target PkgConfig::fmt fmt::fmt)
+    if(TARGET ${_fmt_target})
+      get_target_property(_fmt_alias ${_fmt_target} ALIASED_TARGET)
+      if(_fmt_alias)
+        set(_fmt_real ${_fmt_alias})
+      else()
+        set(_fmt_real ${_fmt_target})
+      endif()
+      get_target_property(_fmt_incs ${_fmt_real} INTERFACE_INCLUDE_DIRECTORIES)
+      if(_fmt_incs)
+        set_property(TARGET ${_fmt_real}
+                     APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_fmt_incs})
+      endif()
+    endif()
+  endforeach()
 endif()
 
 # C++17 polyfills for std::expected (C++23) and std::span (C++20). The
