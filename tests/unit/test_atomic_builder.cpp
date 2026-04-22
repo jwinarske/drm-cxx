@@ -4,6 +4,7 @@
 #include "core/device.hpp"
 #include "modeset/atomic.hpp"
 
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <memory>
 #include <utility>
@@ -31,10 +32,17 @@ TEST_F(AtomicRequestTest, ConstructAndDestroy) {
   // Should not crash — verifies RAII allocation/deallocation
 }
 
-TEST_F(AtomicRequestTest, AddPropertyWithInvalidObject) {
+TEST_F(AtomicRequestTest, AddPropertyQueuesWithoutValidation) {
   drm::AtomicRequest req(*dev_);
-  // Adding a property should succeed at the API level (it just queues it)
-  auto result = req.add_property(0, 0, 0);
+  // libdrm's drmModeAtomicAddProperty rejects object_id == 0 or
+  // property_id == 0 outright (EINVAL) but does NOT verify that the
+  // ids refer to actual kernel objects — that check happens at
+  // commit time. Any non-zero pair should queue successfully and
+  // fail only when we try to commit it. Use sentinel values so the
+  // intent is obvious.
+  constexpr std::uint32_t k_sentinel_object = 0xDEADBEEFU;
+  constexpr std::uint32_t k_sentinel_prop = 0xCAFEF00DU;
+  const auto result = req.add_property(k_sentinel_object, k_sentinel_prop, 0U);
   EXPECT_TRUE(result.has_value());
 }
 
@@ -47,10 +55,11 @@ TEST_F(AtomicRequestTest, TestCommitWithEmptyRequest) {
 
 TEST_F(AtomicRequestTest, MoveConstruct) {
   drm::AtomicRequest req1(*dev_);
-  req1.add_property(0, 0, 0);
-
+  // Moving an empty request is enough to exercise move semantics —
+  // adding a property here would force the downstream req2.test()
+  // to cope with an invalid-object commit, which isn't what this
+  // test is about.
   drm::AtomicRequest req2(std::move(req1));
-  // req2 should be usable
   auto result = req2.test();
   EXPECT_TRUE(result.has_value());
 }
@@ -58,7 +67,6 @@ TEST_F(AtomicRequestTest, MoveConstruct) {
 TEST_F(AtomicRequestTest, MoveAssign) {
   drm::AtomicRequest req1(*dev_);
   drm::AtomicRequest req2(*dev_);
-  req1.add_property(0, 0, 0);
 
   req2 = std::move(req1);
   auto result = req2.test();
