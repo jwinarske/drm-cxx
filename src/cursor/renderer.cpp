@@ -71,6 +71,24 @@ std::uint32_t plane_current_crtc(int fd, std::uint32_t plane_id) {
   return current;
 }
 
+// Translate the public Rotation enum into the DRM_MODE_ROTATE_* bitmask
+// used by the plane's rotation property. Defined here (not in the
+// plane-selection anon namespace further down) so stage_position() —
+// which now writes the rotation prop on every commit — can see it.
+std::uint64_t rotation_to_drm_mask(Rotation r) {
+  switch (r) {
+    case Rotation::k0:
+      return DRM_MODE_ROTATE_0;
+    case Rotation::k90:
+      return DRM_MODE_ROTATE_90;
+    case Rotation::k180:
+      return DRM_MODE_ROTATE_180;
+    case Rotation::k270:
+      return DRM_MODE_ROTATE_270;
+  }
+  return DRM_MODE_ROTATE_0;
+}
+
 }  // namespace
 
 struct Renderer::Impl {
@@ -108,6 +126,15 @@ struct Renderer::Impl {
   // does not expose this property at all.
   std::optional<std::uint32_t> hotspot_x_prop;
   std::optional<std::uint32_t> hotspot_y_prop;
+
+  // "rotation" is optional on the plane: planes that don't expose it
+  // can only run Rotation::k0. Cached alongside the hotspot ids so
+  // set_rotation() can validate without a property_id scan on the
+  // set path, and stage_position() can write the current value as
+  // part of its normal property list instead of a separate setup
+  // commit. Resurveyed at every session resume because property ids
+  // can change when the DRM fd is replaced.
+  std::optional<std::uint32_t> rotation_prop;
 
   // --- cursor binding + animation -----------------------------------
   // shared_ptr so multi-CRTC compositors can load once and hand the
@@ -150,12 +177,13 @@ struct Renderer::Impl {
   drm::expected<void, std::error_code> stage_position(drm::AtomicRequest& req, int crtc_x,
                                                       int crtc_y) const;
 
-  // Probe the just-cached plane properties for HOTSPOT_X / HOTSPOT_Y.
-  // Fills hotspot_x_prop / hotspot_y_prop; both remain nullopt on
-  // bare-metal planes. Cheap — the property_id lookup is a small
-  // vector scan. Called from create() and on_session_resumed() right
-  // after props.cache_properties().
-  void probe_hotspot_properties() noexcept;
+  // Probe the just-cached plane properties for the optional fields
+  // the Renderer tracks per-Impl — currently HOTSPOT_X / HOTSPOT_Y
+  // (virtualized drivers only) and rotation (hardware-specific).
+  // Each `*_prop` slot becomes nullopt if the plane does not expose
+  // that property. Called from create() and on_session_resumed()
+  // right after props.cache_properties().
+  void probe_plane_properties() noexcept;
 
   // Translate a CRTC coordinate to the plane-destination coordinate,
   // accounting for the current frame's hotspot and the centering
@@ -294,9 +322,10 @@ std::pair<int, int> Renderer::Impl::hotspot_adjust(int crtc_x, int crtc_y) const
   return {crtc_x - (last_frame->xhot + x_off), crtc_y - (last_frame->yhot + y_off)};
 }
 
-void Renderer::Impl::probe_hotspot_properties() noexcept {
+void Renderer::Impl::probe_plane_properties() noexcept {
   hotspot_x_prop.reset();
   hotspot_y_prop.reset();
+  rotation_prop.reset();
   if (path == PlanePath::kLegacy) {
     return;
   }
@@ -305,6 +334,9 @@ void Renderer::Impl::probe_hotspot_properties() noexcept {
   }
   if (auto id = props.property_id(plane_id, "HOTSPOT_Y")) {
     hotspot_y_prop = *id;
+  }
+  if (auto id = props.property_id(plane_id, "rotation")) {
+    rotation_prop = *id;
   }
 }
 
@@ -358,6 +390,17 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   }
   if (auto r = add("SRC_H", static_cast<std::uint64_t>(buf_h) << 16U); !r) {
     return r;
+  }
+
+  // rotation — optional (some planes don't expose it). Written on
+  // every commit so the value is re-armed on the first post-resume
+  // commit (fresh fd lost the prior kernel state) and so set_rotation
+  // doesn't need its own commit path. Validated at create time: a
+  // plane without this property can only run Rotation::k0.
+  if (rotation_prop) {
+    if (auto r = req.add_property(plane_id, *rotation_prop, rotation_to_drm_mask(rotation)); !r) {
+      return r;
+    }
   }
 
   // HOTSPOT_X / HOTSPOT_Y — virtualized-driver hint. Only written if
@@ -512,20 +555,6 @@ drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& de
   return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
 }
 
-std::uint64_t rotation_to_drm_mask(Rotation r) {
-  switch (r) {
-    case Rotation::k0:
-      return DRM_MODE_ROTATE_0;
-    case Rotation::k90:
-      return DRM_MODE_ROTATE_90;
-    case Rotation::k180:
-      return DRM_MODE_ROTATE_180;
-    case Rotation::k270:
-      return DRM_MODE_ROTATE_270;
-  }
-  return DRM_MODE_ROTATE_0;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -598,43 +627,17 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
       impl->free_buffer();
       return drm::unexpected<std::error_code>(r.error());
     }
-    impl->probe_hotspot_properties();
+    impl->probe_plane_properties();
 
-    // Rotation: set the plane's rotation property now if the plane
-    // exposes it. Planes that don't expose it can only run k0;
-    // anything else is rejected up front rather than at first commit.
-    if (cfg.rotation != Rotation::k0) {
-      auto prop_id = impl->props.property_id(impl->plane_id, "rotation");
-      if (!prop_id) {
-        impl->free_buffer();
-        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
-      }
-      // The rotation property is set inside every commit via the
-      // cached property id; we just recorded whether the plane has
-      // the knob at all. commit_position / stage_position ride on
-      // the cached property list, so no extra work here.
-      //
-      // Note: we don't stage rotation inside stage_position() because
-      // that lives in the hot path and the value only changes on
-      // set_rotation() (deferred to V2). For V1 we commit rotation
-      // once at create() via a separate atomic test-commit so the
-      // plane is configured before the first real frame.
-      const drm::Device tmp = drm::Device::from_fd(dev.fd());
-      drm::AtomicRequest setup_req(tmp);
-      if (!setup_req.valid()) {
-        impl->free_buffer();
-        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
-      }
-      if (auto r =
-              setup_req.add_property(impl->plane_id, *prop_id, rotation_to_drm_mask(cfg.rotation));
-          !r) {
-        impl->free_buffer();
-        return drm::unexpected<std::error_code>(r.error());
-      }
-      if (auto r = setup_req.commit(DRM_MODE_ATOMIC_ALLOW_MODESET); !r) {
-        impl->free_buffer();
-        return drm::unexpected<std::error_code>(r.error());
-      }
+    // Rotation: planes that don't expose the "rotation" property can
+    // only run Rotation::k0; reject anything else up front rather
+    // than at first commit. The actual value rides on every
+    // stage_position() commit (cheap — one property write), which
+    // keeps the set_rotation() path simple and makes the first post-
+    // resume commit re-arm rotation on the fresh fd automatically.
+    if (cfg.rotation != Rotation::k0 && !impl->rotation_prop) {
+      impl->free_buffer();
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
     }
   } else if (cfg.rotation != Rotation::k0) {
     // Legacy SetCursor has no rotation knob.
@@ -888,7 +891,7 @@ drm::expected<void, std::error_code> Renderer::on_session_resumed(int new_fd) {
         !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
-    impl_->probe_hotspot_properties();
+    impl_->probe_plane_properties();
   }
 
   impl_->paused = false;
@@ -925,6 +928,31 @@ std::uint32_t Renderer::plane_id() const noexcept {
 
 Rotation Renderer::rotation() const noexcept {
   return impl_->rotation;
+}
+
+drm::expected<void, std::error_code> Renderer::set_rotation(Rotation rotation) {
+  if (impl_->rotation == rotation) {
+    return {};
+  }
+  // Non-k0 requires either a legacy-out (impossible — legacy has no
+  // rotation knob) or an atomic plane that exposes the rotation
+  // property. Setting back to k0 is always accepted: atomic planes
+  // without the property are already at k0 implicitly, and legacy
+  // has only ever been k0.
+  if (rotation != Rotation::k0 && (impl_->path == PlanePath::kLegacy || !impl_->rotation_prop)) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+  }
+  impl_->rotation = rotation;
+  // Commit immediately if there's something to display so the new
+  // rotation takes effect without waiting for the next mouse event.
+  // If no cursor is bound, the cursor is hidden, or the session is
+  // paused, the stored value picks up on the next commit after
+  // set_cursor() / show() / on_session_resumed() — stage_position
+  // always re-emits the rotation prop when cached.
+  if (impl_->cursor && impl_->visible && !impl_->paused) {
+    return impl_->commit_position(impl_->last_x, impl_->last_y);
+  }
+  return {};
 }
 
 bool Renderer::has_hotspot_properties() const noexcept {

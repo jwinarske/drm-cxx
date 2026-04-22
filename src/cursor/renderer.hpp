@@ -260,6 +260,16 @@ class Renderer {
   [[nodiscard]] std::uint32_t plane_id() const noexcept;
   [[nodiscard]] Rotation rotation() const noexcept;
 
+  /// Change rotation after create(). Returns std::errc::not_supported
+  /// on the legacy path or when the plane doesn't expose the
+  /// "rotation" property and the requested rotation isn't k0. On
+  /// success, the new value takes effect immediately when a Cursor
+  /// is bound + visible + not paused (an atomic commit ships with
+  /// the updated rotation); otherwise the stored value is picked up
+  /// on the next commit after set_cursor() / show() /
+  /// on_session_resumed().
+  [[nodiscard]] drm::expected<void, std::error_code> set_rotation(Rotation rotation);
+
   /// True when the selected plane exposes the HOTSPOT_X / HOTSPOT_Y
   /// properties — typically only virtualized display drivers do.
   /// Compositors running in a VM can check this to confirm the host
