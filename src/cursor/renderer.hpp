@@ -46,6 +46,19 @@
 //   - on_session_paused() stops drawing but keeps the Cursor pointer
 //     and the animation start time so resume is seamless.
 //
+// Multi-CRTC sharing:
+//   - Renderer holds its Cursor as shared_ptr<const Cursor>, so a
+//     compositor with N heads can load once and hand the same
+//     shared_ptr to every per-CRTC Renderer instead of loading the
+//     same shape N times. Use set_cursor(std::shared_ptr<const Cursor>)
+//     for that path. The single-owner entry point set_cursor(Cursor)
+//     still works — it wraps the moved-in Cursor internally and is
+//     the right choice for compositors that don't need sharing.
+//   - The shared Cursor is immutable (all accessors are const) so
+//     concurrent reads are safe even across threads. Renderer itself
+//     is not thread-safe — one Renderer per thread if you're driving
+//     CRTCs from multiple threads.
+//
 // Virtualized-plane hotspot hinting:
 //   - When the chosen plane exposes the HOTSPOT_X / HOTSPOT_Y
 //     properties (virtio-gpu, vmwgfx, and other virtualized display
@@ -159,8 +172,24 @@ class Renderer {
   /// `std::move(c)` or directly from `Cursor::load(...).value()`.
   /// Shape-cycling callers keep their own cache and move one in per
   /// swap. Re-blits the first frame, resets the animation start time,
-  /// and marks the next commit as needing to re-upload.
+  /// and marks the next commit as needing to re-upload. Internally
+  /// the moved-in Cursor is wrapped in a shared_ptr so sharing with
+  /// other Renderers remains possible via current_cursor().
   [[nodiscard]] drm::expected<void, std::error_code> set_cursor(Cursor cursor);
+
+  /// Bind a shared Cursor. Use this in multi-CRTC compositors to load
+  /// a shape once (`std::make_shared<Cursor>(Cursor::load(...).value())`)
+  /// and hand the same shared_ptr to every per-CRTC Renderer, instead
+  /// of parsing the XCursor file and allocating the pixel buffer N
+  /// times. Returns std::errc::invalid_argument if `cursor` is null.
+  [[nodiscard]] drm::expected<void, std::error_code> set_cursor(
+      std::shared_ptr<const Cursor> cursor);
+
+  /// Snapshot of the currently bound Cursor, or nullptr if none. Lets
+  /// a compositor that started with set_cursor(Cursor) still propagate
+  /// the shape to a late-joining Renderer without re-parsing the
+  /// XCursor file.
+  [[nodiscard]] std::shared_ptr<const Cursor> current_cursor() const noexcept;
 
   // --- Self-commit mode ---------------------------------------------
 

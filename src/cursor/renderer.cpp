@@ -110,7 +110,15 @@ struct Renderer::Impl {
   std::optional<std::uint32_t> hotspot_y_prop;
 
   // --- cursor binding + animation -----------------------------------
-  std::optional<Cursor> cursor;
+  // shared_ptr so multi-CRTC compositors can load once and hand the
+  // same Cursor to every per-head Renderer. Const-qualified because
+  // Cursor is immutable after load; the shared_ptr owns a const object
+  // so concurrent reads across threads are safe without any locking
+  // on the Cursor itself. last_frame points into the shared Cursor's
+  // pixel storage — safe because that storage is allocated once at
+  // Cursor::load time and never resized, and this Renderer keeps a
+  // strong reference for as long as last_frame is in use.
+  std::shared_ptr<const Cursor> cursor;
   drm::Clock::time_point anim_start;
   const Frame* last_frame{nullptr};
 
@@ -676,18 +684,27 @@ Renderer::~Renderer() {
 }
 
 drm::expected<void, std::error_code> Renderer::set_cursor(Cursor cursor) {
-  // emplace returns a reference to the newly-constructed value — lets us
-  // bind a name without tripping the tidy unchecked-optional-access
-  // check (which otherwise flags every subsequent access, even .value()).
-  const Cursor& bound = impl_->cursor.emplace(std::move(cursor));
+  // The single-owner path wraps the moved-in Cursor in a shared_ptr so
+  // the two set_cursor overloads can share one assignment + first-blit
+  // implementation. Allocation happens once per set_cursor call, which
+  // is a shape-swap path (middle-click, digit-key) rather than a
+  // per-event hot path.
+  return set_cursor(std::make_shared<Cursor>(std::move(cursor)));
+}
+
+drm::expected<void, std::error_code> Renderer::set_cursor(std::shared_ptr<const Cursor> cursor) {
+  if (!cursor) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  impl_->cursor = std::move(cursor);
   impl_->anim_start = impl_->clock->now();
 
-  // Blit the first frame eagerly so the next commit has real pixels;
-  // last_frame points into impl_->cursor's frame vector, which is
-  // move-stable (std::optional in-place emplacement preserves the
-  // Cursor's Impl pointer, and frames are stored in a vector<Frame>
-  // that isn't resized post-load).
-  impl_->blit_frame(bound.first());
+  // Blit the first frame eagerly so the next commit has real pixels.
+  // last_frame points into the shared Cursor's frame vector, whose
+  // storage is stable for the Cursor's lifetime — the shared_ptr we
+  // just assigned keeps it alive until the next set_cursor or until
+  // this Renderer is destroyed.
+  impl_->blit_frame(impl_->cursor->first());
   impl_->first_commit_needed = true;
 
   // Legacy needs an explicit re-upload of the new buffer contents
@@ -695,6 +712,10 @@ drm::expected<void, std::error_code> Renderer::set_cursor(Cursor cursor) {
   // re-uploads after a SetCursor are driver-dependent. Do nothing
   // here; commit_position() re-calls SetCursor on first_commit_needed.
   return {};
+}
+
+std::shared_ptr<const Cursor> Renderer::current_cursor() const noexcept {
+  return impl_->cursor;
 }
 
 // ---------------------------------------------------------------------------
@@ -876,12 +897,8 @@ drm::expected<void, std::error_code> Renderer::on_session_resumed(int new_fd) {
   // Re-blit whatever frame the animation is on right now, so the
   // first post-resume commit carries the correct pixels. Skipped
   // when no cursor is bound (caller will call set_cursor() later).
-  // The local reference collapses tidy's view of the optional access
-  // pattern to a single variable so the guard on the next line is
-  // recognized (tidy struggles to track narrowing through impl_->).
-  auto& cur_opt = impl_->cursor;
-  if (cur_opt.has_value()) {
-    const Cursor& bound = *cur_opt;
+  if (impl_->cursor) {
+    const Cursor& bound = *impl_->cursor;
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(impl_->clock->now() -
                                                                                impl_->anim_start);
     const Frame& f = bound.animated() ? bound.frame_at(elapsed) : bound.first();
