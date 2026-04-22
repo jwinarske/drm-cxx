@@ -28,6 +28,15 @@ executable('xcursor_smoke',
   dependencies : [drm_cxx_dep],
 )
 
+# cursor_rotate — V2 hardware-validation harness for drm::cursor.
+# Exercises the theme resolve cache, HOTSPOT_X/Y writes, shared Cursor
+# across multi-CRTC Renderers, set_rotation(), and software pre-
+# rotation. Pure library consumer — no direct libxcursor dep.
+executable('cursor_rotate',
+  'cursor_rotate/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 if get_option('vulkan')
   executable('vulkan_display',
     'vulkan_display/main.cpp',

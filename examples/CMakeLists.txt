@@ -17,6 +17,11 @@ add_executable(xcursor_smoke mouse_cursor/xcursor_smoke.cpp)
 target_link_libraries(xcursor_smoke PRIVATE drm-cxx::drm-cxx)
 target_include_directories(xcursor_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# cursor_rotate — V2 hardware-validation harness for drm::cursor.
+add_executable(cursor_rotate cursor_rotate/main.cpp)
+target_link_libraries(cursor_rotate PRIVATE drm-cxx::drm-cxx)
+target_include_directories(cursor_rotate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 if(DRM_CXX_VULKAN)
   add_executable(vulkan_display vulkan_display/main.cpp)
   target_link_libraries(vulkan_display PRIVATE drm-cxx::drm-cxx)
