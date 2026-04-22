@@ -59,6 +59,22 @@
 //     is not thread-safe — one Renderer per thread if you're driving
 //     CRTCs from multiple threads.
 //
+// Rotation:
+//   - Atomic planes that expose the "rotation" property rotate at
+//     scanout — Renderer writes the current value on every commit
+//     and the kernel handles it for free.
+//   - Atomic planes without the property fall back to software
+//     pre-rotation: blit_frame lays the pixels into the dumb buffer
+//     already rotated, the hotspot math rotates with them, and the
+//     plane itself is a bog-standard k0 commit. Cost is one extra
+//     per-pixel remap inside blit_frame (trivial at cursor sizes)
+//     plus a re-blit on set_rotation() so the buffer matches the
+//     new orientation.
+//   - Legacy drmModeSetCursor has no rotation channel — non-k0 is
+//     rejected by create() and set_rotation() on that path.
+//   - has_hardware_rotation() distinguishes the two atomic modes for
+//     callers that want to report which one is live.
+//
 // Virtualized-plane hotspot hinting:
 //   - When the chosen plane exposes the HOTSPOT_X / HOTSPOT_Y
 //     properties (virtio-gpu, vmwgfx, and other virtualized display
@@ -261,14 +277,20 @@ class Renderer {
   [[nodiscard]] Rotation rotation() const noexcept;
 
   /// Change rotation after create(). Returns std::errc::not_supported
-  /// on the legacy path or when the plane doesn't expose the
-  /// "rotation" property and the requested rotation isn't k0. On
-  /// success, the new value takes effect immediately when a Cursor
-  /// is bound + visible + not paused (an atomic commit ships with
-  /// the updated rotation); otherwise the stored value is picked up
-  /// on the next commit after set_cursor() / show() /
-  /// on_session_resumed().
+  /// on the legacy path (drmModeSetCursor has no rotation knob);
+  /// atomic planes accept any value and route through hardware if the
+  /// plane exposes the "rotation" property, or through software
+  /// pre-rotation in blit_frame if it doesn't. On success, the new
+  /// value takes effect immediately when a Cursor is bound + visible
+  /// + not paused; otherwise the stored value is picked up on the
+  /// next commit after set_cursor() / show() / on_session_resumed().
   [[nodiscard]] drm::expected<void, std::error_code> set_rotation(Rotation rotation);
+
+  /// True when the selected plane rotates in hardware (the "rotation"
+  /// property is present). False means either the legacy path
+  /// (rotation isn't supported at all) or software pre-rotation
+  /// (non-k0 rotates via blit_frame, at a small per-blit CPU cost).
+  [[nodiscard]] bool has_hardware_rotation() const noexcept;
 
   /// True when the selected plane exposes the HOTSPOT_X / HOTSPOT_Y
   /// properties — typically only virtualized display drivers do.
