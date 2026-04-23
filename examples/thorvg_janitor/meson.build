@@ -5,5 +5,5 @@
 
 executable('thorvg_janitor',
   'tvggame.cpp',
-  dependencies : [drm_cxx_dep, thorvg_dep],
+  dependencies : [drm_cxx_dep, common_scene_dep, thorvg_dep],
 )
