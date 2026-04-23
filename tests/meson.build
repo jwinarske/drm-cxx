@@ -138,3 +138,14 @@ if has_blend2d
     ),
   )
 endif
+
+# drm::scene tests link against common_scene_dep defined in
+# examples/common/meson.build, so they only exist when examples are on.
+if get_option('examples')
+  test('test_scene',
+    executable('test_scene',
+      'unit/test_scene.cpp',
+      dependencies : [test_deps, common_scene_dep],
+    ),
+  )
+endif

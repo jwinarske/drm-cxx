@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 
+# Shared example infrastructure (scene skeleton, device-selection helpers).
+# Must come before any example that depends on common_scene_dep.
+subdir('common')
+
 executable('overlay_planes',
   'overlay_planes/main.cpp',
   dependencies : [drm_cxx_dep],

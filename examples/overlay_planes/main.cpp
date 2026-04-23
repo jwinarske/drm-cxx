@@ -8,7 +8,7 @@
 // Opens a DRM device, enumerates planes, creates virtual layers,
 // and runs the allocator to assign layers to hardware planes.
 
-#include "../select_device.hpp"
+#include "../common/select_device.hpp"
 #include "core/device.hpp"
 #include "drm-cxx/detail/format.hpp"
 #include "modeset/atomic.hpp"

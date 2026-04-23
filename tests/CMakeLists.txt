@@ -63,3 +63,15 @@ if(DRM_CXX_HAS_BLEND2D)
     GTest::gtest_main)
   gtest_discover_tests(test_capture_vkms)
 endif()
+
+# drm::scene tests need to link against the examples/common/common_scene
+# static library, so they're only built when examples are also built.
+if(DRM_CXX_BUILD_EXAMPLES)
+  add_executable(test_scene unit/test_scene.cpp)
+  target_link_libraries(test_scene PRIVATE
+    drm-cxx::drm-cxx
+    common_scene
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_scene)
+endif()

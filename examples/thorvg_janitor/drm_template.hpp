@@ -62,7 +62,7 @@
 #include <thorvg.h>
 
 // drm-cxx
-#include "../select_device.hpp"
+#include "../common/select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "input/seat.hpp"

@@ -18,7 +18,7 @@
 // for exercising a non-default path on a platform that advertises
 // several overlays.
 
-#include "../select_device.hpp"
+#include "../common/select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "cursor/cursor.hpp"
