@@ -575,7 +575,7 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   // commit raises DRM_MODE_ATOMIC_ALLOW_MODESET, creates the MODE_ID
   // blob, injects CRTC.MODE_ID/ACTIVE + connector.CRTC_ID).
   source->set_current(back);
-  if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT); !r) {
+  if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip); !r) {
     drm::println(stderr, "first commit failed: {}", r.error().message());
     tvg::Initializer::term();
     return EXIT_FAILURE;
@@ -707,7 +707,8 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     // takes care of plane binding, property writes, and (on the first
     // commit after a resume-triggered rebuild) the full modeset.
     source->set_current(back);
-    if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK); !r) {
+    if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
+        !r) {
       drm::println(stderr, "commit failed: {}", r.error().message());
       break;
     }

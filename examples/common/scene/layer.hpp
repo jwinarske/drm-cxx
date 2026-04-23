@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace drm::scene {
@@ -63,7 +64,7 @@ class Layer {
     display_.alpha = a;
     dirty_ = true;
   }
-  void set_zpos(int z) noexcept {
+  void set_zpos(std::optional<int> z) noexcept {
     display_.zpos = z;
     dirty_ = true;
   }

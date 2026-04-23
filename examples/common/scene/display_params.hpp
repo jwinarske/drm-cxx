@@ -15,6 +15,7 @@
 #include <drm-cxx/planes/layer.hpp>
 
 #include <cstdint>
+#include <optional>
 
 namespace drm::scene {
 
@@ -29,7 +30,10 @@ using Rect = drm::planes::Rect;
 /// 16.16 fixed-point convention); dst_rect → CRTC_X/Y/W/H; rotation →
 /// the plane's rotation property (or software pre-rotation if the
 /// plane lacks the property); alpha → plane.alpha property when
-/// present; zpos → plane.zpos.
+/// present; zpos → plane.zpos when set (unset = "let the allocator pick",
+/// which is the right default when the layer doesn't care — e.g. a single-
+/// layer scene shouldn't pre-filter out an amdgpu PRIMARY with an
+/// immutable non-zero zpos).
 ///
 /// needs_scaling is derived, not stored: src_rect.{w,h} != dst_rect.{w,h}
 /// implies the plane must support scaling.
@@ -38,7 +42,7 @@ struct DisplayParams {
   Rect dst_rect{};
   std::uint64_t rotation{0};        // DRM_MODE_ROTATE_* | DRM_MODE_REFLECT_*
   std::uint16_t alpha{0xFFFF};      // 0xFFFF = fully opaque
-  int zpos{0};
+  std::optional<int> zpos{};
 
   [[nodiscard]] constexpr bool needs_scaling() const noexcept {
     return src_rect.w != dst_rect.w || src_rect.h != dst_rect.h;

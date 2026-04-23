@@ -97,8 +97,12 @@ class LayerScene {
   ///
   /// `flags` is OR-ed with the implicit flags the scene adds. Callers
   /// who want page-flip events should set DRM_MODE_PAGE_FLIP_EVENT
-  /// themselves; the scene does not inject it.
-  [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(std::uint32_t flags = 0);
+  /// themselves; the scene does not inject it. `user_data` is forwarded
+  /// verbatim to drmModeAtomicCommit — the kernel routes it back as the
+  /// user_data arg of page_flip_handler{,2} when the flip completes, so
+  /// callers typically pass their PageFlip* here.
+  [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(std::uint32_t flags = 0,
+                                                                    void* user_data = nullptr);
 
  private:
   class Impl;

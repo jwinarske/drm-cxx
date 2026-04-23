@@ -63,6 +63,38 @@ class LayerScene::Impl {
   Impl(Impl&&) = delete;
   Impl& operator=(Impl&&) = delete;
 
+  // Called once during factory setup, after cache_object_properties.
+  // Resolves the PRIMARY plane's zpos_min on this scene's CRTC so
+  // single-layer commits can pin the layer there (see the hint handling
+  // in do_commit). Best-effort: if the mapping fails or no PRIMARY
+  // exposes zpos, the hint stays empty and the allocator falls back to
+  // its default scoring (which is fine on drivers that don't enforce
+  // CRTC-needs-primary).
+  void compute_primary_zpos_hint() {
+    std::unique_ptr<drmModeRes, decltype(&drmModeFreeResources)> res(
+        drmModeGetResources(dev_->fd()), drmModeFreeResources);
+    if (!res) {
+      return;
+    }
+    std::optional<std::uint32_t> crtc_bit;
+    for (int i = 0; i < res->count_crtcs; ++i) {
+      if (res->crtcs[i] == crtc_id_) {
+        crtc_bit = static_cast<std::uint32_t>(i);
+        break;
+      }
+    }
+    if (!crtc_bit.has_value()) {
+      return;
+    }
+    for (const auto& plane : registry_.all()) {
+      if (plane.type == drm::planes::DRMPlaneType::PRIMARY &&
+          plane.compatible_with_crtc(*crtc_bit) && plane.zpos_min.has_value()) {
+        primary_zpos_hint_ = plane.zpos_min;
+        return;
+      }
+    }
+  }
+
   // Called once during factory setup; bundles the property-caching
   // work that can fail (and therefore has to surface through the
   // factory's drm::expected return) instead of doing it in the ctor.
@@ -147,7 +179,7 @@ class LayerScene::Impl {
   // ── Commit path ───────────────────────────────────────────────────
 
   drm::expected<CommitReport, std::error_code> do_commit(std::uint32_t caller_flags,
-                                                         bool test_only) {
+                                                         bool test_only, void* user_data) {
     CommitReport report;
     report.layers_total = layer_count();
 
@@ -162,8 +194,21 @@ class LayerScene::Impl {
 
     // Lower each live scene::Layer into its corresponding planes::Layer
     // property bag. This is what the allocator reads to pick planes.
+    //
+    // Single-layer scenes without an explicit zpos get the PRIMARY
+    // plane's zpos_min as a hint: the allocator's preseed prefers
+    // OVERLAY (+2 score) over PRIMARY for non-composition layers, which
+    // causes its TEST commits to explicitly disable PRIMARY while
+    // activating the CRTC — amdgpu rejects that combination with EINVAL
+    // (active CRTC requires an armed PRIMARY plane). Pinning zpos to
+    // PRIMARY's zpos_min lights up the primary-affinity bonus in
+    // score_pair and steers the single layer onto PRIMARY directly.
+    std::optional<std::uint64_t> zpos_hint;
+    if (layer_count() == 1 && primary_zpos_hint_.has_value()) {
+      zpos_hint = primary_zpos_hint_;
+    }
     for (const auto& acq : acquisitions) {
-      lower_layer(*acq.scene_layer, *acq.planes_layer, acq.buffer.fb_id);
+      lower_layer(*acq.scene_layer, *acq.planes_layer, acq.buffer.fb_id, crtc_id_, zpos_hint);
     }
 
     // Build the frame's AtomicRequest.
@@ -214,7 +259,7 @@ class LayerScene::Impl {
         return drm::unexpected<std::error_code>(r.error());
       }
     } else {
-      if (auto r = req.commit(effective_flags); !r) {
+      if (auto r = req.commit(effective_flags, user_data); !r) {
         release_all(acquisitions);
         return drm::unexpected<std::error_code>(r.error());
       }
@@ -314,11 +359,19 @@ class LayerScene::Impl {
   // Copy scene::Layer state into the planes::Layer property bag. The
   // allocator and the AtomicRequest it builds read from this bag to
   // write plane properties.
-  static void lower_layer(const Layer& src, drm::planes::Layer& dst, std::uint32_t fb_id) {
+  static void lower_layer(const Layer& src, drm::planes::Layer& dst, std::uint32_t fb_id,
+                          std::uint32_t crtc_id,
+                          std::optional<std::uint64_t> default_zpos_hint) {
     const auto& d = src.display();
     const auto fmt = src.source().format();
 
     dst.set_property("FB_ID", fb_id);
+    // CRTC_ID binds the plane to this scene's CRTC. Without it the
+    // kernel rejects the plane commit (FB armed, but the plane is still
+    // bound to nothing / to whatever the previous committed CRTC was),
+    // the allocator's test commits fail for every plane, and the
+    // allocator reports 0 layers assigned.
+    dst.set_property("CRTC_ID", crtc_id);
 
     // KMS plane rectangles: CRTC_* is destination on the scanout, in
     // signed 32-bit pixels. SRC_* is source within the buffer, encoded
@@ -335,19 +388,33 @@ class LayerScene::Impl {
     // Format + modifier let the allocator statically screen planes for
     // compatibility before any test commit. The allocator reads both
     // through planes::Layer's format()/modifier() accessors, which are
-    // backed by these property keys.
-    dst.set_property("format", fmt.drm_fourcc);
-    dst.set_property("modifier", fmt.modifier);
+    // backed by the "pixel_format" / "FB_MODIFIER" property keys (not
+    // the KMS plane-property names — these are internal-to-Layer hints).
+    dst.set_property("pixel_format", fmt.drm_fourcc);
+    dst.set_property("FB_MODIFIER", fmt.modifier);
 
-    // Optional plane properties — written unconditionally so the
-    // allocator can screen planes that don't support them. zpos and
-    // alpha get their literal values; rotation is the DRM_MODE_ROTATE_*
-    // bitmask already stored on DisplayParams.
+    // Optional plane properties. rotation and zpos are only written when
+    // the caller set a value; emitting zpos=0 unconditionally would
+    // static-compat-reject any PRIMARY plane with an immutable non-zero
+    // zpos (amdgpu pins PRIMARY at zpos=2), leaving the scene with
+    // nowhere to put a single layer.
     if (d.rotation != 0) {
       dst.set_property("rotation", d.rotation);
     }
-    dst.set_property("zpos", static_cast<std::uint64_t>(d.zpos));
-    dst.set_property("alpha", static_cast<std::uint64_t>(d.alpha));
+    if (d.zpos.has_value()) {
+      dst.set_property("zpos", static_cast<std::uint64_t>(*d.zpos));
+    } else if (default_zpos_hint.has_value()) {
+      dst.set_property("zpos", *default_zpos_hint);
+    }
+    // Only write alpha when the caller asked for something other than
+    // fully opaque. The pre-LayerScene thorvg_janitor path never wrote
+    // alpha and reliably got PAGE_FLIP_EVENT back on first commit;
+    // unconditionally writing alpha=0xFFFF on amdgpu PRIMARY correlates
+    // with the kernel accepting the commit but never queuing the vblank
+    // event, wedging flip_pending. Skip the no-op write.
+    if (d.alpha != 0xFFFF) {
+      dst.set_property("alpha", static_cast<std::uint64_t>(d.alpha));
+    }
 
     dst.set_content_type(src.content_type());
     if (src.update_hint_hz() != 0) {
@@ -422,6 +489,11 @@ class LayerScene::Impl {
 
   std::uint32_t mode_blob_id_{0};
   bool first_commit_{true};
+
+  // Cached PRIMARY-plane zpos_min for this scene's CRTC. Used as a
+  // default zpos for single-layer commits where the caller didn't pin
+  // zpos — see do_commit for the rationale.
+  std::optional<std::uint64_t> primary_zpos_hint_;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -446,6 +518,7 @@ drm::expected<std::unique_ptr<LayerScene>, std::error_code> LayerScene::create(
   if (auto r = impl->cache_object_properties(); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
+  impl->compute_primary_zpos_hint();
 
   // Install the modeset-state preparer on the allocator so its internal
   // test commits carry CRTC + connector state on the first commit.
@@ -478,11 +551,12 @@ std::size_t LayerScene::layer_count() const noexcept {
 }
 
 drm::expected<CommitReport, std::error_code> LayerScene::test() {
-  return impl_->do_commit(0, /*test_only=*/true);
+  return impl_->do_commit(0, /*test_only=*/true, /*user_data=*/nullptr);
 }
 
-drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t flags) {
-  return impl_->do_commit(flags, /*test_only=*/false);
+drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t flags,
+                                                                void* user_data) {
+  return impl_->do_commit(flags, /*test_only=*/false, user_data);
 }
 
 }  // namespace drm::scene
