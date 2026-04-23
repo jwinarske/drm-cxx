@@ -37,6 +37,15 @@ executable('cursor_rotate',
   dependencies : [drm_cxx_dep],
 )
 
+# capture_demo — libinput-driven snapshot demo for drm::capture. Gated
+# on blend2d since it #includes drm-cxx/capture/*.hpp.
+if has_blend2d
+  executable('capture_demo',
+    'capture_demo/main.cpp',
+    dependencies : [drm_cxx_dep],
+  )
+endif
+
 if get_option('vulkan')
   executable('vulkan_display',
     'vulkan_display/main.cpp',
