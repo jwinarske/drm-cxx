@@ -22,6 +22,14 @@ add_executable(cursor_rotate cursor_rotate/main.cpp)
 target_link_libraries(cursor_rotate PRIVATE drm-cxx::drm-cxx)
 target_include_directories(cursor_rotate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# capture_demo — libinput-driven snapshot demo for drm::capture.
+# Only built when Blend2D is on (same gate as the library module it exercises).
+if(DRM_CXX_HAS_BLEND2D)
+  add_executable(capture_demo capture_demo/main.cpp)
+  target_link_libraries(capture_demo PRIVATE drm-cxx::drm-cxx)
+  target_include_directories(capture_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 if(DRM_CXX_VULKAN)
   add_executable(vulkan_display vulkan_display/main.cpp)
   target_link_libraries(vulkan_display PRIVATE drm-cxx::drm-cxx)

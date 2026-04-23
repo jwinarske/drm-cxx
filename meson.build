@@ -142,6 +142,34 @@ else
   message('drm-cxx: libxcursor not found — drm::cursor will not be built')
 endif
 
+# Blend2D probe for drm::capture (and future drm::csd). Upstream ships
+# a CMake config but no pkg-config file — meson's `method: 'cmake'`
+# consumes the CMake config directly and produces a normal dependency
+# object that can be added to drm_cxx_deps.
+blend2d_feature = get_option('blend2d')
+if not blend2d_feature.disabled()
+  blend2d_dep = dependency('blend2d', method : 'cmake',
+                           required : blend2d_feature.enabled(),
+                           include_type : 'system')
+else
+  blend2d_dep = disabler()
+endif
+has_blend2d = blend2d_dep.found()
+if has_blend2d
+  # Some distributions ship the CMake config in a separate package from
+  # the headers themselves — a tidy runner that can't reach the headers
+  # will fail the whole TU. Verify the umbrella is actually includable
+  # before advertising the gate as ON.
+  if not cpp.has_header('blend2d/blend2d.h', dependencies : blend2d_dep) \
+      and not cpp.has_header('blend2d.h', dependencies : blend2d_dep)
+    has_blend2d = false
+    message('drm-cxx: blend2d found via CMake config but headers not reachable — treating as not installed')
+  endif
+endif
+if not has_blend2d and not blend2d_feature.disabled()
+  message('drm-cxx: blend2d not found — drm::capture will not be built')
+endif
+
 #── Configuration ─────────────────────────────────────────────
 conf = configuration_data()
 conf.set('DRM_CXX_VERSION', meson.project_version())

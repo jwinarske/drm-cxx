@@ -86,11 +86,25 @@ if has_xcursor
   endif
 endif
 
+# drm::capture — Blend2D-backed plane composition snapshot + PNG encode.
+# Build-gated on blend2d availability; public headers only install when
+# the gate is on (matches drm::cursor).
+capture_cpp_args = has_blend2d \
+  ? ['-DDRM_CXX_HAS_BLEND2D=1'] \
+  : ['-DDRM_CXX_HAS_BLEND2D=0']
+if has_blend2d
+  drm_cxx_sources += files(
+    'capture/snapshot.cpp',
+    'capture/png.cpp',
+  )
+  drm_cxx_deps += blend2d_dep
+endif
+
 drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
-  cpp_args : session_cpp_args + cursor_cpp_args,
+  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args,
   install : true,
 )
 
@@ -171,6 +185,14 @@ if has_xcursor
     'cursor/cursor.hpp',
     'cursor/renderer.hpp',
     subdir : 'drm-cxx/cursor',
+  )
+endif
+
+if has_blend2d
+  install_headers(
+    'capture/snapshot.hpp',
+    'capture/png.hpp',
+    subdir : 'drm-cxx/capture',
   )
 endif
 

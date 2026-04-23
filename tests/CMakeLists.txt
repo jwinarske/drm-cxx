@@ -37,6 +37,11 @@ if(DRM_CXX_HAS_XCURSOR)
     test_cursor_cursor)
 endif()
 
+if(DRM_CXX_HAS_BLEND2D)
+  list(APPEND DRM_CXX_TESTS
+    test_capture_snapshot)
+endif()
+
 foreach(_t ${DRM_CXX_TESTS})
   add_executable(${_t} unit/${_t}.cpp)
   target_link_libraries(${_t} PRIVATE
@@ -45,3 +50,15 @@ foreach(_t ${DRM_CXX_TESTS})
     GTest::gtest_main)
   gtest_discover_tests(${_t})
 endforeach()
+
+# VKMS integration test — self-skips when vkms is absent. Kept out of
+# the loop above because its source lives under tests/integration/
+# rather than tests/unit/.
+if(DRM_CXX_HAS_BLEND2D)
+  add_executable(test_capture_vkms integration/test_capture_vkms.cpp)
+  target_link_libraries(test_capture_vkms PRIVATE
+    drm-cxx::drm-cxx
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_capture_vkms)
+endif()

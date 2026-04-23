@@ -122,14 +122,42 @@ jobs:
             -Dstatic=false
           meson install -C thorvg-src/build
 
+      # Blend2D — also not packaged on ubuntu-24.04. Same pattern as thorvg:
+      # clone, build, install to a cache-keyed prefix, export the paths.
+      # Without this, DRM_CXX_BLEND2D resolves to OFF and drm::capture plus
+      # its unit + integration tests silently drop out of the CI matrix.
+      - name: Cache blend2d install
+        id: cache-blend2d
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/blend2d-install
+          key: blend2d-main-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.version }}
+
+      - name: Build blend2d from source
+        if: steps.cache-blend2d.outputs.cache-hit != 'true'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          git clone --depth 1 https://github.com/asmjit/asmjit asmjit-src
+          git clone --depth 1 https://github.com/blend2d/blend2d blend2d-src
+          cmake -S blend2d-src -B blend2d-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/blend2d-install" \
+            -DASMJIT_DIR="$GITHUB_WORKSPACE/asmjit-src" \
+            -DBLEND2D_STATIC=FALSE \
+            -DBLEND2D_TEST=FALSE
+          cmake --build blend2d-src/build
+          cmake --install blend2d-src/build
+
       # libseat replaces the old sdbus-c++-from-source dance: it's packaged
-      # on Ubuntu 24.04 as libseat-dev and pulled in via apt above. Only
-      # thorvg still needs an install prefix exported.
+      # on Ubuntu 24.04 as libseat-dev and pulled in via apt above. thorvg
+      # and blend2d still need their install prefixes exported.
       - name: Export third-party environment
         run: |
           echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/thorvg-install/lib/pkgconfig:$GITHUB_WORKSPACE/thorvg-install/lib64/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
-          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$GITHUB_WORKSPACE/blend2d-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
@@ -212,8 +240,43 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev clang-19 clang-tidy-19 clang-format-19
+          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev clang-19 clang-tidy-19 clang-format-19
           version: 1.0
+
+      # Blend2D isn't packaged on ubuntu-24.04 (upstream ships no stable
+      # releases, only git master). Build + cache the install prefix so
+      # the capture/ TUs end up in compile_commands.json and clang-tidy
+      # has <blend2d/*> headers on the include path. Without this, tidy's
+      # find-walk of every .cpp hits an empty compile_commands entry for
+      # capture/ and bails with "Blend2D headers not found".
+      - name: Cache blend2d install
+        id: cache-blend2d
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/blend2d-install
+          key: blend2d-main-${{ runner.os }}-clang-19
+
+      - name: Build blend2d from source
+        if: steps.cache-blend2d.outputs.cache-hit != 'true'
+        env:
+          CC: clang-19
+          CXX: clang++-19
+        run: |
+          git clone --depth 1 https://github.com/asmjit/asmjit asmjit-src
+          git clone --depth 1 https://github.com/blend2d/blend2d blend2d-src
+          cmake -S blend2d-src -B blend2d-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/blend2d-install" \
+            -DASMJIT_DIR="$GITHUB_WORKSPACE/asmjit-src" \
+            -DBLEND2D_STATIC=FALSE \
+            -DBLEND2D_TEST=FALSE
+          cmake --build blend2d-src/build
+          cmake --install blend2d-src/build
+
+      - name: Export blend2d environment
+        run: |
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/blend2d-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
