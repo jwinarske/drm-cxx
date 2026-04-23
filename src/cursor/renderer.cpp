@@ -6,6 +6,7 @@
 #include "../core/device.hpp"
 #include "../core/property_store.hpp"
 #include "../core/resources.hpp"
+#include "../dumb/buffer.hpp"
 #include "../modeset/atomic.hpp"
 #include "../planes/plane_registry.hpp"
 #include "../time/clock.hpp"
@@ -13,9 +14,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 
-#include <drm.h>
 #include <drm_fourcc.h>
-#include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -27,9 +26,6 @@
 #include <cstring>
 #include <memory>
 #include <optional>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/types.h>
 #include <system_error>
 #include <utility>
 
@@ -108,13 +104,18 @@ struct Renderer::Impl {
   drm::Clock* clock{nullptr};
 
   // --- dumb buffer --------------------------------------------------
-  std::uint32_t gem_handle{0};
-  std::uint32_t buf_w{0};
-  std::uint32_t buf_h{0};
-  std::uint32_t stride{0};
-  std::uint64_t buf_size{0};
-  std::uint32_t fb_id{0};  // 0 in legacy path
-  std::uint32_t* mapped{nullptr};
+  // Backed by drm::dumb::Buffer. buffer.fb_id() is 0 on the legacy path (we tell
+  // the factory to skip drmModeAddFB2 in that case). Linear ARGB8888
+  // in all cases; stride is driver-chosen (typically width * 4 but may
+  // be padded for alignment — always consult buffer.stride()).
+  drm::dumb::Buffer buffer;
+
+  [[nodiscard]] std::uint32_t* mapped32() noexcept {
+    return reinterpret_cast<std::uint32_t*>(buffer.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  }
+  [[nodiscard]] const std::uint32_t* mapped32() const noexcept {
+    return reinterpret_cast<const std::uint32_t*>(buffer.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  }
 
   // --- cached plane props (atomic paths only) -----------------------
   drm::PropertyStore props;
@@ -219,74 +220,28 @@ struct Renderer::Impl {
 
 drm::expected<void, std::error_code> Renderer::Impl::alloc_buffer(std::uint32_t w,
                                                                   std::uint32_t h) {
-  drm_mode_create_dumb create{};
-  create.width = w;
-  create.height = h;
-  create.bpp = 32;
-  if (ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) {
-    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
+  // Legacy drmModeSetCursor takes a raw GEM handle and never a KMS FB
+  // ID, so we skip drmModeAddFB2 in that path — the allocation is
+  // otherwise identical. Positional init keeps this C++17-pedantic
+  // clean (designated initializers are C++20).
+  drm::dumb::Config cfg;
+  cfg.width = w;
+  cfg.height = h;
+  cfg.drm_format = DRM_FORMAT_ARGB8888;
+  cfg.bpp = 32;
+  cfg.add_fb = (path != PlanePath::kLegacy);
+  auto dev = drm::Device::from_fd(drm_fd);
+  auto r = drm::dumb::Buffer::create(dev, cfg);
+  if (!r) {
+    return drm::unexpected<std::error_code>(r.error());
   }
-
-  gem_handle = create.handle;
-  buf_w = w;
-  buf_h = h;
-  stride = create.pitch;
-  buf_size = create.size;
-
-  drm_mode_map_dumb map_req{};
-  map_req.handle = gem_handle;
-  if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &map_req) < 0) {
-    const auto ec = std::error_code(errno, std::system_category());
-    free_buffer();
-    return drm::unexpected<std::error_code>(ec);
-  }
-
-  void* ptr = mmap(nullptr, buf_size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd,
-                   static_cast<off_t>(map_req.offset));
-  if (ptr == MAP_FAILED) {
-    const auto ec = std::error_code(errno, std::system_category());
-    free_buffer();
-    return drm::unexpected<std::error_code>(ec);
-  }
-  mapped = static_cast<std::uint32_t*>(ptr);
-
-  // Atomic paths need an FB_ID to reference the buffer; legacy uses
-  // the raw GEM handle directly.
-  if (path != PlanePath::kLegacy) {
-    std::uint32_t handles[4] = {gem_handle};
-    std::uint32_t strides[4] = {stride};
-    std::uint32_t offsets[4] = {0};
-    if (drmModeAddFB2(drm_fd, buf_w, buf_h, DRM_FORMAT_ARGB8888, handles, strides, offsets, &fb_id,
-                      0) != 0) {
-      const auto ec = std::error_code(errno, std::system_category());
-      free_buffer();
-      return drm::unexpected<std::error_code>(ec);
-    }
-  }
-
-  // Zero-fill so the first blit only has to write the cursor's own
-  // pixels — the rest stays transparent (alpha=0) instead of being
-  // uninitialized mmap contents.
-  std::memset(mapped, 0, buf_size);
+  buffer = std::move(*r);
+  // drm::dumb::Buffer already zero-fills the mapping during create().
   return {};
 }
 
 void Renderer::Impl::free_buffer() {
-  if (fb_id != 0) {
-    drmModeRmFB(drm_fd, fb_id);
-    fb_id = 0;
-  }
-  if (mapped != nullptr) {
-    munmap(mapped, buf_size);
-    mapped = nullptr;
-  }
-  if (gem_handle != 0) {
-    drm_mode_destroy_dumb destroy{};
-    destroy.handle = gem_handle;
-    ioctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
-    gem_handle = 0;
-  }
-  buf_size = 0;
+  buffer = drm::dumb::Buffer{};
 }
 
 // ---------------------------------------------------------------------------
@@ -294,10 +249,11 @@ void Renderer::Impl::free_buffer() {
 // ---------------------------------------------------------------------------
 
 void Renderer::Impl::blit_frame(const Frame& f) {
-  if (mapped == nullptr) {
+  if (buffer.empty()) {
     return;
   }
-  const auto stride_px = static_cast<std::size_t>(stride / 4);
+  auto* const dst = mapped32();
+  const auto stride_px = static_cast<std::size_t>(buffer.stride() / 4);
 
   // Wipe the full buffer — a smaller-than-buffer frame must not leak
   // stale pixels around its edges (prior frames in an animation or a
@@ -305,8 +261,8 @@ void Renderer::Impl::blit_frame(const Frame& f) {
   // rely on this wipe: the post-rotation sprite may not overlap the
   // pre-rotation sprite's footprint, and any stale pixels outside
   // the new footprint would otherwise ghost on screen.
-  for (std::size_t y = 0; y < buf_h; ++y) {
-    std::memset(mapped + (y * stride_px), 0, static_cast<std::size_t>(buf_w) * 4);
+  for (std::size_t y = 0; y < buffer.height(); ++y) {
+    std::memset(dst + (y * stride_px), 0, static_cast<std::size_t>(buffer.width()) * 4);
   }
 
   // Rotated sprite dimensions: k90 and k270 swap width and height,
@@ -317,16 +273,16 @@ void Renderer::Impl::blit_frame(const Frame& f) {
   const std::uint32_t rot_w = swap_dims ? f.height : f.width;
   const std::uint32_t rot_h = swap_dims ? f.width : f.height;
 
-  const std::uint32_t w = std::min(rot_w, buf_w);
-  const std::uint32_t h = std::min(rot_h, buf_h);
-  const std::size_t x_off = (buf_w > rot_w) ? (buf_w - rot_w) / 2 : 0;
-  const std::size_t y_off = (buf_h > rot_h) ? (buf_h - rot_h) / 2 : 0;
+  const std::uint32_t w = std::min(rot_w, buffer.width());
+  const std::uint32_t h = std::min(rot_h, buffer.height());
+  const std::size_t x_off = (buffer.width() > rot_w) ? (buffer.width() - rot_w) / 2 : 0;
+  const std::size_t y_off = (buffer.height() > rot_h) ? (buffer.height() - rot_h) / 2 : 0;
 
   if (rot == Rotation::k0) {
     // Fast path: full-row memcpy when no pre-rotation is needed.
     for (std::size_t y = 0; y < h; ++y) {
       const std::size_t src_offset = y * static_cast<std::size_t>(f.width);
-      std::memcpy(mapped + ((y + y_off) * stride_px) + x_off, f.pixels.data() + src_offset,
+      std::memcpy(dst + ((y + y_off) * stride_px) + x_off, f.pixels.data() + src_offset,
                   static_cast<std::size_t>(w) * 4);
     }
   } else {
@@ -363,7 +319,7 @@ void Renderer::Impl::blit_frame(const Frame& f) {
             // Handled by the fast path above — unreachable here.
             break;
         }
-        mapped[((dy + y_off) * stride_px) + (dx + x_off)] = f.pixels[(sy * src_w) + sx];
+        dst[((dy + y_off) * stride_px) + (dx + x_off)] = f.pixels[(sy * src_w) + sx];
       }
     }
   }
@@ -444,8 +400,8 @@ Renderer::Impl::BufferHotspot Renderer::Impl::buffer_hotspot() const noexcept {
       rh = last_frame->width;
       break;
   }
-  const int x_off = (buf_w > rw) ? static_cast<int>((buf_w - rw) / 2) : 0;
-  const int y_off = (buf_h > rh) ? static_cast<int>((buf_h - rh) / 2) : 0;
+  const int x_off = (buffer.width() > rw) ? static_cast<int>((buffer.width() - rw) / 2) : 0;
+  const int y_off = (buffer.height() > rh) ? static_cast<int>((buffer.height() - rh) / 2) : 0;
   return {rx + x_off, ry + y_off};
 }
 
@@ -487,7 +443,7 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   // commits, but a cursor plane that toggled off during a hide() needs
   // every field re-armed to go visible again, and it's cheaper to just
   // always write them than to track a dirty bitmap.
-  if (auto r = add("FB_ID", fb_id); !r) {
+  if (auto r = add("FB_ID", buffer.fb_id()); !r) {
     return r;
   }
   if (auto r = add("CRTC_ID", crtc_id); !r) {
@@ -499,10 +455,10 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   if (auto r = add("CRTC_Y", static_cast<std::uint64_t>(py)); !r) {
     return r;
   }
-  if (auto r = add("CRTC_W", buf_w); !r) {
+  if (auto r = add("CRTC_W", buffer.width()); !r) {
     return r;
   }
-  if (auto r = add("CRTC_H", buf_h); !r) {
+  if (auto r = add("CRTC_H", buffer.height()); !r) {
     return r;
   }
   if (auto r = add("SRC_X", 0); !r) {
@@ -512,10 +468,10 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
     return r;
   }
   // Source rect is in 16.16 fixed-point; CRTC rect is plain pixels.
-  if (auto r = add("SRC_W", static_cast<std::uint64_t>(buf_w) << 16U); !r) {
+  if (auto r = add("SRC_W", static_cast<std::uint64_t>(buffer.width()) << 16U); !r) {
     return r;
   }
-  if (auto r = add("SRC_H", static_cast<std::uint64_t>(buf_h) << 16U); !r) {
+  if (auto r = add("SRC_H", static_cast<std::uint64_t>(buffer.height()) << 16U); !r) {
     return r;
   }
 
@@ -565,7 +521,7 @@ drm::expected<void, std::error_code> Renderer::Impl::commit_position(int crtc_x,
     // First legacy install: point the CRTC at our GEM handle.
     // Subsequent moves are cheap drmModeMoveCursor calls.
     if (first_commit_needed) {
-      if (drmModeSetCursor(drm_fd, crtc_id, gem_handle, buf_w, buf_h) != 0) {
+      if (drmModeSetCursor(drm_fd, crtc_id, buffer.handle(), buffer.width(), buffer.height()) != 0) {
         return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
       }
       first_commit_needed = false;
@@ -993,17 +949,16 @@ drm::expected<void, std::error_code> Renderer::on_session_resumed(int new_fd) {
   // it. But the mmap VMA persists past DRM-fd close (fd close doesn't
   // auto-munmap; VMAs hold their own file ref), so we must release it
   // explicitly or leak one VMA per VT switch on long-lived compositors.
-  if (impl_->mapped != nullptr && impl_->buf_size > 0) {
-    munmap(impl_->mapped, impl_->buf_size);
-  }
-  impl_->gem_handle = 0;
-  impl_->fb_id = 0;
-  impl_->mapped = nullptr;
-  impl_->buf_size = 0;
+  // drm::dumb::Buffer::forget() munmaps locally and drops the GEM/FB
+  // handles without issuing ioctls against the dead fd. Snapshot the
+  // dimensions first so we can re-allocate on the new fd.
+  const auto prev_w = impl_->buffer.width();
+  const auto prev_h = impl_->buffer.height();
+  impl_->buffer.forget();
   impl_->props.clear();
   impl_->drm_fd = new_fd;
 
-  if (auto r = impl_->alloc_buffer(impl_->buf_w, impl_->buf_h); !r) {
+  if (auto r = impl_->alloc_buffer(prev_w, prev_h); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
   if (impl_->path != PlanePath::kLegacy) {

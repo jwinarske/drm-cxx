@@ -97,6 +97,13 @@ test('test_gbm',
   ),
 )
 
+test('test_dumb_buffer',
+  executable('test_dumb_buffer',
+    'unit/test_dumb_buffer.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 if has_xcursor
   test('test_cursor_theme',
     executable('test_cursor_theme',

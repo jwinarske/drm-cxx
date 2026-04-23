@@ -26,6 +26,7 @@ set(DRM_CXX_SOURCES
   gbm/device.cpp
   gbm/surface.cpp
   gbm/buffer.cpp
+  dumb/buffer.cpp
   sync/fence.cpp)
 
 if(DRM_CXX_VULKAN)
@@ -250,6 +251,9 @@ install(FILES
 
 install(FILES sync/fence.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/sync)
+
+install(FILES dumb/buffer.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/dumb)
 
 if(DRM_CXX_VULKAN)
   install(FILES

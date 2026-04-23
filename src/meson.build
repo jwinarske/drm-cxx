@@ -25,6 +25,7 @@ drm_cxx_sources = files(
   'gbm/device.cpp',
   'gbm/surface.cpp',
   'gbm/buffer.cpp',
+  'dumb/buffer.cpp',
   'sync/fence.cpp',
 )
 
@@ -206,6 +207,11 @@ install_headers(
 install_headers(
   'sync/fence.hpp',
   subdir : 'drm-cxx/sync',
+)
+
+install_headers(
+  'dumb/buffer.hpp',
+  subdir : 'drm-cxx/dumb',
 )
 
 if get_option('vulkan')
