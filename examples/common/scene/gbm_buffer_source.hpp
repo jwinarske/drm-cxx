@@ -1,0 +1,93 @@
+// SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
+// SPDX-License-Identifier: MIT
+//
+// gbm_buffer_source.hpp — single-buffer LayerBufferSource backed by a
+// CPU-mapped GBM scanout buffer.
+//
+// Analogue of DumbBufferSource, but allocates through GBM instead of
+// the dumb-buffer ioctl. Suitable for layers where the caller wants
+// the GBM allocation path (modifier negotiation, future DMA-BUF
+// export, future GPU-rendered variants) while still painting pixels
+// from the CPU today. The buffer is created with:
+//
+//     usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE
+//
+// so the BO is KMS-scannable, linearly laid out, and CPU-mappable.
+// Consumers rasterize into `pixels()` and commit — the scene submits
+// the cached FB ID from `acquire()`.
+//
+// Single-buffer: the same BO is returned on every `acquire()`. Good
+// enough for slideshows and other slowly-rotating content where the
+// producer isn't racing the display. For multi-buffered GBM scanout
+// (GPU producer, page-flipped display), a ring-based source lands
+// once a consumer actually needs it.
+
+#pragma once
+
+#include "buffer_source.hpp"
+
+#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/gbm/buffer.hpp>
+#include <drm-cxx/gbm/device.hpp>
+
+#include <cstdint>
+#include <memory>
+#include <system_error>
+#include <utility>
+
+namespace drm {
+class Device;
+}  // namespace drm
+
+namespace drm::scene {
+
+class GbmBufferSource : public LayerBufferSource {
+ public:
+  /// Allocate a single GBM scanout buffer of the given size and DRM
+  /// FourCC format. Usage flags are fixed at `GBM_BO_USE_SCANOUT |
+  /// GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE`; modifier is left to the
+  /// driver (no explicit pin). The buffer is zero-filled by the
+  /// kernel at allocation time, so the first `acquire()` returns a
+  /// fully-transparent frame.
+  [[nodiscard]] static drm::expected<std::unique_ptr<GbmBufferSource>, std::error_code> create(
+      const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_format);
+
+  GbmBufferSource(const GbmBufferSource&) = delete;
+  GbmBufferSource& operator=(const GbmBufferSource&) = delete;
+  GbmBufferSource(GbmBufferSource&&) = delete;
+  GbmBufferSource& operator=(GbmBufferSource&&) = delete;
+  ~GbmBufferSource() override = default;
+
+  // ── LayerBufferSource ──────────────────────────────────────────────
+  [[nodiscard]] drm::expected<AcquiredBuffer, std::error_code> acquire() override;
+  void release(AcquiredBuffer acquired) noexcept override;
+  [[nodiscard]] BindingModel binding_model() const noexcept override {
+    return BindingModel::SceneSubmitsFbId;
+  }
+  [[nodiscard]] SourceFormat format() const noexcept override { return format_; }
+  void on_session_paused() noexcept override;
+  [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
+      const drm::Device& new_dev) override;
+
+  // ── Pixel access for CPU-side renderers ────────────────────────────
+  /// Mutable view over the buffer's pixel storage. `stride()` bytes
+  /// per row — the allocator picks a stride that may exceed
+  /// `width * 4` for alignment.
+  [[nodiscard]] drm::span<std::uint8_t> pixels() noexcept {
+    return {buffer_.data(), buffer_.size_bytes()};
+  }
+
+  [[nodiscard]] std::uint32_t stride() const noexcept { return buffer_.stride(); }
+
+ private:
+  GbmBufferSource(drm::gbm::GbmDevice gbm_dev, drm::gbm::Buffer buffer,
+                  SourceFormat format) noexcept
+      : gbm_dev_(std::move(gbm_dev)), buffer_(std::move(buffer)), format_(format) {}
+
+  drm::gbm::GbmDevice gbm_dev_;
+  drm::gbm::Buffer buffer_;
+  SourceFormat format_{};
+};
+
+}  // namespace drm::scene

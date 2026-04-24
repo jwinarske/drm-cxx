@@ -21,6 +21,7 @@
 #include "common/scene/composite_canvas.hpp"
 #include "common/scene/display_params.hpp"
 #include "common/scene/dumb_buffer_source.hpp"
+#include "common/scene/gbm_buffer_source.hpp"
 #include "common/scene/layer_handle.hpp"
 #include "common/scene/layer_scene.hpp"
 #include "core/device.hpp"
@@ -211,4 +212,29 @@ TEST(SceneDumbBufferSource, CreateFailsOnZeroDimensions) {
   EXPECT_FALSE(r0w.has_value());
   auto r0h = drm::scene::DumbBufferSource::create(dev, 64, 0, 0x34325241U);
   EXPECT_FALSE(r0h.has_value());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GbmBufferSource
+// ─────────────────────────────────────────────────────────────────────
+
+TEST(SceneGbmBufferSource, CreateFailsOnInvalidFd) {
+  auto dev = drm::Device::from_fd(-1);
+  auto r = drm::scene::GbmBufferSource::create(dev, 64, 64, 0x34325241U /*ARGB8888*/);
+  EXPECT_FALSE(r.has_value());
+}
+
+TEST(SceneGbmBufferSource, CreateFailsOnZeroDimensions) {
+  // Open a real DRM device so GbmDevice::create can succeed and the
+  // zero-dimension rejection comes from Buffer::create itself.
+  const int fd = ::open("/dev/dri/card0", O_RDWR);
+  if (fd < 0) {
+    GTEST_SKIP() << "No DRM device available for GBM";
+  }
+  auto dev = drm::Device::from_fd(fd);
+  auto r0w = drm::scene::GbmBufferSource::create(dev, 0, 64, 0x34325241U);
+  EXPECT_FALSE(r0w.has_value());
+  auto r0h = drm::scene::GbmBufferSource::create(dev, 64, 0, 0x34325241U);
+  EXPECT_FALSE(r0h.has_value());
+  ::close(fd);
 }

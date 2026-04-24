@@ -7,6 +7,7 @@
 common_scene = static_library(
   'common_scene',
   'scene/dumb_buffer_source.cpp',
+  'scene/gbm_buffer_source.cpp',
   'scene/layer_scene.cpp',
   dependencies : [drm_cxx_dep],
   include_directories : include_directories('..'),

@@ -10,6 +10,7 @@
 
 add_library(common_scene STATIC
   scene/dumb_buffer_source.cpp
+  scene/gbm_buffer_source.cpp
   scene/layer_scene.cpp)
 
 target_link_libraries(common_scene PUBLIC drm-cxx::drm-cxx)
