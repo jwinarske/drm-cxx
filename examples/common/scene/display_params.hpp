@@ -40,8 +40,8 @@ using Rect = drm::planes::Rect;
 struct DisplayParams {
   Rect src_rect{};
   Rect dst_rect{};
-  std::uint64_t rotation{0};        // DRM_MODE_ROTATE_* | DRM_MODE_REFLECT_*
-  std::uint16_t alpha{0xFFFF};      // 0xFFFF = fully opaque
+  std::uint64_t rotation{0};    // DRM_MODE_ROTATE_* | DRM_MODE_REFLECT_*
+  std::uint16_t alpha{0xFFFF};  // 0xFFFF = fully opaque
   std::optional<int> zpos{};
 
   [[nodiscard]] constexpr bool needs_scaling() const noexcept {

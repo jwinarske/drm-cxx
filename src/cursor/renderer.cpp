@@ -111,10 +111,12 @@ struct Renderer::Impl {
   drm::dumb::Buffer buffer;
 
   [[nodiscard]] std::uint32_t* mapped32() noexcept {
-    return reinterpret_cast<std::uint32_t*>(buffer.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    return reinterpret_cast<std::uint32_t*>(
+        buffer.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
   }
   [[nodiscard]] const std::uint32_t* mapped32() const noexcept {
-    return reinterpret_cast<const std::uint32_t*>(buffer.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    return reinterpret_cast<const std::uint32_t*>(
+        buffer.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
   }
 
   // --- cached plane props (atomic paths only) -----------------------
@@ -521,7 +523,8 @@ drm::expected<void, std::error_code> Renderer::Impl::commit_position(int crtc_x,
     // First legacy install: point the CRTC at our GEM handle.
     // Subsequent moves are cheap drmModeMoveCursor calls.
     if (first_commit_needed) {
-      if (drmModeSetCursor(drm_fd, crtc_id, buffer.handle(), buffer.width(), buffer.height()) != 0) {
+      if (drmModeSetCursor(drm_fd, crtc_id, buffer.handle(), buffer.width(), buffer.height()) !=
+          0) {
         return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
       }
       first_commit_needed = false;

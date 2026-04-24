@@ -51,12 +51,11 @@ class LayerScene::Impl {
         connector_id_(cfg.connector_id),
         mode_(cfg.mode),
         registry_(std::move(registry)),
-        allocator_(*dev_, registry_),
-        output_(cfg.crtc_id, composition_planes_layer_) {}
-
-  ~Impl() {
-    destroy_mode_blob();
+        output_(cfg.crtc_id, composition_planes_layer_) {
+    allocator_.emplace(*dev_, registry_);
   }
+
+  ~Impl() { destroy_mode_blob(); }
 
   Impl(const Impl&) = delete;
   Impl& operator=(const Impl&) = delete;
@@ -178,10 +177,19 @@ class LayerScene::Impl {
 
   // ── Commit path ───────────────────────────────────────────────────
 
-  drm::expected<CommitReport, std::error_code> do_commit(std::uint32_t caller_flags,
-                                                         bool test_only, void* user_data) {
+  drm::expected<CommitReport, std::error_code> do_commit(std::uint32_t caller_flags, bool test_only,
+                                                         void* user_data) {
     CommitReport report;
     report.layers_total = layer_count();
+
+    // Short-circuit while the seat is suspended. The kernel revokes
+    // commit privileges before libseat delivers pause_cb, so commit()
+    // starts returning EACCES some frames ahead of the notification. A
+    // sticky flag here keeps us from burning frames in the allocator
+    // between that first EACCES and the resume_cb that clears it.
+    if (suspended_) {
+      return CommitReport{};
+    }
 
     // Acquire every live layer's buffer up front. On any failure the
     // already-acquired buffers are handed back to their sources.
@@ -239,7 +247,7 @@ class LayerScene::Impl {
     // to-plane assignments into `req`. It returns how many layers were
     // placed on hardware; anything else is unassigned (Phase 2.1 drops
     // with a log_warn; Phase 2.3 will composite).
-    auto assigned = allocator_.apply(output_, req, effective_flags);
+    auto assigned = allocator_->apply(output_, req, effective_flags);
     if (!assigned) {
       release_all(acquisitions);
       return drm::unexpected<std::error_code>(assigned.error());
@@ -247,9 +255,10 @@ class LayerScene::Impl {
     report.layers_assigned = *assigned;
     report.layers_unassigned = report.layers_total - report.layers_assigned;
     if (report.layers_unassigned != 0) {
-      drm::log_warn("scene::LayerScene: {} layer(s) unassigned by allocator — "
-                    "dropped this frame (composition fallback lands in Phase 2.3)",
-                    report.layers_unassigned);
+      drm::log_warn(
+          "scene::LayerScene: {} layer(s) unassigned by allocator — "
+          "dropped this frame (composition fallback lands in Phase 2.3)",
+          report.layers_unassigned);
     }
 
     // Apply or validate.
@@ -260,6 +269,9 @@ class LayerScene::Impl {
       }
     } else {
       if (auto r = req.commit(effective_flags, user_data); !r) {
+        if (r.error() == std::errc::permission_denied) {
+          suspended_ = true;
+        }
         release_all(acquisitions);
         return drm::unexpected<std::error_code>(r.error());
       }
@@ -284,7 +296,7 @@ class LayerScene::Impl {
   // preparer closure needs `this`, and passing it through the Impl
   // constructor would leak implementation types into the header.
   void install_test_preparer() {
-    allocator_.set_test_preparer(
+    allocator_->set_test_preparer(
         [this](drm::AtomicRequest& req,
                std::uint32_t flags) -> drm::expected<void, std::error_code> {
           if ((flags & DRM_MODE_ATOMIC_ALLOW_MODESET) == 0) {
@@ -295,6 +307,78 @@ class LayerScene::Impl {
           }
           return inject_modeset_state(req);
         });
+  }
+
+  // ── Session hooks ─────────────────────────────────────────────────
+  //
+  // Mirror drm::cursor::Renderer's on_session_paused / on_session_resumed
+  // contract. Handles + generations survive; fd-bound kernel state
+  // (plane enum, property caches, MODE_ID blob, per-source buffers)
+  // is rebuilt against the new Device.
+
+  void on_session_paused() noexcept {
+    for (auto& slot : slots_) {
+      if (slot.alive && slot.scene_layer) {
+        slot.scene_layer->source().on_session_paused();
+      }
+    }
+  }
+
+  drm::expected<void, std::error_code> on_session_resumed(drm::Device& new_dev) {
+    // Old fd is already dead by the time libseat signals resume. The
+    // mode blob, property ids, and plane registry it populated are
+    // gone with it — zero/clear here without issuing destroy ioctls
+    // (the kernel reclaimed the blob on fd close). Doing the clearing
+    // up front so re-cache / re-enumerate below can't trip over stale
+    // content if anything fails mid-way.
+    mode_blob_id_ = 0;
+    props_.clear();
+    primary_zpos_hint_.reset();
+
+    dev_ = &new_dev;
+
+    // Re-enumerate planes before rebuilding the allocator — the
+    // allocator's reference binds to `registry_` at construction and
+    // the emplace below captures the current content.
+    auto fresh_registry = drm::planes::PlaneRegistry::enumerate(new_dev);
+    if (!fresh_registry) {
+      return drm::unexpected<std::error_code>(fresh_registry.error());
+    }
+    registry_ = std::move(*fresh_registry);
+
+    if (auto r = cache_object_properties(); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+
+    // Rebuild the allocator against the new Device + registry. Drops
+    // the previous-frame warm state and the failure cache — correct,
+    // since both reference kernel state that's gone. Reinstall the
+    // test_preparer closure (its `this` capture is still valid; only
+    // the underlying allocator changed).
+    allocator_.reset();
+    allocator_.emplace(*dev_, registry_);
+    install_test_preparer();
+
+    compute_primary_zpos_hint();
+
+    // Walk every live source; each one re-allocates its dumb/GBM/etc.
+    // buffers against the new fd. If any fails we bail out — the
+    // scene is in a half-resumed state, but the caller can retry or
+    // tear down cleanly.
+    for (auto& slot : slots_) {
+      if (!slot.alive || !slot.scene_layer) {
+        continue;
+      }
+      if (auto r = slot.scene_layer->source().on_session_resumed(new_dev); !r) {
+        return drm::unexpected<std::error_code>(r.error());
+      }
+    }
+
+    // Next commit must carry ALLOW_MODESET to bring the new CRTC
+    // binding up from cold; matches create-time semantics.
+    first_commit_ = true;
+    suspended_ = false;
+    return {};
   }
 
  private:
@@ -360,8 +444,7 @@ class LayerScene::Impl {
   // allocator and the AtomicRequest it builds read from this bag to
   // write plane properties.
   static void lower_layer(const Layer& src, drm::planes::Layer& dst, std::uint32_t fb_id,
-                          std::uint32_t crtc_id,
-                          std::optional<std::uint64_t> default_zpos_hint) {
+                          std::uint32_t crtc_id, std::optional<std::uint64_t> default_zpos_hint) {
     const auto& d = src.display();
     const auto fmt = src.source().format();
 
@@ -476,7 +559,13 @@ class LayerScene::Impl {
 
   drm::planes::PlaneRegistry registry_;
   drm::PropertyStore props_;
-  drm::planes::Allocator allocator_;
+  // Held in optional so on_session_resumed can tear down and rebuild
+  // against a freshly-reopened Device + a freshly-enumerated registry
+  // — Allocator holds `const Device&` and `PlaneRegistry&` references
+  // bound at construction, so rebinding them without reconstruction
+  // would require API surface on Allocator itself. One optional is
+  // cheaper than widening Allocator's contract.
+  std::optional<drm::planes::Allocator> allocator_;
 
   // Placeholder composition layer until Phase 2.3 lands the canvas.
   // Disabled at rest — the Output's allocator-apply path skips it, so
@@ -489,6 +578,7 @@ class LayerScene::Impl {
 
   std::uint32_t mode_blob_id_{0};
   bool first_commit_{true};
+  bool suspended_{false};
 
   // Cached PRIMARY-plane zpos_min for this scene's CRTC. Used as a
   // default zpos for single-layer commits where the caller didn't pin
@@ -503,8 +593,8 @@ class LayerScene::Impl {
 LayerScene::LayerScene(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 LayerScene::~LayerScene() = default;
 
-drm::expected<std::unique_ptr<LayerScene>, std::error_code> LayerScene::create(
-    drm::Device& dev, const Config& cfg) {
+drm::expected<std::unique_ptr<LayerScene>, std::error_code> LayerScene::create(drm::Device& dev,
+                                                                               const Config& cfg) {
   if (cfg.crtc_id == 0 || cfg.connector_id == 0) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
@@ -557,6 +647,14 @@ drm::expected<CommitReport, std::error_code> LayerScene::test() {
 drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t flags,
                                                                 void* user_data) {
   return impl_->do_commit(flags, /*test_only=*/false, user_data);
+}
+
+void LayerScene::on_session_paused() noexcept {
+  impl_->on_session_paused();
+}
+
+drm::expected<void, std::error_code> LayerScene::on_session_resumed(drm::Device& new_dev) {
+  return impl_->on_session_resumed(new_dev);
 }
 
 }  // namespace drm::scene

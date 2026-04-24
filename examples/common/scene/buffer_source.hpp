@@ -37,6 +37,10 @@
 #include <cstdint>
 #include <system_error>
 
+namespace drm {
+class Device;
+}  // namespace drm
+
 namespace drm::scene {
 
 /// How the scene and the source cooperate on FB_ID ownership.
@@ -136,12 +140,36 @@ class LayerBufferSource {
   // plane, and calls `unbind_from_plane` when the layer is reassigned
   // off the plane or retired.
 
-  virtual drm::expected<void, std::error_code> bind_to_plane(
-      std::uint32_t /*plane_id*/) {
+  virtual drm::expected<void, std::error_code> bind_to_plane(std::uint32_t /*plane_id*/) {
     return {};
   }
 
   virtual void unbind_from_plane(std::uint32_t /*plane_id*/) noexcept {}
+
+  // ── Session hooks ─────────────────────────────────────────────────
+  //
+  // Mirror drm::cursor::Renderer's session contract. Called by
+  // LayerScene::on_session_paused / on_session_resumed when libseat
+  // hands the process a fresh DRM fd after a VT switch. Default no-op
+  // is correct for sources that hold no fd-bound state (pure-memory
+  // test sources, future EGL Streams where the driver owns the
+  // binding). fd-backed sources (dumb buffers, GBM BOs) must override
+  // on_session_resumed to drop handles bound to the dead fd and
+  // re-allocate against new_dev.
+
+  /// The seat is losing master. The source must not issue DRM ioctls
+  /// until on_session_resumed. Safe to no-op.
+  virtual void on_session_paused() noexcept {}
+
+  /// The seat is back with `new_dev` (wrapping a fresh fd). The source
+  /// must drop every GEM handle / FB ID bound to the old fd (use
+  /// forget()-style paths — ioctls against the dead fd will fail) and
+  /// re-allocate equivalent buffers on `new_dev`. Buffer dimensions
+  /// and formats are preserved; callers rely on format() returning the
+  /// same SourceFormat post-resume.
+  virtual drm::expected<void, std::error_code> on_session_resumed(const drm::Device& /*new_dev*/) {
+    return {};
+  }
 };
 
 }  // namespace drm::scene

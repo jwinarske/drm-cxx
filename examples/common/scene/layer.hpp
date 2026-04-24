@@ -77,9 +77,8 @@ class Layer {
   /// (needs a LayerHandle the scene mints, takes an rvalue source) to
   /// steer consumers toward the add_layer path. Exposed in the public
   /// API to avoid friending a pimpl'd nested class.
-  Layer(LayerHandle handle, std::unique_ptr<LayerBufferSource> source,
-        const DisplayParams& display, drm::planes::ContentType content_type,
-        std::uint32_t update_hint_hz) noexcept
+  Layer(LayerHandle handle, std::unique_ptr<LayerBufferSource> source, const DisplayParams& display,
+        drm::planes::ContentType content_type, std::uint32_t update_hint_hz) noexcept
       : handle_(handle),
         source_(std::move(source)),
         display_(display),
@@ -87,7 +86,6 @@ class Layer {
         update_hint_hz_(update_hint_hz) {}
 
  private:
-
   LayerHandle handle_;
   std::unique_ptr<LayerBufferSource> source_;
   DisplayParams display_;

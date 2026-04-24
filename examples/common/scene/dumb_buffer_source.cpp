@@ -15,8 +15,7 @@
 namespace drm::scene {
 
 drm::expected<std::unique_ptr<DumbBufferSource>, std::error_code> DumbBufferSource::create(
-    const drm::Device& dev, std::uint32_t width, std::uint32_t height,
-    std::uint32_t drm_format) {
+    const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_format) {
   drm::dumb::Config cfg;
   cfg.width = width;
   cfg.height = height;
@@ -56,6 +55,42 @@ void DumbBufferSource::release(AcquiredBuffer /*acquired*/) noexcept {
   // Single-buffer source: the buffer is permanently owned by this
   // object and handed out again on the next acquire(). Nothing to
   // release.
+}
+
+void DumbBufferSource::on_session_paused() noexcept {
+  // No outstanding ioctls; acquire() is driven by the scene's commit
+  // path, which won't run while the scene is paused. State is safe
+  // as-is until on_session_resumed re-allocates against a live fd.
+}
+
+drm::expected<void, std::error_code> DumbBufferSource::on_session_resumed(
+    const drm::Device& new_dev) {
+  // Old fd is dead: forget() drops GEM + FB handles without ioctls
+  // (the kernel reclaims them on fd close) and munmaps the CPU
+  // mapping. Snapshot the prior dimensions first — format_ is the
+  // source of truth post-forget.
+  const auto prev_width = format_.width;
+  const auto prev_height = format_.height;
+  const auto prev_format = format_.drm_fourcc;
+
+  buffer_.forget();
+
+  drm::dumb::Config cfg;
+  cfg.width = prev_width;
+  cfg.height = prev_height;
+  cfg.drm_format = prev_format;
+  cfg.bpp = 32;
+  cfg.add_fb = true;
+
+  auto r = drm::dumb::Buffer::create(new_dev, cfg);
+  if (!r) {
+    return drm::unexpected<std::error_code>(r.error());
+  }
+  buffer_ = std::move(*r);
+  // format_ is re-affirmed rather than reassigned; modifier stays 0
+  // (linear), dimensions unchanged. Consumers depend on format()
+  // returning the same SourceFormat post-resume.
+  return {};
 }
 
 }  // namespace drm::scene

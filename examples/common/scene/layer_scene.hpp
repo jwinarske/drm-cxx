@@ -13,7 +13,9 @@
 // Not in Phase 2.1 (shipped in later phases):
 //   - Property minimization (Phase 2.2).
 //   - Composition fallback for unassigned layers (Phase 2.3).
-//   - rebind() for CRTC/connector/mode changes (Phase 2.4).
+//   - rebind() for CRTC/connector/mode changes (Phase 2.4 config-change
+//     half; the fd-swap half ships here via on_session_paused /
+//     on_session_resumed, which the Janitor VT-switch path needs).
 //   - Page-flip async completion handling / buffer release after scanout.
 //
 // The pimpl keeps drm::planes::Output, drm::planes::Allocator, and
@@ -103,6 +105,27 @@ class LayerScene {
   /// callers typically pass their PageFlip* here.
   [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(std::uint32_t flags = 0,
                                                                     void* user_data = nullptr);
+
+  // ── Session hooks ──────────────────────────────────────────────────
+  //
+  // Mirror drm::cursor::Renderer's session contract. The CRTC/
+  // connector/mode binding and every layer handle survive across a
+  // pause/resume pair; only fd-bound kernel state (plane registry,
+  // property ids, MODE_ID blob, per-source GEM/FB handles) is rebuilt.
+
+  /// The seat has been disabled. Forwards to every layer source's
+  /// on_session_paused. No ioctls fire here.
+  void on_session_paused() noexcept;
+
+  /// The seat is back with `new_dev` (a freshly-opened Device against
+  /// the new fd libseat handed the process). Re-enumerates the plane
+  /// registry, re-caches property ids, rebuilds the allocator, and
+  /// walks every live layer's source to re-allocate buffers against
+  /// `new_dev`. Next commit implicitly carries ALLOW_MODESET to bring
+  /// the CRTC back up. Layer handles (including generations) remain
+  /// valid across the call; callers do not need to rebuild their
+  /// handle maps.
+  [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(drm::Device& new_dev);
 
  private:
   class Impl;

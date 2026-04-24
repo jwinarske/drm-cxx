@@ -44,8 +44,7 @@ class DumbBufferSource : public LayerBufferSource {
   /// buffer is zero-filled at creation (drm::dumb::Buffer guarantees
   /// this), so the first `acquire()` returns a fully-transparent image.
   [[nodiscard]] static drm::expected<std::unique_ptr<DumbBufferSource>, std::error_code> create(
-      const drm::Device& dev, std::uint32_t width, std::uint32_t height,
-      std::uint32_t drm_format);
+      const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_format);
 
   DumbBufferSource(const DumbBufferSource&) = delete;
   DumbBufferSource& operator=(const DumbBufferSource&) = delete;
@@ -60,6 +59,9 @@ class DumbBufferSource : public LayerBufferSource {
     return BindingModel::SceneSubmitsFbId;
   }
   [[nodiscard]] SourceFormat format() const noexcept override { return format_; }
+  void on_session_paused() noexcept override;
+  [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
+      const drm::Device& new_dev) override;
 
   // ── Pixel access for CPU-side renderers ────────────────────────────
   /// Mutable view over the buffer's linear pixel storage. `stride()`

@@ -237,7 +237,8 @@ class JanitorBufferSource : public drm::scene::LayerBufferSource {
       }
       b = std::move(*r);
     }
-    return std::unique_ptr<JanitorBufferSource>(new JanitorBufferSource(std::move(bufs)));
+    return std::unique_ptr<JanitorBufferSource>(
+        new JanitorBufferSource(std::move(bufs), width, height));
   }
 
   // ── Pixel access for ThorVG ────────────────────────────────────────
@@ -246,20 +247,10 @@ class JanitorBufferSource : public drm::scene::LayerBufferSource {
         buffers_.at(idx).data());
   }
   [[nodiscard]] std::uint32_t stride_px() const noexcept { return buffers_.at(0).stride() / 4; }
-  [[nodiscard]] std::uint32_t width() const noexcept { return buffers_.at(0).width(); }
-  [[nodiscard]] std::uint32_t height() const noexcept { return buffers_.at(0).height(); }
+  [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
+  [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
 
   void set_current(std::size_t idx) noexcept { current_ = idx; }
-
-  /// Drop all dumb-buffer handles without ioctls. Called before the
-  /// owning LayerScene is destroyed on a fd-dead session-resume path,
-  /// so the dumb::Buffer destructors don't fire RmFB / DESTROY_DUMB
-  /// against what is now a different fd.
-  void forget_all() noexcept {
-    for (auto& b : buffers_) {
-      b.forget();
-    }
-  }
 
   // ── LayerBufferSource ──────────────────────────────────────────────
   [[nodiscard]] drm::expected<drm::scene::AcquiredBuffer, std::error_code> acquire() override {
@@ -289,11 +280,56 @@ class JanitorBufferSource : public drm::scene::LayerBufferSource {
     return f;
   }
 
+  // ── Session hooks ──────────────────────────────────────────────────
+  //
+  // Forget both buffers without ioctls on pause (the fd is already
+  // dead by the time the scene signals); re-allocate both on resume
+  // against the new Device. Dimensions are preserved — ThorVG re-
+  // targets its canvas at the new mmap through the same stride_px /
+  // pixels_for accessors.
+
+  void on_session_paused() noexcept override {
+    for (auto& b : buffers_) {
+      b.forget();
+    }
+  }
+
+  [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
+      const drm::Device& new_dev) override {
+    // Dimensions are cached as members so they survive on_session_paused
+    // (which calls buffers_[i].forget() — that zeroes the buffer's own
+    // width/height/stride). Without the members, width()/height() would
+    // return 0 here and Buffer::create would reject the config with
+    // EINVAL.
+    for (auto& b : buffers_) {
+      b.forget();
+    }
+
+    drm::dumb::Config cfg;
+    cfg.width = width_;
+    cfg.height = height_;
+    cfg.drm_format = DRM_FORMAT_ARGB8888;
+    cfg.bpp = 32;
+    cfg.add_fb = true;
+
+    for (auto& b : buffers_) {
+      auto r = drm::dumb::Buffer::create(new_dev, cfg);
+      if (!r) {
+        return drm::unexpected<std::error_code>(r.error());
+      }
+      b = std::move(*r);
+    }
+    return {};
+  }
+
  private:
-  explicit JanitorBufferSource(std::array<drm::dumb::Buffer, 2> bufs) noexcept
-      : buffers_(std::move(bufs)) {}
+  explicit JanitorBufferSource(std::array<drm::dumb::Buffer, 2> bufs, std::uint32_t width,
+                               std::uint32_t height) noexcept
+      : buffers_(std::move(bufs)), width_(width), height_(height) {}
 
   std::array<drm::dumb::Buffer, 2> buffers_;
+  std::uint32_t width_;
+  std::uint32_t height_;
   std::size_t current_{0};
 };
 
@@ -619,19 +655,17 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
       seat->dispatch();
     }
 
-    // VT resume: libseat handed us a fresh fd. LayerScene has no
-    // rebind() yet (Phase 2.4), so the scene (and everything it owns:
-    // mode blob, plane registry, property cache, the source's dumb
-    // buffers) is torn down and rebuilt against the new fd. Call
-    // source->forget_all() first so the dumb-buffer destructors don't
-    // issue ioctls against what is now a different fd.
+    // VT resume: libseat handed us a fresh fd. LayerScene's
+    // on_session_resumed re-enumerates planes, re-caches property
+    // ids, rebuilds the allocator, and walks every layer source to
+    // re-allocate buffers on the new Device. Layer handles and the
+    // handle table survive the call — nothing above this needs to be
+    // rebuilt.
     if (pending_resume_fd != -1) {
       const int new_fd = pending_resume_fd;
       pending_resume_fd = -1;
 
-      source->forget_all();
-      scene.reset();
-      source = nullptr;
+      scene->on_session_paused();
 
       dev_holder = drm::Device::from_fd(new_fd);
       pfds[1].fd = dev.fd();
@@ -644,13 +678,10 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
         break;
       }
 
-      auto rebuilt = build_scene(dev);
-      if (!rebuilt) {
-        drm::println(stderr, "resume: scene rebuild failed: {}", rebuilt.error().message());
+      if (auto r = scene->on_session_resumed(dev); !r) {
+        drm::println(stderr, "resume: on_session_resumed failed: {}", r.error().message());
         break;
       }
-      scene = std::move(rebuilt->first);
-      source = rebuilt->second;
 
       // PageFlip caches the fd it was constructed against; rebuild so
       // drmHandleEvent targets the new fd.
@@ -658,6 +689,9 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
       page_flip.set_handler(
           [&](std::uint32_t, std::uint64_t, std::uint64_t) { flip_pending = false; });
 
+      // ThorVG's canvas was bound to the old mmap. The source
+      // re-allocated its buffers on the new fd, so retarget at the
+      // current back buffer's fresh pixels.
       if (!verify(canvas->target(canvas_origin_for(back), source->stride_px(), canvas_w, canvas_h,
                                  tvg::ColorSpace::ARGB8888),
                   "resume canvas rebind")) {
@@ -709,6 +743,17 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     source->set_current(back);
     if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
         !r) {
+      // EACCES means DRM master was revoked out from under us — either
+      // the VT switched and libseat's disable_seat hasn't reached us
+      // yet, or another process took master. Defensively enter the
+      // paused state; libseat's real pause callback will confirm (it's
+      // idempotent with this) and the next resume_callback clears it.
+      // Any other error is genuinely fatal.
+      if (r.error() == std::errc::permission_denied) {
+        session_paused = true;
+        flip_pending = false;
+        continue;
+      }
       drm::println(stderr, "commit failed: {}", r.error().message());
       break;
     }
