@@ -55,4 +55,22 @@ struct TickerPaint {
 
 void paint_ticker(drm::span<std::uint8_t> pixels, const TickerPaint& p) noexcept;
 
+/// Single-frame paint of a small clock badge. The current time string
+/// is supplied by the caller so this function stays stateless and
+/// dependency-free; the demo only invokes it when the formatted string
+/// changes (once per minute with the default "%H:%M"), which is what
+/// makes this layer useful as the dirty-once-per-minute counterpart to
+/// the static overlay and dirty-every-frame ticker.
+struct ClockPaint {
+  std::uint32_t width{};
+  std::uint32_t height{};
+  std::uint32_t stride_bytes{};
+  std::uint32_t fg_argb{0xFFFFFFFFU};
+  std::uint32_t bg_argb{0x80000000U};
+  std::uint32_t font_size{48};
+  std::string_view text;
+};
+
+void paint_clock(drm::span<std::uint8_t> pixels, const ClockPaint& p) noexcept;
+
 }  // namespace signage

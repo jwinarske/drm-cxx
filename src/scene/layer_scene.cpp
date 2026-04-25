@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -275,10 +276,19 @@ class LayerScene::Impl {
     report.layers_assigned = *assigned;
     report.layers_unassigned = report.layers_total - report.layers_assigned;
     if (report.layers_unassigned != 0) {
+      std::string unassigned_ids;
+      for (const auto& acq : acquisitions) {
+        if (!acq.planes_layer->assigned_plane_id().has_value()) {
+          if (!unassigned_ids.empty()) {
+            unassigned_ids += ',';
+          }
+          unassigned_ids += std::to_string(acq.scene_layer->handle().id);
+        }
+      }
       drm::log_warn(
-          "scene::LayerScene: {} layer(s) unassigned by allocator — "
+          "scene::LayerScene: {} layer(s) unassigned by allocator (handle id(s): {}) — "
           "dropped this frame (composition fallback lands in Phase 2.3)",
-          report.layers_unassigned);
+          report.layers_unassigned, unassigned_ids);
     }
 
     // Apply or validate.

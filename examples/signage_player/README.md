@@ -1,16 +1,19 @@
 # signage_player
 
-A minimal three-layer LayerScene demo driven by a TOML playlist:
+A minimal four-layer LayerScene demo driven by a TOML playlist:
 
 - **Background** — `GbmBufferSource`, repainted on slide rotation.
 - **Overlay** — `DumbBufferSource`, painted once with static text.
 - **Ticker** — optional `DumbBufferSource`, repainted every frame with
   a horizontally scrolling marquee.
+- **Clock** — optional `DumbBufferSource` in the top-right corner,
+  repainted only when the formatted time string changes (once per
+  minute with the default `%H:%M`).
 
-The three layers' update cadences (per-slide, once-ever, every-frame)
-are deliberately spread so the example exercises the dirty surface that
-`drm::scene::LayerScene`'s eventual property-minimization pass needs to
-reason about. ESC quits.
+The four layers' update cadences (per-slide, once-ever, every-frame,
+once-per-minute) are deliberately spread so the example exercises the
+dirty surface that `drm::scene::LayerScene`'s eventual
+property-minimization pass needs to reason about. ESC quits.
 
 This is the second consumer of `drm::scene::LayerScene` (the first
 being `thorvg_janitor`). Together they prove the scene's API survives
@@ -23,12 +26,13 @@ Scaffold. The playlist parser handles the full schema below, but only
 `kind = "color"` slides actually render slide content today. PNG /
 Blend2D / ThorVG slide renderers land in follow-up commits.
 
-The `[overlay]` and `[ticker]` text are drawn with Blend2D when the
-build is configured with `-DDRM_CXX_BLEND2D=ON` (or `AUTO` and Blend2D
-is installed). Without Blend2D the bands still fill with `bg_color` but
-no glyphs are drawn — the build degrades cleanly via an `__has_include`
-probe in `overlay_renderer.cpp`. A short list of common Linux font
-paths is tried in order; if none is present the bands remain text-free.
+The `[overlay]`, `[ticker]`, and `[clock]` text are drawn with Blend2D
+when the build is configured with `-DDRM_CXX_BLEND2D=ON` (or `AUTO`
+and Blend2D is installed). Without Blend2D the bands still fill with
+`bg_color` but no glyphs are drawn — the build degrades cleanly via an
+`__has_include` probe in `overlay_renderer.cpp`. A short list of
+common Linux font paths is tried in order; if none is present the
+bands remain text-free.
 
 ## Run
 
@@ -63,6 +67,12 @@ font_size = 24
 fg_color = "#ffffff"
 bg_color = "#000000c0"
 pixels_per_second = 120
+
+[clock]                 # optional, top-right clock badge
+format = "%H:%M"        # any strftime; "%H:%M" → repaint once per minute
+font_size = 48
+fg_color = "#ffffff"
+bg_color = "#80000000"
 ```
 
 At least one slide is required.

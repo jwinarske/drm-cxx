@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 #
-# signage_player — two-layer LayerScene demo driven by a toml playlist.
+# signage_player — four-layer LayerScene demo driven by a toml playlist.
 # Included from examples/CMakeLists.txt.
 
 include(FetchContent)

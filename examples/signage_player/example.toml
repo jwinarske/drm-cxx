@@ -41,8 +41,18 @@ bg_color = "#00000080"
 # every frame; the example uses this layer to exercise the
 # dirty-every-frame side of the per-layer update spread.
 [ticker]
-text = "BREAKING NEWS  ·  drm-cxx signage_player  ·  three-layer LayerScene demo  ·  "
+text = "BREAKING NEWS  ·  drm-cxx signage_player  ·  four-layer LayerScene demo  ·  "
 font_size = 28
 fg_color = "#ffffff"
 bg_color = "#000000c0"
 pixels_per_second = 140
+
+# Optional clock badge in the top-right corner. The renderer is invoked
+# only when the formatted string changes, so the default "%H:%M" gives
+# the dirty-once-per-minute datapoint that complements the ticker's
+# every-frame and the overlay's once-ever cadences.
+[clock]
+format = "%H:%M"
+font_size = 56
+fg_color = "#ffffff"
+bg_color = "#80000000"

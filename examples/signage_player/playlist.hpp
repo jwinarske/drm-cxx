@@ -3,12 +3,14 @@
 //
 // playlist.hpp — toml-backed playlist for signage_player.
 //
-// One Playlist owns a cyclic list of SlideDesc entries plus an optional
-// OverlayDesc and an optional TickerDesc. Slides drive the background
-// layer (GbmBufferSource); the overlay drives a static DumbBufferSource-
-// backed text layer; the ticker drives a third DumbBufferSource that
-// repaints every frame with a scrolling marquee. Parse via
-// Playlist::load(toml_path) → drm::expected<Playlist, error_code>.
+// One Playlist owns a cyclic list of SlideDesc entries plus optional
+// OverlayDesc, TickerDesc, and ClockDesc blocks. Slides drive the
+// background layer (GbmBufferSource); the overlay drives a static
+// DumbBufferSource-backed text layer; the ticker drives a third
+// DumbBufferSource that repaints every frame with a scrolling marquee;
+// the clock drives a fourth DumbBufferSource that repaints only when
+// the formatted time string changes (once per minute with the default
+// "%H:%M"). Parse via Playlist::load(toml_path).
 //
 // Schema (TOML):
 //
@@ -31,6 +33,12 @@
 //     fg_color = "#ffffff"    # optional, default white
 //     bg_color = "#000000c0"  # optional, default 75% black
 //     pixels_per_second = 120 # optional, default 120
+//
+//     [clock]                 # optional
+//     format = "%H:%M"        # optional strftime, default "%H:%M"
+//     font_size = 48          # optional, default 48
+//     fg_color = "#ffffff"    # optional, default white
+//     bg_color = "#80000000"  # optional, default 50% black
 //
 // At least one slide is required. The parser rejects unknown `kind`
 // values and malformed color literals.
@@ -87,6 +95,19 @@ struct TickerDesc {
   std::uint32_t pixels_per_second{120};
 };
 
+struct ClockDesc {
+  /// strftime-style format. Default "%H:%M" gives the once-per-minute
+  /// repaint cadence the example was designed to demonstrate; passing
+  /// "%H:%M:%S" or similar will simply make repaints fire every second.
+  std::string format{"%H:%M"};
+  std::uint32_t font_size{48};
+  Argb fg_color{0xFFFFFFFFU};
+  /// Default 50% opaque black, slightly lighter than the ticker's 75%
+  /// because the clock pad sits over slide content rather than its own
+  /// bottom band.
+  Argb bg_color{0x80000000U};
+};
+
 class Playlist {
  public:
   [[nodiscard]] static drm::expected<Playlist, std::error_code> load(const std::string& toml_path);
@@ -98,11 +119,13 @@ class Playlist {
   [[nodiscard]] const std::vector<SlideDesc>& slides() const noexcept { return slides_; }
   [[nodiscard]] const std::optional<OverlayDesc>& overlay() const noexcept { return overlay_; }
   [[nodiscard]] const std::optional<TickerDesc>& ticker() const noexcept { return ticker_; }
+  [[nodiscard]] const std::optional<ClockDesc>& clock() const noexcept { return clock_; }
 
  private:
   std::vector<SlideDesc> slides_;
   std::optional<OverlayDesc> overlay_;
   std::optional<TickerDesc> ticker_;
+  std::optional<ClockDesc> clock_;
 };
 
 }  // namespace signage

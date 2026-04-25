@@ -46,6 +46,12 @@ font_size = 28
 fg_color = "#ffeeaa"
 bg_color = "#c0102030"
 pixels_per_second = 200
+
+[clock]
+format = "%H:%M:%S"
+font_size = 64
+fg_color = "#ffeeaa"
+bg_color = "#80112233"
 )";
 
 }  // namespace
@@ -84,6 +90,42 @@ TEST(SignagePlaylist, ParseFull) {
   // "#c0102030" reads as RR=c0, GG=10, BB=20, AA=30 → packed AARRGGBB.
   EXPECT_EQ(p->ticker()->bg_color, 0x30C01020U);
   EXPECT_EQ(p->ticker()->pixels_per_second, 200U);
+  ASSERT_TRUE(p->clock().has_value());
+  EXPECT_EQ(p->clock()->format, "%H:%M:%S");
+  EXPECT_EQ(p->clock()->font_size, 64U);
+  EXPECT_EQ(p->clock()->fg_color, 0xFFFFEEAAU);
+  // "#80112233" reads as RR=80, GG=11, BB=22, AA=33 → packed AARRGGBB.
+  EXPECT_EQ(p->clock()->bg_color, 0x33801122U);
+}
+
+TEST(SignagePlaylist, ClockOmittedByDefault) {
+  auto p = signage::Playlist::parse(kMinimal);
+  ASSERT_TRUE(p.has_value()) << p.error().message();
+  EXPECT_FALSE(p->clock().has_value());
+}
+
+TEST(SignagePlaylist, ClockDefaultsApplied) {
+  auto p = signage::Playlist::parse(R"([[slide]]
+kind = "color"
+color = "#ffffff"
+
+[clock])");
+  ASSERT_TRUE(p.has_value()) << p.error().message();
+  ASSERT_TRUE(p->clock().has_value());
+  EXPECT_EQ(p->clock()->format, "%H:%M");
+  EXPECT_EQ(p->clock()->font_size, 48U);
+  EXPECT_EQ(p->clock()->fg_color, 0xFFFFFFFFU);
+  EXPECT_EQ(p->clock()->bg_color, 0x80000000U);
+}
+
+TEST(SignagePlaylist, ClockRejectsEmptyFormat) {
+  auto p = signage::Playlist::parse(R"([[slide]]
+kind = "color"
+color = "#ffffff"
+
+[clock]
+format = "")");
+  EXPECT_FALSE(p.has_value());
 }
 
 TEST(SignagePlaylist, TickerOmittedByDefault) {

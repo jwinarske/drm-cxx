@@ -1,14 +1,17 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 //
-// signage_player — a three-layer LayerScene demo driven by a TOML
+// signage_player — a four-layer LayerScene demo driven by a TOML
 // playlist. Background slides cycle on a timer (GbmBufferSource), a
-// static text overlay sits in the lower third (DumbBufferSource), and
-// an optional scrolling ticker repaints every frame on a third
-// DumbBufferSource. The three layers' update cadences (per-slide,
-// once-ever, every-frame) are deliberately spread so the example
-// exercises the per-layer dirty surface that Phase 2.2 will eventually
-// minimize property/FB writes against.
+// static text overlay sits in the lower third (DumbBufferSource), an
+// optional scrolling ticker repaints every frame on a third
+// DumbBufferSource, and an optional clock badge in the top-right
+// corner repaints only when the formatted time string changes (once
+// per minute with the default "%H:%M"). The four layers' update
+// cadences (per-slide, once-ever, every-frame, once-per-minute) are
+// deliberately spread so the example exercises the per-layer dirty
+// surface that Phase 2.2 will eventually minimize property/FB writes
+// against.
 
 #include "common/select_device.hpp"
 #include "signage_player/overlay_renderer.hpp"
@@ -22,6 +25,7 @@
 #include <drm-cxx/modeset/mode.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
+#include <drm-cxx/planes/plane_registry.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/gbm_buffer_source.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -31,10 +35,12 @@
 #include <xf86drmMode.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <linux/input-event-codes.h>
 #include <memory>
 #include <optional>
@@ -56,22 +62,82 @@ void fill_argb(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, std::
   }
 }
 
+// Count OVERLAY planes the registry can route to `crtc_id`. main()
+// uses this to gate optional layers (ticker, clock) when the hardware
+// can't accept them all — until LayerScene grows a software
+// composition fallback (Phase 2.3), excess layers get dropped per
+// frame rather than composited together. The result is the absolute
+// per-CRTC count; in a multi-output app where two CRTCs are
+// simultaneously lit on hardware that shares its OVERLAY pool (amdgpu
+// does this — its 2 OVERLAYs each have crtc_mask=0xff), each CRTC's
+// effective budget is smaller than what this returns.
+drm::expected<std::uint32_t, std::error_code> count_crtc_overlay_planes(drm::Device& dev,
+                                                                        std::uint32_t crtc_id) {
+  auto registry = drm::planes::PlaneRegistry::enumerate(dev);
+  if (!registry) {
+    return drm::unexpected<std::error_code>(registry.error());
+  }
+  auto res = drm::get_resources(dev.fd());
+  if (!res) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::io_error));
+  }
+  std::optional<std::uint32_t> crtc_idx;
+  for (int i = 0; i < res->count_crtcs; ++i) {
+    if (res->crtcs[i] == crtc_id) {
+      crtc_idx = static_cast<std::uint32_t>(i);
+      break;
+    }
+  }
+  if (!crtc_idx.has_value()) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::no_such_device_or_address));
+  }
+  std::uint32_t n = 0;
+  for (const auto* p : registry->for_crtc(*crtc_idx)) {
+    if (p->type == drm::planes::DRMPlaneType::OVERLAY) {
+      ++n;
+    }
+  }
+  return n;
+}
+
 struct Scene {
   std::unique_ptr<drm::scene::LayerScene> scene;
   drm::scene::GbmBufferSource* bg{nullptr};
   drm::scene::DumbBufferSource* overlay{nullptr};
   drm::scene::DumbBufferSource* ticker{nullptr};
+  drm::scene::DumbBufferSource* clock{nullptr};
   drm::scene::LayerHandle bg_handle;
   drm::scene::LayerHandle overlay_handle;
   drm::scene::LayerHandle ticker_handle;
+  drm::scene::LayerHandle clock_handle;
+};
+
+struct SceneDims {
+  std::uint32_t fb_w;
+  std::uint32_t fb_h;
+  std::uint32_t overlay_w;
+  std::uint32_t overlay_h;
+  std::uint32_t ticker_w;
+  std::uint32_t ticker_h;
+  std::uint32_t clock_w;
+  std::uint32_t clock_h;
+  bool with_ticker;
+  bool with_clock;
 };
 
 drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_t crtc_id,
                                                   std::uint32_t connector_id,
-                                                  const drmModeModeInfo& mode, std::uint32_t fb_w,
-                                                  std::uint32_t fb_h, std::uint32_t overlay_w,
-                                                  std::uint32_t overlay_h, std::uint32_t ticker_w,
-                                                  std::uint32_t ticker_h, bool with_ticker) {
+                                                  const drmModeModeInfo& mode,
+                                                  const SceneDims& dims) {
+  const auto fb_w = dims.fb_w;
+  const auto fb_h = dims.fb_h;
+  const auto overlay_w = dims.overlay_w;
+  const auto overlay_h = dims.overlay_h;
+  const auto ticker_w = dims.ticker_w;
+  const auto ticker_h = dims.ticker_h;
+  const auto clock_w = dims.clock_w;
+  const auto clock_h = dims.clock_h;
   auto bg_src = drm::scene::GbmBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
   if (!bg_src) {
     return drm::unexpected<std::error_code>(bg_src.error());
@@ -83,13 +149,23 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
   }
 
   std::unique_ptr<drm::scene::DumbBufferSource> ticker_src_owner;
-  if (with_ticker) {
+  if (dims.with_ticker) {
     auto ticker_src =
         drm::scene::DumbBufferSource::create(dev, ticker_w, ticker_h, DRM_FORMAT_ARGB8888);
     if (!ticker_src) {
       return drm::unexpected<std::error_code>(ticker_src.error());
     }
     ticker_src_owner = std::move(*ticker_src);
+  }
+
+  std::unique_ptr<drm::scene::DumbBufferSource> clock_src_owner;
+  if (dims.with_clock) {
+    auto clock_src =
+        drm::scene::DumbBufferSource::create(dev, clock_w, clock_h, DRM_FORMAT_ARGB8888);
+    if (!clock_src) {
+      return drm::unexpected<std::error_code>(clock_src.error());
+    }
+    clock_src_owner = std::move(*clock_src);
   }
 
   drm::scene::LayerScene::Config cfg;
@@ -106,6 +182,7 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
   out.bg = bg_src->get();
   out.overlay = overlay_src->get();
   out.ticker = ticker_src_owner.get();
+  out.clock = clock_src_owner.get();
 
   drm::scene::LayerDesc bg_desc;
   bg_desc.source = std::move(*bg_src);
@@ -134,7 +211,7 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
   }
   out.overlay_handle = *ov_h;
 
-  if (with_ticker) {
+  if (dims.with_ticker) {
     // Ticker hugs the bottom of the screen, full width. zpos sits above
     // PRIMARY (amdgpu pins PRIMARY at zpos=2, so anything <=2 here lets
     // the kernel hide the ticker behind the bg) and below the centered
@@ -154,7 +231,47 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
     out.ticker_handle = *tk_h;
   }
 
+  if (dims.with_clock) {
+    // Clock badge sits in the top-right corner with a small margin. zpos
+    // is the highest layer (overlay=4, ticker=3, bg=2) so the timestamp
+    // is never occluded by other UI.
+    constexpr std::uint32_t kClockMargin = 16U;
+    const std::int32_t cx = (fb_w > clock_w + kClockMargin)
+                                ? static_cast<std::int32_t>(fb_w - clock_w - kClockMargin)
+                                : 0;
+    const std::int32_t cy = static_cast<std::int32_t>(kClockMargin);
+    drm::scene::LayerDesc ck_desc;
+    ck_desc.source = std::move(clock_src_owner);
+    ck_desc.display.src_rect = drm::scene::Rect{0, 0, clock_w, clock_h};
+    ck_desc.display.dst_rect = drm::scene::Rect{cx, cy, clock_w, clock_h};
+    ck_desc.display.zpos = 5;
+    ck_desc.content_type = drm::planes::ContentType::UI;
+    auto ck_h = out.scene->add_layer(std::move(ck_desc));
+    if (!ck_h) {
+      return drm::unexpected<std::error_code>(ck_h.error());
+    }
+    out.clock_handle = *ck_h;
+  }
+
   return out;
+}
+
+// strftime against the wall-clock now. Returns empty on overflow / bad
+// format. 64 chars is comfortable for any sane time string; if a user
+// supplies a format that exceeds it we'd rather render nothing than
+// truncate silently mid-string.
+std::string format_now(const std::string& fmt) noexcept {
+  std::array<char, 64> buf{};
+  const auto t = std::time(nullptr);
+  std::tm tm_local{};
+  if (localtime_r(&t, &tm_local) == nullptr) {
+    return {};
+  }
+  const std::size_t n = std::strftime(buf.data(), buf.size(), fmt.c_str(), &tm_local);
+  if (n == 0U) {
+    return {};
+  }
+  return std::string(buf.data(), n);
 }
 
 }  // namespace
@@ -251,14 +368,72 @@ int main(int argc, char** argv) {
   drm::println("Mode: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.refresh(),
                connector_id, crtc_id);
 
+  // Plane budget: bg lands on PRIMARY; overlay text + optional ticker
+  // + optional clock each need an OVERLAY plane. When the hardware
+  // can't fit every optional layer (e.g. amdgpu exposes 2 OVERLAYs
+  // total but the playlist asks for 3 overlay-class layers), shed in
+  // priority order — clock first, then ticker — before LayerScene's
+  // allocator has to drop them per frame. Once the Phase 2.3
+  // composition fallback lands the gating below can go away.
+  const auto overlay_budget_res = count_crtc_overlay_planes(dev, crtc_id);
+  if (!overlay_budget_res) {
+    drm::println(stderr, "plane enumeration failed: {}", overlay_budget_res.error().message());
+    return EXIT_FAILURE;
+  }
+  const std::uint32_t overlay_budget = *overlay_budget_res;
+
+  bool has_ticker = playlist->ticker().has_value();
+  bool has_clock = playlist->clock().has_value();
+  std::uint32_t overlay_demand = 1U + (has_ticker ? 1U : 0U) + (has_clock ? 1U : 0U);
+  if (overlay_demand > overlay_budget && has_clock) {
+    drm::println("plane budget: CRTC {} has {} OVERLAY plane(s); disabling clock layer", crtc_id,
+                 overlay_budget);
+    has_clock = false;
+    --overlay_demand;
+  }
+  if (overlay_demand > overlay_budget && has_ticker) {
+    drm::println("plane budget: CRTC {} has {} OVERLAY plane(s); disabling ticker layer", crtc_id,
+                 overlay_budget);
+    has_ticker = false;
+    --overlay_demand;
+  }
+  if (overlay_demand > overlay_budget) {
+    drm::println(stderr,
+                 "plane budget: CRTC {} has only {} OVERLAY plane(s); not enough for the static "
+                 "overlay text layer",
+                 crtc_id, overlay_budget);
+    return EXIT_FAILURE;
+  }
+
   const std::uint32_t overlay_w = std::min<std::uint32_t>(fb_w, 640U);
   const std::uint32_t overlay_h = std::min<std::uint32_t>(fb_h, 96U);
-  const bool has_ticker = playlist->ticker().has_value();
   const std::uint32_t ticker_h = has_ticker ? std::min<std::uint32_t>(fb_h, 56U) : 0U;
   const std::uint32_t ticker_w = has_ticker ? fb_w : 0U;
+  // Size the clock buffer from font_size so a larger format ("%H:%M:%S")
+  // or a bumped font still fits — width holds ~5 ems (enough for the
+  // longest strftime we expect from a sensible playlist), height is 2×
+  // ems so ascent+descent has breathing room.
+  const std::uint32_t clock_font_size = has_clock ? playlist->clock()->font_size : 0U;
+  const std::uint32_t clock_w =
+      has_clock ? std::min<std::uint32_t>(fb_w, std::max<std::uint32_t>(192U, clock_font_size * 5U))
+                : 0U;
+  const std::uint32_t clock_h =
+      has_clock ? std::min<std::uint32_t>(fb_h, std::max<std::uint32_t>(72U, clock_font_size * 2U))
+                : 0U;
 
-  auto scene_built = build_scene(dev, crtc_id, connector_id, mode.drm_mode, fb_w, fb_h, overlay_w,
-                                 overlay_h, ticker_w, ticker_h, has_ticker);
+  SceneDims dims;
+  dims.fb_w = fb_w;
+  dims.fb_h = fb_h;
+  dims.overlay_w = overlay_w;
+  dims.overlay_h = overlay_h;
+  dims.ticker_w = ticker_w;
+  dims.ticker_h = ticker_h;
+  dims.clock_w = clock_w;
+  dims.clock_h = clock_h;
+  dims.with_ticker = has_ticker;
+  dims.with_clock = has_clock;
+
+  auto scene_built = build_scene(dev, crtc_id, connector_id, mode.drm_mode, dims);
   if (!scene_built) {
     drm::println(stderr, "scene build failed: {}", scene_built.error().message());
     return EXIT_FAILURE;
@@ -267,6 +442,7 @@ int main(int argc, char** argv) {
   auto* bg = scene_built->bg;
   auto* overlay = scene_built->overlay;
   auto* ticker = scene_built->ticker;
+  auto* clock_src = scene_built->clock;
 
   // Overlay paint is constant — the static-text layer is what makes
   // dirty-tracking interesting later (it never needs a property re-write
@@ -309,6 +485,36 @@ int main(int argc, char** argv) {
     signage::paint_ticker(ticker->pixels(), ticker_paint);
   };
   repaint_ticker(ticker_started);
+
+  // Clock paint is dirty-once-per-minute — the renderer is invoked only
+  // when the formatted time string changes, which is the once-per-minute
+  // counterpart to the static overlay and dirty-every-frame ticker.
+  signage::ClockPaint clock_paint;
+  std::string clock_format;
+  std::string last_clock_text;
+  if (has_clock) {
+    const auto& cd = *playlist->clock();
+    clock_paint.width = clock_w;
+    clock_paint.height = clock_h;
+    clock_paint.stride_bytes = clock_src->stride();
+    clock_paint.fg_argb = cd.fg_color;
+    clock_paint.bg_argb = cd.bg_color;
+    clock_paint.font_size = cd.font_size;
+    clock_format = cd.format;
+  }
+  auto repaint_clock_if_changed = [&]() {
+    if (!has_clock) {
+      return;
+    }
+    auto formatted = format_now(clock_format);
+    if (formatted == last_clock_text) {
+      return;
+    }
+    last_clock_text = std::move(formatted);
+    clock_paint.text = last_clock_text;
+    signage::paint_clock(clock_src->pixels(), clock_paint);
+  };
+  repaint_clock_if_changed();
 
   // Paint the first slide into the background before the initial commit.
   auto paint_slide = [&](std::size_t idx) {
@@ -423,13 +629,21 @@ int main(int argc, char** argv) {
       page_flip = drm::PageFlip(dev);
       page_flip.set_handler(
           [&](std::uint32_t, std::uint64_t, std::uint64_t) { flip_pending = false; });
-      // Re-paint all three layers against the fresh mappings.
+      // Re-paint every layer against the fresh mappings.
       paint_slide(slide_idx);
       overlay_paint.stride_bytes = overlay->stride();
       signage::paint_overlay(overlay->pixels(), overlay_paint);
       if (has_ticker) {
         ticker_paint.stride_bytes = ticker->stride();
         repaint_ticker(clock::now());
+      }
+      if (has_clock) {
+        clock_paint.stride_bytes = clock_src->stride();
+        // Force the clock to repaint after resume even if the minute
+        // hasn't rolled — the underlying buffer was unmapped and is
+        // fresh again.
+        last_clock_text.clear();
+        repaint_clock_if_changed();
       }
     }
 
@@ -448,6 +662,7 @@ int main(int argc, char** argv) {
     }
 
     repaint_ticker(now);
+    repaint_clock_if_changed();
 
     if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
         !r) {

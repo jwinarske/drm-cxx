@@ -85,7 +85,19 @@ BLResult load_default_font_face(BLFontFace& face) noexcept {
   return BL_ERROR_FONT_NOT_INITIALIZED;
 }
 
-void draw_text_blend2d(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexcept {
+// Shared Blend2D draw path for the overlay's centered text and the
+// clock's centered timestamp — same anchoring math, different inputs.
+struct CenteredTextParams {
+  std::uint32_t width;
+  std::uint32_t height;
+  std::uint32_t stride_bytes;
+  std::uint32_t font_size;
+  std::uint32_t fg_argb;
+  std::string_view text;
+};
+
+void draw_centered_text_blend2d(drm::span<std::uint8_t> pixels,
+                                const CenteredTextParams& p) noexcept {
   if (p.text.empty()) {
     return;
   }
@@ -120,8 +132,8 @@ void draw_text_blend2d(drm::span<std::uint8_t> pixels, const OverlayPaint& p) no
   const BLFontMetrics fm = font.metrics();
 
   // tm.bounding_box is in design space relative to the baseline; width
-  // is x1 - x0. Vertically centre the inked-glyph box (ascent+descent)
-  // inside the overlay rect, then offset by ascent so fill_utf8_text's
+  // is x1 - x0. Vertically center the inked-glyph box (ascent+descent)
+  // inside the rect, then offset by ascent so fill_utf8_text's
   // baseline-anchored origin lands correctly.
   const double text_w = tm.bounding_box.x1 - tm.bounding_box.x0;
   const double total_h = static_cast<double>(fm.ascent + fm.descent);
@@ -211,7 +223,8 @@ void paint_overlay(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexce
   fill_premul(pixels, p.stride_bytes, p.width, p.height, premultiply(p.bg_argb));
 
 #ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
-  draw_text_blend2d(pixels, p);
+  draw_centered_text_blend2d(pixels,
+                             {p.width, p.height, p.stride_bytes, p.font_size, p.fg_argb, p.text});
 #endif
 }
 
@@ -223,6 +236,18 @@ void paint_ticker(drm::span<std::uint8_t> pixels, const TickerPaint& p) noexcept
 
 #ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
   draw_ticker_blend2d(pixels, p);
+#endif
+}
+
+void paint_clock(drm::span<std::uint8_t> pixels, const ClockPaint& p) noexcept {
+  if (p.width == 0U || p.height == 0U || p.stride_bytes < (p.width * 4U)) {
+    return;
+  }
+  fill_premul(pixels, p.stride_bytes, p.width, p.height, premultiply(p.bg_argb));
+
+#ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
+  draw_centered_text_blend2d(pixels,
+                             {p.width, p.height, p.stride_bytes, p.font_size, p.fg_argb, p.text});
 #endif
 }
 

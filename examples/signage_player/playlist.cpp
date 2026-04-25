@@ -136,6 +136,34 @@ drm::expected<OverlayDesc, std::error_code> parse_overlay(const toml::table& tbl
   return o;
 }
 
+drm::expected<ClockDesc, std::error_code> parse_clock(const toml::table& tbl) {
+  ClockDesc c;
+  if (auto fmt = tbl["format"].value<std::string>()) {
+    if (fmt->empty()) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    c.format = *fmt;
+  }
+  if (auto fs = tbl["font_size"].value<std::int64_t>(); fs && *fs > 0) {
+    c.font_size = static_cast<std::uint32_t>(*fs);
+  }
+  if (auto fg = tbl["fg_color"].value<std::string>()) {
+    auto parsed = parse_color(*fg);
+    if (!parsed) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    c.fg_color = *parsed;
+  }
+  if (auto bg = tbl["bg_color"].value<std::string>()) {
+    auto parsed = parse_color(*bg);
+    if (!parsed) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    c.bg_color = *parsed;
+  }
+  return c;
+}
+
 drm::expected<TickerDesc, std::error_code> parse_ticker(const toml::table& tbl) {
   TickerDesc t;
   const auto text_lit = tbl["text"].value<std::string>();
@@ -207,6 +235,14 @@ drm::expected<Playlist, std::error_code> Playlist::parse(std::string_view toml_s
       return drm::unexpected<std::error_code>(t.error());
     }
     p.ticker_ = std::move(*t);
+  }
+
+  if (const auto* clock_tbl = root["clock"].as_table(); clock_tbl != nullptr) {
+    auto c = parse_clock(*clock_tbl);
+    if (!c) {
+      return drm::unexpected<std::error_code>(c.error());
+    }
+    p.clock_ = std::move(*c);
   }
 
   return p;
