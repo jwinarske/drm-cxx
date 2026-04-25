@@ -148,4 +148,13 @@ if get_option('examples')
       dependencies : [test_deps, common_scene_dep],
     ),
   )
+
+  # signage_player playlist parser. signage_playlist_dep links toml++
+  # and the parser headers; this test pulls them in transitively.
+  test('test_playlist',
+    executable('test_playlist',
+      'unit/test_playlist.cpp',
+      dependencies : [gtest_dep, gtest_main_dep, signage_playlist_dep],
+    ),
+  )
 endif

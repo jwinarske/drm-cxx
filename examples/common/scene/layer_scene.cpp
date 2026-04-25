@@ -203,20 +203,40 @@ class LayerScene::Impl {
     // Lower each live scene::Layer into its corresponding planes::Layer
     // property bag. This is what the allocator reads to pick planes.
     //
-    // Single-layer scenes without an explicit zpos get the PRIMARY
-    // plane's zpos_min as a hint: the allocator's preseed prefers
-    // OVERLAY (+2 score) over PRIMARY for non-composition layers, which
-    // causes its TEST commits to explicitly disable PRIMARY while
-    // activating the CRTC — amdgpu rejects that combination with EINVAL
-    // (active CRTC requires an armed PRIMARY plane). Pinning zpos to
-    // PRIMARY's zpos_min lights up the primary-affinity bonus in
-    // score_pair and steers the single layer onto PRIMARY directly.
-    std::optional<std::uint64_t> zpos_hint;
-    if (layer_count() == 1 && primary_zpos_hint_.has_value()) {
-      zpos_hint = primary_zpos_hint_;
+    // Steer one layer onto PRIMARY by handing it the PRIMARY plane's
+    // zpos_min as a hint: the allocator's preseed prefers OVERLAY (+2
+    // score) over PRIMARY for non-composition layers, which causes its
+    // TEST commits to explicitly disable PRIMARY while activating the
+    // CRTC — amdgpu rejects that combination with EINVAL (active CRTC
+    // requires an armed PRIMARY plane). Pinning zpos to PRIMARY's
+    // zpos_min lights up the primary-affinity bonus in score_pair and
+    // steers exactly that layer onto PRIMARY. The chosen target is the
+    // first layer in commit order without a caller-set zpos — for
+    // bottom-to-top scenes (the convention) that's the background; if a
+    // caller already pinned a layer to PRIMARY's slot, no hint is needed.
+    const Layer* hint_target = nullptr;
+    if (primary_zpos_hint_.has_value()) {
+      bool already_targeted = false;
+      for (const auto& acq : acquisitions) {
+        const auto z = acq.scene_layer->display().zpos;
+        if (z.has_value() && static_cast<std::uint64_t>(*z) == *primary_zpos_hint_) {
+          already_targeted = true;
+          break;
+        }
+      }
+      if (!already_targeted) {
+        for (const auto& acq : acquisitions) {
+          if (!acq.scene_layer->display().zpos.has_value()) {
+            hint_target = acq.scene_layer;
+            break;
+          }
+        }
+      }
     }
     for (const auto& acq : acquisitions) {
-      lower_layer(*acq.scene_layer, *acq.planes_layer, acq.buffer.fb_id, crtc_id_, zpos_hint);
+      const std::optional<std::uint64_t> per_layer_hint =
+          (acq.scene_layer == hint_target) ? primary_zpos_hint_ : std::nullopt;
+      lower_layer(*acq.scene_layer, *acq.planes_layer, acq.buffer.fb_id, crtc_id_, per_layer_hint);
     }
 
     // Build the frame's AtomicRequest.

@@ -74,4 +74,14 @@ if(DRM_CXX_BUILD_EXAMPLES)
     GTest::gtest
     GTest::gtest_main)
   gtest_discover_tests(test_scene)
+
+  # signage_player playlist parser. signage_playlist links toml++, so
+  # this test pulls toml++ in transitively without needing its own
+  # FetchContent block.
+  add_executable(test_playlist unit/test_playlist.cpp)
+  target_link_libraries(test_playlist PRIVATE
+    signage_playlist
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_playlist)
 endif()

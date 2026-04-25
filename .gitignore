@@ -19,6 +19,7 @@ subprojects/v4l-utils/
 subprojects/fmt/
 subprojects/tcb-span/
 subprojects/tl-expected/
+subprojects/tomlplusplus/
 subprojects/packagecache/
 
 # CMake
