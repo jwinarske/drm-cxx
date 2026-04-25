@@ -82,4 +82,12 @@ if(DRM_CXX_BUILD_EXAMPLES)
     GTest::gtest
     GTest::gtest_main)
   gtest_discover_tests(test_playlist)
+
+  # test_patterns painters — same arrangement as the playlist test above.
+  add_executable(test_test_patterns unit/test_test_patterns.cpp)
+  target_link_libraries(test_test_patterns PRIVATE
+    test_patterns_painters
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_test_patterns)
 endif()
