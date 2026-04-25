@@ -4,8 +4,10 @@
 // playlist.hpp — toml-backed playlist for signage_player.
 //
 // One Playlist owns a cyclic list of SlideDesc entries plus an optional
-// OverlayDesc. Slides drive the background layer (GbmBufferSource);
-// the overlay drives a DumbBufferSource-backed text layer. Parse via
+// OverlayDesc and an optional TickerDesc. Slides drive the background
+// layer (GbmBufferSource); the overlay drives a static DumbBufferSource-
+// backed text layer; the ticker drives a third DumbBufferSource that
+// repaints every frame with a scrolling marquee. Parse via
 // Playlist::load(toml_path) → drm::expected<Playlist, error_code>.
 //
 // Schema (TOML):
@@ -22,6 +24,13 @@
 //     font_size = 32          # optional, default 32
 //     fg_color = "#ffffff"    # optional, default white
 //     bg_color = "#00000080"  # optional, default transparent
+//
+//     [ticker]                # optional
+//     text = "BREAKING NEWS  ·  more headlines  ·  "
+//     font_size = 24          # optional, default 24
+//     fg_color = "#ffffff"    # optional, default white
+//     bg_color = "#000000c0"  # optional, default 75% black
+//     pixels_per_second = 120 # optional, default 120
 //
 // At least one slide is required. The parser rejects unknown `kind`
 // values and malformed color literals.
@@ -66,6 +75,18 @@ struct OverlayDesc {
   Argb bg_color{0x00000000U};
 };
 
+struct TickerDesc {
+  std::string text;
+  std::uint32_t font_size{24};
+  Argb fg_color{0xFFFFFFFFU};
+  /// Default 75% opaque black so the marquee reads against most slides.
+  Argb bg_color{0xC0000000U};
+  /// Horizontal scroll velocity. The renderer multiplies elapsed time
+  /// by this and modulos against a single text-pass width to produce a
+  /// seamless loop.
+  std::uint32_t pixels_per_second{120};
+};
+
 class Playlist {
  public:
   [[nodiscard]] static drm::expected<Playlist, std::error_code> load(const std::string& toml_path);
@@ -76,10 +97,12 @@ class Playlist {
 
   [[nodiscard]] const std::vector<SlideDesc>& slides() const noexcept { return slides_; }
   [[nodiscard]] const std::optional<OverlayDesc>& overlay() const noexcept { return overlay_; }
+  [[nodiscard]] const std::optional<TickerDesc>& ticker() const noexcept { return ticker_; }
 
  private:
   std::vector<SlideDesc> slides_;
   std::optional<OverlayDesc> overlay_;
+  std::optional<TickerDesc> ticker_;
 };
 
 }  // namespace signage

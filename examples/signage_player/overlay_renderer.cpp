@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -133,6 +134,70 @@ void draw_text_blend2d(drm::span<std::uint8_t> pixels, const OverlayPaint& p) no
   ctx.end();
 }
 
+void draw_ticker_blend2d(drm::span<std::uint8_t> pixels, const TickerPaint& p) noexcept {
+  if (p.text.empty()) {
+    return;
+  }
+
+  BLImage img;
+  if (img.create_from_data(static_cast<int>(p.width), static_cast<int>(p.height), BL_FORMAT_PRGB32,
+                           pixels.data(), static_cast<intptr_t>(p.stride_bytes), BL_DATA_ACCESS_RW,
+                           nullptr, nullptr) != BL_SUCCESS) {
+    return;
+  }
+
+  BLFontFace face;
+  if (load_default_font_face(face) != BL_SUCCESS) {
+    return;
+  }
+
+  BLFont font;
+  if (font.create_from_face(face, static_cast<float>(p.font_size)) != BL_SUCCESS) {
+    return;
+  }
+
+  BLGlyphBuffer gb;
+  gb.set_utf8_text(p.text.data(), p.text.size());
+  if (font.shape(gb) != BL_SUCCESS) {
+    return;
+  }
+
+  BLTextMetrics tm{};
+  if (font.get_text_metrics(gb, tm) != BL_SUCCESS) {
+    return;
+  }
+  const BLFontMetrics fm = font.metrics();
+
+  // Per-pass advance: width of one rendered text plus a gap, so
+  // consecutive copies don't run into each other. A gap of one font
+  // size is the lazy choice that reads fine; if a playlist wants tighter
+  // spacing it can append " · " or similar to the text itself.
+  const double text_w = tm.bounding_box.x1 - tm.bounding_box.x0;
+  const double pass_w = text_w + static_cast<double>(p.font_size);
+  if (pass_w <= 0.0) {
+    return;
+  }
+
+  // Vertically centre the inked-glyph box, baseline-anchor as in the
+  // overlay renderer.
+  const double total_h = static_cast<double>(fm.ascent + fm.descent);
+  const double y = ((static_cast<double>(p.height) - total_h) * 0.5) + fm.ascent;
+
+  // Modulo the running scroll offset against pass_w so the buffer never
+  // sees a discontinuity. Then start one pass to the left of the visible
+  // region and stamp copies until we run past the right edge.
+  const double scroll_mod = std::fmod(p.scroll_offset_px, pass_w);
+  double x = -scroll_mod - tm.bounding_box.x0;
+
+  BLContext ctx(img);
+  ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
+  while (x < static_cast<double>(p.width)) {
+    ctx.fill_utf8_text(BLPoint(x, y), font, p.text.data(), p.text.size(), BLRgba32(p.fg_argb));
+    x += pass_w;
+  }
+  ctx.end();
+}
+
 // NOLINTEND(misc-include-cleaner)
 
 #endif  // SIGNAGE_OVERLAY_HAS_BLEND2D
@@ -147,6 +212,17 @@ void paint_overlay(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexce
 
 #ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
   draw_text_blend2d(pixels, p);
+#endif
+}
+
+void paint_ticker(drm::span<std::uint8_t> pixels, const TickerPaint& p) noexcept {
+  if (p.width == 0U || p.height == 0U || p.stride_bytes < (p.width * 4U)) {
+    return;
+  }
+  fill_premul(pixels, p.stride_bytes, p.width, p.height, premultiply(p.bg_argb));
+
+#ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
+  draw_ticker_blend2d(pixels, p);
 #endif
 }
 

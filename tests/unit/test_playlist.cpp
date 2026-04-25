@@ -39,6 +39,13 @@ text = "Hello"
 font_size = 48
 fg_color = "#ffffff"
 bg_color = "#80112233"
+
+[ticker]
+text = "BREAKING NEWS"
+font_size = 28
+fg_color = "#ffeeaa"
+bg_color = "#c0102030"
+pixels_per_second = 200
 )";
 
 }  // namespace
@@ -70,6 +77,45 @@ TEST(SignagePlaylist, ParseFull) {
   EXPECT_EQ(p->overlay()->fg_color, 0xFFFFFFFFU);
   // "#80112233" reads as RR=80, GG=11, BB=22, AA=33 → packed AARRGGBB.
   EXPECT_EQ(p->overlay()->bg_color, 0x33801122U);
+  ASSERT_TRUE(p->ticker().has_value());
+  EXPECT_EQ(p->ticker()->text, "BREAKING NEWS");
+  EXPECT_EQ(p->ticker()->font_size, 28U);
+  EXPECT_EQ(p->ticker()->fg_color, 0xFFFFEEAAU);
+  // "#c0102030" reads as RR=c0, GG=10, BB=20, AA=30 → packed AARRGGBB.
+  EXPECT_EQ(p->ticker()->bg_color, 0x30C01020U);
+  EXPECT_EQ(p->ticker()->pixels_per_second, 200U);
+}
+
+TEST(SignagePlaylist, TickerOmittedByDefault) {
+  auto p = signage::Playlist::parse(kMinimal);
+  ASSERT_TRUE(p.has_value()) << p.error().message();
+  EXPECT_FALSE(p->ticker().has_value());
+}
+
+TEST(SignagePlaylist, TickerWithoutTextRejected) {
+  auto p = signage::Playlist::parse(R"([[slide]]
+kind = "color"
+color = "#ffffff"
+
+[ticker]
+font_size = 24)");
+  EXPECT_FALSE(p.has_value());
+}
+
+TEST(SignagePlaylist, TickerDefaultsApplied) {
+  auto p = signage::Playlist::parse(R"([[slide]]
+kind = "color"
+color = "#ffffff"
+
+[ticker]
+text = "headlines")");
+  ASSERT_TRUE(p.has_value()) << p.error().message();
+  ASSERT_TRUE(p->ticker().has_value());
+  EXPECT_EQ(p->ticker()->text, "headlines");
+  EXPECT_EQ(p->ticker()->font_size, 24U);
+  EXPECT_EQ(p->ticker()->fg_color, 0xFFFFFFFFU);
+  EXPECT_EQ(p->ticker()->bg_color, 0xC0000000U);
+  EXPECT_EQ(p->ticker()->pixels_per_second, 120U);
 }
 
 TEST(SignagePlaylist, RejectsEmpty) {

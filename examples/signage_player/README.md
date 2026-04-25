@@ -1,8 +1,16 @@
 # signage_player
 
-A minimal two-layer LayerScene demo driven by a TOML playlist. The
-background layer is a `GbmBufferSource`; the overlay is a
-`DumbBufferSource`. Slides cycle on a timer; ESC quits.
+A minimal three-layer LayerScene demo driven by a TOML playlist:
+
+- **Background** — `GbmBufferSource`, repainted on slide rotation.
+- **Overlay** — `DumbBufferSource`, painted once with static text.
+- **Ticker** — optional `DumbBufferSource`, repainted every frame with
+  a horizontally scrolling marquee.
+
+The three layers' update cadences (per-slide, once-ever, every-frame)
+are deliberately spread so the example exercises the dirty surface that
+`drm::scene::LayerScene`'s eventual property-minimization pass needs to
+reason about. ESC quits.
 
 This is the second consumer of `drm::scene::LayerScene` (the first
 being `thorvg_janitor`). Together they prove the scene's API survives
@@ -12,15 +20,15 @@ animation-driven pixel mutation there.
 ## Status
 
 Scaffold. The playlist parser handles the full schema below, but only
-`kind = "color"` slides actually render content today. PNG / Blend2D
-/ ThorVG slide renderers land in follow-up commits.
+`kind = "color"` slides actually render slide content today. PNG /
+Blend2D / ThorVG slide renderers land in follow-up commits.
 
-The `[overlay]` band's text is drawn with Blend2D when the build is
-configured with `-DDRM_CXX_BLEND2D=ON` (or `AUTO` and Blend2D is
-installed). Without Blend2D the band still fills with `bg_color` but
+The `[overlay]` and `[ticker]` text are drawn with Blend2D when the
+build is configured with `-DDRM_CXX_BLEND2D=ON` (or `AUTO` and Blend2D
+is installed). Without Blend2D the bands still fill with `bg_color` but
 no glyphs are drawn — the build degrades cleanly via an `__has_include`
 probe in `overlay_renderer.cpp`. A short list of common Linux font
-paths is tried in order; if none is present the band remains text-free.
+paths is tried in order; if none is present the bands remain text-free.
 
 ## Run
 
@@ -48,6 +56,13 @@ text = "Hello, signage"
 font_size = 32
 fg_color = "#ffffff"
 bg_color = "#80000000"
+
+[ticker]                # optional, scrolling marquee at the bottom
+text = "headlines  ·  more headlines  ·  "
+font_size = 24
+fg_color = "#ffffff"
+bg_color = "#000000c0"
+pixels_per_second = 120
 ```
 
 At least one slide is required.

@@ -136,6 +136,36 @@ drm::expected<OverlayDesc, std::error_code> parse_overlay(const toml::table& tbl
   return o;
 }
 
+drm::expected<TickerDesc, std::error_code> parse_ticker(const toml::table& tbl) {
+  TickerDesc t;
+  const auto text_lit = tbl["text"].value<std::string>();
+  if (!text_lit || text_lit->empty()) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  t.text = *text_lit;
+  if (auto fs = tbl["font_size"].value<std::int64_t>(); fs && *fs > 0) {
+    t.font_size = static_cast<std::uint32_t>(*fs);
+  }
+  if (auto fg = tbl["fg_color"].value<std::string>()) {
+    auto parsed = parse_color(*fg);
+    if (!parsed) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    t.fg_color = *parsed;
+  }
+  if (auto bg = tbl["bg_color"].value<std::string>()) {
+    auto parsed = parse_color(*bg);
+    if (!parsed) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    t.bg_color = *parsed;
+  }
+  if (auto pps = tbl["pixels_per_second"].value<std::int64_t>(); pps && *pps > 0) {
+    t.pixels_per_second = static_cast<std::uint32_t>(*pps);
+  }
+  return t;
+}
+
 }  // namespace
 
 drm::expected<Playlist, std::error_code> Playlist::parse(std::string_view toml_src) {
@@ -169,6 +199,14 @@ drm::expected<Playlist, std::error_code> Playlist::parse(std::string_view toml_s
       return drm::unexpected<std::error_code>(o.error());
     }
     p.overlay_ = std::move(*o);
+  }
+
+  if (const auto* ticker_tbl = root["ticker"].as_table(); ticker_tbl != nullptr) {
+    auto t = parse_ticker(*ticker_tbl);
+    if (!t) {
+      return drm::unexpected<std::error_code>(t.error());
+    }
+    p.ticker_ = std::move(*t);
   }
 
   return p;

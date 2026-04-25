@@ -8,7 +8,7 @@
 # was configured with -DDRM_CXX_BLEND2D=ON|AUTO; without Blend2D the
 # band fills with bg_color but no glyphs are drawn.
 #
-# Colour literals are CSS-style "#RRGGBB" or "#RRGGBBAA" (alpha last).
+# Color literals are CSS-style "#RRGGBB" or "#RRGGBBAA" (alpha last).
 
 [[slide]]
 kind = "color"
@@ -36,3 +36,13 @@ text = "drm-cxx signage demo"
 font_size = 32
 fg_color = "#ffffff"
 bg_color = "#00000080"
+
+# Optional scrolling marquee at the bottom of the screen. Repaints
+# every frame; the example uses this layer to exercise the
+# dirty-every-frame side of the per-layer update spread.
+[ticker]
+text = "BREAKING NEWS  ·  drm-cxx signage_player  ·  three-layer LayerScene demo  ·  "
+font_size = 28
+fg_color = "#ffffff"
+bg_color = "#000000c0"
+pixels_per_second = 140

@@ -34,4 +34,25 @@ struct OverlayPaint {
 /// unavailable, the text is empty, or no system font could be located.
 void paint_overlay(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexcept;
 
+/// Single-frame paint of a horizontally-scrolling marquee. The scroll
+/// position is supplied by the caller so this function stays stateless;
+/// each call repaints the whole buffer (background + repeated text
+/// copies). Designed to be called every frame — the dirty-every-frame
+/// workload is what makes this layer useful as a Phase 2.2 testbed.
+struct TickerPaint {
+  std::uint32_t width{};
+  std::uint32_t height{};
+  std::uint32_t stride_bytes{};
+  std::uint32_t fg_argb{0xFFFFFFFFU};
+  std::uint32_t bg_argb{0xC0000000U};
+  std::uint32_t font_size{24};
+  /// Monotonically advancing pixel offset (caller multiplies elapsed
+  /// seconds by pixels_per_second). The renderer modulos against the
+  /// per-pass text width internally so callers don't need to.
+  double scroll_offset_px{0.0};
+  std::string_view text;
+};
+
+void paint_ticker(drm::span<std::uint8_t> pixels, const TickerPaint& p) noexcept;
+
 }  // namespace signage
