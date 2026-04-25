@@ -13,8 +13,14 @@ animation-driven pixel mutation there.
 
 Scaffold. The playlist parser handles the full schema below, but only
 `kind = "color"` slides actually render content today. PNG / Blend2D
-/ ThorVG renderers and the overlay text painter land in follow-up
-commits.
+/ ThorVG slide renderers land in follow-up commits.
+
+The `[overlay]` band's text is drawn with Blend2D when the build is
+configured with `-DDRM_CXX_BLEND2D=ON` (or `AUTO` and Blend2D is
+installed). Without Blend2D the band still fills with `bg_color` but
+no glyphs are drawn — the build degrades cleanly via an `__has_include`
+probe in `overlay_renderer.cpp`. A short list of common Linux font
+paths is tried in order; if none is present the band remains text-free.
 
 ## Run
 

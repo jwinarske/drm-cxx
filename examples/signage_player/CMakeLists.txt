@@ -43,9 +43,17 @@ add_library(signage_playlist STATIC playlist.cpp)
 target_link_libraries(signage_playlist PUBLIC tomlplusplus::tomlplusplus drm-cxx::drm-cxx)
 target_include_directories(signage_playlist PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
-add_executable(signage_player main.cpp)
+add_executable(signage_player main.cpp overlay_renderer.cpp)
 target_link_libraries(signage_player PRIVATE
   drm-cxx::drm-cxx
   common_scene
   signage_playlist)
 target_include_directories(signage_player PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# Overlay text painter uses Blend2D when available; the .cpp's
+# __has_include probe degrades to a bg-only fill when it isn't. The
+# top-level CMakeLists.txt already runs the find_package(blend2d) probe
+# and sets DRM_CXX_HAS_BLEND2D; here we just gate the link.
+if(DRM_CXX_HAS_BLEND2D)
+  target_link_libraries(signage_player PRIVATE blend2d::blend2d)
+endif()

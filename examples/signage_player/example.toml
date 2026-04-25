@@ -2,9 +2,13 @@
 # duration_ms before the next one cycles in. The optional [overlay]
 # block paints a banner near the bottom third of the display.
 #
-# Today only kind="color" actually renders content — the png /
+# Today only kind="color" actually renders slide content — the png /
 # blend2d / thorvg backends are parsed, but their renderers land in
-# follow-up commits.
+# follow-up commits. Overlay text renders via Blend2D when the build
+# was configured with -DDRM_CXX_BLEND2D=ON|AUTO; without Blend2D the
+# band fills with bg_color but no glyphs are drawn.
+#
+# Colour literals are CSS-style "#RRGGBB" or "#RRGGBBAA" (alpha last).
 
 [[slide]]
 kind = "color"
@@ -31,4 +35,4 @@ kind = "text"
 text = "drm-cxx signage demo"
 font_size = 32
 fg_color = "#ffffff"
-bg_color = "#80000000"
+bg_color = "#00000080"

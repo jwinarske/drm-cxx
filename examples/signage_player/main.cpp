@@ -13,6 +13,7 @@
 #include "common/scene/gbm_buffer_source.hpp"
 #include "common/scene/layer_scene.hpp"
 #include "common/select_device.hpp"
+#include "signage_player/overlay_renderer.hpp"
 #include "signage_player/playlist.hpp"
 
 #include <drm-cxx/core/device.hpp>
@@ -226,11 +227,20 @@ int main(int argc, char** argv) {
   auto* bg = scene_built->bg;
   auto* overlay = scene_built->overlay;
 
-  // Paint the overlay once; it stays constant in this scaffold (real
-  // text rendering lands in the overlay-renderer commit).
-  const std::uint32_t overlay_bg =
-      playlist->overlay().has_value() ? playlist->overlay()->bg_color : 0x80000000U;
-  fill_argb(overlay->pixels(), overlay->stride(), overlay_w, overlay_h, overlay_bg);
+  // Overlay paint is constant in this scaffold — the playlist + scene
+  // wiring is what's being exercised, not per-frame text animation.
+  // Computed once here, repeated verbatim on libseat resume.
+  signage::OverlayPaint overlay_paint;
+  overlay_paint.width = overlay_w;
+  overlay_paint.height = overlay_h;
+  overlay_paint.stride_bytes = overlay->stride();
+  if (const auto& od = playlist->overlay(); od.has_value()) {
+    overlay_paint.fg_argb = od->fg_color;
+    overlay_paint.bg_argb = od->bg_color;
+    overlay_paint.font_size = od->font_size;
+    overlay_paint.text = od->text;
+  }
+  signage::paint_overlay(overlay->pixels(), overlay_paint);
 
   // Paint the first slide into the background before the initial commit.
   auto paint_slide = [&](std::size_t idx) {
@@ -347,7 +357,8 @@ int main(int argc, char** argv) {
           [&](std::uint32_t, std::uint64_t, std::uint64_t) { flip_pending = false; });
       // Re-paint both layers against the fresh mappings.
       paint_slide(slide_idx);
-      fill_argb(overlay->pixels(), overlay->stride(), overlay_w, overlay_h, overlay_bg);
+      overlay_paint.stride_bytes = overlay->stride();
+      signage::paint_overlay(overlay->pixels(), overlay_paint);
     }
 
     if (flip_pending || session_paused) {
