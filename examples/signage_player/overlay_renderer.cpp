@@ -3,6 +3,8 @@
 
 #include "overlay_renderer.hpp"
 
+#include <drm-cxx/detail/span.hpp>
+
 // Blend2D's umbrella header layout varies by distro: Fedora ships
 // /usr/include/blend2d/blend2d.h, some Debian packages ship the flat
 // /usr/include/blend2d.h. Mirror src/capture/snapshot.cpp's probe so
@@ -48,12 +50,30 @@ std::uint32_t premultiply(std::uint32_t straight) noexcept {
 
 void fill_premul(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, std::uint32_t width,
                  std::uint32_t height, std::uint32_t premul) noexcept {
+  // Caller has already validated width*4 <= stride_bytes and the span size
+  // (see the paint_* entry points). The cast assumes 4-byte alignment, which
+  // every dumb/GBM scanout buffer satisfies (page-aligned mmap origin).
   const std::uint32_t stride_px = stride_bytes / 4U;
   auto* px = reinterpret_cast<std::uint32_t*>(pixels.data());
   for (std::uint32_t y = 0; y < height; ++y) {
     auto* row = px + (static_cast<std::size_t>(y) * stride_px);
     std::fill_n(row, width, premul);
   }
+}
+
+// Common entry guard for paint_*: rejects degenerate dims, narrow strides,
+// and (most importantly) any span that cannot hold height * stride_bytes
+// of pixel data — guards against a misshapen caller writing OOB.
+[[nodiscard]] bool valid_target(drm::span<const std::uint8_t> pixels, std::uint32_t width,
+                                std::uint32_t height, std::uint32_t stride_bytes) noexcept {
+  if (width == 0U || height == 0U) {
+    return false;
+  }
+  if (stride_bytes < (width * 4U)) {
+    return false;
+  }
+  const std::size_t required = static_cast<std::size_t>(height) * stride_bytes;
+  return pixels.size() >= required;
 }
 
 #ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
@@ -66,7 +86,7 @@ void fill_premul(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, std
 // Arch / Alpine layouts and bail if none load. Bold tends to read better
 // on photographic backgrounds, so prefer Bold variants when available.
 BLResult load_default_font_face(BLFontFace& face) noexcept {
-  static constexpr std::array<const char*, 10> kCandidates = {
+  static constexpr std::array<const char*, 10> k_candidates = {
       "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
       "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
       "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
@@ -78,7 +98,7 @@ BLResult load_default_font_face(BLFontFace& face) noexcept {
       "/usr/share/fonts/noto/NotoSans-Bold.ttf",
       "/usr/share/fonts/TTF/Vera.ttf",
   };
-  for (const char* path : kCandidates) {
+  for (const char* path : k_candidates) {
     if (face.create_from_file(path) == BL_SUCCESS) {
       return BL_SUCCESS;
     }
@@ -260,7 +280,7 @@ void draw_ticker_blend2d(drm::span<std::uint8_t> pixels, const TickerPaint& p) n
 }  // namespace
 
 void paint_overlay(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexcept {
-  if (p.width == 0U || p.height == 0U || p.stride_bytes < (p.width * 4U)) {
+  if (!valid_target(pixels, p.width, p.height, p.stride_bytes)) {
     return;
   }
   fill_premul(pixels, p.stride_bytes, p.width, p.height, premultiply(p.bg_argb));
@@ -272,7 +292,7 @@ void paint_overlay(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexce
 }
 
 void paint_ticker(drm::span<std::uint8_t> pixels, const TickerPaint& p) noexcept {
-  if (p.width == 0U || p.height == 0U || p.stride_bytes < (p.width * 4U)) {
+  if (!valid_target(pixels, p.width, p.height, p.stride_bytes)) {
     return;
   }
   fill_premul(pixels, p.stride_bytes, p.width, p.height, premultiply(p.bg_argb));
@@ -283,7 +303,7 @@ void paint_ticker(drm::span<std::uint8_t> pixels, const TickerPaint& p) noexcept
 }
 
 void paint_clock(drm::span<std::uint8_t> pixels, const ClockPaint& p) noexcept {
-  if (p.width == 0U || p.height == 0U || p.stride_bytes < (p.width * 4U)) {
+  if (!valid_target(pixels, p.width, p.height, p.stride_bytes)) {
     return;
   }
   fill_premul(pixels, p.stride_bytes, p.width, p.height, premultiply(p.bg_argb));
@@ -295,7 +315,7 @@ void paint_clock(drm::span<std::uint8_t> pixels, const ClockPaint& p) noexcept {
 }
 
 void paint_logo(drm::span<std::uint8_t> pixels, const LogoPaint& p) noexcept {
-  if (p.width == 0U || p.height == 0U || p.stride_bytes < (p.width * 4U)) {
+  if (!valid_target(pixels, p.width, p.height, p.stride_bytes)) {
     return;
   }
   // Pre-fill so the layer is visible (and any letterbox margins are

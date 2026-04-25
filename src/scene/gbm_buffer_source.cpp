@@ -3,12 +3,13 @@
 
 #include "gbm_buffer_source.hpp"
 
+#include "buffer_source.hpp"
+
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/gbm/buffer.hpp>
 #include <drm-cxx/gbm/device.hpp>
 
-#include <drm_fourcc.h>
 #include <gbm.h>
 
 #include <cstdint>

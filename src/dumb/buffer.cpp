@@ -5,6 +5,8 @@
 
 #include "../core/device.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <drm.h>
 #include <drm_mode.h>
 #include <xf86drmMode.h>
@@ -16,6 +18,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <system_error>
 
 namespace drm::dumb {
 

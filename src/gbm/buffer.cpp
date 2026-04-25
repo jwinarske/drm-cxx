@@ -8,6 +8,7 @@
 #include <drm-cxx/detail/expected.hpp>
 
 #include <drm_fourcc.h>
+#include <drm_mode.h>
 #include <gbm.h>
 #include <xf86drmMode.h>
 

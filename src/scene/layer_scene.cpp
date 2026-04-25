@@ -4,7 +4,10 @@
 #include "layer_scene.hpp"
 
 #include "buffer_source.hpp"
+#include "commit_report.hpp"
 #include "layer.hpp"
+#include "layer_desc.hpp"
+#include "layer_handle.hpp"
 
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/property_store.hpp>
@@ -22,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -235,9 +239,14 @@ class LayerScene::Impl {
       }
     }
     for (const auto& acq : acquisitions) {
+      // acquire_all only pushes slots whose scene_layer + planes_layer
+      // are both non-null (the slot.alive guard plus add_layer always
+      // wires planes_layer before alive flips true), so the dereferences
+      // below are safe even though the analyzer can't prove it.
       const std::optional<std::uint64_t> per_layer_hint =
           (acq.scene_layer == hint_target) ? primary_zpos_hint_ : std::nullopt;
-      lower_layer(*acq.scene_layer, *acq.planes_layer, acq.buffer.fb_id, crtc_id_, per_layer_hint);
+      lower_layer(*acq.scene_layer,  // NOLINT(clang-analyzer-core.NonNullParamChecker)
+                  *acq.planes_layer, acq.buffer.fb_id, crtc_id_, per_layer_hint);
     }
 
     // Build the frame's AtomicRequest.
@@ -267,8 +276,11 @@ class LayerScene::Impl {
     // Let the allocator pick planes. apply() writes the winning layer-
     // to-plane assignments into `req`. It returns how many layers were
     // placed on hardware; anything else is unassigned (Phase 2.1 drops
-    // with a log_warn; Phase 2.3 will composite).
-    auto assigned = allocator_->apply(output_, req, effective_flags);
+    // with a log_warn; Phase 2.3 will composite). allocator_ is
+    // engaged in the ctor and re-engaged across on_session_resumed —
+    // never empty by the time do_commit runs.
+    auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        allocator_->apply(output_, req, effective_flags);
     if (!assigned) {
       release_all(acquisitions);
       return drm::unexpected<std::error_code>(assigned.error());
@@ -326,7 +338,9 @@ class LayerScene::Impl {
   // preparer closure needs `this`, and passing it through the Impl
   // constructor would leak implementation types into the header.
   void install_test_preparer() {
-    allocator_->set_test_preparer(
+    // allocator_ is engaged in the ctor (and re-engaged in
+    // on_session_resumed) before any caller can reach this method.
+    allocator_->set_test_preparer(  // NOLINT(bugprone-unchecked-optional-access)
         [this](drm::AtomicRequest& req,
                std::uint32_t flags) -> drm::expected<void, std::error_code> {
           if ((flags & DRM_MODE_ATOMIC_ALLOW_MODESET) == 0) {

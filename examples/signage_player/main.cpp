@@ -20,6 +20,7 @@
 
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/resources.hpp>
+#include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/input/seat.hpp>
@@ -29,14 +30,18 @@
 #include <drm-cxx/planes/plane_registry.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/gbm_buffer_source.hpp>
+#include <drm-cxx/scene/layer_desc.hpp>
+#include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 #include <drm-cxx/session/seat.hpp>
 
 #include <drm_fourcc.h>
+#include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -45,16 +50,26 @@
 #include <linux/input-event-codes.h>
 #include <memory>
 #include <optional>
-#include <poll.h>
 #include <string>
+#include <sys/poll.h>
 #include <system_error>
 #include <utility>
+#include <variant>
 
 namespace {
 
-// 32-bpp ARGB fill. `color` is packed 0xAARRGGBB.
+// 32-bpp ARGB fill. `color` is packed 0xAARRGGBB. Validates the span
+// before writing so a misshapen mapping (e.g. a stride/height that no
+// longer matches what was allocated, or a span shortened by a future
+// resume bug) can't punch past the buffer end.
 void fill_argb(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, std::uint32_t width,
                std::uint32_t height, std::uint32_t color) noexcept {
+  if (width == 0U || height == 0U || stride_bytes < (width * 4U)) {
+    return;
+  }
+  if (pixels.size() < static_cast<std::size_t>(height) * stride_bytes) {
+    return;
+  }
   const std::uint32_t stride_px = stride_bytes / 4U;
   auto* px = reinterpret_cast<std::uint32_t*>(pixels.data());
   for (std::uint32_t y = 0; y < height; ++y) {

@@ -6,17 +6,32 @@
 #include <drm-cxx/detail/expected.hpp>
 
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <ios>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <toml++/toml.hpp>
+#include <utility>
 #include <vector>
 
+// toml++ ships every public symbol behind the umbrella <toml++/toml.hpp>;
+// the per-class headers live under impl/ and aren't part of the supported
+// API surface. Tell misc-include-cleaner to accept the umbrella as the
+// provider for toml::table / toml::parse / toml::parse_error.
+#include <toml++/toml.hpp>  // IWYU pragma: keep
+                            // NOLINT(misc-include-cleaner)
+
 namespace signage {
+
+// toml::table / toml::parse / toml::parse_error all live behind the
+// umbrella header above. misc-include-cleaner can't see the umbrella as
+// the provider, so suppress the "no header providing" check across the
+// parse helpers.
+// NOLINTBEGIN(misc-include-cleaner)
 
 namespace {
 
@@ -280,13 +295,34 @@ drm::expected<Playlist, std::error_code> Playlist::parse(std::string_view toml_s
 }
 
 drm::expected<Playlist, std::error_code> Playlist::load(const std::string& toml_path) {
-  std::ifstream const f(toml_path);
+  // Cap the file size so a malformed or hostile playlist can't OOM us
+  // before toml++ ever sees it. 16 MiB is generous for a config file
+  // — a real playlist is kilobytes — but small enough that the worst
+  // case is a single short allocation, not unbounded growth.
+  constexpr std::uintmax_t k_max_size = std::uintmax_t{16} * 1024 * 1024;
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(toml_path, ec);
+  if (ec) {
+    return drm::unexpected<std::error_code>(ec);
+  }
+  if (size > k_max_size) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::file_too_large));
+  }
+  std::ifstream f(toml_path);
   if (!f) {
     return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
-  std::ostringstream buf;
-  buf << f.rdbuf();
-  return parse(buf.str());
+  std::string contents;
+  contents.resize(static_cast<std::size_t>(size));
+  if (size != 0U && !f.read(contents.data(), static_cast<std::streamsize>(size))) {
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
+  }
+  // Trim down to actually-read bytes (file may have shrunk between
+  // file_size and read; trailing zeros would otherwise confuse the parser).
+  contents.resize(static_cast<std::size_t>(f.gcount()));
+  return parse(contents);
 }
+
+// NOLINTEND(misc-include-cleaner)
 
 }  // namespace signage

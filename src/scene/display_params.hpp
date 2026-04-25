@@ -42,7 +42,7 @@ struct DisplayParams {
   Rect dst_rect{};
   std::uint64_t rotation{0};    // DRM_MODE_ROTATE_* | DRM_MODE_REFLECT_*
   std::uint16_t alpha{0xFFFF};  // 0xFFFF = fully opaque
-  std::optional<int> zpos{};
+  std::optional<int> zpos;
 
   [[nodiscard]] constexpr bool needs_scaling() const noexcept {
     return src_rect.w != dst_rect.w || src_rect.h != dst_rect.h;
