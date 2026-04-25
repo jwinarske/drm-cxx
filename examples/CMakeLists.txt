@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 
-# Shared example infrastructure (scene skeleton, device-selection helpers).
-# Must come before any example that links common_scene.
-add_subdirectory(common)
-
 foreach(_ex atomic_modeset hotplug_monitor overlay_planes)
   add_executable(${_ex} ${_ex}/main.cpp)
   target_link_libraries(${_ex} PRIVATE drm-cxx::drm-cxx)

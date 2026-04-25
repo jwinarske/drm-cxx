@@ -139,18 +139,18 @@ if has_blend2d
   )
 endif
 
-# drm::scene tests link against common_scene_dep defined in
-# examples/common/meson.build, so they only exist when examples are on.
-if get_option('examples')
-  test('test_scene',
-    executable('test_scene',
-      'unit/test_scene.cpp',
-      dependencies : [test_deps, common_scene_dep],
-    ),
-  )
+# drm::scene unit tests — scene lives in the library now (src/scene/),
+# so test_scene just depends on test_deps like every other unit test.
+test('test_scene',
+  executable('test_scene',
+    'unit/test_scene.cpp',
+    dependencies : test_deps,
+  ),
+)
 
-  # signage_player playlist parser. signage_playlist_dep links toml++
-  # and the parser headers; this test pulls them in transitively.
+# signage_player playlist parser. signage_playlist_dep still lives under
+# examples/, so the playlist test only exists when examples are on.
+if get_option('examples')
   test('test_playlist',
     executable('test_playlist',
       'unit/test_playlist.cpp',

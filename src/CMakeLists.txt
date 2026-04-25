@@ -27,6 +27,9 @@ set(DRM_CXX_SOURCES
   gbm/surface.cpp
   gbm/buffer.cpp
   dumb/buffer.cpp
+  scene/dumb_buffer_source.cpp
+  scene/gbm_buffer_source.cpp
+  scene/layer_scene.cpp
   sync/fence.cpp)
 
 if(DRM_CXX_VULKAN)
@@ -254,6 +257,19 @@ install(FILES sync/fence.hpp
 
 install(FILES dumb/buffer.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/dumb)
+
+install(FILES
+    scene/buffer_source.hpp
+    scene/commit_report.hpp
+    scene/composite_canvas.hpp
+    scene/display_params.hpp
+    scene/dumb_buffer_source.hpp
+    scene/gbm_buffer_source.hpp
+    scene/layer.hpp
+    scene/layer_desc.hpp
+    scene/layer_handle.hpp
+    scene/layer_scene.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
 
 if(DRM_CXX_VULKAN)
   install(FILES

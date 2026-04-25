@@ -64,20 +64,18 @@ if(DRM_CXX_HAS_BLEND2D)
   gtest_discover_tests(test_capture_vkms)
 endif()
 
-# drm::scene tests need to link against the examples/common/common_scene
-# static library, so they're only built when examples are also built.
-if(DRM_CXX_BUILD_EXAMPLES)
-  add_executable(test_scene unit/test_scene.cpp)
-  target_link_libraries(test_scene PRIVATE
-    drm-cxx::drm-cxx
-    common_scene
-    GTest::gtest
-    GTest::gtest_main)
-  gtest_discover_tests(test_scene)
+# drm::scene unit tests — scene lives in the library now (src/scene/),
+# so the test binary just links drm-cxx::drm-cxx like every other unit test.
+add_executable(test_scene unit/test_scene.cpp)
+target_link_libraries(test_scene PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_scene)
 
-  # signage_player playlist parser. signage_playlist links toml++, so
-  # this test pulls toml++ in transitively without needing its own
-  # FetchContent block.
+# signage_player playlist parser. signage_playlist still lives under
+# examples/, so the playlist test only builds when examples do.
+if(DRM_CXX_BUILD_EXAMPLES)
   add_executable(test_playlist unit/test_playlist.cpp)
   target_link_libraries(test_playlist PRIVATE
     signage_playlist

@@ -55,20 +55,20 @@
 #include <thorvg.h>
 
 // drm-cxx
-#include "../common/scene/buffer_source.hpp"
-#include "../common/scene/layer_desc.hpp"
-#include "../common/scene/layer_scene.hpp"
 #include "../common/select_device.hpp"
-#include "core/device.hpp"
-#include "core/resources.hpp"
-#include "dumb/buffer.hpp"
-#include "input/seat.hpp"
-#include "modeset/mode.hpp"
-#include "modeset/page_flip.hpp"
-#include "session/seat.hpp"
 
+#include <drm-cxx/core/device.hpp>
+#include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/dumb/buffer.hpp>
+#include <drm-cxx/input/seat.hpp>
+#include <drm-cxx/modeset/mode.hpp>
+#include <drm-cxx/modeset/page_flip.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>
+#include <drm-cxx/scene/layer_desc.hpp>
+#include <drm-cxx/scene/layer_scene.hpp>
+#include <drm-cxx/session/seat.hpp>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -208,8 +208,8 @@ namespace detail {
 // buffered (no multi-buffer ring in v1), and the Janitor's vsync-aligned
 // page-flipping pattern needs a back+front rotation. Rather than extend
 // the library-level source speculatively, we keep the ring here; if
-// signage_player (Phase 2.6) or a later scene example wants the same
-// pattern, promote this to examples/common/scene/.
+// signage_player or a later scene example wants the same pattern,
+// promote this into the library at src/scene/.
 //
 // The "current" index is set by the game before each scene.commit()
 // call; acquire() reports the current buffer's fb_id. release() is a

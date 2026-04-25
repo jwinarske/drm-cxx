@@ -20,7 +20,7 @@ signage_playlist_dep = declare_dependency(
   include_directories : include_directories('..'),
 )
 
-signage_player_deps = [drm_cxx_dep, common_scene_dep, signage_playlist_dep]
+signage_player_deps = [drm_cxx_dep, signage_playlist_dep]
 # Overlay text painter uses Blend2D when available; the .cpp's
 # __has_include probe degrades to a bg-only fill when it isn't. The
 # top-level meson.build already runs the blend2d probe; here we just

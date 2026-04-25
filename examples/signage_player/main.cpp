@@ -9,9 +9,6 @@
 // today's job is to prove the playlist + two-layer scene + libseat
 // resume pipeline works end-to-end.
 
-#include "common/scene/dumb_buffer_source.hpp"
-#include "common/scene/gbm_buffer_source.hpp"
-#include "common/scene/layer_scene.hpp"
 #include "common/select_device.hpp"
 #include "signage_player/overlay_renderer.hpp"
 #include "signage_player/playlist.hpp"
@@ -24,6 +21,9 @@
 #include <drm-cxx/modeset/mode.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
+#include <drm-cxx/scene/dumb_buffer_source.hpp>
+#include <drm-cxx/scene/gbm_buffer_source.hpp>
+#include <drm-cxx/scene/layer_scene.hpp>
 #include <drm-cxx/session/seat.hpp>
 
 #include <drm_fourcc.h>

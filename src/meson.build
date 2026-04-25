@@ -26,6 +26,9 @@ drm_cxx_sources = files(
   'gbm/surface.cpp',
   'gbm/buffer.cpp',
   'dumb/buffer.cpp',
+  'scene/dumb_buffer_source.cpp',
+  'scene/gbm_buffer_source.cpp',
+  'scene/layer_scene.cpp',
   'sync/fence.cpp',
 )
 
@@ -212,6 +215,20 @@ install_headers(
 install_headers(
   'dumb/buffer.hpp',
   subdir : 'drm-cxx/dumb',
+)
+
+install_headers(
+  'scene/buffer_source.hpp',
+  'scene/commit_report.hpp',
+  'scene/composite_canvas.hpp',
+  'scene/display_params.hpp',
+  'scene/dumb_buffer_source.hpp',
+  'scene/gbm_buffer_source.hpp',
+  'scene/layer.hpp',
+  'scene/layer_desc.hpp',
+  'scene/layer_handle.hpp',
+  'scene/layer_scene.hpp',
+  subdir : 'drm-cxx/scene',
 )
 
 if get_option('vulkan')

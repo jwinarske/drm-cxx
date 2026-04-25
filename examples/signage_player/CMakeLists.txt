@@ -46,7 +46,6 @@ target_include_directories(signage_playlist PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/.
 add_executable(signage_player main.cpp overlay_renderer.cpp)
 target_link_libraries(signage_player PRIVATE
   drm-cxx::drm-cxx
-  common_scene
   signage_playlist)
 target_include_directories(signage_player PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 

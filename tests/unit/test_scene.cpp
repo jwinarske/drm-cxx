@@ -16,15 +16,16 @@
 // drm::AtomicRequest into virtual interfaces to support in-process
 // mocks would be a much larger change than this milestone warrants.
 
-#include "common/scene/buffer_source.hpp"
-#include "common/scene/commit_report.hpp"
-#include "common/scene/composite_canvas.hpp"
-#include "common/scene/display_params.hpp"
-#include "common/scene/dumb_buffer_source.hpp"
-#include "common/scene/gbm_buffer_source.hpp"
-#include "common/scene/layer_handle.hpp"
-#include "common/scene/layer_scene.hpp"
 #include "core/device.hpp"
+
+#include <drm-cxx/scene/buffer_source.hpp>
+#include <drm-cxx/scene/commit_report.hpp>
+#include <drm-cxx/scene/composite_canvas.hpp>
+#include <drm-cxx/scene/display_params.hpp>
+#include <drm-cxx/scene/dumb_buffer_source.hpp>
+#include <drm-cxx/scene/gbm_buffer_source.hpp>
+#include <drm-cxx/scene/layer_handle.hpp>
+#include <drm-cxx/scene/layer_scene.hpp>
 
 #include <cstring>
 #include <fcntl.h>
