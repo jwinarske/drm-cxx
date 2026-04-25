@@ -157,4 +157,13 @@ if get_option('examples')
       dependencies : [gtest_dep, gtest_main_dep, signage_playlist_dep],
     ),
   )
+
+  # test_patterns painters live under examples/, same arrangement as
+  # the playlist parser above.
+  test('test_test_patterns',
+    executable('test_test_patterns',
+      'unit/test_test_patterns.cpp',
+      dependencies : [gtest_dep, gtest_main_dep, test_patterns_dep],
+    ),
+  )
 endif
