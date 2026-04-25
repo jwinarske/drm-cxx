@@ -41,7 +41,7 @@
 //     via libseat when available, which gives the same access without
 //     root.
 
-#include "../select_device.hpp"
+#include "../common/select_device.hpp"
 #include "capture/png.hpp"
 #include "capture/snapshot.hpp"
 #include "core/device.hpp"

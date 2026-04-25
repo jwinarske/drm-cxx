@@ -8,7 +8,7 @@
 // Opens a DRM device, finds a connected connector, selects the preferred
 // mode, and performs an atomic modeset. Then waits for a page flip event.
 
-#include "../select_device.hpp"
+#include "../common/select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "drm-cxx/detail/format.hpp"

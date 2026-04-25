@@ -53,6 +53,8 @@ if get_option('vulkan')
   )
 endif
 
+subdir('signage_player')
+
 # ThorVG Janitor example — scaffold only (see examples/thorvg_janitor/README.md).
 # Upstream ThorVG is auto-detected; set -Dthorvg_janitor=disabled to skip the
 # probe entirely, or -Dthorvg_janitor=enabled to hard-require ThorVG.

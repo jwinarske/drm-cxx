@@ -369,7 +369,17 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // frame. Without this, a plane the allocator stopped using keeps
   // scanning out its last FB and continues to contend for zpos with
   // whatever the allocator did pick — blank screen or EINVAL next frame.
-  disable_unused_planes(req, crtc_index, planes_in_use);
+  //
+  // Skipped on the very first commit: there's no previous frame to
+  // inherit from, and an ALLOW_MODESET commit that also disables
+  // currently-idle overlays appears to race the PAGE_FLIP_EVENT queue
+  // on amdgpu (kernel delivers the commit but no event arrives,
+  // wedging the caller's flip_pending). 5bcc2b9a's hand-rolled path
+  // never touched idle overlays on the first commit and didn't see
+  // this; match that shape here.
+  if (previous_allocation_valid_) {
+    disable_unused_planes(req, crtc_index, planes_in_use);
+  }
 
   // Save for warm-start next frame
   previous_allocation_ = best_assignment;
@@ -730,13 +740,24 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer
                                                                      const uint32_t plane_id,
                                                                      AtomicRequest& req) const {
   for (const auto& [name, value] : layer.properties()) {
-    if (auto prop_id = prop_store_.property_id(plane_id, name); prop_id.has_value()) {
-      if (auto result = req.add_property(plane_id, *prop_id, value); !result.has_value()) {
-        return result;
-      }
+    auto prop_id = prop_store_.property_id(plane_id, name);
+    if (!prop_id.has_value()) {
+      // Property not advertised on this plane — not all layers set
+      // properties that exist on every plane. Skip silently.
+      continue;
     }
-    // If property not found in store, skip silently — not all layers
-    // set properties that exist on all planes.
+    // Immutable properties (e.g. amdgpu pins PRIMARY zpos at 2) are
+    // rejected by the atomic uapi with EINVAL regardless of value —
+    // see drm_atomic_set_property in drm_atomic_uapi.c. Scene lowering
+    // may still populate them as scoring hints (score_pair reads the
+    // same property map), so filter them out of the atomic write path
+    // rather than stripping them upstream and losing the hint.
+    if (prop_store_.is_immutable(plane_id, name).value_or(false)) {
+      continue;
+    }
+    if (auto result = req.add_property(plane_id, *prop_id, value); !result.has_value()) {
+      return result;
+    }
   }
   return {};
 }

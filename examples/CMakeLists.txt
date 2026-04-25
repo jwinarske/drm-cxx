@@ -42,6 +42,8 @@ set(DRM_CXX_BUILD_THORVG_JANITOR "AUTO" CACHE STRING
     "Build the ThorVG Janitor example: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_BUILD_THORVG_JANITOR PROPERTY STRINGS AUTO ON OFF)
 
+add_subdirectory(signage_player)
+
 if(NOT DRM_CXX_BUILD_THORVG_JANITOR STREQUAL "OFF")
   if(DRM_CXX_BUILD_THORVG_JANITOR STREQUAL "ON")
     pkg_check_modules(thorvg REQUIRED IMPORTED_TARGET thorvg-1>=1.0.4)

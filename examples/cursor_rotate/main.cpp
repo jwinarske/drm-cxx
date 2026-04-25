@@ -35,7 +35,7 @@
 //      older GPUs and embedded stacks) it's false — the rotation
 //      cycle still works, and blit_frame does the work on the CPU.
 
-#include "../select_device.hpp"
+#include "../common/select_device.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "cursor/cursor.hpp"

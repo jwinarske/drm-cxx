@@ -97,6 +97,13 @@ test('test_gbm',
   ),
 )
 
+test('test_dumb_buffer',
+  executable('test_dumb_buffer',
+    'unit/test_dumb_buffer.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 if has_xcursor
   test('test_cursor_theme',
     executable('test_cursor_theme',
@@ -128,6 +135,26 @@ if has_blend2d
     executable('test_capture_vkms',
       'integration/test_capture_vkms.cpp',
       dependencies : test_deps,
+    ),
+  )
+endif
+
+# drm::scene unit tests — scene lives in the library now (src/scene/),
+# so test_scene just depends on test_deps like every other unit test.
+test('test_scene',
+  executable('test_scene',
+    'unit/test_scene.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# signage_player playlist parser. signage_playlist_dep still lives under
+# examples/, so the playlist test only exists when examples are on.
+if get_option('examples')
+  test('test_playlist',
+    executable('test_playlist',
+      'unit/test_playlist.cpp',
+      dependencies : [gtest_dep, gtest_main_dep, signage_playlist_dep],
     ),
   )
 endif

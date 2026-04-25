@@ -1,0 +1,71 @@
+# Sample signage_player playlist. Each [[slide]] entry runs for
+# duration_ms before the next one cycles in. The optional [overlay]
+# block paints a banner near the bottom third of the display.
+#
+# Today only kind="color" actually renders slide content — the png /
+# blend2d / thorvg backends are parsed, but their renderers land in
+# follow-up commits. Overlay text renders via Blend2D when the build
+# was configured with -DDRM_CXX_BLEND2D=ON|AUTO; without Blend2D the
+# band fills with bg_color but no glyphs are drawn.
+#
+# Color literals are CSS-style "#RRGGBB" or "#RRGGBBAA" (alpha last).
+
+[[slide]]
+kind = "color"
+color = "#ff5722"
+duration_ms = 2000
+
+[[slide]]
+kind = "color"
+color = "#2196f3"
+duration_ms = 2000
+
+[[slide]]
+kind = "color"
+color = "#4caf50"
+duration_ms = 2000
+
+[[slide]]
+kind = "color"
+color = "#9c27b0"
+duration_ms = 2000
+
+[overlay]
+kind = "text"
+text = "drm-cxx signage demo"
+font_size = 32
+fg_color = "#ffffff"
+bg_color = "#00000080"
+
+# Optional scrolling marquee at the bottom of the screen. Repaints
+# every frame; the example uses this layer to exercise the
+# dirty-every-frame side of the per-layer update spread.
+[ticker]
+text = "BREAKING NEWS  ·  drm-cxx signage_player  ·  four-layer LayerScene demo  ·  "
+font_size = 28
+fg_color = "#ffffff"
+bg_color = "#000000c0"
+pixels_per_second = 140
+
+# Optional clock badge in the top-right corner. The renderer is invoked
+# only when the formatted string changes, so the default "%H:%M" gives
+# the dirty-once-per-minute datapoint that complements the ticker's
+# every-frame and the overlay's once-ever cadences.
+[clock]
+format = "%H:%M"
+font_size = 56
+fg_color = "#ffffff"
+bg_color = "#80000000"
+
+# Optional brand bug in the top-left corner. Painted once at scene
+# construction (and once again on session resume), so this layer is the
+# never-after-load datapoint that complements the four cadences above.
+# `path` is resolved relative to the current working directory; absolute
+# paths are typical for production use. `fallback_color` is painted
+# under the PNG, so the layer stays visible if the build wasn't
+# configured with -DDRM_CXX_BLEND2D=ON|AUTO or the file fails to load.
+[logo]
+path = "docs/logo.png"
+width = 192
+height = 96
+fallback_color = "#ffffff20"

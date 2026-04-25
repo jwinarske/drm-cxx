@@ -121,10 +121,16 @@ struct Seat::Impl {
   std::unordered_map<std::string, TrackedDevice> devices;  // key = path
   PauseCallback pause_cb;
   ResumeCallback resume_cb;
-  // True once we've seen the initial enable_seat event (libseat fires
-  // one right after open_seat when the seat is already active). Until
-  // that fires, take_device would race against the backend's handshake.
+  // True between enable_seat and disable_seat. Gates take_device so it
+  // can't race the backend's handshake, and is toggled by every
+  // enable/disable pair.
   bool active{false};
+  // Sticky once the initial enable_seat has fired. Distinguishes the
+  // first enable (open_seat handshake — nothing to reopen) from a
+  // later enable that follows a disable (VT resume — fd revoked,
+  // reopen + fire resume_cb). Without this, every resume looks like
+  // the initial enable because `active` was just cleared by disable.
+  bool ever_enabled{false};
 };
 
 Seat::Seat(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -156,7 +162,8 @@ void Seat::on_enable_trampoline(libseat* seat, void* userdata) {
   // the flag. Subsequent enables are genuine resumes — for every
   // device we had, close the (possibly revoked) id and re-open the
   // path to get a fresh fd, then notify the caller.
-  const bool first = !impl->active;
+  const bool first = !impl->ever_enabled;
+  impl->ever_enabled = true;
   impl->active = true;
   if (first) {
     return;

@@ -29,7 +29,8 @@ set(DRM_CXX_TESTS
   test_input
   test_mode
   test_display
-  test_gbm)
+  test_gbm
+  test_dumb_buffer)
 
 if(DRM_CXX_HAS_XCURSOR)
   list(APPEND DRM_CXX_TESTS
@@ -61,4 +62,24 @@ if(DRM_CXX_HAS_BLEND2D)
     GTest::gtest
     GTest::gtest_main)
   gtest_discover_tests(test_capture_vkms)
+endif()
+
+# drm::scene unit tests — scene lives in the library now (src/scene/),
+# so the test binary just links drm-cxx::drm-cxx like every other unit test.
+add_executable(test_scene unit/test_scene.cpp)
+target_link_libraries(test_scene PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_scene)
+
+# signage_player playlist parser. signage_playlist still lives under
+# examples/, so the playlist test only builds when examples do.
+if(DRM_CXX_BUILD_EXAMPLES)
+  add_executable(test_playlist unit/test_playlist.cpp)
+  target_link_libraries(test_playlist PRIVATE
+    signage_playlist
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_playlist)
 endif()
