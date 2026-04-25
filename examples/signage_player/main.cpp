@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 //
-// signage_player — a four-layer LayerScene demo driven by a TOML
+// signage_player — a five-layer LayerScene demo driven by a TOML
 // playlist. Background slides cycle on a timer (GbmBufferSource), a
 // static text overlay sits in the lower third (DumbBufferSource), an
 // optional scrolling ticker repaints every frame on a third
-// DumbBufferSource, and an optional clock badge in the top-right
-// corner repaints only when the formatted time string changes (once
-// per minute with the default "%H:%M"). The four layers' update
-// cadences (per-slide, once-ever, every-frame, once-per-minute) are
-// deliberately spread so the example exercises the per-layer dirty
-// surface that Phase 2.2 will eventually minimize property/FB writes
-// against.
+// DumbBufferSource, an optional clock badge in the top-right corner
+// repaints only when the formatted time string changes (once per
+// minute with the default "%H:%M"), and an optional logo bug in the
+// top-left corner is painted once from a PNG. The five layers' update
+// cadences (per-slide, once-ever, every-frame, once-per-minute,
+// never-after-load) are deliberately spread so the example exercises
+// the per-layer dirty surface that Phase 2.2 will eventually minimize
+// property/FB writes against.
 
 #include "common/select_device.hpp"
 #include "signage_player/overlay_renderer.hpp"
@@ -107,10 +108,12 @@ struct Scene {
   drm::scene::DumbBufferSource* overlay{nullptr};
   drm::scene::DumbBufferSource* ticker{nullptr};
   drm::scene::DumbBufferSource* clock{nullptr};
+  drm::scene::DumbBufferSource* logo{nullptr};
   drm::scene::LayerHandle bg_handle;
   drm::scene::LayerHandle overlay_handle;
   drm::scene::LayerHandle ticker_handle;
   drm::scene::LayerHandle clock_handle;
+  drm::scene::LayerHandle logo_handle;
 };
 
 struct SceneDims {
@@ -122,8 +125,11 @@ struct SceneDims {
   std::uint32_t ticker_h;
   std::uint32_t clock_w;
   std::uint32_t clock_h;
+  std::uint32_t logo_w;
+  std::uint32_t logo_h;
   bool with_ticker;
   bool with_clock;
+  bool with_logo;
 };
 
 drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_t crtc_id,
@@ -168,6 +174,16 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
     clock_src_owner = std::move(*clock_src);
   }
 
+  std::unique_ptr<drm::scene::DumbBufferSource> logo_src_owner;
+  if (dims.with_logo) {
+    auto logo_src =
+        drm::scene::DumbBufferSource::create(dev, dims.logo_w, dims.logo_h, DRM_FORMAT_ARGB8888);
+    if (!logo_src) {
+      return drm::unexpected<std::error_code>(logo_src.error());
+    }
+    logo_src_owner = std::move(*logo_src);
+  }
+
   drm::scene::LayerScene::Config cfg;
   cfg.crtc_id = crtc_id;
   cfg.connector_id = connector_id;
@@ -183,6 +199,7 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
   out.overlay = overlay_src->get();
   out.ticker = ticker_src_owner.get();
   out.clock = clock_src_owner.get();
+  out.logo = logo_src_owner.get();
 
   drm::scene::LayerDesc bg_desc;
   bg_desc.source = std::move(*bg_src);
@@ -232,14 +249,15 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
   }
 
   if (dims.with_clock) {
-    // Clock badge sits in the top-right corner with a small margin. zpos
-    // is the highest layer (overlay=4, ticker=3, bg=2) so the timestamp
-    // is never occluded by other UI.
-    constexpr std::uint32_t kClockMargin = 16U;
-    const std::int32_t cx = (fb_w > clock_w + kClockMargin)
-                                ? static_cast<std::int32_t>(fb_w - clock_w - kClockMargin)
+    // The clock badge sits in the top-right corner with a small margin. zpos
+    // is above ticker/overlay (overlay=4, ticker=3, bg=2), so the
+    // timestamp is never occluded by another UI; the logo bug below sits
+    // one rung higher still.
+    constexpr std::uint32_t k_clock_margin = 16U;
+    const std::int32_t cx = (fb_w > clock_w + k_clock_margin)
+                                ? static_cast<std::int32_t>(fb_w - clock_w - k_clock_margin)
                                 : 0;
-    const std::int32_t cy = static_cast<std::int32_t>(kClockMargin);
+    constexpr auto cy = static_cast<std::int32_t>(k_clock_margin);
     drm::scene::LayerDesc ck_desc;
     ck_desc.source = std::move(clock_src_owner);
     ck_desc.display.src_rect = drm::scene::Rect{0, 0, clock_w, clock_h};
@@ -253,13 +271,33 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
     out.clock_handle = *ck_h;
   }
 
+  if (dims.with_logo) {
+    // Logo bug in the top-left corner with the same margin as the
+    // clock. zpos sits above every other UI layer (overlay=4,
+    // ticker=3, clock=5), so brand chrome is never occluded.
+    constexpr std::uint32_t k_logo_margin = 16U;
+    constexpr auto lx = static_cast<std::int32_t>(k_logo_margin);
+    constexpr auto ly = static_cast<std::int32_t>(k_logo_margin);
+    drm::scene::LayerDesc lg_desc;
+    lg_desc.source = std::move(logo_src_owner);
+    lg_desc.display.src_rect = drm::scene::Rect{0, 0, dims.logo_w, dims.logo_h};
+    lg_desc.display.dst_rect = drm::scene::Rect{lx, ly, dims.logo_w, dims.logo_h};
+    lg_desc.display.zpos = 6;
+    lg_desc.content_type = drm::planes::ContentType::UI;
+    auto lg_h = out.scene->add_layer(std::move(lg_desc));
+    if (!lg_h) {
+      return drm::unexpected<std::error_code>(lg_h.error());
+    }
+    out.logo_handle = *lg_h;
+  }
+
   return out;
 }
 
 // strftime against the wall-clock now. Returns empty on overflow / bad
 // format. 64 chars is comfortable for any sane time string; if a user
-// supplies a format that exceeds it we'd rather render nothing than
-// truncate silently mid-string.
+// supplies a format that exceeds it, we'd rather render nothing than
+// truncate silent mid-string.
 std::string format_now(const std::string& fmt) noexcept {
   std::array<char, 64> buf{};
   const auto t = std::time(nullptr);
@@ -271,7 +309,7 @@ std::string format_now(const std::string& fmt) noexcept {
   if (n == 0U) {
     return {};
   }
-  return std::string(buf.data(), n);
+  return {buf.data(), n};
 }
 
 }  // namespace
@@ -384,7 +422,19 @@ int main(int argc, char** argv) {
 
   bool has_ticker = playlist->ticker().has_value();
   bool has_clock = playlist->clock().has_value();
-  std::uint32_t overlay_demand = 1U + (has_ticker ? 1U : 0U) + (has_clock ? 1U : 0U);
+  bool has_logo = playlist->logo().has_value();
+  // Shed in priority order — most-static first. Logo is purely
+  // decorative branding; a clock loses the least information when missing
+  // (system clock readable elsewhere); ticker carries actively
+  // scrolling content and is dropped last.
+  std::uint32_t overlay_demand =
+      1U + (has_ticker ? 1U : 0U) + (has_clock ? 1U : 0U) + (has_logo ? 1U : 0U);
+  if (overlay_demand > overlay_budget && has_logo) {
+    drm::println("plane budget: CRTC {} has {} OVERLAY plane(s); disabling logo layer", crtc_id,
+                 overlay_budget);
+    has_logo = false;
+    --overlay_demand;
+  }
   if (overlay_demand > overlay_budget && has_clock) {
     drm::println("plane budget: CRTC {} has {} OVERLAY plane(s); disabling clock layer", crtc_id,
                  overlay_budget);
@@ -420,8 +470,14 @@ int main(int argc, char** argv) {
   const std::uint32_t clock_h =
       has_clock ? std::min<std::uint32_t>(fb_h, std::max<std::uint32_t>(72U, clock_font_size * 2U))
                 : 0U;
+  // Logo dims come straight from the playlist — clamped to the
+  // framebuffer in case someone configures something silly.
+  const std::uint32_t logo_w =
+      has_logo ? std::min<std::uint32_t>(fb_w, playlist->logo()->width) : 0U;
+  const std::uint32_t logo_h =
+      has_logo ? std::min<std::uint32_t>(fb_h, playlist->logo()->height) : 0U;
 
-  SceneDims dims;
+  SceneDims dims{};
   dims.fb_w = fb_w;
   dims.fb_h = fb_h;
   dims.overlay_w = overlay_w;
@@ -430,8 +486,11 @@ int main(int argc, char** argv) {
   dims.ticker_h = ticker_h;
   dims.clock_w = clock_w;
   dims.clock_h = clock_h;
+  dims.logo_w = logo_w;
+  dims.logo_h = logo_h;
   dims.with_ticker = has_ticker;
   dims.with_clock = has_clock;
+  dims.with_logo = has_logo;
 
   auto scene_built = build_scene(dev, crtc_id, connector_id, mode.drm_mode, dims);
   if (!scene_built) {
@@ -443,6 +502,7 @@ int main(int argc, char** argv) {
   auto* overlay = scene_built->overlay;
   auto* ticker = scene_built->ticker;
   auto* clock_src = scene_built->clock;
+  auto* logo_src = scene_built->logo;
 
   // Overlay paint is constant — the static-text layer is what makes
   // dirty-tracking interesting later (it never needs a property re-write
@@ -516,6 +576,20 @@ int main(int argc, char** argv) {
   };
   repaint_clock_if_changed();
 
+  // Logo paint is dirty-once (and once-after-resume since the dumb
+  // buffer is remapped). Loaded eagerly so the very first commit
+  // already contains the brand bug.
+  signage::LogoPaint logo_paint;
+  if (has_logo) {
+    const auto& ld = *playlist->logo();
+    logo_paint.width = logo_w;
+    logo_paint.height = logo_h;
+    logo_paint.stride_bytes = logo_src->stride();
+    logo_paint.path = ld.path;
+    logo_paint.fallback_argb = ld.fallback_color;
+    signage::paint_logo(logo_src->pixels(), logo_paint);
+  }
+
   // Paint the first slide into the background before the initial commit.
   auto paint_slide = [&](std::size_t idx) {
     const auto& slide = playlist->slides()[idx];
@@ -581,9 +655,9 @@ int main(int argc, char** argv) {
   std::size_t slide_idx = 0;
 
   while (!quit) {
-    // When paused we block indefinitely so the CPU is idle until the
-    // session resumes or a libinput event wakes us. Otherwise poll
-    // with a short timeout so slide timing stays responsive even when
+    // When paused, we block indefinitely, so the CPU is idle until the
+    // session resumes or a libinput event wakes us. Otherwise, poll
+    // with a short timeout, so slide timing stays responsive even when
     // no input/seat events arrive.
     int timeout = 0;
     if (session_paused) {
@@ -644,6 +718,10 @@ int main(int argc, char** argv) {
         // fresh again.
         last_clock_text.clear();
         repaint_clock_if_changed();
+      }
+      if (has_logo) {
+        logo_paint.stride_bytes = logo_src->stride();
+        signage::paint_logo(logo_src->pixels(), logo_paint);
       }
     }
 

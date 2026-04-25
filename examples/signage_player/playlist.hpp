@@ -4,13 +4,14 @@
 // playlist.hpp — toml-backed playlist for signage_player.
 //
 // One Playlist owns a cyclic list of SlideDesc entries plus optional
-// OverlayDesc, TickerDesc, and ClockDesc blocks. Slides drive the
-// background layer (GbmBufferSource); the overlay drives a static
+// OverlayDesc, TickerDesc, ClockDesc, and LogoDesc blocks. Slides drive
+// the background layer (GbmBufferSource); the overlay drives a static
 // DumbBufferSource-backed text layer; the ticker drives a third
 // DumbBufferSource that repaints every frame with a scrolling marquee;
 // the clock drives a fourth DumbBufferSource that repaints only when
 // the formatted time string changes (once per minute with the default
-// "%H:%M"). Parse via Playlist::load(toml_path).
+// "%H:%M"); the logo drives a fifth DumbBufferSource painted once from
+// a PNG. Parse via Playlist::load(toml_path).
 //
 // Schema (TOML):
 //
@@ -40,6 +41,13 @@
 //     fg_color = "#ffffff"    # optional, default white
 //     bg_color = "#80000000"  # optional, default 50% black
 //
+//     [logo]                  # optional, top-left brand bug
+//     path = "logo.png"       # required PNG path
+//     width = 96              # optional, default 96
+//     height = 96             # optional, default 96
+//     fallback_color = "#ffffff80"  # optional; painted when Blend2D
+//                             # is missing or PNG load fails
+//
 // At least one slide is required. The parser rejects unknown `kind`
 // values and malformed color literals.
 
@@ -68,7 +76,7 @@ using Argb = std::uint32_t;
 
 struct SlideDesc {
   SlideKind kind{SlideKind::Color};
-  /// For `kind == Color`: the fill colour. Unused otherwise.
+  /// For `kind == Color`: the fill color. Unused otherwise.
   Argb color{0xFF000000};
   /// For `kind == Png | Blend2D | Thorvg`: filesystem path or demo
   /// identifier. Unused for `Color`.
@@ -87,7 +95,7 @@ struct TickerDesc {
   std::string text;
   std::uint32_t font_size{24};
   Argb fg_color{0xFFFFFFFFU};
-  /// Default 75% opaque black so the marquee reads against most slides.
+  /// Default 75% opaque black, so the marquee reads against most slides.
   Argb bg_color{0xC0000000U};
   /// Horizontal scroll velocity. The renderer multiplies elapsed time
   /// by this and modulos against a single text-pass width to produce a
@@ -108,6 +116,21 @@ struct ClockDesc {
   Argb bg_color{0x80000000U};
 };
 
+struct LogoDesc {
+  /// PNG file path. Loaded once at scene construction (and again on
+  /// session resume). Required.
+  std::string path;
+  /// Layer rectangle. The image is scaled-to-fit while preserving
+  /// the aspect ratio; letterboxing pixels are left at the fallback fill.
+  std::uint32_t width{96};
+  std::uint32_t height{96};
+  /// Painted under the PNG so the layer is still visible when Blend2D
+  /// isn't compiled in or the PNG fails to load. Default is fully
+  /// transparent, so a successful PNG load looks identical with or
+  /// without the fallback in place.
+  Argb fallback_color{0x00000000U};
+};
+
 class Playlist {
  public:
   [[nodiscard]] static drm::expected<Playlist, std::error_code> load(const std::string& toml_path);
@@ -120,12 +143,14 @@ class Playlist {
   [[nodiscard]] const std::optional<OverlayDesc>& overlay() const noexcept { return overlay_; }
   [[nodiscard]] const std::optional<TickerDesc>& ticker() const noexcept { return ticker_; }
   [[nodiscard]] const std::optional<ClockDesc>& clock() const noexcept { return clock_; }
+  [[nodiscard]] const std::optional<LogoDesc>& logo() const noexcept { return logo_; }
 
  private:
   std::vector<SlideDesc> slides_;
   std::optional<OverlayDesc> overlay_;
   std::optional<TickerDesc> ticker_;
   std::optional<ClockDesc> clock_;
+  std::optional<LogoDesc> logo_;
 };
 
 }  // namespace signage

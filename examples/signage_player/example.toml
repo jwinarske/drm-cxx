@@ -56,3 +56,16 @@ format = "%H:%M"
 font_size = 56
 fg_color = "#ffffff"
 bg_color = "#80000000"
+
+# Optional brand bug in the top-left corner. Painted once at scene
+# construction (and once again on session resume), so this layer is the
+# never-after-load datapoint that complements the four cadences above.
+# `path` is resolved relative to the current working directory; absolute
+# paths are typical for production use. `fallback_color` is painted
+# under the PNG, so the layer stays visible if the build wasn't
+# configured with -DDRM_CXX_BLEND2D=ON|AUTO or the file fails to load.
+[logo]
+path = "docs/logo.png"
+width = 192
+height = 96
+fallback_color = "#ffffff20"

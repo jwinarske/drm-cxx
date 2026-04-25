@@ -17,7 +17,7 @@
 
 namespace signage {
 
-/// All colours are straight-alpha 0xAARRGGBB (the form `parse_color`
+/// All colors are straight-alpha 0xAARRGGBB (the form `parse_color`
 /// produces). The renderer premultiplies before pixel write.
 struct OverlayPaint {
   std::uint32_t width{};
@@ -34,8 +34,8 @@ struct OverlayPaint {
 /// unavailable, the text is empty, or no system font could be located.
 void paint_overlay(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexcept;
 
-/// Single-frame paint of a horizontally-scrolling marquee. The scroll
-/// position is supplied by the caller so this function stays stateless;
+/// Single-frame paint of a horizontally scrolling marquee. The caller
+///  supplies the scroll position so this function stays stateless;
 /// each call repaints the whole buffer (background + repeated text
 /// copies). Designed to be called every frame — the dirty-every-frame
 /// workload is what makes this layer useful as a Phase 2.2 testbed.
@@ -48,15 +48,15 @@ struct TickerPaint {
   std::uint32_t font_size{24};
   /// Monotonically advancing pixel offset (caller multiplies elapsed
   /// seconds by pixels_per_second). The renderer modulos against the
-  /// per-pass text width internally so callers don't need to.
+  /// per-pass text width internally, so callers don't need to.
   double scroll_offset_px{0.0};
   std::string_view text;
 };
 
 void paint_ticker(drm::span<std::uint8_t> pixels, const TickerPaint& p) noexcept;
 
-/// Single-frame paint of a small clock badge. The current time string
-/// is supplied by the caller so this function stays stateless and
+/// Single-frame paint of a small clock badge. The caller
+/// supplies the current time string so this function stays stateless and
 /// dependency-free; the demo only invokes it when the formatted string
 /// changes (once per minute with the default "%H:%M"), which is what
 /// makes this layer useful as the dirty-once-per-minute counterpart to
@@ -72,5 +72,23 @@ struct ClockPaint {
 };
 
 void paint_clock(drm::span<std::uint8_t> pixels, const ClockPaint& p) noexcept;
+
+/// Single-shot paint of a small brand bug from a PNG file. Runs once
+/// at scene construction (and again on session resume since the dumb
+/// buffer's mapping changes). The renderer fills `fallback_argb`
+/// first, then blits the scaled PNG on top — that way the layer stays
+/// visible when Blend2D isn't compiled in or the file fails to load.
+struct LogoPaint {
+  std::uint32_t width{};
+  std::uint32_t height{};
+  std::uint32_t stride_bytes{};
+  /// PNG file path. Empty / missing / non-PNG paths leave the buffer
+  /// at the fallback fill.
+  std::string_view path;
+  /// Straight-alpha 0xAARRGGBB. Painted underneath the image.
+  std::uint32_t fallback_argb{0x00000000U};
+};
+
+void paint_logo(drm::span<std::uint8_t> pixels, const LogoPaint& p) noexcept;
 
 }  // namespace signage

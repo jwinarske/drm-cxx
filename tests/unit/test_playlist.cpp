@@ -52,6 +52,12 @@ format = "%H:%M:%S"
 font_size = 64
 fg_color = "#ffeeaa"
 bg_color = "#80112233"
+
+[logo]
+path = "/tmp/brand.png"
+width = 128
+height = 64
+fallback_color = "#ff112233"
 )";
 
 }  // namespace
@@ -96,6 +102,12 @@ TEST(SignagePlaylist, ParseFull) {
   EXPECT_EQ(p->clock()->fg_color, 0xFFFFEEAAU);
   // "#80112233" reads as RR=80, GG=11, BB=22, AA=33 → packed AARRGGBB.
   EXPECT_EQ(p->clock()->bg_color, 0x33801122U);
+  ASSERT_TRUE(p->logo().has_value());
+  EXPECT_EQ(p->logo()->path, "/tmp/brand.png");
+  EXPECT_EQ(p->logo()->width, 128U);
+  EXPECT_EQ(p->logo()->height, 64U);
+  // "#ff112233" reads as RR=ff, GG=11, BB=22, AA=33 → packed AARRGGBB.
+  EXPECT_EQ(p->logo()->fallback_color, 0x33FF1122U);
 }
 
 TEST(SignagePlaylist, ClockOmittedByDefault) {
@@ -158,6 +170,37 @@ text = "headlines")");
   EXPECT_EQ(p->ticker()->fg_color, 0xFFFFFFFFU);
   EXPECT_EQ(p->ticker()->bg_color, 0xC0000000U);
   EXPECT_EQ(p->ticker()->pixels_per_second, 120U);
+}
+
+TEST(SignagePlaylist, LogoOmittedByDefault) {
+  auto p = signage::Playlist::parse(kMinimal);
+  ASSERT_TRUE(p.has_value()) << p.error().message();
+  EXPECT_FALSE(p->logo().has_value());
+}
+
+TEST(SignagePlaylist, LogoDefaultsApplied) {
+  auto p = signage::Playlist::parse(R"([[slide]]
+kind = "color"
+color = "#ffffff"
+
+[logo]
+path = "/tmp/x.png")");
+  ASSERT_TRUE(p.has_value()) << p.error().message();
+  ASSERT_TRUE(p->logo().has_value());
+  EXPECT_EQ(p->logo()->path, "/tmp/x.png");
+  EXPECT_EQ(p->logo()->width, 96U);
+  EXPECT_EQ(p->logo()->height, 96U);
+  EXPECT_EQ(p->logo()->fallback_color, 0x00000000U);
+}
+
+TEST(SignagePlaylist, LogoWithoutPathRejected) {
+  auto p = signage::Playlist::parse(R"([[slide]]
+kind = "color"
+color = "#ffffff"
+
+[logo]
+width = 128)");
+  EXPECT_FALSE(p.has_value());
 }
 
 TEST(SignagePlaylist, RejectsEmpty) {

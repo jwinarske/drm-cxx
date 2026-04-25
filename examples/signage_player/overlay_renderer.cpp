@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 namespace signage {
 
@@ -39,9 +40,9 @@ std::uint32_t premultiply(std::uint32_t straight) noexcept {
   if (a == 0xFFU) {
     return straight;
   }
-  const std::uint32_t r = (((straight >> 16U) & 0xFFU) * a + 127U) / 255U;
-  const std::uint32_t g = (((straight >> 8U) & 0xFFU) * a + 127U) / 255U;
-  const std::uint32_t b = ((straight & 0xFFU) * a + 127U) / 255U;
+  const std::uint32_t r = ((((straight >> 16U) & 0xFFU) * a) + 127U) / 255U;
+  const std::uint32_t g = ((((straight >> 8U) & 0xFFU) * a) + 127U) / 255U;
+  const std::uint32_t b = (((straight & 0xFFU) * a) + 127U) / 255U;
   return (a << 24U) | (r << 16U) | (g << 8U) | b;
 }
 
@@ -131,18 +132,60 @@ void draw_centered_text_blend2d(drm::span<std::uint8_t> pixels,
   }
   const BLFontMetrics fm = font.metrics();
 
-  // tm.bounding_box is in design space relative to the baseline; width
+  // tm.bounding_box is in the design space relative to the baseline; width
   // is x1 - x0. Vertically center the inked-glyph box (ascent+descent)
   // inside the rect, then offset by ascent so fill_utf8_text's
   // baseline-anchored origin lands correctly.
   const double text_w = tm.bounding_box.x1 - tm.bounding_box.x0;
-  const double total_h = static_cast<double>(fm.ascent + fm.descent);
-  const double x = (static_cast<double>(p.width) - text_w) * 0.5 - tm.bounding_box.x0;
+  const auto total_h = static_cast<double>(fm.ascent + fm.descent);
+  const double x = ((static_cast<double>(p.width) - text_w) * 0.5) - tm.bounding_box.x0;
   const double y = ((static_cast<double>(p.height) - total_h) * 0.5) + fm.ascent;
 
   BLContext ctx(img);
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
   ctx.fill_utf8_text(BLPoint(x, y), font, p.text.data(), p.text.size(), BLRgba32(p.fg_argb));
+  ctx.end();
+}
+
+void draw_logo_blend2d(drm::span<std::uint8_t> pixels, const LogoPaint& p) noexcept {
+  if (p.path.empty()) {
+    return;
+  }
+  BLImage canvas;
+  if (canvas.create_from_data(static_cast<int>(p.width), static_cast<int>(p.height),
+                              BL_FORMAT_PRGB32, pixels.data(),
+                              static_cast<intptr_t>(p.stride_bytes), BL_DATA_ACCESS_RW, nullptr,
+                              nullptr) != BL_SUCCESS) {
+    return;
+  }
+
+  // BLImage::read_from_file needs a C string; the LogoPaint carries a
+  // string_view to keep the struct lightweight, so copy here. Logo is
+  // single-shot anyway — the per-call allocation is in the noise.
+  const std::string path_z(p.path);
+  BLImage src;
+  if (src.read_from_file(path_z.c_str()) != BL_SUCCESS) {
+    return;
+  }
+
+  const int sw = src.width();
+  const int sh = src.height();
+  if (sw <= 0 || sh <= 0) {
+    return;
+  }
+
+  // Scale-to-fit while preserving aspect, letterboxing the unused
+  // pixels with the fallback fill that's already underneath.
+  const double scale = std::min(static_cast<double>(p.width) / static_cast<double>(sw),
+                                static_cast<double>(p.height) / static_cast<double>(sh));
+  const int dw = static_cast<int>(static_cast<double>(sw) * scale);
+  const int dh = static_cast<int>(static_cast<double>(sh) * scale);
+  const int dx = (static_cast<int>(p.width) - dw) / 2;
+  const int dy = (static_cast<int>(p.height) - dh) / 2;
+
+  BLContext ctx(canvas);
+  ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
+  ctx.blit_image(BLRectI(dx, dy, dw, dh), src);
   ctx.end();
 }
 
@@ -192,7 +235,7 @@ void draw_ticker_blend2d(drm::span<std::uint8_t> pixels, const TickerPaint& p) n
 
   // Vertically centre the inked-glyph box, baseline-anchor as in the
   // overlay renderer.
-  const double total_h = static_cast<double>(fm.ascent + fm.descent);
+  const auto total_h = static_cast<double>(fm.ascent + fm.descent);
   const double y = ((static_cast<double>(p.height) - total_h) * 0.5) + fm.ascent;
 
   // Modulo the running scroll offset against pass_w so the buffer never
@@ -248,6 +291,20 @@ void paint_clock(drm::span<std::uint8_t> pixels, const ClockPaint& p) noexcept {
 #ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
   draw_centered_text_blend2d(pixels,
                              {p.width, p.height, p.stride_bytes, p.font_size, p.fg_argb, p.text});
+#endif
+}
+
+void paint_logo(drm::span<std::uint8_t> pixels, const LogoPaint& p) noexcept {
+  if (p.width == 0U || p.height == 0U || p.stride_bytes < (p.width * 4U)) {
+    return;
+  }
+  // Pre-fill so the layer is visible (and any letterbox margins are
+  // covered) when the PNG load below succeeds, fails, or Blend2D is
+  // absent.
+  fill_premul(pixels, p.stride_bytes, p.width, p.height, premultiply(p.fallback_argb));
+
+#ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
+  draw_logo_blend2d(pixels, p);
 #endif
 }
 

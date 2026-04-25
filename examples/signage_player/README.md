@@ -1,6 +1,6 @@
 # signage_player
 
-A minimal four-layer LayerScene demo driven by a TOML playlist:
+A minimal five-layer LayerScene demo driven by a TOML playlist:
 
 - **Background** — `GbmBufferSource`, repainted on slide rotation.
 - **Overlay** — `DumbBufferSource`, painted once with static text.
@@ -9,11 +9,20 @@ A minimal four-layer LayerScene demo driven by a TOML playlist:
 - **Clock** — optional `DumbBufferSource` in the top-right corner,
   repainted only when the formatted time string changes (once per
   minute with the default `%H:%M`).
+- **Logo** — optional `DumbBufferSource` in the top-left corner,
+  painted once from a PNG (and once again on session resume).
 
-The four layers' update cadences (per-slide, once-ever, every-frame,
-once-per-minute) are deliberately spread so the example exercises the
-dirty surface that `drm::scene::LayerScene`'s eventual
-property-minimization pass needs to reason about. ESC quits.
+The five layers' update cadences (per-slide, once-ever, every-frame,
+once-per-minute, never-after-load) are deliberately spread so the
+example exercises the dirty surface that `drm::scene::LayerScene`'s
+eventual property-minimization pass needs to reason about. ESC quits.
+
+When the hardware can't fit every optional layer (`amdgpu` exposes
+just 2 OVERLAY planes for the whole device), `signage_player` queries
+the plane budget at startup and sheds optional layers in priority
+order — **logo → clock → ticker** — before any frame is committed.
+Each shed prints a `plane budget: ...` line so it's obvious which
+layer dropped and why.
 
 This is the second consumer of `drm::scene::LayerScene` (the first
 being `thorvg_janitor`). Together they prove the scene's API survives

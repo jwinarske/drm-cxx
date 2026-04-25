@@ -164,6 +164,29 @@ drm::expected<ClockDesc, std::error_code> parse_clock(const toml::table& tbl) {
   return c;
 }
 
+drm::expected<LogoDesc, std::error_code> parse_logo(const toml::table& tbl) {
+  LogoDesc l;
+  const auto path_lit = tbl["path"].value<std::string>();
+  if (!path_lit || path_lit->empty()) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  l.path = *path_lit;
+  if (auto w = tbl["width"].value<std::int64_t>(); w && *w > 0) {
+    l.width = static_cast<std::uint32_t>(*w);
+  }
+  if (auto h = tbl["height"].value<std::int64_t>(); h && *h > 0) {
+    l.height = static_cast<std::uint32_t>(*h);
+  }
+  if (auto fb = tbl["fallback_color"].value<std::string>()) {
+    auto parsed = parse_color(*fb);
+    if (!parsed) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    l.fallback_color = *parsed;
+  }
+  return l;
+}
+
 drm::expected<TickerDesc, std::error_code> parse_ticker(const toml::table& tbl) {
   TickerDesc t;
   const auto text_lit = tbl["text"].value<std::string>();
@@ -245,11 +268,19 @@ drm::expected<Playlist, std::error_code> Playlist::parse(std::string_view toml_s
     p.clock_ = std::move(*c);
   }
 
+  if (const auto* logo_tbl = root["logo"].as_table(); logo_tbl != nullptr) {
+    auto l = parse_logo(*logo_tbl);
+    if (!l) {
+      return drm::unexpected<std::error_code>(l.error());
+    }
+    p.logo_ = std::move(*l);
+  }
+
   return p;
 }
 
 drm::expected<Playlist, std::error_code> Playlist::load(const std::string& toml_path) {
-  std::ifstream f(toml_path);
+  std::ifstream const f(toml_path);
   if (!f) {
     return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
