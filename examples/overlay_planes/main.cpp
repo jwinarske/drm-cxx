@@ -8,59 +8,24 @@
 // Opens a DRM device, enumerates planes, creates virtual layers,
 // and runs the allocator to assign layers to hardware planes.
 
-#include "../common/select_device.hpp"
-#include "core/device.hpp"
-#include "drm-cxx/detail/format.hpp"
-#include "modeset/atomic.hpp"
-#include "planes/allocator.hpp"
-#include "planes/layer.hpp"
-#include "planes/output.hpp"
-#include "planes/plane_registry.hpp"
-#include "session/seat.hpp"
+#include "../common/open_output.hpp"
+
+#include <drm-cxx/detail/format.hpp>
+#include <drm-cxx/modeset/atomic.hpp>
+#include <drm-cxx/planes/allocator.hpp>
+#include <drm-cxx/planes/layer.hpp>
+#include <drm-cxx/planes/output.hpp>
+#include <drm-cxx/planes/plane_registry.hpp>
 
 #include <cstdint>
 #include <cstdlib>
-#include <optional>
-#include <utility>
 
 int main(int argc, char* argv[]) {
-  const auto path = drm::examples::select_device(argc, argv);
-  if (!path) {
+  auto ctx = drm::examples::open_device(argc, argv);
+  if (!ctx) {
     return EXIT_FAILURE;
   }
-
-  // See atomic_modeset for why we claim a seat session.
-  auto seat = drm::session::Seat::open();
-
-  // Prefer the seat's revocable device fd — on VT switch it's revoked
-  // cleanly and master is managed by the seat provider. Fall back to
-  // plain open() when no seat backend is available.
-  const auto seat_dev = seat ? seat->take_device(*path) : std::nullopt;
-  auto dev_holder = [&]() -> std::optional<drm::Device> {
-    if (seat_dev) {
-      return drm::Device::from_fd(seat_dev->fd);
-    }
-    auto r = drm::Device::open(*path);
-    if (!r) {
-      return std::nullopt;
-    }
-    return std::move(*r);
-  }();
-  if (!dev_holder) {
-    drm::println(stderr, "Failed to open {}", *path);
-    return EXIT_FAILURE;
-  }
-  auto& dev = *dev_holder;
-
-  // Enable universal planes + atomic
-  if (auto r = dev.enable_universal_planes(); !r) {
-    drm::println(stderr, "Failed to enable universal planes");
-    return EXIT_FAILURE;
-  }
-  if (auto r = dev.enable_atomic(); !r) {
-    drm::println(stderr, "Failed to enable atomic modesetting");
-    return EXIT_FAILURE;
-  }
+  auto& dev = ctx->device;
 
   // Enumerate planes
   auto reg_result = drm::planes::PlaneRegistry::enumerate(dev);

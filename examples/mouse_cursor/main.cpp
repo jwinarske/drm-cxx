@@ -18,7 +18,7 @@
 // for exercising a non-default path on a platform that advertises
 // several overlays.
 
-#include "../common/select_device.hpp"
+#include "../common/open_output.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "cursor/cursor.hpp"
@@ -143,41 +143,18 @@ int main(int argc, char* argv[]) {
     ++i;
   }
 
-  const auto path = drm::examples::select_device(argc, argv);
-  if (!path) {
-    return EXIT_FAILURE;
-  }
-
   // ---------------------------------------------------------------------------
-  // Seat session + Device. See atomic_modeset for why we claim a seat.
+  // Device + libseat. The example uses the CRTC's *current* mode for
+  // pointer clamping (not the connector's preferred mode), so it can't
+  // share open_and_pick_output's preferred-mode pickup — only the open
+  // half is shared.
   // ---------------------------------------------------------------------------
-  auto seat = drm::session::Seat::open();
-
-  const auto seat_dev = seat ? seat->take_device(*path) : std::nullopt;
-  auto dev_holder = [&]() -> std::optional<drm::Device> {
-    if (seat_dev) {
-      return drm::Device::from_fd(seat_dev->fd);
-    }
-    auto r = drm::Device::open(*path);
-    if (!r) {
-      return std::nullopt;
-    }
-    return std::move(*r);
-  }();
-  if (!dev_holder) {
-    drm::println(stderr, "Failed to open {}", *path);
+  auto ctx = drm::examples::open_device(argc, argv);
+  if (!ctx) {
     return EXIT_FAILURE;
   }
-  auto& dev = *dev_holder;
-
-  if (auto r = dev.enable_universal_planes(); !r) {
-    drm::println(stderr, "Failed to enable universal planes");
-    return EXIT_FAILURE;
-  }
-  if (auto r = dev.enable_atomic(); !r) {
-    drm::println(stderr, "Failed to enable atomic modesetting");
-    return EXIT_FAILURE;
-  }
+  auto& dev = ctx->device;
+  auto& seat = ctx->seat;
 
   // ---------------------------------------------------------------------------
   // CRTC discovery — first connected connector with an active mode.

@@ -35,7 +35,7 @@
 //      older GPUs and embedded stacks) it's false — the rotation
 //      cycle still works, and blit_frame does the work on the CPU.
 
-#include "../common/select_device.hpp"
+#include "../common/open_output.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "cursor/cursor.hpp"
@@ -200,30 +200,16 @@ int main(int argc, char* argv[]) {
     ++i;
   }
 
-  const auto path = drm::examples::select_device(argc, argv);
-  if (!path) {
-    return EXIT_FAILURE;
-  }
-
   // ---------------------------------------------------------------------------
-  // Device + CRTC discovery. Open direct (no seat) — documenting the
-  // limitation: VT-switch testing wants a seat-aware wrapper. Here we
-  // focus on the rotation / hotspot / sharing diagnostics.
+  // Device + CRTC discovery. Multi-CRTC enumeration is the example's
+  // whole point, so the connector pickup stays bespoke; only the open
+  // half is shared via open_device.
   // ---------------------------------------------------------------------------
-  auto dev_res = drm::Device::open(*path);
-  if (!dev_res) {
-    drm::println(stderr, "Failed to open {}", *path);
+  auto ctx = drm::examples::open_device(argc, argv);
+  if (!ctx) {
     return EXIT_FAILURE;
   }
-  auto& dev = *dev_res;
-  if (auto r = dev.enable_universal_planes(); !r) {
-    drm::println(stderr, "Failed to enable universal planes");
-    return EXIT_FAILURE;
-  }
-  if (auto r = dev.enable_atomic(); !r) {
-    drm::println(stderr, "Failed to enable atomic modeset");
-    return EXIT_FAILURE;
-  }
+  auto& dev = ctx->device;
 
   const auto crtcs = discover_active_crtcs(dev.fd());
   if (crtcs.empty()) {
