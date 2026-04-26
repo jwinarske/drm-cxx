@@ -18,11 +18,18 @@ example exercises the dirty surface that `drm::scene::LayerScene`'s
 eventual property-minimization pass needs to reason about. ESC quits.
 
 When the hardware can't fit every optional layer (`amdgpu` exposes
-just 2 OVERLAY planes for the whole device), `signage_player` queries
-the plane budget at startup and sheds optional layers in priority
-order — **logo → clock → ticker** — before any frame is committed.
-Each shed prints a `plane budget: ...` line so it's obvious which
-layer dropped and why.
+just 2 OVERLAY planes for the whole device), `LayerScene`'s Phase 2.3
+composition fallback CPU-blends the overflow layers onto a shared
+`CompositeCanvas` and presents that canvas on a single OVERLAY plane.
+The example doesn't have to shed optional layers up front — every
+layer the playlist requests reaches the screen.
+
+If the GPU is so plane-starved that even the canvas can't find a free
+plane (no OVERLAY at all, PRIMARY taken by the background), the
+overflow layers are silently dropped for that frame and a `log_warn`
+entry is emitted. The example continues running rather than failing
+hard — watch stderr for `composition fallback found no free plane`
+if a layer unexpectedly fails to appear.
 
 This is the second consumer of `drm::scene::LayerScene` (the first
 being `thorvg_janitor`). Together they prove the scene's API survives
@@ -46,8 +53,16 @@ bands remain text-free.
 ## Run
 
 ```
-sudo signage_player --playlist /path/to/playlist.toml
+sudo signage_player --playlist /path/to/playlist.toml [--hotplug-follow]
 ```
+
+`--hotplug-follow` opens a `drm::display::HotplugMonitor` and rebinds
+the running scene to the new active connector / mode whenever a
+hotplug event changes either. The playlist + Blend2D overlay survive
+the rebind. Layer buffers keep the dimensions chosen at startup, so a
+new mode with different dimensions will letterbox or crop — fine for
+demonstrating the rebind primitive; a production app would also
+re-allocate the layer sources at the new size.
 
 `sudo` is the path of least resistance for a bare-TTY run; on a
 seatd-managed system the membership in the `seat` group is enough.

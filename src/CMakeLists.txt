@@ -27,6 +27,7 @@ set(DRM_CXX_SOURCES
   gbm/surface.cpp
   gbm/buffer.cpp
   dumb/buffer.cpp
+  scene/composite_canvas.cpp
   scene/dumb_buffer_source.cpp
   scene/gbm_buffer_source.cpp
   scene/layer_scene.cpp
@@ -261,6 +262,7 @@ install(FILES dumb/buffer.hpp
 install(FILES
     scene/buffer_source.hpp
     scene/commit_report.hpp
+    scene/compatibility_report.hpp
     scene/composite_canvas.hpp
     scene/display_params.hpp
     scene/dumb_buffer_source.hpp

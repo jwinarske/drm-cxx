@@ -23,11 +23,11 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/display/hotplug_monitor.hpp>
 #include <drm-cxx/input/seat.hpp>
 #include <drm-cxx/modeset/mode.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
-#include <drm-cxx/planes/plane_registry.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/gbm_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
@@ -78,43 +78,49 @@ void fill_argb(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, std::
   }
 }
 
-// Count OVERLAY planes the registry can route to `crtc_id`. main()
-// uses this to gate optional layers (ticker, clock) when the hardware
-// can't accept them all — until LayerScene grows a software
-// composition fallback (Phase 2.3), excess layers get dropped per
-// frame rather than composited together. The result is the absolute
-// per-CRTC count; in a multi-output app where two CRTCs are
-// simultaneously lit on hardware that shares its OVERLAY pool (amdgpu
-// does this — its 2 OVERLAYs each have crtc_mask=0xff), each CRTC's
-// effective budget is smaller than what this returns.
-drm::expected<std::uint32_t, std::error_code> count_crtc_overlay_planes(drm::Device& dev,
-                                                                        std::uint32_t crtc_id) {
-  auto registry = drm::planes::PlaneRegistry::enumerate(dev);
-  if (!registry) {
-    return drm::unexpected<std::error_code>(registry.error());
-  }
-  auto res = drm::get_resources(dev.fd());
+// Resolved (connector, crtc, mode) tuple — produced by find_active_target,
+// consumed by --hotplug-follow's rebind path.
+struct ActiveTarget {
+  std::uint32_t connector_id{0};
+  std::uint32_t crtc_id{0};
+  drmModeModeInfo mode{};
+};
+
+// First connected connector with at least one mode and a usable
+// encoder + CRTC. Mirrors the startup-time selection but split into a
+// reusable helper so --hotplug-follow can re-run it on each event.
+std::optional<ActiveTarget> find_active_target(int drm_fd) {
+  const auto res = drm::get_resources(drm_fd);
   if (!res) {
-    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::io_error));
+    return std::nullopt;
   }
-  std::optional<std::uint32_t> crtc_idx;
-  for (int i = 0; i < res->count_crtcs; ++i) {
-    if (res->crtcs[i] == crtc_id) {
-      crtc_idx = static_cast<std::uint32_t>(i);
-      break;
+  for (int i = 0; i < res->count_connectors; ++i) {
+    auto conn = drm::get_connector(drm_fd, res->connectors[i]);
+    if (!conn || conn->connection != DRM_MODE_CONNECTED || conn->count_modes == 0 ||
+        conn->encoder_id == 0) {
+      continue;
     }
-  }
-  if (!crtc_idx.has_value()) {
-    return drm::unexpected<std::error_code>(
-        std::make_error_code(std::errc::no_such_device_or_address));
-  }
-  std::uint32_t n = 0;
-  for (const auto* p : registry->for_crtc(*crtc_idx)) {
-    if (p->type == drm::planes::DRMPlaneType::OVERLAY) {
-      ++n;
+    auto enc = drm::get_encoder(drm_fd, conn->encoder_id);
+    if (!enc || enc->crtc_id == 0) {
+      continue;
     }
+    const auto mode = drm::select_preferred_mode(
+        drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes));
+    if (!mode) {
+      continue;
+    }
+    ActiveTarget out;
+    out.connector_id = conn->connector_id;
+    out.crtc_id = enc->crtc_id;
+    out.mode = mode->drm_mode;
+    return out;
   }
-  return n;
+  return std::nullopt;
+}
+
+bool same_mode(const drmModeModeInfo& a, const drmModeModeInfo& b) {
+  return a.hdisplay == b.hdisplay && a.vdisplay == b.vdisplay && a.clock == b.clock &&
+         a.vrefresh == b.vrefresh;
 }
 
 struct Scene {
@@ -331,13 +337,17 @@ std::string format_now(const std::string& fmt) noexcept {
 
 int main(int argc, char** argv) {
   const char* toml_path = nullptr;
+  bool hotplug_follow = false;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--playlist") == 0 && i + 1 < argc) {
       toml_path = argv[++i];
+    } else if (std::strcmp(argv[i], "--hotplug-follow") == 0) {
+      hotplug_follow = true;
     }
   }
   if (toml_path == nullptr) {
-    drm::println(stderr, "usage: signage_player --playlist <path.toml> [device]");
+    drm::println(stderr,
+                 "usage: signage_player --playlist <path.toml> [--hotplug-follow] [device]");
     return EXIT_FAILURE;
   }
 
@@ -421,54 +431,14 @@ int main(int argc, char** argv) {
   drm::println("Mode: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.refresh(),
                connector_id, crtc_id);
 
-  // Plane budget: bg lands on PRIMARY; overlay text + optional ticker
-  // + optional clock each need an OVERLAY plane. When the hardware
-  // can't fit every optional layer (e.g. amdgpu exposes 2 OVERLAYs
-  // total but the playlist asks for 3 overlay-class layers), shed in
-  // priority order — clock first, then ticker — before LayerScene's
-  // allocator has to drop them per frame. Once the Phase 2.3
-  // composition fallback lands the gating below can go away.
-  const auto overlay_budget_res = count_crtc_overlay_planes(dev, crtc_id);
-  if (!overlay_budget_res) {
-    drm::println(stderr, "plane enumeration failed: {}", overlay_budget_res.error().message());
-    return EXIT_FAILURE;
-  }
-  const std::uint32_t overlay_budget = *overlay_budget_res;
-
-  bool has_ticker = playlist->ticker().has_value();
-  bool has_clock = playlist->clock().has_value();
-  bool has_logo = playlist->logo().has_value();
-  // Shed in priority order — most-static first. Logo is purely
-  // decorative branding; a clock loses the least information when missing
-  // (system clock readable elsewhere); ticker carries actively
-  // scrolling content and is dropped last.
-  std::uint32_t overlay_demand =
-      1U + (has_ticker ? 1U : 0U) + (has_clock ? 1U : 0U) + (has_logo ? 1U : 0U);
-  if (overlay_demand > overlay_budget && has_logo) {
-    drm::println("plane budget: CRTC {} has {} OVERLAY plane(s); disabling logo layer", crtc_id,
-                 overlay_budget);
-    has_logo = false;
-    --overlay_demand;
-  }
-  if (overlay_demand > overlay_budget && has_clock) {
-    drm::println("plane budget: CRTC {} has {} OVERLAY plane(s); disabling clock layer", crtc_id,
-                 overlay_budget);
-    has_clock = false;
-    --overlay_demand;
-  }
-  if (overlay_demand > overlay_budget && has_ticker) {
-    drm::println("plane budget: CRTC {} has {} OVERLAY plane(s); disabling ticker layer", crtc_id,
-                 overlay_budget);
-    has_ticker = false;
-    --overlay_demand;
-  }
-  if (overlay_demand > overlay_budget) {
-    drm::println(stderr,
-                 "plane budget: CRTC {} has only {} OVERLAY plane(s); not enough for the static "
-                 "overlay text layer",
-                 crtc_id, overlay_budget);
-    return EXIT_FAILURE;
-  }
+  // Layer count is whatever the playlist asks for. LayerScene's Phase 2.3
+  // composition fallback CPU-blends any layers the allocator can't fit
+  // onto a hardware plane onto a shared canvas, so a 3-layer playlist
+  // on a 2-OVERLAY GPU degrades to one composited canvas + bg without
+  // the example having to shed optional layers up front.
+  const bool has_ticker = playlist->ticker().has_value();
+  const bool has_clock = playlist->clock().has_value();
+  const bool has_logo = playlist->logo().has_value();
 
   const std::uint32_t overlay_w = std::min<std::uint32_t>(fb_w, 640U);
   const std::uint32_t overlay_h = std::min<std::uint32_t>(fb_h, 96U);
@@ -655,15 +625,69 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   flip_pending = true;
+
+  // Optional hotplug-follow plumbing. The library's HotplugMonitor
+  // exposes a netlink fd we add to the poll set; on every event we
+  // rescan for the best (connector, crtc, mode) and call rebind() if
+  // the answer changed. Existing layers keep their handles and their
+  // backing buffers — we don't resize the bg/overlay/ticker buffers
+  // here, so a new mode with different dimensions will letterbox or
+  // crop. That's an honest demo of the rebind primitive; a production
+  // app would also rebuild layer buffers at the new dimensions.
+  std::optional<drm::display::HotplugMonitor> hotplug_monitor;
+  drmModeModeInfo current_mode = mode.drm_mode;
+  std::uint32_t current_crtc_id = crtc_id;
+  std::uint32_t current_connector_id = connector_id;
+  if (hotplug_follow) {
+    auto m = drm::display::HotplugMonitor::open();
+    if (!m) {
+      drm::println(stderr, "HotplugMonitor::open: {}", m.error().message());
+      return EXIT_FAILURE;
+    }
+    hotplug_monitor = std::move(*m);
+    hotplug_monitor->set_handler([&](const drm::display::HotplugEvent& /*ev*/) {
+      const auto fresh = find_active_target(dev.fd());
+      if (!fresh) {
+        drm::println("[hotplug] no connected connector — staying on the previous binding");
+        return;
+      }
+      if (fresh->connector_id == current_connector_id && fresh->crtc_id == current_crtc_id &&
+          same_mode(fresh->mode, current_mode)) {
+        return;
+      }
+      drm::println("[hotplug] rebinding to connector={} crtc={} mode={}x{}@{}Hz",
+                   fresh->connector_id, fresh->crtc_id, fresh->mode.hdisplay, fresh->mode.vdisplay,
+                   fresh->mode.vrefresh);
+      auto report = scene->rebind(fresh->crtc_id, fresh->connector_id, fresh->mode);
+      if (!report) {
+        drm::println(stderr, "rebind: {}", report.error().message());
+        return;
+      }
+      if (!report->empty()) {
+        drm::println("  ({} layer(s) flagged incompatible against the new mode)",
+                     report->incompatibilities.size());
+      }
+      current_connector_id = fresh->connector_id;
+      current_crtc_id = fresh->crtc_id;
+      current_mode = fresh->mode;
+      // Force the next loop iteration to commit so the rebound CRTC
+      // gets its modeset + first frame promptly.
+      flip_pending = false;
+    });
+    drm::println("Hotplug-follow enabled.");
+  }
+
   drm::println("Running — Escape to quit.");
 
-  pollfd pfds[3]{};
+  pollfd pfds[4]{};
   pfds[0].fd = input_seat.fd();
   pfds[0].events = POLLIN;
   pfds[1].fd = dev.fd();
   pfds[1].events = POLLIN;
   pfds[2].fd = seat ? seat->poll_fd() : -1;
   pfds[2].events = POLLIN;
+  pfds[3].fd = hotplug_monitor ? hotplug_monitor->fd() : -1;
+  pfds[3].events = POLLIN;
 
   using clock = std::chrono::steady_clock;
   auto slide_started = clock::now();
@@ -680,7 +704,7 @@ int main(int argc, char** argv) {
     } else if (flip_pending) {
       timeout = 16;
     }
-    if (const int ret = poll(pfds, 3, timeout); ret < 0) {
+    if (const int ret = poll(pfds, 4, timeout); ret < 0) {
       if (errno == EINTR) {
         continue;
       }
@@ -695,6 +719,9 @@ int main(int argc, char** argv) {
     }
     if ((pfds[2].revents & POLLIN) != 0 && seat) {
       seat->dispatch();
+    }
+    if ((pfds[3].revents & POLLIN) != 0 && hotplug_monitor) {
+      (void)hotplug_monitor->dispatch();
     }
 
     if (pending_resume_fd != -1) {

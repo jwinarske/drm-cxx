@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <utility>
 
@@ -66,6 +67,26 @@ drm::expected<AcquiredBuffer, std::error_code> GbmBufferSource::acquire() {
   acq.acquire_fence_fd = -1;
   acq.opaque = nullptr;
   return acq;
+}
+
+std::optional<CpuMapping> GbmBufferSource::cpu_mapping() const noexcept {
+  if (buffer_.empty() || buffer_.data() == nullptr) {
+    return std::nullopt;
+  }
+  // GBM_BO_USE_LINEAR + GBM_BO_USE_WRITE in buffer_config asks for a
+  // linear layout, but the driver may still resolve the BO to a
+  // non-LINEAR explicit modifier (e.g. on hybrid SoCs). The
+  // composition fallback reads bytes assuming a contiguous linear
+  // layout — anything else would scan tiled garbage. Bail when the
+  // resolved modifier isn't LINEAR or INVALID.
+  if (format_.modifier != 0U /* DRM_FORMAT_MOD_LINEAR */ &&
+      format_.modifier != ((1ULL << 56U) - 1U) /* DRM_FORMAT_MOD_INVALID */) {
+    return std::nullopt;
+  }
+  CpuMapping m;
+  m.pixels = drm::span<const std::uint8_t>(buffer_.data(), buffer_.size_bytes());
+  m.stride_bytes = buffer_.stride();
+  return m;
 }
 
 void GbmBufferSource::release(AcquiredBuffer /*acquired*/) noexcept {

@@ -59,6 +59,7 @@ class DumbBufferSource : public LayerBufferSource {
     return BindingModel::SceneSubmitsFbId;
   }
   [[nodiscard]] SourceFormat format() const noexcept override { return format_; }
+  [[nodiscard]] std::optional<CpuMapping> cpu_mapping() const noexcept override;
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;

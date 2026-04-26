@@ -62,7 +62,40 @@ if(DRM_CXX_HAS_BLEND2D)
     GTest::gtest
     GTest::gtest_main)
   gtest_discover_tests(test_capture_vkms)
+
+  # LayerScene composition fallback against VKMS — pulls capture
+  # snapshot for pixel readback, so it's gated on Blend2D for the same
+  # reason test_capture_vkms is.
+  add_executable(test_layer_scene_composition_vkms
+    integration/test_layer_scene_composition_vkms.cpp)
+  target_link_libraries(test_layer_scene_composition_vkms PRIVATE
+    drm-cxx::drm-cxx
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_layer_scene_composition_vkms)
 endif()
+
+# LayerScene Phase 2.2 property-minimization tests against VKMS. No
+# Blend2D dependency — diagnostics readback is via CommitReport, not
+# capture::snapshot — so this stays out of the DRM_CXX_HAS_BLEND2D
+# block above.
+add_executable(test_layer_scene_minimization_vkms
+  integration/test_layer_scene_minimization_vkms.cpp)
+target_link_libraries(test_layer_scene_minimization_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_layer_scene_minimization_vkms)
+
+# LayerScene Phase 2.4 rebind tests against VKMS. Same rationale as
+# the minimization suite — pure scene API, no capture dependency.
+add_executable(test_layer_scene_rebind_vkms
+  integration/test_layer_scene_rebind_vkms.cpp)
+target_link_libraries(test_layer_scene_rebind_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_layer_scene_rebind_vkms)
 
 # drm::scene unit tests — scene lives in the library now (src/scene/),
 # so the test binary just links drm-cxx::drm-cxx like every other unit test.
@@ -72,6 +105,13 @@ target_link_libraries(test_scene PRIVATE
   GTest::gtest
   GTest::gtest_main)
 gtest_discover_tests(test_scene)
+
+add_executable(test_composite_canvas unit/test_composite_canvas.cpp)
+target_link_libraries(test_composite_canvas PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_composite_canvas)
 
 # signage_player playlist parser. signage_playlist still lives under
 # examples/, so the playlist test only builds when examples do.

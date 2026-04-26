@@ -1,21 +1,23 @@
-# drm-cxx
+![drm-cxx logo](docs/logo.svg)
 
-C++17 library for Linux DRM/KMS display management, input handling, and hardware plane allocation. Originally prototyped against C++23 and hoisted down to C++17 behind adapter headers (`drm::expected`, `drm::span`, `drm::print`) so it builds on older toolchains while still picking up `std::expected` / `std::span` / `std::print` transparently on C++23 stacks.
+C++17 library for Linux DRM/KMS display, input, and hardware plane allocation. Adapter headers (`drm::expected`, `drm::span`, `drm::print`) alias the standard types on C++23 toolchains and `tl::expected` / `tcb::span` / `fmt::print` on older ones.
 
 ## Features
 
-- **RAII everywhere** — DRM devices, GBM buffers, libinput contexts, xkbcommon state
-- **`drm::expected<T, E>`** for all fallible operations (aliases `std::expected` on C++23, `tl::expected` on C++17)
-- **Native plane allocator** replacing libliftoff with 7 algorithmic improvements:
-  - Hopcroft-Karp bipartite pre-solve
-  - Warm-start from previous frame (0-1 test commits in steady state)
-  - Failure memoization, content-type priority, spatial splitting
-- **Atomic modesetting** — builder pattern for `drmModeAtomicCommit`
-- **Input subsystem** — libinput/xkbcommon with typed event variants and `std::function` dispatch
-- **Display info** — EDID parsing via libdisplay-info (colorimetry, HDR, EOTFs)
-- **GBM integration** — device, surface, buffer with DMA-BUF support
-- **Vulkan `VK_KHR_display`** — optional, dynamically loaded
-- **`drm::print` logging** with runtime `LogLevel` gating (aliases `std::print` on C++23, `fmt::print` on C++17)
+- RAII wrappers for DRM devices, dumb buffers, GBM buffers, libinput contexts, and xkbcommon state.
+- `drm::expected<T, E>` on every fallible operation.
+- **`drm::scene::LayerScene`** — handle-based layer model with allocator-driven plane assignment, session pause/resume, and a CPU composition fallback for layers the hardware can't fit.
+- **Native plane allocator** with bipartite pre-solve, warm-start across frames, failure memoization, content-type priority, and spatial group splitting. Replaces libliftoff.
+- **`drm::cursor`** — XCursor theme resolver and KMS cursor renderer with runtime rotation and `HOTSPOT_X/Y` virtualization.
+- **`drm::session::Seat`** — libseat-backed session multiplexer over logind / seatd / builtin (gated on `DRM_CXX_SESSION`).
+- **`drm::display::HotplugMonitor`** — udev netlink hotplug stream with connector-id fast-path.
+- **`drm::capture`** — Blend2D-backed CRTC plane-composition snapshot with PNG encode (gated on `DRM_CXX_BLEND2D`).
+- Atomic modeset builder around `drmModeAtomicCommit`.
+- libinput / xkbcommon input with typed event variants and `std::function` dispatch.
+- EDID parsing via libdisplay-info (colorimetry, HDR, EOTFs).
+- GBM device / surface / buffer with DMA-BUF.
+- Optional `VK_KHR_display` Vulkan support.
+- `drm::print` logging with runtime `LogLevel` gating.
 
 ## Requirements
 
@@ -29,10 +31,16 @@ C++17 library for Linux DRM/KMS display management, input handling, and hardware
 | libgbm | any |
 | libinput | 1.21 |
 | xkbcommon | 1.5 |
-| libdisplay-info | 0.1.1 (fetched as subproject) |
+| libdisplay-info | 0.1.1 (subproject) |
+| libseat | 0.7 (optional, for `DRM_CXX_SESSION`) |
+| libxcursor | any (optional, for `DRM_CXX_CURSOR`) |
+| Blend2D | 0.10 (optional, for `DRM_CXX_BLEND2D`) |
+| ThorVG | 1.0.4 (optional, for the `thorvg_janitor` example) |
 | Vulkan-Headers | 1.3 (optional) |
 
 ## Building
+
+Meson:
 
 ```sh
 meson setup builddir
@@ -40,17 +48,25 @@ ninja -C builddir
 meson test -C builddir
 ```
 
-### Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `vulkan` | `true` | Build Vulkan VK_KHR_display support |
-| `examples` | `true` | Build example programs |
-| `tests` | `true` | Build unit tests |
+CMake:
 
 ```sh
-meson setup builddir -Dvulkan=false -Dexamples=false
+cmake -B build -G Ninja
+cmake --build build
+ctest --test-dir build
 ```
+
+### Options
+
+| Meson | CMake | Default | Description |
+|-------|-------|---------|-------------|
+| `vulkan` | `DRM_CXX_VULKAN` | on | `VK_KHR_display` support |
+| `examples` | `DRM_CXX_BUILD_EXAMPLES` | on | Example programs |
+| `tests` | `DRM_CXX_BUILD_TESTS` | on | Unit + integration tests |
+| `session` | `DRM_CXX_SESSION` | auto | `drm::session::Seat` (libseat) |
+| `cursor` | `DRM_CXX_CURSOR` | auto | `drm::cursor` (libxcursor) |
+| `blend2d` | `DRM_CXX_BLEND2D` | auto | `drm::capture` + `drm::csd` (Blend2D) |
+| `thorvg_janitor` | `DRM_CXX_BUILD_THORVG_JANITOR` | auto | `thorvg_janitor` example (ThorVG) |
 
 ## Usage
 
@@ -60,15 +76,29 @@ meson setup builddir -Dvulkan=false -Dexamples=false
 #include <drm-cxx/drm-cxx.hpp>
 ```
 
-### Open a DRM device
+### LayerScene
 
 ```cpp
 auto dev = drm::Device::open("/dev/dri/card0").value();
 dev.enable_universal_planes();
 dev.enable_atomic();
+
+drm::scene::LayerScene::Config cfg{crtc_id, connector_id, mode};
+auto scene = drm::scene::LayerScene::create(dev, cfg).value();
+
+auto bg = drm::scene::DumbBufferSource::create(dev, w, h, DRM_FORMAT_ARGB8888).value();
+// ... fill bg->pixels() ...
+
+drm::scene::LayerDesc desc;
+desc.source = std::move(bg);
+desc.display.dst_rect = {0, 0, w, h};
+auto handle = scene->add_layer(std::move(desc)).value();
+
+auto report = scene->commit().value();
+// report.layers_assigned / layers_composited / layers_unassigned
 ```
 
-### Enumerate planes and allocate layers
+### Raw plane allocation
 
 ```cpp
 auto registry = drm::planes::PlaneRegistry::enumerate(dev).value();
@@ -83,10 +113,10 @@ layer.set_property("FB_ID", fb_id)
 
 drm::planes::Allocator allocator(dev, registry);
 drm::AtomicRequest req(dev);
-auto assigned = allocator.apply(output, req, 0);
+auto assigned = allocator.apply(output, req, 0).value();
 ```
 
-### Input handling
+### Input
 
 ```cpp
 auto seat = drm::input::Seat::open().value();
@@ -100,7 +130,7 @@ seat.set_event_handler([&](const drm::input::InputEvent& ev) {
 });
 ```
 
-### EDID parsing
+### EDID
 
 ```cpp
 auto info = drm::display::parse_edid(edid_blob).value();
@@ -116,7 +146,7 @@ drm::set_log_level(drm::LogLevel::Debug);
 drm::log_info("Device opened: {}", path);
 ```
 
-Or at compile time: `-DDRM_CXX_LOG_LEVEL=4`
+Compile-time floor: `-DDRM_CXX_LOG_LEVEL=4`.
 
 ## Migration from drmpp
 

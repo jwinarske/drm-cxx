@@ -1,0 +1,31 @@
+<svg width="680" height="360" viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>drm-cxx logo</title>
+  <desc>Three stacked, isometric rectangles in cyan, magenta, and amber representing hardware display planes, with the drm-cxx wordmark beside them.</desc>
+  <style>
+    .plane-1 { fill: #0EA5B7; }
+    .plane-2 { fill: #D946A8; }
+    .plane-3 { fill: #F59E0B; }
+    .plane-edge { stroke: #0a0a0a; stroke-width: 2; stroke-linejoin: round; fill: none; }
+    .wm-main { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 56px; font-weight: 500; fill: #0a0a0a; letter-spacing: -1.5px; }
+    .wm-sub { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 14px; font-weight: 400; fill: #555555; letter-spacing: 2px; }
+    @media (prefers-color-scheme: dark) {
+      .plane-edge { stroke: #f5f5f5; }
+      .wm-main { fill: #f5f5f5; }
+      .wm-sub { fill: #aaaaaa; }
+    }
+  </style>
+
+  <g transform="translate(80, 110)">
+    <polygon class="plane-3" points="0,40 140,0 220,40 80,80"/>
+    <polygon class="plane-edge" points="0,40 140,0 220,40 80,80"/>
+
+    <polygon class="plane-2" points="20,80 160,40 240,80 100,120"/>
+    <polygon class="plane-edge" points="20,80 160,40 240,80 100,120"/>
+
+    <polygon class="plane-1" points="40,120 180,80 260,120 120,160"/>
+    <polygon class="plane-edge" points="40,120 180,80 260,120 120,160"/>
+  </g>
+
+  <text x="380" y="200" class="wm-main">drm-cxx</text>
+  <text x="382" y="226" class="wm-sub">C++17 / DRM / KMS</text>
+</svg>
