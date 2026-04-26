@@ -11,98 +11,34 @@
 //
 // Usage: atomic_modeset [/dev/dri/cardN]
 
-#include "../common/select_device.hpp"
+#include "../common/open_output.hpp"
 
-#include <drm-cxx/core/device.hpp>
-#include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
-#include <drm-cxx/detail/span.hpp>
-#include <drm-cxx/modeset/mode.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
-#include <drm-cxx/session/seat.hpp>
 
 #include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <optional>
 #include <utility>
 
 int main(int argc, char* argv[]) {
-  const auto path = drm::examples::select_device(argc, argv);
-  if (!path) {
+  auto output = drm::examples::open_and_pick_output(argc, argv);
+  if (!output) {
     return EXIT_FAILURE;
   }
-
-  // Prefer the seat's revocable fd when libseat is available — it owns
-  // master and resolves the open-vs-set_master race for us. Plain
-  // drm::Device::open is the fallback for stacks without seatd/logind.
-  auto seat = drm::session::Seat::open();
-  const auto seat_dev = seat ? seat->take_device(*path) : std::nullopt;
-  auto dev_holder = [&]() -> std::optional<drm::Device> {
-    if (seat_dev) {
-      return drm::Device::from_fd(seat_dev->fd);
-    }
-    auto r = drm::Device::open(*path);
-    if (!r) {
-      return std::nullopt;
-    }
-    return std::move(*r);
-  }();
-  if (!dev_holder) {
-    drm::println(stderr, "Failed to open {}", *path);
-    return EXIT_FAILURE;
-  }
-  auto& dev = *dev_holder;
-
-  if (auto r = dev.enable_universal_planes(); !r) {
-    drm::println(stderr, "enable_universal_planes: {}", r.error().message());
-    return EXIT_FAILURE;
-  }
-  if (auto r = dev.enable_atomic(); !r) {
-    drm::println(stderr, "enable_atomic: {}", r.error().message());
-    return EXIT_FAILURE;
-  }
-
-  const auto res = drm::get_resources(dev.fd());
-  if (!res) {
-    drm::println(stderr, "get_resources failed");
-    return EXIT_FAILURE;
-  }
-  drm::Connector conn{nullptr, &drmModeFreeConnector};
-  const auto connector_ids = drm::span<const std::uint32_t>(res->connectors, res->count_connectors);
-  for (const auto cid : connector_ids) {
-    if (auto c = drm::get_connector(dev.fd(), cid);
-        c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0 && c->encoder_id != 0) {
-      conn = std::move(c);
-      break;
-    }
-  }
-  if (!conn) {
-    drm::println(stderr, "No connected connector with an attached encoder");
-    return EXIT_FAILURE;
-  }
-  const auto enc = drm::get_encoder(dev.fd(), conn->encoder_id);
-  if (!enc || enc->crtc_id == 0) {
-    drm::println(stderr, "No encoder/CRTC for connector {}", conn->connector_id);
-    return EXIT_FAILURE;
-  }
-  const auto mode_res =
-      drm::select_preferred_mode(drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes));
-  if (!mode_res) {
-    drm::println(stderr, "No usable mode on connector {}", conn->connector_id);
-    return EXIT_FAILURE;
-  }
-  const auto mode = *mode_res;
-  const std::uint32_t fb_w = mode.width();
-  const std::uint32_t fb_h = mode.height();
-  drm::println("Modeset: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.refresh(),
-               conn->connector_id, enc->crtc_id);
+  auto& dev = output->device;
+  const drmModeModeInfo mode = output->mode;
+  const std::uint32_t fb_w = mode.hdisplay;
+  const std::uint32_t fb_h = mode.vdisplay;
+  drm::println("Modeset: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.vrefresh,
+               output->connector_id, output->crtc_id);
 
   // Single full-screen XRGB8888 layer. Paint a horizontal black-to-white
   // gradient: proves the framebuffer reached the screen and that the
@@ -129,9 +65,9 @@ int main(int argc, char* argv[]) {
   }
 
   drm::scene::LayerScene::Config cfg;
-  cfg.crtc_id = enc->crtc_id;
-  cfg.connector_id = conn->connector_id;
-  cfg.mode = mode.drm_mode;
+  cfg.crtc_id = output->crtc_id;
+  cfg.connector_id = output->connector_id;
+  cfg.mode = mode;
   auto scene_res = drm::scene::LayerScene::create(dev, cfg);
   if (!scene_res) {
     drm::println(stderr, "LayerScene::create: {}", scene_res.error().message());
