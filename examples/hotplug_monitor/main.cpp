@@ -18,7 +18,7 @@
 // the clock badge follow the new mode without restart. The udev
 // plumbing lives inside the library — this file just polls the fd.
 
-#include "../common/select_device.hpp"
+#include "../common/open_output.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "display/hotplug_monitor.hpp"
@@ -180,30 +180,17 @@ void print_active(const ActiveConfig& cfg) {
 }  // namespace
 
 int main(const int argc, char* argv[]) {
-  const auto path = drm::examples::select_device(argc, argv);
-  if (!path) {
+  // Connector-to-CRTC routing here uses `find_active_config` (above),
+  // which walks `conn->encoders` + `possible_crtcs` rather than just
+  // `conn->encoder_id`. That's the right shape for hotplug-time
+  // re-resolution, so the initial pickup uses it too — only the device
+  // open is shared with the rest of the example tree via open_device.
+  auto ctx = drm::examples::open_device(argc, argv);
+  if (!ctx) {
     return EXIT_FAILURE;
   }
-
-  // Same seat-acquisition rationale as atomic_modeset: a bare-TTY run
-  // needs us to be DRM master, and a session may want to revoke us
-  // when another VT activates.
-  auto seat = drm::session::Seat::open();
-
-  auto dev_result = drm::Device::open(*path);
-  if (!dev_result) {
-    drm::println(stderr, "Failed to open {}", *path);
-    return EXIT_FAILURE;
-  }
-  auto& dev = *dev_result;
-  if (auto r = dev.enable_universal_planes(); !r) {
-    drm::log_error("enable_universal_planes: {}", r.error().message());
-    return EXIT_FAILURE;
-  }
-  if (auto r = dev.enable_atomic(); !r) {
-    drm::log_error("enable_atomic: {}", r.error().message());
-    return EXIT_FAILURE;
-  }
+  auto& dev = ctx->device;
+  auto& seat = ctx->seat;
 
   auto active = find_active_config(dev.fd());
   if (!active) {

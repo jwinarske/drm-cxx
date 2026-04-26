@@ -14,7 +14,7 @@
 // the per-layer dirty surface that Phase 2.2 will eventually minimize
 // property/FB writes against.
 
-#include "common/select_device.hpp"
+#include "common/open_output.hpp"
 #include "signage_player/overlay_renderer.hpp"
 #include "signage_player/playlist.hpp"
 
@@ -360,76 +360,23 @@ int main(int argc, char** argv) {
                playlist->overlay().has_value() ? "yes" : "no",
                playlist->ticker().has_value() ? "yes" : "no");
 
-  const auto device_path = drm::examples::select_device(argc, argv);
-  if (!device_path) {
+  auto output = drm::examples::open_and_pick_output(argc, argv);
+  if (!output) {
     return EXIT_FAILURE;
   }
+  auto& dev = output->device;
+  auto& seat = output->seat;
+  const std::uint32_t crtc_id = output->crtc_id;
+  const std::uint32_t connector_id = output->connector_id;
+  const drmModeModeInfo mode = output->mode;
+  const std::uint32_t fb_w = mode.hdisplay;
+  const std::uint32_t fb_h = mode.vdisplay;
+  drm::println("Mode: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.vrefresh,
+               connector_id, crtc_id);
 
-  auto seat = drm::session::Seat::open();
   bool session_paused = false;
   bool flip_pending = false;
   int pending_resume_fd = -1;
-
-  const auto seat_dev = seat ? seat->take_device(*device_path) : std::nullopt;
-  auto dev_holder = [&]() -> std::optional<drm::Device> {
-    if (seat_dev) {
-      return drm::Device::from_fd(seat_dev->fd);
-    }
-    auto r = drm::Device::open(*device_path);
-    if (!r) {
-      return std::nullopt;
-    }
-    return std::move(*r);
-  }();
-  if (!dev_holder) {
-    drm::println(stderr, "Failed to open {}", *device_path);
-    return EXIT_FAILURE;
-  }
-  auto& dev = *dev_holder;
-  if (auto r = dev.enable_universal_planes(); !r) {
-    drm::println(stderr, "enable_universal_planes failed");
-    return EXIT_FAILURE;
-  }
-  if (auto r = dev.enable_atomic(); !r) {
-    drm::println(stderr, "enable_atomic failed");
-    return EXIT_FAILURE;
-  }
-
-  auto res = drm::get_resources(dev.fd());
-  if (!res) {
-    drm::println(stderr, "get_resources failed");
-    return EXIT_FAILURE;
-  }
-  drm::Connector conn{nullptr, &drmModeFreeConnector};
-  for (int i = 0; i < res->count_connectors; ++i) {
-    if (auto c = drm::get_connector(dev.fd(), res->connectors[i]);
-        c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0 && c->encoder_id != 0) {
-      conn = std::move(c);
-      break;
-    }
-  }
-  if (!conn) {
-    drm::println(stderr, "No connected connector");
-    return EXIT_FAILURE;
-  }
-  auto enc = drm::get_encoder(dev.fd(), conn->encoder_id);
-  if (!enc || enc->crtc_id == 0) {
-    drm::println(stderr, "No encoder/CRTC for connector");
-    return EXIT_FAILURE;
-  }
-  const std::uint32_t crtc_id = enc->crtc_id;
-  const std::uint32_t connector_id = conn->connector_id;
-  const auto mode_res =
-      drm::select_preferred_mode(drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes));
-  if (!mode_res) {
-    drm::println(stderr, "No mode selected");
-    return EXIT_FAILURE;
-  }
-  const auto mode = *mode_res;
-  const std::uint32_t fb_w = mode.width();
-  const std::uint32_t fb_h = mode.height();
-  drm::println("Mode: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.refresh(),
-               connector_id, crtc_id);
 
   // Layer count is whatever the playlist asks for. LayerScene's Phase 2.3
   // composition fallback CPU-blends any layers the allocator can't fit
@@ -477,7 +424,7 @@ int main(int argc, char** argv) {
   dims.with_clock = has_clock;
   dims.with_logo = has_logo;
 
-  auto scene_built = build_scene(dev, crtc_id, connector_id, mode.drm_mode, dims);
+  auto scene_built = build_scene(dev, crtc_id, connector_id, mode, dims);
   if (!scene_built) {
     drm::println(stderr, "scene build failed: {}", scene_built.error().message());
     return EXIT_FAILURE;
@@ -635,7 +582,7 @@ int main(int argc, char** argv) {
   // crop. That's an honest demo of the rebind primitive; a production
   // app would also rebuild layer buffers at the new dimensions.
   std::optional<drm::display::HotplugMonitor> hotplug_monitor;
-  drmModeModeInfo current_mode = mode.drm_mode;
+  drmModeModeInfo current_mode = mode;
   std::uint32_t current_crtc_id = crtc_id;
   std::uint32_t current_connector_id = connector_id;
   if (hotplug_follow) {
@@ -728,7 +675,7 @@ int main(int argc, char** argv) {
       const int new_fd = pending_resume_fd;
       pending_resume_fd = -1;
       scene->on_session_paused();
-      dev_holder = drm::Device::from_fd(new_fd);
+      output->device = drm::Device::from_fd(new_fd);
       pfds[1].fd = dev.fd();
       if (auto r = dev.enable_universal_planes(); !r) {
         drm::println(stderr, "resume: enable_universal_planes failed");
