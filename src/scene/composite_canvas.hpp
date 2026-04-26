@@ -82,11 +82,19 @@ struct CompositeRect {
   std::uint32_t h{0};
 };
 
+/// Software composition target for layers the allocator could not
+/// place on a hardware plane. Owns a pair of ARGB8888 dumb buffers and
+/// ping-pongs between them per frame; the CPU paints into the back
+/// while the kernel scans the front. The static `blend_into` /
+/// `clear_into` helpers are exposed so unit tests can exercise the
+/// blend math against stack buffers without a live DRM device.
 class CompositeCanvas {
  public:
-  /// Allocate a single ARGB8888 dumb buffer at the requested size.
+  /// Allocate a pair of ARGB8888 dumb buffers at the requested size.
   /// Width / height come from `cfg.canvas_width / canvas_height`;
-  /// `max_canvases` is honoured up to 1 for v1.
+  /// `max_canvases` is honoured up to 1 for v1 (controls how many
+  /// distinct canvas surfaces, not the per-canvas buffer count — the
+  /// double-buffering above is unconditional).
   [[nodiscard]] static drm::expected<std::unique_ptr<CompositeCanvas>, std::error_code> create(
       const drm::Device& dev, const CompositeCanvasConfig& cfg);
 
@@ -182,16 +190,25 @@ class CompositeCanvas {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
     return buffers_[back_index_].fb_id();
   }
+  /// Canvas width in pixels (CRTC mode size by default; explicit for
+  /// headless / offscreen scenes).
   [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
+  /// Canvas height in pixels.
   [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
+  /// Bytes per row of the back buffer. Both buffers were allocated to
+  /// the same size; the kernel may pad above `width * 4`.
   [[nodiscard]] std::uint32_t stride_bytes() const noexcept {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
     return buffers_[back_index_].stride();
   }
+
   // Canvas pixel format and modifier are fixed for v1 (ARGB8888 linear),
   // so these are static — exposed via the canvas type rather than an
   // instance for clarity at the call site.
+
+  /// DRM FourCC for canvas pixels (`DRM_FORMAT_ARGB8888` in v1).
   [[nodiscard]] static std::uint32_t drm_fourcc() noexcept;
+  /// DRM modifier for canvas pixels (`DRM_FORMAT_MOD_LINEAR` in v1).
   [[nodiscard]] static std::uint64_t modifier() noexcept;
 
   /// True when the canvas can be armed — both buffers were allocated
@@ -202,7 +219,16 @@ class CompositeCanvas {
   }
 
   // ── Session hooks ────────────────────────────────────────────────────
+
+  /// Drop both dumb buffers' GEM/FB state without ioctls — the
+  /// libseat-revoked fd cannot service them. Pairs with
+  /// `on_session_resumed`. After this call `armable()` is false until
+  /// the resume completes.
   void on_session_paused() noexcept;
+
+  /// Re-allocate both ARGB8888 dumb buffers against `new_dev`.
+  /// Dimensions and back/front orientation are preserved; pixel
+  /// content is not. Caller's responsibility to repaint.
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(const drm::Device& new_dev);
 
  private:

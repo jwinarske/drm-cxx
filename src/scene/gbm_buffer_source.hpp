@@ -42,6 +42,12 @@ class Device;
 
 namespace drm::scene {
 
+/// `LayerBufferSource` backed by a single CPU-mapped GBM scanout BO,
+/// allocated with `GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR |
+/// GBM_BO_USE_WRITE`. Same single-buffer semantics as
+/// `DumbBufferSource`, but goes through GBM so future variants can
+/// negotiate modifiers, export DMA-BUFs, or front a `gbm_surface` for
+/// GL/Vulkan producers without changing the source's public shape.
 class GbmBufferSource : public LayerBufferSource {
  public:
   /// Allocate a single GBM scanout buffer of the given size and DRM
@@ -79,6 +85,9 @@ class GbmBufferSource : public LayerBufferSource {
     return {buffer_.data(), buffer_.size_bytes()};
   }
 
+  /// Bytes per row in the buffer. The GBM allocator picks a stride
+  /// that may exceed `width * 4` for alignment; honour this rather
+  /// than computing one from the format.
   [[nodiscard]] std::uint32_t stride() const noexcept { return buffer_.stride(); }
 
  private:

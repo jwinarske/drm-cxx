@@ -19,6 +19,10 @@
 
 namespace drm::scene {
 
+/// Diagnostic snapshot of a single `LayerScene::commit()` or `test()`
+/// call. Every field is a non-negative count; consumers use these for
+/// unit-test assertions, benchmark instrumentation, and runtime
+/// telemetry. Fields the current phase doesn't populate stay at 0.
 struct CommitReport {
   /// Total layers in the scene at commit time.
   /// Invariant: `layers_total == layers_assigned + layers_composited + layers_unassigned`.

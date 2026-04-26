@@ -26,6 +26,12 @@ namespace drm::scene {
 
 class LayerScene;
 
+/// Scene-owned layer state. Returned by `LayerScene::get_layer`; never
+/// constructed directly by consumers (the constructor is exposed for
+/// pimpl reasons but is intended for `LayerScene::add_layer` only).
+/// Accessors return the source, the current `DisplayParams`, and the
+/// allocator hints; setters mutate `DisplayParams` and mark the layer
+/// dirty so the next commit re-emits the affected plane properties.
 class Layer {
  public:
   Layer(const Layer&) = delete;
@@ -34,13 +40,25 @@ class Layer {
   Layer& operator=(Layer&&) noexcept = default;
   ~Layer() = default;
 
+  /// The handle the scene minted for this layer. Stable across
+  /// `rebind()` and `on_session_resumed()`.
   [[nodiscard]] LayerHandle handle() const noexcept { return handle_; }
 
+  /// Mutable / const access to the layer's buffer source. The scene
+  /// keeps ownership; consumers may call source-specific APIs
+  /// (`pixels()`, `stride()`) but must not destroy the source.
   [[nodiscard]] LayerBufferSource& source() noexcept { return *source_; }
   [[nodiscard]] const LayerBufferSource& source() const noexcept { return *source_; }
 
+  /// Current display configuration (src/dst rect, rotation, alpha,
+  /// zpos). Mutate via the setters below — do not const_cast.
   [[nodiscard]] const DisplayParams& display() const noexcept { return display_; }
+
+  /// Allocator hint passed at `add_layer` time. Read-only post-create.
   [[nodiscard]] drm::planes::ContentType content_type() const noexcept { return content_type_; }
+
+  /// Producer's expected refresh rate in Hz from `LayerDesc`, 0 if no
+  /// hint was supplied. Read-only post-create.
   [[nodiscard]] std::uint32_t update_hint_hz() const noexcept { return update_hint_hz_; }
 
   // ── Display-side mutation ──────────────────────────────────────────
@@ -48,28 +66,42 @@ class Layer {
   // successful commit via mark_clean(). The granularity is per-layer,
   // not per-field — Phase 2.2's property minimization refines that.
 
+  /// Update `display.src_rect`. Marks the layer dirty.
   void set_src_rect(Rect r) noexcept {
     display_.src_rect = r;
     dirty_ = true;
   }
+  /// Update `display.dst_rect`. Marks the layer dirty.
   void set_dst_rect(Rect r) noexcept {
     display_.dst_rect = r;
     dirty_ = true;
   }
+  /// Update `display.rotation` (DRM_MODE_ROTATE_* | DRM_MODE_REFLECT_*).
+  /// Marks the layer dirty.
   void set_rotation(std::uint64_t rot) noexcept {
     display_.rotation = rot;
     dirty_ = true;
   }
+  /// Update `display.alpha` (0xFFFF = fully opaque). Marks the layer
+  /// dirty.
   void set_alpha(std::uint16_t a) noexcept {
     display_.alpha = a;
     dirty_ = true;
   }
+  /// Update `display.zpos`. `std::nullopt` lets the allocator pick.
+  /// Marks the layer dirty.
   void set_zpos(std::optional<int> z) noexcept {
     display_.zpos = z;
     dirty_ = true;
   }
 
+  /// True when at least one display-side field has been mutated since
+  /// the last `mark_clean`. The scene reads this during commit build to
+  /// decide whether the layer's plane state needs re-emission.
   [[nodiscard]] bool is_dirty() const noexcept { return dirty_; }
+
+  /// Reset the dirty flag. Called by `LayerScene` after a commit
+  /// succeeds; consumers shouldn't normally call it directly.
   void mark_clean() noexcept { dirty_ = false; }
 
   /// Construct a Layer. In practice this is only called from

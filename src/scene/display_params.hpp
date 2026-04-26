@@ -19,10 +19,11 @@
 
 namespace drm::scene {
 
-/// Reuse the geometry primitive already defined by drm::planes::Layer
-/// so scene → planes::Layer lowering is a trivial field copy rather
-/// than a type conversion. int32_t x/y match KMS CRTC_X/Y (signed —
-/// planes can extend off-screen); uint32_t w/h match CRTC_W/H.
+/// Geometry primitive for src/dst rectangles. Aliased onto
+/// `drm::planes::Rect` so scene → `planes::Layer` lowering is a
+/// trivial field copy rather than a type conversion. `int32_t x/y`
+/// match KMS `CRTC_X/Y` (signed — planes can extend off-screen);
+/// `uint32_t w/h` match `CRTC_W/H`.
 using Rect = drm::planes::Rect;
 
 /// Per-layer display configuration. Lowered to plane properties at
