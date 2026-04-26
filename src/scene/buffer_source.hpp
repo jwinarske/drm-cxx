@@ -33,8 +33,10 @@
 #pragma once
 
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <system_error>
 
 namespace drm {
@@ -90,6 +92,26 @@ struct AcquiredBuffer {
   void* opaque{nullptr};
 };
 
+/// Read-only view of a source's CPU-mapped pixel storage. Returned by
+/// `LayerBufferSource::cpu_mapping()` for sources whose buffer is laid
+/// out as a contiguous linear span (DumbBufferSource, GbmBufferSource
+/// configured with `GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE`). Sources
+/// holding tiled / compressed / GPU-only buffers must return
+/// `std::nullopt` — the composition fallback reads through this view
+/// assuming a linear layout and would produce visual garbage if handed
+/// tiled bytes. By contract, sources that return a CpuMapping must have
+/// a modifier of `DRM_FORMAT_MOD_LINEAR` or `DRM_FORMAT_MOD_INVALID`
+/// (the latter is the legacy "implementation-defined linear" sentinel
+/// many drivers still emit).
+struct CpuMapping {
+  /// Linear pixel storage covering at least `height * stride_bytes`
+  /// bytes. The first row starts at `pixels.data()`.
+  drm::span<const std::uint8_t> pixels;
+  /// Bytes per row; usually `width * 4` for ARGB/XRGB formats but may
+  /// be padded by the kernel / GBM allocator.
+  std::uint32_t stride_bytes{0};
+};
+
 /// Polymorphic interface for "where does this layer's content come
 /// from?". Concrete v1 implementations: `DumbBufferSource` (single
 /// dumb buffer, CPU-writable) and `GbmBufferSource` (rotating ring of
@@ -129,6 +151,21 @@ class LayerBufferSource {
   /// lowering to populate the `planes::Layer` format/modifier/size
   /// properties the allocator reads.
   [[nodiscard]] virtual SourceFormat format() const noexcept = 0;
+
+  /// Read-only CPU view of the buffer. Returned for sources that hold
+  /// a linear CPU mapping (DumbBufferSource, GbmBufferSource with
+  /// LINEAR + WRITE usage); `std::nullopt` for sources whose pixels
+  /// only live in GPU memory or behind a producer the scene can't
+  /// reach (future EGL Stream consumers, NPU outputs).
+  ///
+  /// Composition fallback uses this to pull pixels from layers the
+  /// allocator couldn't place on hardware. Sources that return
+  /// `nullopt` are uncompositable — when the allocator drops them, the
+  /// scene cannot rescue them via composition and they stay dropped
+  /// for the frame.
+  [[nodiscard]] virtual std::optional<CpuMapping> cpu_mapping() const noexcept {
+    return std::nullopt;
+  }
 
   // ── v2 DriverOwnsBinding hooks ─────────────────────────────────────
   //

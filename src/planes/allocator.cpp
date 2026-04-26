@@ -101,9 +101,23 @@ void Allocator::set_test_preparer(TestPreparer preparer) {
 
 // ── Main entry point (§13.3 warm-start logic) ──────────────────
 
-drm::expected<std::size_t, std::error_code> Allocator::apply(Output& output, AtomicRequest& req,
-                                                             const uint32_t commit_flags) {
+drm::expected<std::size_t, std::error_code> Allocator::apply(
+    Output& output, AtomicRequest& req, const uint32_t commit_flags,
+    drm::span<const uint32_t> external_reserved) {
   test_commits_this_frame_ = 0;
+  // Diagnostics are per-apply; reset before any property-writing path
+  // can run. apply_layer_to_plane_real and disable_unused_planes both
+  // bump the same counters.
+  diagnostics_ = {};
+  // Stash for the duration of this apply() — disable_unused_planes
+  // consumes it. Cleared on every exit path so a later apply() call
+  // never picks up stale state from a previous frame.
+  external_reserved_ = external_reserved;
+  struct ResetReserved {
+    Allocator* self;
+    ~ResetReserved() { self->external_reserved_ = {}; }
+  };
+  const ResetReserved reset_reserved{this};
 
   // Reset layer assignment state
   for (auto* layer : output.layers()) {
@@ -152,6 +166,20 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(Output& output, Ato
 
 drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation(
     Output& output, AtomicRequest& req, const uint32_t flags, const uint32_t crtc_index) {
+  // Bail to full_search when the caller's external_reserved set
+  // overlaps with our remembered allocation. The previous frame's
+  // assignment placed a layer where the caller now wants the canvas
+  // (or some other reserved use); we can't honour both, and the
+  // simplest path is to re-search from scratch.
+  for (const auto& [plane_id, layer] : previous_allocation_) {
+    for (const auto reserved : external_reserved_) {
+      if (plane_id == reserved) {
+        return drm::unexpected<std::error_code>(
+            std::make_error_code(std::errc::resource_unavailable_try_again));
+      }
+    }
+  }
+
   // Validate that all layer pointers from previous allocation still exist
   const auto& current_layers = output.layers();
   for (auto it = previous_allocation_.begin(); it != previous_allocation_.end();) {
@@ -181,11 +209,14 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
 
   // TEST passed → populate the caller's request so the real commit
   // reflects the tested state: disables for dropped planes first, then
-  // property writes for planes we're keeping.
-  disable_unused_planes(req, crtc_index, previous_allocation_);
+  // property writes for planes we're keeping. The warm-start path is
+  // the steady-state best case for property minimization: every plane
+  // already has the correct layer pointer in last_committed_, so
+  // unchanged properties skip the wire entirely.
+  disable_unused_planes(req, crtc_index, previous_allocation_, /*track_state=*/true);
   std::size_t assigned = 0;
   for (auto& [plane_id, layer] : previous_allocation_) {
-    if (auto r = apply_layer_to_plane(*layer, plane_id, req); !r) {
+    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
     layer->assigned_plane_ = plane_id;
@@ -214,6 +245,20 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   auto groups = split_independent_groups(output.layers());
 
   auto available_planes = registry_.for_crtc(crtc_index);
+  // Externally reserved planes are off-limits for placement *and*
+  // for the disable-unused pass. The caller (e.g. LayerScene's
+  // compose_unassigned) will arm them itself; if we let the
+  // bipartite preseed grab one, the caller would either fight us
+  // for the slot or its canvas would have nowhere to land.
+  if (!external_reserved_.empty()) {
+    available_planes.erase(
+        std::remove_if(available_planes.begin(), available_planes.end(),
+                       [this](const PlaneCapabilities* p) {
+                         return std::any_of(external_reserved_.begin(), external_reserved_.end(),
+                                            [p](const std::uint32_t pid) { return pid == p->id; });
+                       }),
+        available_planes.end());
+  }
 
   std::unordered_map<uint32_t, Layer*> best_assignment;
   std::size_t total_assigned = 0;
@@ -321,11 +366,14 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     }
   }
 
-  // Apply the best assignment
+  // Apply the best assignment. Real-commit path → minimization-aware
+  // variant; the per-plane snapshot detects layer reassignment versus
+  // last frame and forces a full write when it happened, otherwise
+  // skips properties whose value is unchanged.
   for (auto& [plane_id, layer] : best_assignment) {
     layer->assigned_plane_ = plane_id;
     layer->needs_composition_ = false;
-    if (auto r = apply_layer_to_plane(*layer, plane_id, req); !r) {
+    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
   }
@@ -378,7 +426,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // never touched idle overlays on the first commit and didn't see
   // this; match that shape here.
   if (previous_allocation_valid_) {
-    disable_unused_planes(req, crtc_index, planes_in_use);
+    disable_unused_planes(req, crtc_index, planes_in_use, /*track_state=*/true);
   }
 
   // Save for warm-start next frame
@@ -533,6 +581,15 @@ int Allocator::layer_priority(const Layer& layer) {
 
 bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, const Layer& layer,
                                             const uint32_t crtc_index) {
+  // Force-composited layers are statically incompatible with every
+  // plane: the caller (test rig, debug overlay, EGL Streams workaround)
+  // has explicitly asked for the composition fallback, and short-
+  // circuiting here propagates that decision through every downstream
+  // path (bipartite preseed, candidate ranking, recursive backtrack)
+  // without each having to re-check the flag.
+  if (layer.force_composited_) {
+    return false;
+  }
   if (!plane.compatible_with_crtc(crtc_index)) {
     return false;
   }
@@ -680,7 +737,7 @@ bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assi
   // previous frame's FB/CRTC/zpos on planes we've stopped using —
   // which typically contends with the new assignment (same zpos on
   // same CRTC → EINVAL) and hides the real reason TEST is failing.
-  disable_unused_planes(test_req, crtc_index, assignment);
+  disable_unused_planes(test_req, crtc_index, assignment, /*track_state=*/false);
 
   // Apply each assigned layer's properties
   for (const auto& [plane_id, layer] : assignment) {
@@ -716,7 +773,8 @@ bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assi
 }
 
 void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_index,
-                                      const std::unordered_map<uint32_t, Layer*>& keep) const {
+                                      const std::unordered_map<uint32_t, Layer*>& keep,
+                                      const bool track_state) {
   for (const auto* plane : registry_.for_crtc(crtc_index)) {
     // Cursor planes are owned by a separate code path (the cursor
     // handler) and shouldn't be force-disabled here.
@@ -726,12 +784,56 @@ void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_in
     if (keep.count(plane->id) != 0) {
       continue;
     }
+    // External reservations (e.g. the composition canvas plane) — the
+    // caller will arm them itself after apply() returns. Skipping the
+    // disable here saves two property writes per reserved plane per
+    // frame and removes the dependency on kernel last-write-wins
+    // semantics for the same atomic request.
+    bool externally_reserved = false;
+    for (const auto pid : external_reserved_) {
+      if (pid == plane->id) {
+        externally_reserved = true;
+        break;
+      }
+    }
+    if (externally_reserved) {
+      continue;
+    }
+    // Property minimization: when track_state is on, skip emission if
+    // the plane is already off (no last_committed_ entry, or the
+    // entry's FB_ID is already 0). last_committed_ is the source of
+    // truth for what the kernel currently has on this plane;
+    // disabling an already-disabled plane is a wasted pair of
+    // property writes the kernel still has to walk. The TEST path
+    // (track_state=false) always emits because the throwaway request
+    // can't rely on the kernel's accumulated state being consulted
+    // during atomic_check the same way a real commit does.
+    if (track_state && !force_full_writes_) {
+      const auto it = last_committed_.find(plane->id);
+      const bool already_off = (it == last_committed_.end()) || [&] {
+        const auto fb_it = it->second.properties.find("FB_ID");
+        return fb_it == it->second.properties.end() || fb_it->second == 0U;
+      }();
+      if (already_off) {
+        continue;
+      }
+    }
     if (const auto fb_prop = prop_store_.property_id(plane->id, "FB_ID"); fb_prop.has_value()) {
-      (void)req.add_property(plane->id, *fb_prop, 0);
+      if (req.add_property(plane->id, *fb_prop, 0).has_value() && track_state) {
+        ++diagnostics_.properties_written;
+        ++diagnostics_.fbs_attached;
+      }
     }
     if (const auto crtc_prop = prop_store_.property_id(plane->id, "CRTC_ID");
         crtc_prop.has_value()) {
-      (void)req.add_property(plane->id, *crtc_prop, 0);
+      if (req.add_property(plane->id, *crtc_prop, 0).has_value() && track_state) {
+        ++diagnostics_.properties_written;
+      }
+    }
+    // The plane is now off. Clear its snapshot so the next assignment
+    // is treated as a fresh activation (forces a full property write).
+    if (track_state) {
+      last_committed_.erase(plane->id);
     }
   }
 }
@@ -759,6 +861,74 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer
       return result;
     }
   }
+  return {};
+}
+
+drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const Layer& layer,
+                                                                          const uint32_t plane_id,
+                                                                          AtomicRequest& req) {
+  // Decide whether this is a full re-emit (every property written
+  // unconditionally) or a per-property diff against last frame's
+  // snapshot. Full-write triggers:
+  //   - force_full_writes_ is on (driver-quirk opt-out).
+  //   - last_committed_ has no entry for this plane (first activation
+  //     since the allocator was constructed, or since the plane was
+  //     last detached by disable_unused_planes).
+  //   - the entry's stored layer pointer differs from the new one,
+  //     which means the plane is being reassigned to a different
+  //     scene-side Layer; without a full write the new layer would
+  //     inherit any property the old layer had set but the new one
+  //     hasn't (e.g. rotation, alpha).
+  const auto it = last_committed_.find(plane_id);
+  const bool full_write =
+      force_full_writes_ || it == last_committed_.end() || it->second.layer != &layer;
+
+  for (const auto& [name, value] : layer.properties()) {
+    auto prop_id = prop_store_.property_id(plane_id, name);
+    if (!prop_id.has_value()) {
+      continue;
+    }
+    if (prop_store_.is_immutable(plane_id, name).value_or(false)) {
+      continue;
+    }
+    bool need_write = full_write;
+    if (!need_write) {
+      const auto& prev = it->second.properties;
+      const auto pit = prev.find(name);
+      need_write = (pit == prev.end()) || (pit->second != value);
+    }
+    // FB_ID always emits, regardless of the snapshot diff. KMS treats
+    // FB_ID re-attachment as the "this is a new frame" signal — the
+    // kernel uses it to schedule the page-flip event a non-blocking
+    // commit relies on. Suppressing the write when the value is
+    // unchanged (single-buffer source like DumbBufferSource where
+    // pixel bytes mutate in place between commits) leaves the
+    // AtomicRequest empty for an otherwise-clean scene; the kernel
+    // accepts the empty commit but never queues PAGE_FLIP_EVENT, and
+    // the caller's flip_pending wedges true. The other plane
+    // properties (CRTC_*, SRC_*, alpha, zpos, rotation) still benefit
+    // from the diff, which is the bulk of the per-frame property
+    // traffic.
+    if (name == "FB_ID") {
+      need_write = true;
+    }
+    if (!need_write) {
+      continue;
+    }
+    if (auto result = req.add_property(plane_id, *prop_id, value); !result.has_value()) {
+      return result;
+    }
+    ++diagnostics_.properties_written;
+    if (name == "FB_ID") {
+      ++diagnostics_.fbs_attached;
+    }
+  }
+  // Update the snapshot to reflect what's now committed for this
+  // plane. Storing a copy of properties() avoids tying our snapshot
+  // to the layer's mutable property map (a future scene relayout
+  // could rewrite layer.properties() between commits, and we'd diff
+  // against the wrong baseline).
+  last_committed_[plane_id] = LastCommitted{&layer, layer.properties()};
   return {};
 }
 

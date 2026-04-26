@@ -137,13 +137,48 @@ if has_blend2d
       dependencies : test_deps,
     ),
   )
+
+  # LayerScene composition fallback against VKMS. Self-skips when vkms
+  # is absent. Pulls capture::snapshot for pixel readback, so it's
+  # gated on the same blend2d feature as test_capture_vkms.
+  test('test_layer_scene_composition_vkms',
+    executable('test_layer_scene_composition_vkms',
+      'integration/test_layer_scene_composition_vkms.cpp',
+      dependencies : test_deps,
+    ),
+  )
 endif
+
+# LayerScene Phase 2.2 property-minimization tests against VKMS.
+# CommitReport diagnostics, not capture::snapshot — independent of the
+# blend2d gate.
+test('test_layer_scene_minimization_vkms',
+  executable('test_layer_scene_minimization_vkms',
+    'integration/test_layer_scene_minimization_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# LayerScene Phase 2.4 rebind tests against VKMS.
+test('test_layer_scene_rebind_vkms',
+  executable('test_layer_scene_rebind_vkms',
+    'integration/test_layer_scene_rebind_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
 
 # drm::scene unit tests — scene lives in the library now (src/scene/),
 # so test_scene just depends on test_deps like every other unit test.
 test('test_scene',
   executable('test_scene',
     'unit/test_scene.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_composite_canvas',
+  executable('test_composite_canvas',
+    'unit/test_composite_canvas.cpp',
     dependencies : test_deps,
   ),
 )
@@ -155,6 +190,15 @@ if get_option('examples')
     executable('test_playlist',
       'unit/test_playlist.cpp',
       dependencies : [gtest_dep, gtest_main_dep, signage_playlist_dep],
+    ),
+  )
+
+  # test_patterns painters live under examples/, same arrangement as
+  # the playlist parser above.
+  test('test_test_patterns',
+    executable('test_test_patterns',
+      'unit/test_test_patterns.cpp',
+      dependencies : [gtest_dep, gtest_main_dep, test_patterns_dep],
     ),
   )
 endif

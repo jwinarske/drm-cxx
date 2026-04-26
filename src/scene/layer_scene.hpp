@@ -27,6 +27,7 @@
 #pragma once
 
 #include "commit_report.hpp"
+#include "compatibility_report.hpp"
 #include "layer.hpp"
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
@@ -106,6 +107,16 @@ class LayerScene {
   [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(std::uint32_t flags = 0,
                                                                     void* user_data = nullptr);
 
+  /// Driver-quirk opt-out: when true, every layer property is
+  /// re-emitted on every commit, bypassing the Phase 2.2 per-plane
+  /// snapshot diff. Default false. Toggle on for drivers that refuse
+  /// to inherit unwritten state across commits — empirically rare
+  /// (we have no confirmed instance) but kept as a documented escape
+  /// hatch for embedded stacks that might surface one. Survives
+  /// across pause/resume; cleared on scene destruction.
+  void set_force_full_property_writes(bool force) noexcept;
+  [[nodiscard]] bool force_full_property_writes() const noexcept;
+
   // ── Session hooks ──────────────────────────────────────────────────
   //
   // Mirror drm::cursor::Renderer's session contract. The CRTC/
@@ -126,6 +137,29 @@ class LayerScene {
   /// valid across the call; callers do not need to rebuild their
   /// handle maps.
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(drm::Device& new_dev);
+
+  /// Rebind the scene to a new CRTC / connector / mode without
+  /// destroying it. Used for hotplug-driven mode switches and
+  /// CRTC migration on connector reassignment. Same fd, same set of
+  /// live layer handles — the scene re-resolves CRTC index, refreshes
+  /// the MODE_ID blob, re-caches the connector and CRTC properties,
+  /// drops the allocator's warm state and per-plane property snapshot
+  /// (kernel state from the old binding doesn't transfer), and forces
+  /// the next commit to carry `ALLOW_MODESET`.
+  ///
+  /// Layer handles survive verbatim (same id, same generation). Layer
+  /// sources keep their existing buffers — those are tied to the fd,
+  /// not the CRTC. Returns a `CompatibilityReport` listing layers
+  /// that don't look like they'll fit the new configuration; those
+  /// entries don't block the rebind, they just signal what the
+  /// caller should reposition or remove before the next commit.
+  ///
+  /// A failure here (e.g. property recache against the new CRTC
+  /// fails, or registry re-enumeration fails) leaves the scene in a
+  /// partially-rebound state; the caller should treat the scene as
+  /// unusable and tear it down, rather than retrying.
+  [[nodiscard]] drm::expected<CompatibilityReport, std::error_code> rebind(
+      std::uint32_t new_crtc_id, std::uint32_t new_connector_id, drmModeModeInfo new_mode);
 
  private:
   class Impl;

@@ -5,6 +5,8 @@
 
 #include "buffer_source.hpp"
 #include "commit_report.hpp"
+#include "compatibility_report.hpp"
+#include "composite_canvas.hpp"
 #include "layer.hpp"
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
@@ -19,14 +21,17 @@
 #include <drm-cxx/planes/output.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
 
+#include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
-#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -144,6 +149,9 @@ class LayerScene::Impl {
 
     auto& planes_layer = output_.add_layer();
     slot.planes_layer = &planes_layer;
+    if (desc.force_composited) {
+      planes_layer.set_composited();
+    }
 
     slot.scene_layer = std::make_unique<Layer>(handle, std::move(desc.source), desc.display,
                                                desc.content_type, desc.update_hint_hz);
@@ -275,32 +283,64 @@ class LayerScene::Impl {
 
     // Let the allocator pick planes. apply() writes the winning layer-
     // to-plane assignments into `req`. It returns how many layers were
-    // placed on hardware; anything else is unassigned (Phase 2.1 drops
-    // with a log_warn; Phase 2.3 will composite). allocator_ is
-    // engaged in the ctor and re-engaged across on_session_resumed —
-    // never empty by the time do_commit runs.
+    // placed on hardware; anything else is unassigned and routed
+    // through compose_unassigned() below. allocator_ is engaged in
+    // the ctor and re-engaged across on_session_resumed — never empty
+    // by the time do_commit runs.
+    //
+    // If the previous frame ended with the composition canvas armed
+    // on a specific plane, hand that plane id to apply() as an
+    // "external reservation" so its disable_unused_planes pass leaves
+    // it alone — compose_unassigned will overwrite the properties
+    // moments later either way, but the reservation saves the
+    // round-trip and removes a dependency on last-write-wins ordering
+    // inside the kernel's atomic state machine.
+    // Pre-reserve a canvas plane when overflow is anticipated. If the
+    // scene has more layers than CRTC-compatible non-cursor planes,
+    // the allocator would greedily fill every plane and leave
+    // compose_unassigned with no plane to land the canvas on; the
+    // overflow layers would then drop. Reserving a plane up front
+    // forces the allocator to place at most N-1 layers on hardware,
+    // leaving one OVERLAY free for the canvas. The reservation is
+    // sticky once a frame uses it (via `last_canvas_plane_id_`), so
+    // subsequent frames don't keep flipping which plane the canvas
+    // lives on.
+    if (!last_canvas_plane_id_.has_value()) {
+      if (auto resv = pick_canvas_reservation_if_needed(); resv.has_value()) {
+        last_canvas_plane_id_ = resv;
+      }
+    }
+    const std::array<std::uint32_t, 1> reserved_planes{last_canvas_plane_id_.value_or(0)};
+    const auto reserved_span = last_canvas_plane_id_.has_value()
+                                   ? drm::span<const std::uint32_t>(reserved_planes.data(), 1)
+                                   : drm::span<const std::uint32_t>{};
     auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        allocator_->apply(output_, req, effective_flags);
+        allocator_->apply(output_, req, effective_flags, reserved_span);
     if (!assigned) {
       release_all(acquisitions);
       return drm::unexpected<std::error_code>(assigned.error());
     }
     report.layers_assigned = *assigned;
-    report.layers_unassigned = report.layers_total - report.layers_assigned;
-    if (report.layers_unassigned != 0) {
-      std::string unassigned_ids;
-      for (const auto& acq : acquisitions) {
-        if (!acq.planes_layer->assigned_plane_id().has_value()) {
-          if (!unassigned_ids.empty()) {
-            unassigned_ids += ',';
-          }
-          unassigned_ids += std::to_string(acq.scene_layer->handle().id);
-        }
-      }
-      drm::log_warn(
-          "scene::LayerScene: {} layer(s) unassigned by allocator (handle id(s): {}) — "
-          "dropped this frame (composition fallback lands in Phase 2.3)",
-          report.layers_unassigned, unassigned_ids);
+    // Snapshot the allocator's diagnostics now — compose_unassigned's
+    // direct property writes below don't go through the allocator and
+    // therefore aren't reflected in its counters; we add them in by
+    // hand a few lines down.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    const auto alloc_diag = allocator_->diagnostics();
+    report.properties_written = alloc_diag.properties_written;
+    report.fbs_attached = alloc_diag.fbs_attached;
+
+    // Phase 2.3: rescue unassigned layers via CPU composition before
+    // counting them as dropped. compose_unassigned() updates
+    // report.layers_composited and report.composition_buckets; the
+    // dropped tally below is the residual that wasn't rescued
+    // (no CPU mapping, no free plane, canvas alloc failed).
+    compose_unassigned(acquisitions, req, report);
+
+    if (report.layers_total > report.layers_assigned + report.layers_composited) {
+      report.layers_unassigned =
+          report.layers_total - report.layers_assigned - report.layers_composited;
+      drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
     }
 
     // Apply or validate.
@@ -331,6 +371,18 @@ class LayerScene::Impl {
     release_all(acquisitions);
     return report;
   }
+
+  // Driver-quirk forwarder. Stored on Impl so on_session_resumed can
+  // re-propagate it after the allocator is rebuilt against the new
+  // fd; consumers expect "I asked for force-full once, it stays on
+  // across pause/resume" semantics.
+  void set_force_full_property_writes(bool force) noexcept {
+    force_full_writes_ = force;
+    if (allocator_.has_value()) {
+      allocator_->set_force_full_property_writes(force);
+    }
+  }
+  [[nodiscard]] bool force_full_property_writes() const noexcept { return force_full_writes_; }
 
   // Wire up the allocator's internal test_preparer to this Impl's
   // modeset-state injector. Called once during LayerScene::create after
@@ -366,6 +418,9 @@ class LayerScene::Impl {
         slot.scene_layer->source().on_session_paused();
       }
     }
+    if (composition_canvas_) {
+      composition_canvas_->on_session_paused();
+    }
   }
 
   drm::expected<void, std::error_code> on_session_resumed(drm::Device& new_dev) {
@@ -395,13 +450,20 @@ class LayerScene::Impl {
     }
 
     // Rebuild the allocator against the new Device + registry. Drops
-    // the previous-frame warm state and the failure cache — correct,
-    // since both reference kernel state that's gone. Reinstall the
+    // the previous-frame warm state, the failure cache, and the
+    // per-plane property snapshot — correct, since each references
+    // kernel state that's gone with the old fd. Reinstall the
     // test_preparer closure (its `this` capture is still valid; only
-    // the underlying allocator changed).
+    // the underlying allocator changed) and re-propagate the
+    // force-full-writes preference (it's a long-lived consumer
+    // setting, not per-fd state).
     allocator_.reset();
     allocator_.emplace(*dev_, registry_);
     install_test_preparer();
+    if (force_full_writes_) {
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+      allocator_->set_force_full_property_writes(true);
+    }
 
     compute_primary_zpos_hint();
 
@@ -418,11 +480,134 @@ class LayerScene::Impl {
       }
     }
 
+    // Resume the composition canvas if it was created. Allocation
+    // failure here is non-fatal: the scene re-attempts canvas creation
+    // on the next compose_unassigned() call, so a transient resume
+    // failure just means composition is unavailable until then. The
+    // Plane ids and the CRTC index can in principle change across an
+    // fd swap (registry was re-enumerated above); drop the cached
+    // values so the next composing frame re-resolves from scratch.
+    last_canvas_plane_id_.reset();
+    cached_crtc_index_.reset();
+    if (composition_canvas_) {
+      if (auto r = composition_canvas_->on_session_resumed(new_dev); !r) {
+        composition_canvas_.reset();
+      }
+    }
+
     // Next commit must carry ALLOW_MODESET to bring the new CRTC
     // binding up from cold; matches create-time semantics.
     first_commit_ = true;
     suspended_ = false;
     return {};
+  }
+
+  // ── Phase 2.4: rebind to a new CRTC / connector / mode ────────────
+  drm::expected<CompatibilityReport, std::error_code> rebind(std::uint32_t new_crtc_id,
+                                                             std::uint32_t new_connector_id,
+                                                             drmModeModeInfo new_mode) {
+    // Tear down state tied to the old binding before swapping in the
+    // new ids. The old MODE_ID blob is owned by the kernel and freed
+    // explicitly here — leaking it would accumulate one blob per
+    // rebind, which a hotplug-heavy app could turn into a real leak.
+    destroy_mode_blob();
+    mode_blob_id_ = 0;
+
+    // The plane registry depends on the fd, not the CRTC, so we keep
+    // it. The PROPERTY caches keyed on connector_id_ and crtc_id_ ARE
+    // tied to the old configuration — clear and recache below for
+    // the new ids. Per-plane property ids keyed on plane_id are
+    // still valid (planes don't change with CRTC rebinds, only the
+    // CRTCs their `possible_crtcs` mask covers does).
+    props_.clear();
+
+    crtc_id_ = new_crtc_id;
+    connector_id_ = new_connector_id;
+    mode_ = new_mode;
+
+    if (auto r = cache_object_properties(); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+
+    // The Output's stored crtc_id is consulted by the allocator's
+    // disable-unused pass; rebuild the allocator (which captures
+    // PlaneRegistry& but not CRTC id directly) so warm-state and
+    // failure cache from the old binding don't leak into the new.
+    // The output's composition_layer keeps its handle into Impl's
+    // member; the Output struct is reconstructed in place.
+    output_ = drm::planes::Output(crtc_id_, composition_planes_layer_);
+
+    // Re-add the live scene Layers' planes::Layer twins back into
+    // the fresh Output. Existing planes::Layer instances are still
+    // owned by the previous Output via unique_ptr; that Output
+    // instance is now destroyed by the move-assign above, taking the
+    // planes::Layer pointers down with it. Each Slot's
+    // planes_layer pointer is now dangling — we re-create the twins
+    // and reattach.
+    for (auto& slot : slots_) {
+      if (!slot.alive || !slot.scene_layer) {
+        slot.planes_layer = nullptr;
+        continue;
+      }
+      auto& fresh = output_.add_layer();
+      slot.planes_layer = &fresh;
+    }
+
+    // Allocator is bound to (Device, Registry); both are still
+    // valid. Re-emplace it anyway so previous_allocation_ (which
+    // holds Layer* pointers that were just invalidated above) and
+    // last_committed_ (kernel state from the old CRTC) get reset.
+    allocator_.reset();
+    allocator_.emplace(*dev_, registry_);
+    install_test_preparer();
+    if (force_full_writes_) {
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+      allocator_->set_force_full_property_writes(true);
+    }
+
+    primary_zpos_hint_.reset();
+    compute_primary_zpos_hint();
+
+    // Composition canvas: the new mode's dimensions may differ from
+    // the old. Drop the canvas wholesale; it'll be re-allocated on
+    // the next compose_unassigned call at the new size. The
+    // dirty-rect tracker resets too.
+    composition_canvas_.reset();
+    last_canvas_plane_id_.reset();
+    cached_crtc_index_.reset();
+
+    // First commit after rebind must modeset the new CRTC.
+    first_commit_ = true;
+
+    // Walk live layers and flag anything that looks problematic
+    // against the new mode. We don't probe the new plane registry
+    // for format / scaling support here — those are checked by the
+    // allocator at apply time and reported via CommitReport. The
+    // dst_rect off-screen check is the cheap one we can do without
+    // running the allocator, and it's the most common reason a
+    // post-rebind commit visibly breaks (the kernel rejects the
+    // commit and the user sees nothing on screen).
+    CompatibilityReport report;
+    const std::int64_t mode_w = new_mode.hdisplay;
+    const std::int64_t mode_h = new_mode.vdisplay;
+    for (const auto& slot : slots_) {
+      if (!slot.alive || !slot.scene_layer) {
+        continue;
+      }
+      const auto& d = slot.scene_layer->display();
+      // Half-open interval check — a layer that ends exactly at
+      // mode_w/mode_h is on-screen; one that *starts* there is off.
+      const std::int64_t x0 = d.dst_rect.x;
+      const std::int64_t y0 = d.dst_rect.y;
+      const std::int64_t x1 = x0 + static_cast<std::int64_t>(d.dst_rect.w);
+      const std::int64_t y1 = y0 + static_cast<std::int64_t>(d.dst_rect.h);
+      if (x1 <= 0 || y1 <= 0 || x0 >= mode_w || y0 >= mode_h) {
+        report.incompatibilities.push_back(
+            {slot.scene_layer->handle(), LayerIncompatibility::Reason::DstRectOffScreen});
+      }
+    }
+
+    return report;
   }
 
  private:
@@ -441,6 +626,10 @@ class LayerScene::Impl {
     Layer* scene_layer{nullptr};
     drm::planes::Layer* planes_layer{nullptr};
     AcquiredBuffer buffer{};
+    // Populated by compose_unassigned for the layers it picks up so the
+    // blend pass below doesn't have to call the virtual cpu_mapping()
+    // a second time. Stays nullopt for hardware-assigned layers.
+    std::optional<CpuMapping> cached_mapping;
   };
 
   // Slot-table helpers — return nullptr on any handle that doesn't
@@ -549,6 +738,416 @@ class LayerScene::Impl {
     }
   }
 
+  // ── Composition fallback (Phase 2.3) ───────────────────────────────
+  //
+  // After allocator.apply() runs, layers it couldn't place report
+  // needs_composition() == true. compose_unassigned() walks them, blends
+  // their CPU-mapped sources into a lazily-allocated full-screen ARGB8888
+  // canvas, finds a free plane on this CRTC, and arms the canvas onto
+  // that plane via direct PropertyStore writes — no second allocator
+  // pass.
+  //
+  // **Failure mode is all-or-nothing for the frame, not per-layer.**
+  // Composition writes the canvas's properties (FB_ID, CRTC_*, SRC_*,
+  // zpos) to the same AtomicRequest the allocator already populated,
+  // and the kernel atomically tests/applies the whole request. If the
+  // chosen plane rejects the canvas (driver-specific scaling /
+  // positioning constraint we don't pre-test), the *entire commit*
+  // fails — including every layer the allocator did place. The
+  // pre-`compose_unassigned` exits below (no free plane, no CPU
+  // mapping, canvas alloc failed) are best-effort and silently drop
+  // the affected layers; only the kernel-side reject path takes the
+  // whole frame down.
+  //
+  // The composition layer's zpos is chosen so it sits above any
+  // hardware-assigned layer (max assigned zpos + 1) AND above any
+  // explicit zpos the unassigned layers themselves carry. Without
+  // this, a scene where the unassigned layers default zpos=0 lands
+  // the canvas at zpos=0 too and competes with the bg plane (on
+  // amdgpu PRIMARY at zpos=2 the canvas would be hidden underneath).
+  //
+  // The composited group's zpos collapses to a single value — for
+  // contiguous unassigned z-runs this is correct; for non-contiguous
+  // runs (an assigned layer interleaved between two unassigned ones)
+  // the composited group floats above its lowest member's natural slot.
+  // Documented limitation; multi-canvas v1.1 will resolve it.
+
+  // Resolve and cache the CRTC index in drmModeRes::crtcs[]. The index
+  // never changes for the scene's lifetime on a given fd, so we ioctl
+  // at most once per session (initial commit + once per resume).
+  std::optional<std::uint32_t> resolve_crtc_index() {
+    if (cached_crtc_index_.has_value()) {
+      return cached_crtc_index_;
+    }
+    std::unique_ptr<drmModeRes, decltype(&drmModeFreeResources)> res(
+        drmModeGetResources(dev_->fd()), drmModeFreeResources);
+    if (!res) {
+      return std::nullopt;
+    }
+    for (int i = 0; i < res->count_crtcs; ++i) {
+      if (res->crtcs[i] == crtc_id_) {
+        cached_crtc_index_ = static_cast<std::uint32_t>(i);
+        return cached_crtc_index_;
+      }
+    }
+    return std::nullopt;
+  }
+
+  // Decide whether to reserve a canvas plane up front for this
+  // commit. Returns the plane id to reserve, or nullopt when overflow
+  // isn't anticipated and the allocator should be free to use every
+  // plane. The heuristic compares live layer count against the count
+  // of canvas-eligible planes (CRTC-compatible, non-cursor,
+  // ARGB8888-supporting); when layers >= eligible planes, every plane
+  // would be claimed by the allocator and compose_unassigned would
+  // have nowhere to land the canvas.
+  std::optional<std::uint32_t> pick_canvas_reservation_if_needed() {
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return std::nullopt;
+    }
+    std::vector<const drm::planes::PlaneCapabilities*> eligible;
+    eligible.reserve(8);
+    const drm::planes::PlaneCapabilities* primary_fallback = nullptr;
+    for (const auto* p : registry_.for_crtc(*crtc_index)) {
+      if (p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (!p->supports_format(DRM_FORMAT_ARGB8888)) {
+        continue;
+      }
+      eligible.push_back(p);
+      if (p->type == drm::planes::DRMPlaneType::PRIMARY && primary_fallback == nullptr) {
+        primary_fallback = p;
+      }
+    }
+    if (eligible.empty()) {
+      return std::nullopt;
+    }
+    if (layer_count() <= eligible.size()) {
+      // Every layer can take its own plane — reserving one for the
+      // canvas would just force one of them through composition for
+      // no gain. Only reserve when overflow is actually anticipated.
+      return std::nullopt;
+    }
+    // Prefer an OVERLAY for the canvas — keeping PRIMARY available
+    // for the bg layer is the conventional layout and avoids any
+    // amdgpu PRIMARY-zpos-pin interaction with the canvas's runtime
+    // zpos pick.
+    for (const auto* p : eligible) {
+      if (p->type == drm::planes::DRMPlaneType::OVERLAY) {
+        return p->id;
+      }
+    }
+    return (primary_fallback != nullptr) ? std::optional<std::uint32_t>(primary_fallback->id)
+                                         : std::nullopt;
+  }
+
+  // Pick a plane on this CRTC that the allocator did not assign and
+  // that the canvas's ARGB8888-linear buffer is compatible with.
+  // When `last_canvas_plane_id_` is set the search prefers that plane
+  // (the do_commit pre-reservation kept it out of the allocator's
+  // pool, so it should still be free here); otherwise we fall back to
+  // the OVERLAY-then-PRIMARY scan. Never returns CURSOR.
+  const drm::planes::PlaneCapabilities* find_free_canvas_plane(
+      std::uint32_t crtc_index, const std::vector<AcquisitionSlot>& acquisitions) {
+    // Build the set of planes already armed by the allocator (from any
+    // assigned layer) plus any plane the allocator routed the empty
+    // composition_planes_layer_ to. Reused scratch member to keep this
+    // off the per-frame heap.
+    scratch_in_use_.clear();
+    scratch_in_use_.reserve(acquisitions.size() + 1);
+    for (const auto& acq : acquisitions) {
+      if (auto pid = acq.planes_layer->assigned_plane_id(); pid.has_value()) {
+        scratch_in_use_.push_back(*pid);
+      }
+    }
+    if (auto pid = composition_planes_layer_.assigned_plane_id(); pid.has_value()) {
+      scratch_in_use_.push_back(*pid);
+    }
+    auto is_in_use = [&](std::uint32_t pid) {
+      return std::find(scratch_in_use_.begin(), scratch_in_use_.end(), pid) !=
+             scratch_in_use_.end();
+    };
+
+    // Preferred path: the do_commit pre-reservation already pinned a
+    // plane by setting `last_canvas_plane_id_`, and the allocator
+    // honoured the reservation by leaving it out of best_assignment.
+    // Try to reuse it before falling through to the generic scan —
+    // sticky plane choice across frames lets the per-plane property
+    // snapshot keep working between commits.
+    if (last_canvas_plane_id_.has_value()) {
+      for (const auto* p : registry_.for_crtc(crtc_index)) {
+        if (p->id != *last_canvas_plane_id_) {
+          continue;
+        }
+        if (is_in_use(p->id) || p->type == drm::planes::DRMPlaneType::CURSOR ||
+            !p->supports_format(DRM_FORMAT_ARGB8888)) {
+          break;  // reservation invalidated this frame; fall back below
+        }
+        return p;
+      }
+    }
+
+    const drm::planes::PlaneCapabilities* primary_fallback = nullptr;
+    for (const auto* p : registry_.for_crtc(crtc_index)) {
+      if (p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (is_in_use(p->id)) {
+        continue;
+      }
+      if (!p->supports_format(DRM_FORMAT_ARGB8888)) {
+        continue;
+      }
+      if (p->type == drm::planes::DRMPlaneType::OVERLAY) {
+        return p;
+      }
+      // Remember the first eligible PRIMARY but keep looking for an
+      // OVERLAY — OVERLAY is the safer placement when the scene has a
+      // dedicated background layer on PRIMARY.
+      if (primary_fallback == nullptr) {
+        primary_fallback = p;
+      }
+    }
+    return primary_fallback;
+  }
+
+  // Pick a zpos for the canvas plane that puts composited content
+  // above every hardware-assigned layer AND above any explicit zpos
+  // the composited layers carry. Returns 0 when no signal exists,
+  // which is the conservative "let the kernel pick" sentinel.
+  static std::int32_t choose_canvas_zpos(const std::vector<AcquisitionSlot>& acquisitions,
+                                         const std::vector<AcquisitionSlot*>& composited) {
+    std::int32_t max_explicit = 0;
+    bool have_signal = false;
+    for (const auto& acq : acquisitions) {
+      if (!acq.planes_layer->assigned_plane_id().has_value()) {
+        continue;  // unassigned layers feed the composited list, not the floor
+      }
+      if (auto z = acq.scene_layer->display().zpos; z.has_value()) {
+        max_explicit = std::max(max_explicit, *z);
+        have_signal = true;
+      }
+    }
+    for (const auto* acq : composited) {
+      if (auto z = acq->scene_layer->display().zpos; z.has_value()) {
+        max_explicit = std::max(max_explicit, *z);
+        have_signal = true;
+      }
+    }
+    if (!have_signal) {
+      return 0;
+    }
+    // +1 so the canvas sits strictly above the highest layer's natural
+    // slot. If max_explicit is INT32_MAX (an absurd configuration the
+    // kernel would already have rejected upstream) the saturating add
+    // here keeps us at INT32_MAX rather than wrapping negative.
+    if (max_explicit == std::numeric_limits<std::int32_t>::max()) {
+      return max_explicit;
+    }
+    return max_explicit + 1;
+  }
+
+  // Best-effort composition. Updates `report.layers_composited` and
+  // `report.composition_buckets` for layers it absorbs.
+  void compose_unassigned(std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
+                          CommitReport& report) {
+    // Collect layers needing composition that also have CPU pixels
+    // available. Sources without a CPU mapping (future EGL Streams,
+    // tiled GBM BOs) can't be composited; they stay dropped. Stash
+    // the mapping inline to avoid re-calling the virtual `cpu_mapping()`
+    // a second time later in the function.
+    scratch_composited_.clear();
+    scratch_composited_.reserve(acquisitions.size());
+    for (auto& acq : acquisitions) {
+      if (!acq.planes_layer->needs_composition()) {
+        continue;
+      }
+      auto mapping = acq.scene_layer->source().cpu_mapping();
+      if (!mapping.has_value()) {
+        drm::log_warn(
+            "scene::LayerScene: layer {} needs composition but its source has no CPU mapping; "
+            "dropping",
+            acq.scene_layer->handle().id);
+        continue;
+      }
+      // std::optional<CpuMapping> is trivially copyable (the mapping
+      // holds a span + a uint32, both POD); std::move would degrade to
+      // a copy and clang-tidy flags the redundant cast.
+      acq.cached_mapping = mapping;
+      scratch_composited_.push_back(&acq);
+    }
+    if (scratch_composited_.empty()) {
+      // Composition not used this frame — drop any record of the
+      // previous canvas plane so disable_unused_planes can reclaim it
+      // on the next frame.
+      last_canvas_plane_id_.reset();
+      return;
+    }
+
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      drm::log_warn("scene::LayerScene: composition fallback could not resolve CRTC index");
+      return;
+    }
+    const auto* target_plane = find_free_canvas_plane(*crtc_index, acquisitions);
+    if (target_plane == nullptr) {
+      drm::log_warn(
+          "scene::LayerScene: composition fallback found no free plane for canvas; {} "
+          "layer(s) dropped",
+          scratch_composited_.size());
+      return;
+    }
+
+    if (!composition_canvas_) {
+      CompositeCanvasConfig cfg;
+      cfg.canvas_width = mode_.hdisplay;
+      cfg.canvas_height = mode_.vdisplay;
+      auto canvas = CompositeCanvas::create(*dev_, cfg);
+      if (!canvas) {
+        drm::log_warn("scene::LayerScene: CompositeCanvas::create failed: {}",
+                      canvas.error().message());
+        return;
+      }
+      composition_canvas_ = std::move(*canvas);
+      // Fresh canvas is kernel-zeroed; nothing left over from a
+      // previous frame to scrub on the first composition.
+    }
+    if (!composition_canvas_->armable()) {
+      drm::log_warn("scene::LayerScene: composition canvas isn't armable (post-resume?)");
+      return;
+    }
+
+    // Swap to the back buffer before any paint ops — the front is
+    // currently being scanned out by the kernel and writing into it
+    // would tear visibly (CPU writes racing the display read pointer).
+    // begin_frame is the first canvas mutation this frame; arming
+    // below uses fb_id() which now reflects the new back.
+    composition_canvas_->begin_frame();
+
+    // Sort composited layers by zpos ascending — paint from the back
+    // forward so SRC_OVER order matches scene Z-order.
+    std::sort(scratch_composited_.begin(), scratch_composited_.end(),
+              [](const AcquisitionSlot* a, const AcquisitionSlot* b) {
+                const auto za = a->scene_layer->display().zpos.value_or(0);
+                const auto zb = b->scene_layer->display().zpos.value_or(0);
+                return za < zb;
+              });
+
+    // Always full-clear the back buffer before blending this frame's
+    // composited layers on top. Partial clear (union of last-frame +
+    // this-frame dirty boxes) is correct only with single-buffer
+    // canvases, where "last-frame's dirty box" is the content
+    // currently in the same buffer. Double buffering means the back
+    // we're about to paint last held content from FRAME N-2, not
+    // N-1; tracking that correctly needs a per-buffer dirty record.
+    // The simpler-correct choice for v1 is the full clear — at
+    // 1024×768 it's 3 MB of memset per frame, well under the
+    // memory-bandwidth budget of any consumer-class CPU.
+    composition_canvas_->clear();
+
+    for (const auto* acq : scratch_composited_) {
+      const auto& d = acq->scene_layer->display();
+      const auto fmt = acq->scene_layer->source().format();
+      // Mapping was stashed during the collection pass above — no
+      // second virtual call.
+      if (!acq->cached_mapping.has_value()) {
+        continue;
+      }
+      CompositeSrc src;
+      src.pixels = acq->cached_mapping->pixels;
+      src.src_stride_bytes = acq->cached_mapping->stride_bytes;
+      src.src_width = fmt.width;
+      src.src_height = fmt.height;
+      src.drm_fourcc = fmt.drm_fourcc;
+      const CompositeRect src_rect{d.src_rect.x, d.src_rect.y, d.src_rect.w, d.src_rect.h};
+      const CompositeRect dst_rect{d.dst_rect.x, d.dst_rect.y, d.dst_rect.w, d.dst_rect.h};
+      composition_canvas_->blend(src, src_rect, dst_rect);
+    }
+
+    const std::int32_t canvas_zpos = choose_canvas_zpos(acquisitions, scratch_composited_);
+    if (auto r = arm_composition_canvas(req, target_plane->id, canvas_zpos, report); !r) {
+      drm::log_warn("scene::LayerScene: arm composition canvas failed: {}", r.error().message());
+      return;
+    }
+    report.layers_composited += scratch_composited_.size();
+    report.composition_buckets += 1U;
+    last_canvas_plane_id_ = target_plane->id;
+  }
+
+  // Write the canvas's plane properties directly to `req`. Mirrors
+  // Allocator::apply_layer_to_plane minus the immutable-property guard
+  // (the canvas only sets writable properties). Bumps the report's
+  // diagnostic counters per actual write so the totals account for
+  // canvas-arm traffic the allocator never sees.
+  drm::expected<void, std::error_code> arm_composition_canvas(drm::AtomicRequest& req,
+                                                              std::uint32_t plane_id,
+                                                              std::int32_t zpos,
+                                                              CommitReport& report) {
+    auto write = [&](std::string_view name,
+                     std::uint64_t value) -> drm::expected<void, std::error_code> {
+      auto id = props_.property_id(plane_id, name);
+      if (!id) {
+        // Property not advertised on this plane — skip silently
+        // (zpos is optional on PRIMARY for some drivers).
+        return {};
+      }
+      if (props_.is_immutable(plane_id, name).value_or(false)) {
+        return {};
+      }
+      auto r = req.add_property(plane_id, *id, value);
+      if (r.has_value()) {
+        ++report.properties_written;
+        if (name == "FB_ID") {
+          ++report.fbs_attached;
+        }
+      }
+      return r;
+    };
+    const std::uint32_t cw = composition_canvas_->width();
+    const std::uint32_t ch = composition_canvas_->height();
+    if (auto r = write("FB_ID", composition_canvas_->fb_id()); !r) {
+      return r;
+    }
+    if (auto r = write("CRTC_ID", crtc_id_); !r) {
+      return r;
+    }
+    if (auto r = write("CRTC_X", 0); !r) {
+      return r;
+    }
+    if (auto r = write("CRTC_Y", 0); !r) {
+      return r;
+    }
+    if (auto r = write("CRTC_W", cw); !r) {
+      return r;
+    }
+    if (auto r = write("CRTC_H", ch); !r) {
+      return r;
+    }
+    if (auto r = write("SRC_X", 0); !r) {
+      return r;
+    }
+    if (auto r = write("SRC_Y", 0); !r) {
+      return r;
+    }
+    if (auto r = write("SRC_W", to_16_16(cw)); !r) {
+      return r;
+    }
+    if (auto r = write("SRC_H", to_16_16(ch)); !r) {
+      return r;
+    }
+    // zpos is best-effort — skipped silently when the plane doesn't
+    // expose it or pins it immutable (amdgpu PRIMARY at 2). The canvas
+    // still scans out at whatever the kernel gives us.
+    if (zpos > 0) {
+      if (auto r = write("zpos", static_cast<std::uint64_t>(zpos)); !r) {
+        return r;
+      }
+    }
+    return {};
+  }
+
   // Allocate the MODE_ID blob on demand. Cheap — one blob per scene —
   // but deferred to the first commit so a scene that's built but never
   // committed doesn't leak a blob into the kernel.
@@ -623,11 +1222,43 @@ class LayerScene::Impl {
   std::uint32_t mode_blob_id_{0};
   bool first_commit_{true};
   bool suspended_{false};
+  // Mirror of the allocator's force-full-writes flag — kept on Impl
+  // so it survives across the allocator teardown/rebuild that
+  // on_session_resumed performs.
+  bool force_full_writes_{false};
 
   // Cached PRIMARY-plane zpos_min for this scene's CRTC. Used as a
   // default zpos for single-layer commits where the caller didn't pin
   // zpos — see do_commit for the rationale.
   std::optional<std::uint64_t> primary_zpos_hint_;
+
+  // Lazy composition canvas. Allocated on first compose_unassigned()
+  // call that actually needs it; survives across frames so the dumb
+  // buffer + fb_id are reused. on_session_paused() forgets the kernel
+  // handles; on_session_resumed re-creates the canvas against the new
+  // device.
+  std::unique_ptr<CompositeCanvas> composition_canvas_;
+
+  // CRTC index in drmModeRes::crtcs, cached at create() / on resume —
+  // saves a drmModeGetResources ioctl per composing frame. nullopt
+  // means "unresolved"; compose_unassigned re-runs the lookup once
+  // each commit until it succeeds (vanishingly rare on real drivers).
+  std::optional<std::uint32_t> cached_crtc_index_;
+
+  // The plane the canvas was armed onto on the previous frame. Passed
+  // to Allocator::apply as an "external reserved" hint so the
+  // allocator's disable_unused_planes pass doesn't write FB_ID=0 /
+  // CRTC_ID=0 to that plane only for compose_unassigned to overwrite
+  // them moments later. Cleared on session resume (fresh fd) and on
+  // any frame where composition didn't run.
+  std::optional<std::uint32_t> last_canvas_plane_id_;
+
+  // Per-frame scratch vectors. Keeping them as members avoids the
+  // per-frame heap allocation that a fresh local vector would incur
+  // on every commit that triggers composition. Capacity carries
+  // across frames; clear() preserves it.
+  std::vector<AcquisitionSlot*> scratch_composited_;
+  std::vector<std::uint32_t> scratch_in_use_;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -693,12 +1324,25 @@ drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t fl
   return impl_->do_commit(flags, /*test_only=*/false, user_data);
 }
 
+void LayerScene::set_force_full_property_writes(bool force) noexcept {
+  impl_->set_force_full_property_writes(force);
+}
+
+bool LayerScene::force_full_property_writes() const noexcept {
+  return impl_->force_full_property_writes();
+}
+
 void LayerScene::on_session_paused() noexcept {
   impl_->on_session_paused();
 }
 
 drm::expected<void, std::error_code> LayerScene::on_session_resumed(drm::Device& new_dev) {
   return impl_->on_session_resumed(new_dev);
+}
+
+drm::expected<CompatibilityReport, std::error_code> LayerScene::rebind(
+    std::uint32_t new_crtc_id, std::uint32_t new_connector_id, drmModeModeInfo new_mode) {
+  return impl_->rebind(new_crtc_id, new_connector_id, new_mode);
 }
 
 }  // namespace drm::scene

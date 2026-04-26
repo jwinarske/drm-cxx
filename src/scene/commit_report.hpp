@@ -21,15 +21,23 @@ namespace drm::scene {
 
 struct CommitReport {
   /// Total layers in the scene at commit time.
+  /// Invariant: `layers_total == layers_assigned + layers_composited + layers_unassigned`.
   std::size_t layers_total{0};
-  /// Layers the allocator placed on a hardware plane this commit.
+  /// Layers the allocator placed directly on a hardware plane this
+  /// commit (not via the composition canvas).
   std::size_t layers_assigned{0};
-  /// layers_total - layers_assigned. In Phase 2.1 these are simply
-  /// dropped (logged via drm::log_warn); Phase 2.3 composites them
-  /// into CompositeCanvas buckets.
+  /// Layers rescued by software composition into a `CompositeCanvas`
+  /// bucket. They do reach hardware, just via the canvas plane rather
+  /// than their own plane. 0 when the allocator placed everything.
+  std::size_t layers_composited{0};
+  /// Layers neither hardware-placed nor composited — dropped this
+  /// frame. Set when the canvas pool was full, no free plane could
+  /// host the canvas, or the layer's source had no CPU mapping for
+  /// the compositor to read from.
   std::size_t layers_unassigned{0};
-  /// Number of composition buckets emitted this frame. 0 until Phase
-  /// 2.3 lands the compositor.
+  /// Number of composition buckets emitted this frame. 0 or 1 in v1
+  /// of Phase 2.3 (single full-screen canvas); multi-canvas pooling
+  /// can raise this.
   std::size_t composition_buckets{0};
 
   /// Total properties enqueued on the AtomicRequest this commit —

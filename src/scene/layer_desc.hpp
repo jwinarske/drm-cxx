@@ -40,6 +40,15 @@ struct LayerDesc {
   /// allocator for scheduling decisions (content updating at 30 Hz on
   /// a 60 Hz display can sit on a plane that doesn't tear-mitigate).
   std::uint32_t update_hint_hz{0};
+
+  /// When true, the allocator will skip plane assignment for this layer
+  /// and route it through the composition fallback unconditionally.
+  /// Useful for diagnostic overlays, integration tests of the compositor
+  /// path, or layers whose source is known to require CPU compositing
+  /// even when a hardware plane is available. Requires
+  /// `source->cpu_mapping()` to return a value — sources without a CPU
+  /// mapping cannot be composited and will be dropped this frame.
+  bool force_composited{false};
 };
 
 }  // namespace drm::scene

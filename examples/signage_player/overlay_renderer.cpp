@@ -4,6 +4,7 @@
 #include "overlay_renderer.hpp"
 
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/log.hpp>
 
 // Blend2D's umbrella header layout varies by distro: Fedora ships
 // /usr/include/blend2d/blend2d.h, some Debian packages ship the flat
@@ -185,6 +186,14 @@ void draw_logo_blend2d(drm::span<std::uint8_t> pixels, const LogoPaint& p) noexc
   const std::string path_z(p.path);
   BLImage src;
   if (src.read_from_file(path_z.c_str()) != BL_SUCCESS) {
+    // Most common cause: relative path doesn't resolve against the
+    // current working directory. Emit a warning so the failure
+    // isn't invisible — the layer keeps the fallback fill, so the
+    // rest of the scene is unaffected.
+    drm::log_warn(
+        "signage_player: logo PNG load failed for path '{}' — check the playlist's "
+        "[logo].path is reachable from the current working directory or use an absolute path",
+        path_z);
     return;
   }
 

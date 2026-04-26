@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <utility>
 
@@ -51,6 +52,25 @@ drm::expected<AcquiredBuffer, std::error_code> DumbBufferSource::acquire() {
   acq.acquire_fence_fd = -1;
   acq.opaque = nullptr;
   return acq;
+}
+
+std::optional<CpuMapping> DumbBufferSource::cpu_mapping() const noexcept {
+  if (buffer_.empty() || buffer_.data() == nullptr) {
+    return std::nullopt;
+  }
+  // Dumb buffers are always linear by kernel construction, so this is
+  // really a belt-and-braces check — `format_.modifier` is set to
+  // DRM_FORMAT_MOD_LINEAR (0) at create() time. Kept symmetric with
+  // GbmBufferSource so a future buffer source that returns a tiled
+  // mapping by mistake gets caught here uniformly.
+  if (format_.modifier != 0U /* DRM_FORMAT_MOD_LINEAR */ &&
+      format_.modifier != ((1ULL << 56U) - 1U) /* DRM_FORMAT_MOD_INVALID */) {
+    return std::nullopt;
+  }
+  CpuMapping m;
+  m.pixels = drm::span<const std::uint8_t>(buffer_.data(), buffer_.size_bytes());
+  m.stride_bytes = buffer_.stride();
+  return m;
 }
 
 void DumbBufferSource::release(AcquiredBuffer /*acquired*/) noexcept {
