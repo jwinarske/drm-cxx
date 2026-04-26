@@ -38,6 +38,12 @@ class Device;
 
 namespace drm::scene {
 
+/// `LayerBufferSource` backed by a single `drm::dumb::Buffer`. CPU
+/// writes pixels directly into `pixels()`; the scene returns the same
+/// cached FB ID on every `acquire()`. Suitable for software-rendered
+/// cursors / CSDs / test patterns / signage layers — anything where
+/// the producer is not racing scanout. For multi-buffered scanout,
+/// reach for a ring source (planned: `GbmRingSource`).
 class DumbBufferSource : public LayerBufferSource {
  public:
   /// Allocate a single dumb buffer of the given size and format. The
@@ -72,6 +78,8 @@ class DumbBufferSource : public LayerBufferSource {
     return {buffer_.data(), buffer_.size_bytes()};
   }
 
+  /// Bytes per row in the buffer. Usually `width * 4` for ARGB/XRGB
+  /// formats, but the kernel may pad it for alignment.
   [[nodiscard]] std::uint32_t stride() const noexcept { return buffer_.stride(); }
 
  private:

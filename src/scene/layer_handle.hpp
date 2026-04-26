@@ -17,6 +17,13 @@
 
 namespace drm::scene {
 
+/// Opaque, generation-tagged identity for a scene layer. Returned by
+/// `LayerScene::add_layer`; passed to `get_layer` / `remove_layer`
+/// and the layer's `set_*` methods. Survives `rebind()` and
+/// `on_session_resumed()`. A handle whose layer was removed and whose
+/// slot has been recycled never accidentally addresses the new
+/// occupant — `get_layer` returns nullptr because the slot's current
+/// generation no longer matches.
 struct LayerHandle {
   /// 1-based slot index into the scene's layer table. 0 == invalid /
   /// default-constructed.
@@ -26,6 +33,10 @@ struct LayerHandle {
   /// generation, so get_layer returns nullptr.
   std::uint32_t generation{0};
 
+  /// True if this handle is not the default-constructed sentinel. Does
+  /// not check against the scene — a `valid()` handle can still be
+  /// stale (its layer was removed). Use `LayerScene::get_layer` to
+  /// resolve liveness.
   [[nodiscard]] constexpr bool valid() const noexcept { return id != 0; }
 
   friend constexpr bool operator==(LayerHandle lhs, LayerHandle rhs) noexcept {

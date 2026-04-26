@@ -20,6 +20,10 @@
 
 namespace drm::scene {
 
+/// Create-time descriptor for a scene layer. Passed by value to
+/// `LayerScene::add_layer`; the embedded `unique_ptr<LayerBufferSource>`
+/// transfers ownership of the source into the scene, and the source's
+/// lifetime from that point on is tied to the created `Layer`.
 struct LayerDesc {
   /// Where the layer's pixels come from each frame. Required — nullptr
   /// is rejected by add_layer with std::errc::invalid_argument.

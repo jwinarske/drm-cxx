@@ -23,6 +23,10 @@
 
 namespace drm::scene {
 
+/// One entry in a `CompatibilityReport`. Identifies a layer the scene
+/// believes does not fit the post-`rebind` configuration and the
+/// reason it was flagged. Multiple causes can apply to the same
+/// layer; the report emits one entry per cause.
 struct LayerIncompatibility {
   /// Why the scene flagged this layer. Multiple causes can apply to
   /// the same layer (e.g. a layer that needs scaling AND has a
