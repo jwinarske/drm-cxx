@@ -525,8 +525,11 @@ std::vector<CandidatePair> Allocator::rank_candidates_group(
 int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) const {
   int s = 0;
 
-  // Prefer matching format
-  if (const auto fmt = layer.format(); fmt && plane.supports_format(*fmt)) {
+  // Prefer matching format + modifier together — a plane that advertises
+  // the layer's exact (format, modifier) is strictly preferable to one
+  // that supports the format only via the linear-fallback path.
+  if (const auto fmt = layer.format();
+      fmt && plane.supports_format_modifier(*fmt, layer.modifier())) {
     s += 4;
   }
 
@@ -594,8 +597,15 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
     return false;
   }
 
-  if (const auto fmt = layer.format(); fmt && !plane.supports_format(*fmt)) {
-    return false;
+  if (const auto fmt = layer.format(); fmt) {
+    // Honor the layer's modifier — AFBC, DCC, and vendor tilings only land
+    // on planes whose IN_FORMATS blob explicitly advertises the
+    // (format, modifier) pair. Layers that don't tag a modifier fall
+    // through the LINEAR/INVALID equivalence path inside
+    // supports_format_modifier.
+    if (!plane.supports_format_modifier(*fmt, layer.modifier())) {
+      return false;
+    }
   }
 
   if (layer.rotation() != 0 && !plane.supports_rotation) {
