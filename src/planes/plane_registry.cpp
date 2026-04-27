@@ -8,6 +8,7 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 
+#include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
@@ -23,6 +24,47 @@ namespace drm::planes {
 
 bool PlaneCapabilities::supports_format(const uint32_t fmt) const {
   return std::find(formats.begin(), formats.end(), fmt) != formats.end();
+}
+
+bool PlaneCapabilities::supports_format_modifier(const uint32_t fmt,
+                                                 const uint64_t modifier) const {
+  // INVALID is the legacy sentinel for "implementation-defined", which
+  // every driver lacking IN_FORMATS treats as linear. Normalize it so
+  // both code paths compare against a single LINEAR identity.
+  const bool is_linear = modifier == DRM_FORMAT_MOD_LINEAR || modifier == DRM_FORMAT_MOD_INVALID;
+
+  if (!has_format_modifiers) {
+    // No IN_FORMATS — accept LINEAR/INVALID against the bare format list,
+    // reject non-trivial modifiers (AFBC, DCC, tilings) outright. We have
+    // no evidence the plane can scan them out.
+    return is_linear && supports_format(fmt);
+  }
+
+  // format_modifiers is sorted by format ascending (parse_in_formats_blob
+  // sorts at the end of the parse). Bisect to the per-format slice in
+  // O(log N), then walk the (typically <10) modifiers within it. The
+  // allocator's bipartite/backtrack search hits this on every (plane,
+  // layer) pair — score_pair calls it once per ranking comparison and
+  // plane_statically_compatible once per static screening — so the
+  // hot-path cost matters even at modest blob sizes.
+  const auto cmp_format = [](const std::pair<uint32_t, uint64_t>& entry, uint32_t f) {
+    return entry.first < f;
+  };
+  const auto first =
+      std::lower_bound(format_modifiers.begin(), format_modifiers.end(), fmt, cmp_format);
+  for (auto it = first; it != format_modifiers.end() && it->first == fmt; ++it) {
+    if (it->second == modifier) {
+      return true;
+    }
+    // Treat LINEAR and INVALID as interchangeable on either side of the
+    // comparison: a layer tagged INVALID matches a plane entry of LINEAR
+    // and vice versa.
+    if (is_linear &&
+        (it->second == DRM_FORMAT_MOD_LINEAR || it->second == DRM_FORMAT_MOD_INVALID)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool PlaneCapabilities::compatible_with_crtc(const uint32_t crtc_index) const {
@@ -64,6 +106,28 @@ DRMPlaneType parse_plane_type(const int fd, const uint32_t plane_id) {
   return result;
 }
 
+void parse_in_formats_blob(const int fd, const uint32_t blob_id, PlaneCapabilities& caps) {
+  auto* blob = drmModeGetPropertyBlob(fd, blob_id);
+  if (blob == nullptr) {
+    return;
+  }
+
+  drmModeFormatModifierIterator iter{};
+  caps.format_modifiers.clear();
+  while (drmModeFormatModifierBlobIterNext(blob, &iter)) {
+    caps.format_modifiers.emplace_back(iter.fmt, iter.mod);
+  }
+  caps.has_format_modifiers = !caps.format_modifiers.empty();
+
+  // Sort by format first, then by modifier — supports_format_modifier()
+  // lower_bounds on format and walks the per-format slice. Sorting once
+  // here turns every per-(plane, layer) eligibility check into
+  // O(log N + K) instead of O(N).
+  std::sort(caps.format_modifiers.begin(), caps.format_modifiers.end());
+
+  drmModeFreePropertyBlob(blob);
+}
+
 void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapabilities& caps) {
   auto* props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
   if (props == nullptr) {
@@ -94,6 +158,13 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
     } else if (std::strcmp(prop->name, "SRC_W") == 0) {
       // If SRC_W exists and is different from CRTC_W range, scaling is supported
       caps.supports_scaling = true;
+    } else if (std::strcmp(prop->name, "IN_FORMATS") == 0) {
+      // The property value is a blob id; the blob carries (format,
+      // modifier) pairs the plane can scan out. Drivers that don't
+      // expose IN_FORMATS (older kernels, some embedded stacks) leave
+      // has_format_modifiers false and the format-only fallback path in
+      // supports_format_modifier handles them.
+      parse_in_formats_blob(fd, static_cast<uint32_t>(prop_vals[i]), caps);
     }
 
     drmModeFreeProperty(prop);
@@ -142,14 +213,17 @@ drm::span<const PlaneCapabilities> PlaneRegistry::all() const noexcept {
   return planes_;
 }
 
-std::vector<const PlaneCapabilities*> PlaneRegistry::for_crtc(uint32_t crtc_index) const {
+const std::vector<const PlaneCapabilities*>& PlaneRegistry::for_crtc(uint32_t crtc_index) const {
+  if (auto it = for_crtc_cache_.find(crtc_index); it != for_crtc_cache_.end()) {
+    return it->second;
+  }
   std::vector<const PlaneCapabilities*> result;
   for (const auto& p : planes_) {
     if (p.compatible_with_crtc(crtc_index)) {
       result.push_back(&p);
     }
   }
-  return result;
+  return for_crtc_cache_.emplace(crtc_index, std::move(result)).first->second;
 }
 
 }  // namespace drm::planes

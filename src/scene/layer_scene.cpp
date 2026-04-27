@@ -949,6 +949,53 @@ class LayerScene::Impl {
     return max_explicit + 1;
   }
 
+  // Emit a per-frame warn line when the only thing keeping the layer
+  // off every plane is its modifier — i.e. the bare format would have
+  // matched some plane on this CRTC but no plane's IN_FORMATS list
+  // carries the (format, modifier) pair. The common AFBC/DCC/vendor-
+  // tiling failure mode otherwise looks identical to "format
+  // unsupported" in the existing dropped-tally log, which is unhelpful
+  // when debugging an embedded SoC bring-up. Skipped for layers whose
+  // modifier is LINEAR or INVALID — those can never be modifier-rejected
+  // (the allocator's eligibility path normalizes both to LINEAR).
+  // Non-const because resolve_crtc_index() updates the cached CRTC
+  // index on first call.
+  void diagnose_modifier_rejection(const drm::planes::Layer& planes_layer) {
+    const auto fmt = planes_layer.format();
+    if (!fmt.has_value()) {
+      return;
+    }
+    const auto modifier = planes_layer.modifier();
+    if (modifier == 0 /* LINEAR */ || modifier == DRM_FORMAT_MOD_INVALID) {
+      return;
+    }
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return;
+    }
+    bool any_plane_has_format = false;
+    for (const auto* p : registry_.for_crtc(*crtc_index)) {
+      if (p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (p->supports_format(*fmt)) {
+        any_plane_has_format = true;
+        break;
+      }
+    }
+    if (!any_plane_has_format) {
+      // Format itself is unsupported on every plane — diagnostic for
+      // that case is the existing "dropped this frame" warn; this
+      // helper's job is only to call out the format-OK / modifier-NOT
+      // case so a reader can tell them apart in the log.
+      return;
+    }
+    drm::log_warn(
+        "scene::LayerScene: layer routed to composition — modifier 0x{:016x} not advertised on "
+        "any compatible plane for format 0x{:08x}",
+        modifier, *fmt);
+  }
+
   // Best-effort composition. Updates `report.layers_composited` and
   // `report.composition_buckets` for layers it absorbs.
   void compose_unassigned(std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
@@ -964,6 +1011,13 @@ class LayerScene::Impl {
       if (!acq.planes_layer->needs_composition()) {
         continue;
       }
+      // Diagnose modifier-driven plane rejection here, before composition
+      // either rescues the layer or drops it. Only fires when the layer's
+      // modifier is non-trivial — LINEAR/INVALID layers can't be
+      // modifier-rejected by construction, and force_composited layers
+      // (test rigs, diagnostic overlays) typically use linear buffers, so
+      // this gate also keeps the log quiet for them.
+      diagnose_modifier_rejection(*acq.planes_layer);
       auto mapping = acq.scene_layer->source().cpu_mapping();
       if (!mapping.has_value()) {
         drm::log_warn(
