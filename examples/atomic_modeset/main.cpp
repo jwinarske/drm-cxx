@@ -13,6 +13,7 @@
 
 #include "../common/open_output.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
@@ -50,8 +51,13 @@ int main(int argc, char* argv[]) {
   }
   auto* bg = bg_src->get();
   {
-    const auto pixels = bg->pixels();
-    const auto stride = bg->stride();
+    auto mapping = bg->map(drm::MapAccess::Write);
+    if (!mapping) {
+      drm::println(stderr, "DumbBufferSource::map: {}", mapping.error().message());
+      return EXIT_FAILURE;
+    }
+    const auto pixels = mapping->pixels();
+    const auto stride = mapping->stride();
     for (std::uint32_t y = 0; y < fb_h; ++y) {
       auto* row = pixels.data() + (static_cast<std::size_t>(y) * stride);
       for (std::uint32_t x = 0; x < fb_w; ++x) {

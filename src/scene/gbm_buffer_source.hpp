@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 //
 // gbm_buffer_source.hpp — single-buffer LayerBufferSource backed by a
-// CPU-mapped GBM scanout buffer.
+// CPU-mappable GBM scanout buffer.
 //
 // Analogue of DumbBufferSource, but allocates through GBM instead of
 // the dumb-buffer ioctl. Suitable for layers where the caller wants
@@ -13,8 +13,12 @@
 //     usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE
 //
 // so the BO is KMS-scannable, linearly laid out, and CPU-mappable.
-// Consumers rasterize into `pixels()` and commit — the scene submits
-// the cached FB ID from `acquire()`.
+// Consumers rasterize through `map(MapAccess::Write | ReadWrite)` and
+// drop the guard before committing — gbm_bo_map / gbm_bo_unmap drive
+// the driver's cache-coherence and (on tiled platforms)
+// staging-buffer lifecycle, so the guard must be held only across the
+// CPU access region. The scene submits the cached FB ID from
+// `acquire()`.
 //
 // Single-buffer: the same BO is returned on every `acquire()`. Good
 // enough for slideshows and other slowly-rotating content where the
@@ -26,8 +30,8 @@
 
 #include "buffer_source.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
-#include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/gbm/buffer.hpp>
 #include <drm-cxx/gbm/device.hpp>
 
@@ -72,23 +76,11 @@ class GbmBufferSource : public LayerBufferSource {
     return BindingModel::SceneSubmitsFbId;
   }
   [[nodiscard]] SourceFormat format() const noexcept override { return format_; }
-  [[nodiscard]] std::optional<CpuMapping> cpu_mapping() const noexcept override;
+  [[nodiscard]] drm::expected<drm::BufferMapping, std::error_code> map(
+      drm::MapAccess access) override;
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
-
-  // ── Pixel access for CPU-side renderers ────────────────────────────
-  /// Mutable view over the buffer's pixel storage. `stride()` bytes
-  /// per row — the allocator picks a stride that may exceed
-  /// `width * 4` for alignment.
-  [[nodiscard]] drm::span<std::uint8_t> pixels() noexcept {
-    return {buffer_.data(), buffer_.size_bytes()};
-  }
-
-  /// Bytes per row in the buffer. The GBM allocator picks a stride
-  /// that may exceed `width * 4` for alignment; honour this rather
-  /// than computing one from the format.
-  [[nodiscard]] std::uint32_t stride() const noexcept { return buffer_.stride(); }
 
  private:
   GbmBufferSource(drm::gbm::GbmDevice gbm_dev, drm::gbm::Buffer buffer,

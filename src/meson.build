@@ -121,6 +121,7 @@ drm_cxx_dep = declare_dependency(
 
 # Install public headers
 install_headers(
+  'buffer_mapping.hpp',
   'drm-cxx.hpp',
   'log.hpp',
   subdir : 'drm-cxx',

@@ -11,6 +11,7 @@
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/property_store.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -627,9 +628,13 @@ class LayerScene::Impl {
     drm::planes::Layer* planes_layer{nullptr};
     AcquiredBuffer buffer{};
     // Populated by compose_unassigned for the layers it picks up so the
-    // blend pass below doesn't have to call the virtual cpu_mapping()
-    // a second time. Stays nullopt for hardware-assigned layers.
-    std::optional<CpuMapping> cached_mapping;
+    // blend pass below doesn't have to call the virtual `map()` a
+    // second time. Stays nullopt for hardware-assigned layers. The
+    // mapping is held across `compose_unassigned`'s blend loop and
+    // dropped on slot destruction (i.e. after the canvas plane has
+    // been armed and before atomic commit) — `BufferMapping`'s dtor
+    // pairs with `gbm_bo_unmap` for GBM-backed sources.
+    std::optional<drm::BufferMapping> cached_mapping;
   };
 
   // Slot-table helpers — return nullptr on any handle that doesn't
@@ -1002,9 +1007,10 @@ class LayerScene::Impl {
                           CommitReport& report) {
     // Collect layers needing composition that also have CPU pixels
     // available. Sources without a CPU mapping (future EGL Streams,
-    // tiled GBM BOs) can't be composited; they stay dropped. Stash
-    // the mapping inline to avoid re-calling the virtual `cpu_mapping()`
-    // a second time later in the function.
+    // tiled GBM BOs) report `errc::function_not_supported`; we drop
+    // them. Stash the mapping inline so the blend pass below doesn't
+    // have to call the virtual `map()` a second time, and so the
+    // GBM-backed unmap pairs with this scope rather than per-blend.
     scratch_composited_.clear();
     scratch_composited_.reserve(acquisitions.size());
     for (auto& acq : acquisitions) {
@@ -1018,18 +1024,15 @@ class LayerScene::Impl {
       // (test rigs, diagnostic overlays) typically use linear buffers, so
       // this gate also keeps the log quiet for them.
       diagnose_modifier_rejection(*acq.planes_layer);
-      auto mapping = acq.scene_layer->source().cpu_mapping();
-      if (!mapping.has_value()) {
+      auto mapping = acq.scene_layer->source().map(drm::MapAccess::Read);
+      if (!mapping) {
         drm::log_warn(
-            "scene::LayerScene: layer {} needs composition but its source has no CPU mapping; "
+            "scene::LayerScene: layer {} needs composition but its source map() failed ({}); "
             "dropping",
-            acq.scene_layer->handle().id);
+            acq.scene_layer->handle().id, mapping.error().message());
         continue;
       }
-      // std::optional<CpuMapping> is trivially copyable (the mapping
-      // holds a span + a uint32, both POD); std::move would degrade to
-      // a copy and clang-tidy flags the redundant cast.
-      acq.cached_mapping = mapping;
+      acq.cached_mapping.emplace(std::move(*mapping));
       scratch_composited_.push_back(&acq);
     }
     if (scratch_composited_.empty()) {
@@ -1110,8 +1113,8 @@ class LayerScene::Impl {
         continue;
       }
       CompositeSrc src;
-      src.pixels = acq->cached_mapping->pixels;
-      src.src_stride_bytes = acq->cached_mapping->stride_bytes;
+      src.pixels = acq->cached_mapping->pixels();
+      src.src_stride_bytes = acq->cached_mapping->stride();
       src.src_width = fmt.width;
       src.src_height = fmt.height;
       src.drm_fourcc = fmt.drm_fourcc;

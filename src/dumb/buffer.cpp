@@ -5,6 +5,7 @@
 
 #include "../core/device.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
 
 #include <drm.h>
@@ -17,7 +18,7 @@
 #include <cstring>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/types.h>
+#include <sys/types.h>  // NOLINT(misc-include-cleaner) — canonical home of off_t
 #include <system_error>
 
 namespace drm::dumb {
@@ -131,6 +132,17 @@ void Buffer::forget() noexcept {
   fd_ = -1;
 }
 
+drm::BufferMapping Buffer::map(drm::MapAccess access) noexcept {
+  // Dumb buffers are mmap'd at create() time onto a kernel-coherent
+  // region; the guard is a thin view, no per-scope work to do. A
+  // null unmap pointer signals "destructor is a no-op" to BufferMapping.
+  if (mapped_ == nullptr || size_bytes_ == 0) {
+    return {};
+  }
+  return {mapped_,           size_bytes_,    stride_, width_, height_, access,
+          /*unmap=*/nullptr, /*ctx=*/nullptr};
+}
+
 drm::expected<Buffer, std::error_code> Buffer::create(const drm::Device& dev, const Config& cfg) {
   if (cfg.width == 0 || cfg.height == 0 || cfg.drm_format == 0 || cfg.bpp == 0) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
@@ -163,8 +175,10 @@ drm::expected<Buffer, std::error_code> Buffer::create(const drm::Device& dev, co
     return drm::unexpected<std::error_code>(ec);
   }
 
+  // NOLINTBEGIN(misc-include-cleaner) — off_t arrives via <sys/types.h>
   void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
                    static_cast<off_t>(map_req.offset));
+  // NOLINTEND(misc-include-cleaner)
   if (ptr == MAP_FAILED) {
     const auto ec = last_errno();
     drm_mode_destroy_dumb destroy{};

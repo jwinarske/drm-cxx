@@ -57,6 +57,7 @@
 // drm-cxx
 #include "../common/select_device.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
@@ -242,11 +243,16 @@ class JanitorBufferSource : public drm::scene::LayerBufferSource {
   }
 
   // ── Pixel access for ThorVG ────────────────────────────────────────
-  [[nodiscard]] std::uint32_t* pixels_for(std::size_t idx) noexcept {
-    return reinterpret_cast<std::uint32_t*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-        buffers_.at(idx).data());
+  /// Acquire a scoped mapping for slot `idx`. The returned guard is the
+  /// unified `drm::BufferMapping` view consumers paint through; for
+  /// dumb buffers the underlying mmap is permanent so the guard's
+  /// destructor is a no-op, but the per-frame shape keeps this source
+  /// portable to a future GBM-backed variant where `gbm_bo_unmap` must
+  /// pair with the painting region. Caller threads ThorVG's draw +
+  /// sync inside the guard's scope.
+  [[nodiscard]] drm::BufferMapping map_buffer(std::size_t idx, drm::MapAccess access) noexcept {
+    return buffers_.at(idx).map(access);
   }
-  [[nodiscard]] std::uint32_t stride_px() const noexcept { return buffers_.at(0).stride() / 4; }
   [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
   [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
 
@@ -508,12 +514,13 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   const std::uint32_t canvas_h = std::min<std::uint32_t>(height, fb_h);
   const std::uint32_t x_off = (fb_w - canvas_w) / 2;
   const std::uint32_t y_off = (fb_h - canvas_h) / 2;
-  const auto canvas_origin_for = [&](std::size_t idx) -> std::uint32_t* {
+  const auto canvas_origin_in = [&](const drm::BufferMapping& m) -> std::uint32_t* {
     // Widen y_off before multiplying; tidy flags uint32_t×uint32_t used
     // as a pointer offset because it would overflow on a 5K+ panel
     // where y_off * stride_px exceeds 2^32.
-    return source->pixels_for(idx) + (static_cast<std::size_t>(y_off) * source->stride_px()) +
-           x_off;
+    return reinterpret_cast<std::uint32_t*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+               m.pixels().data()) +
+           (static_cast<std::size_t>(y_off) * (m.stride() / 4U)) + x_off;
   };
 
   // ThorVG init
@@ -528,22 +535,34 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
   }
 
   // Bind canvas to the initial back buffer and pre-render frame 0 so
-  // the first scene commit displays something real.
+  // the first scene commit displays something real. ThorVG keeps the
+  // pixel pointer bound across draw + sync — sync() is the barrier that
+  // releases it — so the mapping must outlive sync(). After sync() the
+  // mapping can drop and the next frame re-maps for whichever slot is
+  // back this time.
   std::size_t back = 0;
   std::size_t front = 1;
-  if (!verify(canvas->target(canvas_origin_for(back), source->stride_px(), canvas_w, canvas_h,
-                             tvg::ColorSpace::ARGB8888))) {
-    tvg::Initializer::term();
-    return EXIT_FAILURE;
-  }
-  if (!demo_owner->content(canvas.get(), canvas_w, canvas_h)) {
-    drm::println(stderr, "demo.content returned false");
-    tvg::Initializer::term();
-    return EXIT_FAILURE;
-  }
-  if (!verify(canvas->draw(clearBuffer)) || !verify(canvas->sync())) {
-    tvg::Initializer::term();
-    return EXIT_FAILURE;
+  {
+    auto initial_mapping = source->map_buffer(back, drm::MapAccess::Write);
+    if (initial_mapping.empty()) {
+      drm::println(stderr, "JanitorBufferSource::map_buffer failed for initial frame");
+      tvg::Initializer::term();
+      return EXIT_FAILURE;
+    }
+    if (!verify(canvas->target(canvas_origin_in(initial_mapping), initial_mapping.stride() / 4U,
+                               canvas_w, canvas_h, tvg::ColorSpace::ARGB8888))) {
+      tvg::Initializer::term();
+      return EXIT_FAILURE;
+    }
+    if (!demo_owner->content(canvas.get(), canvas_w, canvas_h)) {
+      drm::println(stderr, "demo.content returned false");
+      tvg::Initializer::term();
+      return EXIT_FAILURE;
+    }
+    if (!verify(canvas->draw(clearBuffer)) || !verify(canvas->sync())) {
+      tvg::Initializer::term();
+      return EXIT_FAILURE;
+    }
   }
 
   // PageFlip: clear flip_pending on each event so the loop knows the
@@ -691,9 +710,16 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
 
       // ThorVG's canvas was bound to the old mmap. The source
       // re-allocated its buffers on the new fd, so retarget at the
-      // current back buffer's fresh pixels.
-      if (!verify(canvas->target(canvas_origin_for(back), source->stride_px(), canvas_w, canvas_h,
-                                 tvg::ColorSpace::ARGB8888),
+      // current back buffer's fresh pixels. The mapping is short-lived
+      // — the next per-frame block remaps, painting and sync() under
+      // its own scope.
+      auto resume_mapping = source->map_buffer(back, drm::MapAccess::Write);
+      if (resume_mapping.empty()) {
+        drm::println(stderr, "resume: map_buffer failed");
+        break;
+      }
+      if (!verify(canvas->target(canvas_origin_in(resume_mapping), resume_mapping.stride() / 4U,
+                                 canvas_w, canvas_h, tvg::ColorSpace::ARGB8888),
                   "resume canvas rebind")) {
         break;
       }
@@ -713,9 +739,15 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
     // the game mutates the scene. With threadsCnt > 0, canvas->update()
     // may dispatch work to the threadpool; calling target() afterwards
     // returns InsufficientCondition because the canvas is "performing
-    // rendering."
-    if (!verify(canvas->target(canvas_origin_for(back), source->stride_px(), canvas_w, canvas_h,
-                               tvg::ColorSpace::ARGB8888),
+    // rendering." The mapping must outlive ThorVG's draw + sync — the
+    // threadpool writes through the bound pointer until sync() returns.
+    auto frame_mapping = source->map_buffer(back, drm::MapAccess::Write);
+    if (frame_mapping.empty()) {
+      drm::println(stderr, "frame: map_buffer failed");
+      break;
+    }
+    if (!verify(canvas->target(canvas_origin_in(frame_mapping), frame_mapping.stride() / 4U,
+                               canvas_w, canvas_h, tvg::ColorSpace::ARGB8888),
                 "target rebind")) {
       break;
     }

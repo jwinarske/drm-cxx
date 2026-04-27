@@ -5,6 +5,7 @@
 
 #include "device.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
 
 #include <drm_fourcc.h>
@@ -15,6 +16,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <system_error>
 
 namespace drm::gbm {
@@ -40,14 +42,12 @@ Buffer::Buffer(struct gbm_bo* bo, struct gbm_surface* surf) noexcept : bo_(bo), 
   }
 }
 
-Buffer::Buffer(int fd, struct gbm_bo* bo, std::uint32_t fb_id, void* map_ptr, void* map_data,
-               std::size_t size_bytes, std::uint32_t width, std::uint32_t height,
-               std::uint32_t stride, std::uint32_t format, std::uint64_t modifier) noexcept
+Buffer::Buffer(int fd, struct gbm_bo* bo, std::uint32_t fb_id, std::size_t size_bytes,
+               std::uint32_t width, std::uint32_t height, std::uint32_t stride,
+               std::uint32_t format, std::uint64_t modifier) noexcept
     : fd_(fd),
       bo_(bo),
       fb_id_(fb_id),
-      map_ptr_(map_ptr),
-      map_data_(map_data),
       size_bytes_(size_bytes),
       width_(width),
       height_(height),
@@ -64,8 +64,6 @@ Buffer::Buffer(Buffer&& other) noexcept
       bo_(other.bo_),
       surf_(other.surf_),
       fb_id_(other.fb_id_),
-      map_ptr_(other.map_ptr_),
-      map_data_(other.map_data_),
       size_bytes_(other.size_bytes_),
       width_(other.width_),
       height_(other.height_),
@@ -76,8 +74,6 @@ Buffer::Buffer(Buffer&& other) noexcept
   other.bo_ = nullptr;
   other.surf_ = nullptr;
   other.fb_id_ = 0;
-  other.map_ptr_ = nullptr;
-  other.map_data_ = nullptr;
   other.size_bytes_ = 0;
   other.width_ = 0;
   other.height_ = 0;
@@ -93,8 +89,6 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
     bo_ = other.bo_;
     surf_ = other.surf_;
     fb_id_ = other.fb_id_;
-    map_ptr_ = other.map_ptr_;
-    map_data_ = other.map_data_;
     size_bytes_ = other.size_bytes_;
     width_ = other.width_;
     height_ = other.height_;
@@ -105,8 +99,6 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
     other.bo_ = nullptr;
     other.surf_ = nullptr;
     other.fb_id_ = 0;
-    other.map_ptr_ = nullptr;
-    other.map_data_ = nullptr;
     other.size_bytes_ = 0;
     other.width_ = 0;
     other.height_ = 0;
@@ -118,12 +110,6 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
 }
 
 void Buffer::destroy() noexcept {
-  if (map_ptr_ != nullptr && bo_ != nullptr) {
-    gbm_bo_unmap(bo_, map_data_);
-  }
-  map_ptr_ = nullptr;
-  map_data_ = nullptr;
-
   if (fb_id_ != 0 && fd_ >= 0) {
     drmModeRmFB(fd_, fb_id_);
   }
@@ -147,15 +133,15 @@ void Buffer::destroy() noexcept {
 }
 
 void Buffer::forget() noexcept {
-  // Every kernel-touching operation below (gbm_bo_unmap, drmModeRmFB,
-  // gbm_bo_destroy) would go through the now-dead DRM fd. Drop the
-  // handles without issuing any of them; the kernel reclaims on fd
-  // close.
+  // Every kernel-touching operation below (drmModeRmFB, gbm_bo_destroy)
+  // would go through the now-dead DRM fd. Drop the handles without
+  // issuing any of them; the kernel reclaims on fd close. Any
+  // BufferMapping previously acquired against this BO must already have
+  // been dropped by the caller — gbm_bo_unmap on a dead fd is the same
+  // hazard as gbm_bo_destroy.
   bo_ = nullptr;
   surf_ = nullptr;
   fb_id_ = 0;
-  map_ptr_ = nullptr;
-  map_data_ = nullptr;
   size_bytes_ = 0;
   width_ = 0;
   height_ = 0;
@@ -172,12 +158,57 @@ std::uint32_t Buffer::handle() const noexcept {
   return gbm_bo_get_handle(bo_).u32;
 }
 
-std::uint8_t* Buffer::data() noexcept {
-  return static_cast<std::uint8_t*>(map_ptr_);
-}
+drm::expected<drm::BufferMapping, std::error_code> Buffer::map(drm::MapAccess access) {
+  if (bo_ == nullptr) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
+  }
 
-const std::uint8_t* Buffer::data() const noexcept {
-  return static_cast<const std::uint8_t*>(map_ptr_);
+  std::uint32_t transfer_flags = 0;
+  switch (access) {
+    case drm::MapAccess::Read:
+      transfer_flags = GBM_BO_TRANSFER_READ;
+      break;
+    case drm::MapAccess::Write:
+      transfer_flags = GBM_BO_TRANSFER_WRITE;
+      break;
+    case drm::MapAccess::ReadWrite:
+      transfer_flags = GBM_BO_TRANSFER_READ_WRITE;
+      break;
+  }
+
+  std::uint32_t map_stride = 0;
+  void* map_data = nullptr;
+  errno = 0;
+  void* map_ptr = gbm_bo_map(bo_, 0, 0, width_, height_, transfer_flags, &map_stride, &map_data);
+  if (map_ptr == nullptr) {
+    return drm::unexpected<std::error_code>(last_errno_or(std::errc::io_error));
+  }
+
+  // Hand the gbm_bo_unmap cookie + the gbm_bo* through the guard so the
+  // dtor can call back into mesa without re-resolving anything. The pair
+  // is heap-allocated so the BufferMapping owns lifetime independently
+  // of the source Buffer; if the caller drops the Buffer first (a use-
+  // after-free, but defensible to handle) the cookie still gets unmapped.
+  // The unmapper deletes the cookie on its way out.
+  struct UnmapCookie {
+    struct gbm_bo* bo;
+    void* map_data;
+  };
+  auto* cookie = new (std::nothrow) UnmapCookie{bo_, map_data};
+  if (cookie == nullptr) {
+    gbm_bo_unmap(bo_, map_data);
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
+  }
+
+  return drm::BufferMapping(
+      static_cast<std::uint8_t*>(map_ptr), static_cast<std::size_t>(map_stride) * height_,
+      map_stride, width_, height_, access,
+      [](void* ctx) noexcept {
+        auto* c = static_cast<UnmapCookie*>(ctx);
+        gbm_bo_unmap(c->bo, c->map_data);
+        delete c;  // NOLINT(cppcoreguidelines-owning-memory)
+      },
+      cookie);
 }
 
 drm::expected<int, std::error_code> Buffer::fd() const {
@@ -221,20 +252,6 @@ drm::expected<Buffer, std::error_code> Buffer::create(const GbmDevice& dev, cons
   const std::uint64_t resolved_modifier = gbm_bo_get_modifier(bo);
   const std::size_t size_bytes = static_cast<std::size_t>(stride) * cfg.height;
 
-  void* map_ptr = nullptr;
-  void* map_data = nullptr;
-  if (cfg.map_cpu) {
-    std::uint32_t map_stride = 0;
-    errno = 0;
-    map_ptr = gbm_bo_map(bo, 0, 0, cfg.width, cfg.height, GBM_BO_TRANSFER_READ_WRITE, &map_stride,
-                         &map_data);
-    if (map_ptr == nullptr) {
-      const auto ec = last_errno_or(std::errc::io_error);
-      gbm_bo_destroy(bo);
-      return drm::unexpected<std::error_code>(ec);
-    }
-  }
-
   std::uint32_t fb_id = 0;
   if (cfg.add_fb) {
     std::uint32_t handles[4] = {gbm_bo_get_handle(bo).u32, 0, 0, 0};
@@ -247,16 +264,13 @@ drm::expected<Buffer, std::error_code> Buffer::create(const GbmDevice& dev, cons
         use_modifiers ? modifiers : nullptr, &fb_id, use_modifiers ? DRM_MODE_FB_MODIFIERS : 0);
     if (rc != 0) {
       const auto ec = std::error_code(errno != 0 ? errno : EIO, std::system_category());
-      if (map_ptr != nullptr) {
-        gbm_bo_unmap(bo, map_data);
-      }
       gbm_bo_destroy(bo);
       return drm::unexpected<std::error_code>(ec);
     }
   }
 
-  return Buffer{drm_fd,    bo,         fb_id,  map_ptr,        map_data,         size_bytes,
-                cfg.width, cfg.height, stride, cfg.drm_format, resolved_modifier};
+  return Buffer{drm_fd,     bo,     fb_id,          size_bytes,       cfg.width,
+                cfg.height, stride, cfg.drm_format, resolved_modifier};
 }
 
 }  // namespace drm::gbm

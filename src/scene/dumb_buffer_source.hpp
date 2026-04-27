@@ -7,7 +7,10 @@
 // The simplest possible source: one CPU-writable linear ARGB8888 buffer
 // (or any format drm::dumb::Buffer accepts), created once at startup,
 // reused every frame. acquire() returns its cached FB ID; release() is
-// a no-op because there is nothing to hand back to. Suitable for:
+// a no-op because there is nothing to hand back to. Pixel access goes
+// through `map(MapAccess)` — backed by the dumb buffer's pinned
+// kernel-coherent mmap, so the guard's destructor is a no-op. Suitable
+// for:
 //
 //   * software-rendered cursors and CSD frames,
 //   * test patterns and unit-test rigs,
@@ -23,8 +26,8 @@
 
 #include "buffer_source.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
-#include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <cstdint>
@@ -39,11 +42,12 @@ class Device;
 namespace drm::scene {
 
 /// `LayerBufferSource` backed by a single `drm::dumb::Buffer`. CPU
-/// writes pixels directly into `pixels()`; the scene returns the same
-/// cached FB ID on every `acquire()`. Suitable for software-rendered
-/// cursors / CSDs / test patterns / signage layers — anything where
-/// the producer is not racing scanout. For multi-buffered scanout,
-/// reach for a ring source (planned: `GbmRingSource`).
+/// writes pixels through `map(MapAccess::Write)` (or `ReadWrite` /
+/// `Read`); the scene returns the same cached FB ID on every
+/// `acquire()`. Suitable for software-rendered cursors / CSDs / test
+/// patterns / signage layers — anything where the producer is not
+/// racing scanout. For multi-buffered scanout, reach for a ring source
+/// (planned: `GbmRingSource`).
 class DumbBufferSource : public LayerBufferSource {
  public:
   /// Allocate a single dumb buffer of the given size and format. The
@@ -65,22 +69,11 @@ class DumbBufferSource : public LayerBufferSource {
     return BindingModel::SceneSubmitsFbId;
   }
   [[nodiscard]] SourceFormat format() const noexcept override { return format_; }
-  [[nodiscard]] std::optional<CpuMapping> cpu_mapping() const noexcept override;
+  [[nodiscard]] drm::expected<drm::BufferMapping, std::error_code> map(
+      drm::MapAccess access) override;
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
-
-  // ── Pixel access for CPU-side renderers ────────────────────────────
-  /// Mutable view over the buffer's linear pixel storage. `stride()`
-  /// bytes per row — usually `width() * 4` for ARGB8888 but padded on
-  /// some drivers.
-  [[nodiscard]] drm::span<std::uint8_t> pixels() noexcept {
-    return {buffer_.data(), buffer_.size_bytes()};
-  }
-
-  /// Bytes per row in the buffer. Usually `width * 4` for ARGB/XRGB
-  /// formats, but the kernel may pad it for alignment.
-  [[nodiscard]] std::uint32_t stride() const noexcept { return buffer_.stride(); }
 
  private:
   DumbBufferSource(drm::dumb::Buffer buffer, SourceFormat format) noexcept

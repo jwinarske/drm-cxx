@@ -18,6 +18,7 @@
 #include "signage_player/overlay_renderer.hpp"
 #include "signage_player/playlist.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -443,14 +444,16 @@ int main(int argc, char** argv) {
   signage::OverlayPaint overlay_paint;
   overlay_paint.width = overlay_w;
   overlay_paint.height = overlay_h;
-  overlay_paint.stride_bytes = overlay->stride();
   if (const auto& od = playlist->overlay(); od.has_value()) {
     overlay_paint.fg_argb = od->fg_color;
     overlay_paint.bg_argb = od->bg_color;
     overlay_paint.font_size = od->font_size;
     overlay_paint.text = od->text;
   }
-  signage::paint_overlay(overlay->pixels(), overlay_paint);
+  if (auto m = overlay->map(drm::MapAccess::Write); m) {
+    overlay_paint.stride_bytes = m->stride();
+    signage::paint_overlay(m->pixels(), overlay_paint);
+  }
 
   // Ticker paint is per-frame — the scroll offset advances with elapsed
   // wall time, which makes this layer the dirty-every-frame counterpart
@@ -460,7 +463,6 @@ int main(int argc, char** argv) {
     const auto& td = *playlist->ticker();
     ticker_paint.width = ticker_w;
     ticker_paint.height = ticker_h;
-    ticker_paint.stride_bytes = ticker->stride();
     ticker_paint.fg_argb = td.fg_color;
     ticker_paint.bg_argb = td.bg_color;
     ticker_paint.font_size = td.font_size;
@@ -474,7 +476,10 @@ int main(int argc, char** argv) {
     const double elapsed_s = std::chrono::duration<double>(now - ticker_started).count();
     ticker_paint.scroll_offset_px =
         elapsed_s * static_cast<double>(playlist->ticker()->pixels_per_second);
-    signage::paint_ticker(ticker->pixels(), ticker_paint);
+    if (auto m = ticker->map(drm::MapAccess::Write); m) {
+      ticker_paint.stride_bytes = m->stride();
+      signage::paint_ticker(m->pixels(), ticker_paint);
+    }
   };
   repaint_ticker(ticker_started);
 
@@ -488,7 +493,6 @@ int main(int argc, char** argv) {
     const auto& cd = *playlist->clock();
     clock_paint.width = clock_w;
     clock_paint.height = clock_h;
-    clock_paint.stride_bytes = clock_src->stride();
     clock_paint.fg_argb = cd.fg_color;
     clock_paint.bg_argb = cd.bg_color;
     clock_paint.font_size = cd.font_size;
@@ -504,7 +508,10 @@ int main(int argc, char** argv) {
     }
     last_clock_text = std::move(formatted);
     clock_paint.text = last_clock_text;
-    signage::paint_clock(clock_src->pixels(), clock_paint);
+    if (auto m = clock_src->map(drm::MapAccess::Write); m) {
+      clock_paint.stride_bytes = m->stride();
+      signage::paint_clock(m->pixels(), clock_paint);
+    }
   };
   repaint_clock_if_changed();
 
@@ -516,10 +523,12 @@ int main(int argc, char** argv) {
     const auto& ld = *playlist->logo();
     logo_paint.width = logo_w;
     logo_paint.height = logo_h;
-    logo_paint.stride_bytes = logo_src->stride();
     logo_paint.path = ld.path;
     logo_paint.fallback_argb = ld.fallback_color;
-    signage::paint_logo(logo_src->pixels(), logo_paint);
+    if (auto m = logo_src->map(drm::MapAccess::Write); m) {
+      logo_paint.stride_bytes = m->stride();
+      signage::paint_logo(m->pixels(), logo_paint);
+    }
   }
 
   // Paint the first slide into the background before the initial commit.
@@ -527,7 +536,9 @@ int main(int argc, char** argv) {
     const auto& slide = playlist->slides()[idx];
     const std::uint32_t color =
         (slide.kind == signage::SlideKind::Color) ? slide.color : 0xFF202020U;
-    fill_argb(bg->pixels(), bg->stride(), fb_w, fb_h, color);
+    if (auto m = bg->map(drm::MapAccess::Write); m) {
+      fill_argb(m->pixels(), m->stride(), fb_w, fb_h, color);
+    }
   };
   paint_slide(0);
 
@@ -692,16 +703,19 @@ int main(int argc, char** argv) {
       page_flip = drm::PageFlip(dev);
       page_flip.set_handler(
           [&](std::uint32_t, std::uint64_t, std::uint64_t) { flip_pending = false; });
-      // Re-paint every layer against the fresh mappings.
+      // Re-paint every layer against the fresh mappings. Each helper
+      // takes its own short-lived map() guard, so there is no per-buffer
+      // stride to refresh up here — the per-frame helpers below pick it
+      // up from the freshly remapped buffer.
       paint_slide(slide_idx);
-      overlay_paint.stride_bytes = overlay->stride();
-      signage::paint_overlay(overlay->pixels(), overlay_paint);
+      if (auto m = overlay->map(drm::MapAccess::Write); m) {
+        overlay_paint.stride_bytes = m->stride();
+        signage::paint_overlay(m->pixels(), overlay_paint);
+      }
       if (has_ticker) {
-        ticker_paint.stride_bytes = ticker->stride();
         repaint_ticker(clock::now());
       }
       if (has_clock) {
-        clock_paint.stride_bytes = clock_src->stride();
         // Force the clock to repaint after resume even if the minute
         // hasn't rolled — the underlying buffer was unmapped and is
         // fresh again.
@@ -709,8 +723,10 @@ int main(int argc, char** argv) {
         repaint_clock_if_changed();
       }
       if (has_logo) {
-        logo_paint.stride_bytes = logo_src->stride();
-        signage::paint_logo(logo_src->pixels(), logo_paint);
+        if (auto m = logo_src->map(drm::MapAccess::Write); m) {
+          logo_paint.stride_bytes = m->stride();
+          signage::paint_logo(m->pixels(), logo_paint);
+        }
       }
     }
 

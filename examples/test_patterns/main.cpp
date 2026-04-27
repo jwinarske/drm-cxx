@@ -17,6 +17,7 @@
 #include "common/open_output.hpp"
 #include "test_patterns/patterns.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/input/seat.hpp>
@@ -142,9 +143,13 @@ int main(int argc, char** argv) {
   // pattern switches with a single function call.
   PatternKind current = PatternKind::SmpteBars;
   auto repaint = [&](PatternKind kind) noexcept {
+    auto m = bg->map(drm::MapAccess::Write);
+    if (!m) {
+      return;
+    }
     PaintTarget tgt;
-    tgt.pixels = bg->pixels();
-    tgt.stride_bytes = bg->stride();
+    tgt.pixels = m->pixels();
+    tgt.stride_bytes = m->stride();
     tgt.width = fb_w;
     tgt.height = fb_h;
     drm::examples::test_patterns::paint(kind, tgt);

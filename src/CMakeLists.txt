@@ -177,6 +177,7 @@ endif()
 include(CMakePackageConfigHelpers)
 
 install(FILES
+    buffer_mapping.hpp
     drm-cxx.hpp
     log.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx)

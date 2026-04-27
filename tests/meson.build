@@ -104,6 +104,13 @@ test('test_dumb_buffer',
   ),
 )
 
+test('test_buffer_mapping',
+  executable('test_buffer_mapping',
+    'unit/test_buffer_mapping.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 if has_xcursor
   test('test_cursor_theme',
     executable('test_cursor_theme',

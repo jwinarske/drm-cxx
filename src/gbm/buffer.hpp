@@ -12,19 +12,28 @@
 //   2. `Buffer::create(GbmDevice, Config)` — direct allocation via
 //      `gbm_bo_create[_with_modifiers2]`. Intended for CPU-rendered
 //      scanout: pair with `GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT |
-//      GBM_BO_USE_WRITE` and a CPU mapping, and the scene binds the
-//      returned FB ID directly. Destruction calls `gbm_bo_destroy`.
+//      GBM_BO_USE_WRITE` so the BO is CPU-mappable with a linear
+//      layout, and the scene binds the returned FB ID directly.
+//      Destruction calls `gbm_bo_destroy`.
+//
+// CPU access goes through `map(MapAccess)` — a scoped `gbm_bo_map` /
+// `gbm_bo_unmap` pair returned as a `drm::BufferMapping` guard. Mesa
+// drivers do cache-coherence work at map and unmap time (and on tiled
+// formats, allocate a temporary linear staging buffer for the duration
+// of the mapping), so callers must hold the guard only across the
+// region of code that actually reads or writes pixels — not across
+// the BO's full lifetime.
 //
 // Factory-allocated buffers optionally carry a KMS FB ID (via
-// `drmModeAddFB2WithModifiers`) and a CPU mapping (via `gbm_bo_map`);
-// both are unwound in the destructor. If the owning DRM fd has been
-// replaced out from under the buffer (libseat's session-resume cycle),
-// `forget()` drops the handles without issuing ioctls against what is
-// now somebody else's fd — the same contract `dumb::Buffer::forget()`
-// offers.
+// `drmModeAddFB2WithModifiers`); the FB ID is unwound in the destructor.
+// If the owning DRM fd has been replaced out from under the buffer
+// (libseat's session-resume cycle), `forget()` drops the handles
+// without issuing ioctls against what is now somebody else's fd — the
+// same contract `dumb::Buffer::forget()` offers.
 
 #pragma once
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
 
 #include <cstddef>
@@ -42,16 +51,14 @@ class GbmDevice;
 /// Parameters for a direct GBM buffer allocation. `drm_format` is a
 /// DRM FourCC (e.g. `DRM_FORMAT_ARGB8888`). `usage` is the bitwise-OR
 /// of `GBM_BO_USE_*` flags — at minimum `GBM_BO_USE_SCANOUT` for KMS
-/// scanout and (if `map_cpu` is true) `GBM_BO_USE_LINEAR |
-/// GBM_BO_USE_WRITE` so the returned BO is CPU-mappable with a linear
-/// layout. `modifier` is optional: leave unset to let GBM (and the
-/// driver) pick a layout, or pin an explicit DRM format modifier
-/// (e.g. `DRM_FORMAT_MOD_LINEAR`) to force it. `add_fb` controls
-/// whether the factory registers a KMS FB via
-/// `drmModeAddFB2WithModifiers`; set false for callers that only want
-/// the BO (e.g. to export as DMA-BUF). `map_cpu` controls whether the
-/// factory establishes a CPU mapping via `gbm_bo_map`; must be paired
-/// with `GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE` in `usage`.
+/// scanout and `GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE` if the caller
+/// intends to CPU-map the BO via `Buffer::map()`. `modifier` is
+/// optional: leave unset to let GBM (and the driver) pick a layout,
+/// or pin an explicit DRM format modifier (e.g.
+/// `DRM_FORMAT_MOD_LINEAR`) to force it. `add_fb` controls whether
+/// the factory registers a KMS FB via `drmModeAddFB2WithModifiers`;
+/// set false for callers that only want the BO (e.g. to export as
+/// DMA-BUF).
 struct Config {
   std::uint32_t width{0};
   std::uint32_t height{0};
@@ -59,7 +66,6 @@ struct Config {
   std::uint32_t usage{0};
   std::optional<std::uint64_t> modifier;
   bool add_fb{true};
-  bool map_cpu{true};
 };
 
 class Buffer {
@@ -94,29 +100,35 @@ class Buffer {
   /// factory-allocated buffers where `add_fb` was false.
   [[nodiscard]] std::uint32_t fb_id() const noexcept { return fb_id_; }
 
-  /// Mutable CPU mapping over the buffer's pixel storage when the
-  /// buffer was created with `Config::map_cpu == true`. `size_bytes()`
-  /// long. Null for surface-locked buffers and factory-allocated
-  /// buffers where `map_cpu` was false.
-  [[nodiscard]] std::uint8_t* data() noexcept;
-  [[nodiscard]] const std::uint8_t* data() const noexcept;
+  /// Acquire a scoped CPU mapping. Calls `gbm_bo_map` with the
+  /// transfer flags matching `access`; the returned guard's destructor
+  /// pairs it with `gbm_bo_unmap`. Mesa drivers use that pair to drive
+  /// cache-coherence handling and (for tiled formats) staging-buffer
+  /// lifetime, so the guard must be held only across the actual CPU
+  /// access — not across the BO's full lifetime. Allocate the BO with
+  /// `GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE` (and READ on platforms that
+  /// distinguish) for CPU-friendly layouts; tiled BOs map through a
+  /// staging buffer the driver populates on map and flushes on unmap.
+  [[nodiscard]] drm::expected<drm::BufferMapping, std::error_code> map(drm::MapAccess access);
 
   /// Get a DMA-BUF fd for this buffer. The caller owns the returned fd
   /// and is responsible for closing it.
   [[nodiscard]] drm::expected<int, std::error_code> fd() const;
 
-  /// Abandon the BO, FB ID, and CPU mapping without issuing ioctls or
-  /// GBM calls against the (now-dead) DRM fd. Same contract as
+  /// Abandon the BO and FB ID without issuing ioctls or GBM calls
+  /// against the (now-dead) DRM fd. Same contract as
   /// `dumb::Buffer::forget()`: use when the originating DRM fd has
   /// been replaced by libseat's resume cycle. The kernel reclaims the
-  /// orphaned handles on fd close.
+  /// orphaned handles on fd close. Any `BufferMapping` previously
+  /// acquired against this BO must already have been dropped — the
+  /// guard's `gbm_bo_unmap` would otherwise go through the dead fd.
   void forget() noexcept;
 
  private:
   explicit Buffer(struct gbm_bo* bo, struct gbm_surface* surf = nullptr) noexcept;
-  Buffer(int fd, struct gbm_bo* bo, std::uint32_t fb_id, void* map_ptr, void* map_data,
-         std::size_t size_bytes, std::uint32_t width, std::uint32_t height, std::uint32_t stride,
-         std::uint32_t format, std::uint64_t modifier) noexcept;
+  Buffer(int fd, struct gbm_bo* bo, std::uint32_t fb_id, std::size_t size_bytes,
+         std::uint32_t width, std::uint32_t height, std::uint32_t stride, std::uint32_t format,
+         std::uint64_t modifier) noexcept;
 
   void destroy() noexcept;
 
@@ -124,8 +136,6 @@ class Buffer {
   struct gbm_bo* bo_{nullptr};
   struct gbm_surface* surf_{nullptr};  // Non-null if locked from a surface
   std::uint32_t fb_id_{0};
-  void* map_ptr_{nullptr};
-  void* map_data_{nullptr};  // gbm_bo_unmap cookie paired with map_ptr_
   std::size_t size_bytes_{0};
   std::uint32_t width_{0};
   std::uint32_t height_{0};

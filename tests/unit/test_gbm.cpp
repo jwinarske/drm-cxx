@@ -28,7 +28,6 @@ drm::gbm::Config valid_argb_config(std::uint32_t w = 64, std::uint32_t h = 64) {
   cfg.drm_format = DRM_FORMAT_ARGB8888;
   cfg.usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE;
   cfg.add_fb = true;
-  cfg.map_cpu = true;
   return cfg;
 }
 
@@ -83,7 +82,6 @@ TEST(GbmBuffer, DefaultCtorIsEmpty) {
   EXPECT_EQ(b.format(), 0U);
   EXPECT_EQ(b.fb_id(), 0U);
   EXPECT_EQ(b.size_bytes(), 0U);
-  EXPECT_EQ(b.data(), nullptr);
 }
 
 TEST(GbmBuffer, ForgetOnEmptyIsSafe) {
