@@ -23,6 +23,13 @@ executable('scene_warm_start',
   dependencies : [drm_cxx_dep],
 )
 
+# scene_priority — pedagogical demo for content-type / update-hint-driven
+# priority eviction. Eight layers, typical 3-plane budget, no extra deps.
+executable('scene_priority',
+  'scene_priority/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
 executable('mouse_cursor',
