@@ -30,7 +30,8 @@ set(DRM_CXX_TESTS
   test_mode
   test_display
   test_gbm
-  test_dumb_buffer)
+  test_dumb_buffer
+  test_buffer_mapping)
 
 if(DRM_CXX_HAS_XCURSOR)
   list(APPEND DRM_CXX_TESTS

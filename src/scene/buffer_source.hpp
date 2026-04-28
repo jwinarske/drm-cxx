@@ -32,11 +32,10 @@
 
 #pragma once
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
-#include <drm-cxx/detail/span.hpp>
 
 #include <cstdint>
-#include <optional>
 #include <system_error>
 
 namespace drm {
@@ -92,26 +91,6 @@ struct AcquiredBuffer {
   void* opaque{nullptr};
 };
 
-/// Read-only view of a source's CPU-mapped pixel storage. Returned by
-/// `LayerBufferSource::cpu_mapping()` for sources whose buffer is laid
-/// out as a contiguous linear span (DumbBufferSource, GbmBufferSource
-/// configured with `GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE`). Sources
-/// holding tiled / compressed / GPU-only buffers must return
-/// `std::nullopt` — the composition fallback reads through this view
-/// assuming a linear layout and would produce visual garbage if handed
-/// tiled bytes. By contract, sources that return a CpuMapping must have
-/// a modifier of `DRM_FORMAT_MOD_LINEAR` or `DRM_FORMAT_MOD_INVALID`
-/// (the latter is the legacy "implementation-defined linear" sentinel
-/// many drivers still emit).
-struct CpuMapping {
-  /// Linear pixel storage covering at least `height * stride_bytes`
-  /// bytes. The first row starts at `pixels.data()`.
-  drm::span<const std::uint8_t> pixels;
-  /// Bytes per row; usually `width * 4` for ARGB/XRGB formats but may
-  /// be padded by the kernel / GBM allocator.
-  std::uint32_t stride_bytes{0};
-};
-
 /// Polymorphic interface for "where does this layer's content come
 /// from?". Concrete v1 implementations: `DumbBufferSource` (single
 /// dumb buffer, CPU-writable) and `GbmBufferSource` (rotating ring of
@@ -152,19 +131,29 @@ class LayerBufferSource {
   /// properties the allocator reads.
   [[nodiscard]] virtual SourceFormat format() const noexcept = 0;
 
-  /// Read-only CPU view of the buffer. Returned for sources that hold
-  /// a linear CPU mapping (DumbBufferSource, GbmBufferSource with
-  /// LINEAR + WRITE usage); `std::nullopt` for sources whose pixels
-  /// only live in GPU memory or behind a producer the scene can't
-  /// reach (future EGL Stream consumers, NPU outputs).
+  /// Acquire a scoped CPU mapping over the source's pixel storage.
+  /// Sources that hold a linear CPU mapping (DumbBufferSource,
+  /// GbmBufferSource with LINEAR + WRITE usage) implement this against
+  /// the underlying buffer's `map()`; sources whose pixels only live
+  /// in GPU memory or behind a producer the scene can't reach (future
+  /// EGL Stream consumers, NPU outputs) return
+  /// `errc::function_not_supported` from the default implementation
+  /// here.
   ///
-  /// Composition fallback uses this to pull pixels from layers the
-  /// allocator couldn't place on hardware. Sources that return
-  /// `nullopt` are uncompositable — when the allocator drops them, the
-  /// scene cannot rescue them via composition and they stay dropped
-  /// for the frame.
-  [[nodiscard]] virtual std::optional<CpuMapping> cpu_mapping() const noexcept {
-    return std::nullopt;
+  /// Composition fallback acquires `MapAccess::Read` to pull pixels
+  /// from layers the allocator couldn't place on hardware; consumers
+  /// painting into the source acquire `MapAccess::Write` or
+  /// `MapAccess::ReadWrite`. The guard's lifetime should match the
+  /// region of code that touches pixels — the scene drops it before
+  /// arming the canvas plane, consumers drop it before each commit.
+  ///
+  /// Sources that return `function_not_supported` are uncompositable —
+  /// when the allocator drops them, the scene cannot rescue them via
+  /// composition and they stay dropped for the frame.
+  [[nodiscard]] virtual drm::expected<drm::BufferMapping, std::error_code> map(
+      drm::MapAccess /*access*/) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
   }
 
   // ── v2 DriverOwnsBinding hooks ─────────────────────────────────────

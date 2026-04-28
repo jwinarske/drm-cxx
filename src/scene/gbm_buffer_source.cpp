@@ -5,6 +5,7 @@
 
 #include "buffer_source.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/gbm/buffer.hpp>
@@ -14,7 +15,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <system_error>
 #include <utility>
 
@@ -30,7 +30,6 @@ drm::gbm::Config buffer_config(std::uint32_t width, std::uint32_t height,
   cfg.drm_format = drm_format;
   cfg.usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE;
   cfg.add_fb = true;
-  cfg.map_cpu = true;
   return cfg;
 }
 
@@ -69,24 +68,24 @@ drm::expected<AcquiredBuffer, std::error_code> GbmBufferSource::acquire() {
   return acq;
 }
 
-std::optional<CpuMapping> GbmBufferSource::cpu_mapping() const noexcept {
-  if (buffer_.empty() || buffer_.data() == nullptr) {
-    return std::nullopt;
+drm::expected<drm::BufferMapping, std::error_code> GbmBufferSource::map(drm::MapAccess access) {
+  if (buffer_.empty()) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
   // GBM_BO_USE_LINEAR + GBM_BO_USE_WRITE in buffer_config asks for a
   // linear layout, but the driver may still resolve the BO to a
   // non-LINEAR explicit modifier (e.g. on hybrid SoCs). The
   // composition fallback reads bytes assuming a contiguous linear
   // layout — anything else would scan tiled garbage. Bail when the
-  // resolved modifier isn't LINEAR or INVALID.
+  // resolved modifier isn't LINEAR or INVALID; consumers writing into
+  // the buffer would still produce garbage if the underlying BO is
+  // tiled, so the gate is symmetric for read and write.
   if (format_.modifier != 0U /* DRM_FORMAT_MOD_LINEAR */ &&
       format_.modifier != ((1ULL << 56U) - 1U) /* DRM_FORMAT_MOD_INVALID */) {
-    return std::nullopt;
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
   }
-  CpuMapping m;
-  m.pixels = drm::span<const std::uint8_t>(buffer_.data(), buffer_.size_bytes());
-  m.stride_bytes = buffer_.stride();
-  return m;
+  return buffer_.map(access);
 }
 
 void GbmBufferSource::release(AcquiredBuffer /*acquired*/) noexcept {

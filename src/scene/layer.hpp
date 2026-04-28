@@ -45,8 +45,9 @@ class Layer {
   [[nodiscard]] LayerHandle handle() const noexcept { return handle_; }
 
   /// Mutable / const access to the layer's buffer source. The scene
-  /// keeps ownership; consumers may call source-specific APIs
-  /// (`pixels()`, `stride()`) but must not destroy the source.
+  /// keeps ownership; consumers may call `source().map(MapAccess)` to
+  /// paint into or read from the source's pixels but must not destroy
+  /// the source.
   [[nodiscard]] LayerBufferSource& source() noexcept { return *source_; }
   [[nodiscard]] const LayerBufferSource& source() const noexcept { return *source_; }
 

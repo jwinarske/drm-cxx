@@ -26,6 +26,7 @@
 // If VKMS is not loaded the test self-skips via GTEST_SKIP() so the
 // suite stays green on developer machines that haven't modprobed it.
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/capture/snapshot.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -143,8 +144,10 @@ drm::expected<ActiveCrtc, std::error_code> pick_crtc(int fd) {
 // any stride padding the kernel inserted.
 void fill_uniform_argb(DumbBufferSource& source, std::uint32_t width, std::uint32_t height,
                        std::uint32_t pixel) {
-  const auto pixels = source.pixels();
-  const std::uint32_t stride = source.stride();
+  auto mapping = source.map(drm::MapAccess::Write);
+  ASSERT_TRUE(mapping.has_value());
+  const auto pixels = mapping->pixels();
+  const std::uint32_t stride = mapping->stride();
   for (std::uint32_t y = 0; y < height; ++y) {
     auto* row = reinterpret_cast<std::uint32_t*>(pixels.data() + (y * stride));
     for (std::uint32_t x = 0; x < width; ++x) {

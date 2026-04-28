@@ -5,13 +5,13 @@
 
 #include "buffer_source.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <system_error>
 #include <utility>
 
@@ -54,9 +54,9 @@ drm::expected<AcquiredBuffer, std::error_code> DumbBufferSource::acquire() {
   return acq;
 }
 
-std::optional<CpuMapping> DumbBufferSource::cpu_mapping() const noexcept {
+drm::expected<drm::BufferMapping, std::error_code> DumbBufferSource::map(drm::MapAccess access) {
   if (buffer_.empty() || buffer_.data() == nullptr) {
-    return std::nullopt;
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
   // Dumb buffers are always linear by kernel construction, so this is
   // really a belt-and-braces check — `format_.modifier` is set to
@@ -65,12 +65,10 @@ std::optional<CpuMapping> DumbBufferSource::cpu_mapping() const noexcept {
   // mapping by mistake gets caught here uniformly.
   if (format_.modifier != 0U /* DRM_FORMAT_MOD_LINEAR */ &&
       format_.modifier != ((1ULL << 56U) - 1U) /* DRM_FORMAT_MOD_INVALID */) {
-    return std::nullopt;
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
   }
-  CpuMapping m;
-  m.pixels = drm::span<const std::uint8_t>(buffer_.data(), buffer_.size_bytes());
-  m.stride_bytes = buffer_.stride();
-  return m;
+  return buffer_.map(access);
 }
 
 void DumbBufferSource::release(AcquiredBuffer /*acquired*/) noexcept {

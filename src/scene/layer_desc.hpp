@@ -50,8 +50,9 @@ struct LayerDesc {
   /// Useful for diagnostic overlays, integration tests of the compositor
   /// path, or layers whose source is known to require CPU compositing
   /// even when a hardware plane is available. Requires
-  /// `source->cpu_mapping()` to return a value — sources without a CPU
-  /// mapping cannot be composited and will be dropped this frame.
+  /// `source->map(MapAccess::Read)` to succeed — sources whose pixels
+  /// don't reach CPU memory (future EGL Stream consumers, tiled GBM
+  /// BOs) cannot be composited and will be dropped this frame.
   bool force_composited{false};
 };
 

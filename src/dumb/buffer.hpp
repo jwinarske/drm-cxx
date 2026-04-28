@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
 
 #include <cstddef>
@@ -86,6 +87,16 @@ class Buffer {
   /// `size_bytes()` long. Always null when `empty()`.
   [[nodiscard]] std::uint8_t* data() noexcept { return mapped_; }
   [[nodiscard]] const std::uint8_t* data() const noexcept { return mapped_; }
+
+  /// Acquire a scoped CPU mapping. For dumb buffers the underlying
+  /// mmap is held for the buffer's full lifetime and is cache-coherent
+  /// by kernel construction, so this is effectively a thin wrapper
+  /// around `data()` / `stride()` — the returned guard's destructor is
+  /// a no-op. The unified shape exists so consumers can write the same
+  /// scoped paint code against dumb and GBM buffers; the access mode
+  /// is recorded on the guard but ignored at the dumb-buffer level.
+  /// Empty (returns an empty mapping) when the buffer is empty.
+  [[nodiscard]] drm::BufferMapping map(drm::MapAccess access) noexcept;
 
   /// Abandon the GEM handle and FB ID without issuing ioctls. Use when
   /// the originating DRM fd is known to be dead (libseat session-resume

@@ -66,7 +66,7 @@ Two v1 implementations:
 - **`DumbBufferSource`** — single CPU-writable dumb buffer. Use for software-rendered cursors, CSDs, test patterns, signage backgrounds — content where the producer is not racing scanout.
 - **`GbmBufferSource`** — single CPU-mapped linear GBM scanout buffer. Same single-buffer semantics, allocated through GBM so future variants can negotiate modifiers, export DMA-BUFs, or front a `gbm_surface` for GL/Vulkan producers.
 
-Both report `BindingModel::SceneSubmitsFbId`: the scene writes `FB_ID` to the atomic commit. Both expose `cpu_mapping()` so the composition fallback can read their pixels when the allocator can't place them.
+Both report `BindingModel::SceneSubmitsFbId`: the scene writes `FB_ID` to the atomic commit. Both expose `map(MapAccess)` — a scoped RAII guard returning a `drm::BufferMapping` — so consumers paint pixels and the composition fallback reads them through one unified surface. The guard's destructor pairs with `gbm_bo_unmap` for GBM-backed sources, so it must be held only across the actual CPU access.
 
 The interface deliberately has v2 hooks (`bind_to_plane` / `unbind_from_plane`, `BindingModel::DriverOwnsBinding`) sitting unused. v1 sources do not override them. See [Future extensions](#future-extensions) below.
 
@@ -76,7 +76,7 @@ When the allocator cannot place every layer on a hardware plane (plane budget ex
 
 The canvas is double-buffered: the CPU paints into the back while the kernel scans the front. When `layer_count` exceeds the canvas-eligible plane count, the scene pre-reserves a plane via the allocator's `external_reserved` parameter so placement leaves it alone.
 
-Sources whose `cpu_mapping()` returns `std::nullopt` (tiled/compressed/GPU-only buffers, future stream-consumed planes) cannot be rescued by composition; if the allocator drops them they stay dropped for the frame and surface in `CommitReport::layers_unassigned`.
+Sources whose `map(MapAccess::Read)` returns `errc::function_not_supported` (tiled/compressed/GPU-only buffers, future stream-consumed planes) cannot be rescued by composition; if the allocator drops them they stay dropped for the frame and surface in `CommitReport::layers_unassigned`.
 
 `LayerDesc::force_composited` routes a layer through composition unconditionally — useful for diagnostic overlays, integration tests of the compositor path, and layers known to require CPU compositing.
 

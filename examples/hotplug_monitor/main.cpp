@@ -31,6 +31,7 @@
 #include "scene/layer_scene.hpp"
 #include "session/seat.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 
@@ -117,8 +118,12 @@ bool same_mode(const drmModeModeInfo& a, const drmModeModeInfo& b) {
 // Paint a 4-quadrant test pattern (red / green / blue / white) into a
 // linear ARGB8888 dumb buffer.
 void paint_test_pattern(drm::scene::DumbBufferSource& src, std::uint32_t w, std::uint32_t h) {
-  const auto pixels = src.pixels();
-  const std::uint32_t stride = src.stride();
+  auto mapping = src.map(drm::MapAccess::Write);
+  if (!mapping) {
+    return;
+  }
+  const auto pixels = mapping->pixels();
+  const std::uint32_t stride = mapping->stride();
   for (std::uint32_t y = 0; y < h; ++y) {
     auto* row =
         reinterpret_cast<std::uint32_t*>(pixels.data() + (static_cast<std::size_t>(y) * stride));
@@ -142,8 +147,12 @@ void paint_test_pattern(drm::scene::DumbBufferSource& src, std::uint32_t w, std:
 // frame so the badge visibly pulses.
 void paint_badge(drm::scene::DumbBufferSource& src, std::uint32_t w, std::uint32_t h,
                  std::uint32_t pixel) {
-  const auto pixels = src.pixels();
-  const std::uint32_t stride = src.stride();
+  auto mapping = src.map(drm::MapAccess::Write);
+  if (!mapping) {
+    return;
+  }
+  const auto pixels = mapping->pixels();
+  const std::uint32_t stride = mapping->stride();
   for (std::uint32_t y = 0; y < h; ++y) {
     auto* row =
         reinterpret_cast<std::uint32_t*>(pixels.data() + (static_cast<std::size_t>(y) * stride));
@@ -263,7 +272,6 @@ int main(const int argc, char* argv[]) {
     drm::log_error("badge layer create: {}", badge_handle_r.error().message());
     return EXIT_FAILURE;
   }
-  const drm::scene::LayerHandle badge_handle = *badge_handle_r;
 
   // First commit brings the CRTC up. Subsequent commits run on a
   // ~1Hz cadence to advance the badge hue.
