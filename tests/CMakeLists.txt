@@ -128,6 +128,18 @@ target_link_libraries(test_composite_canvas PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_composite_canvas)
 
+# Connector-rank helper test. The header lives under examples/common,
+# so the test target adds examples/ to its include path to resolve
+# "common/select_connector.hpp".
+add_executable(test_select_connector unit/test_select_connector.cpp)
+target_link_libraries(test_select_connector PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+target_include_directories(test_select_connector PRIVATE
+  ${PROJECT_SOURCE_DIR}/examples)
+gtest_discover_tests(test_select_connector)
+
 # signage_player playlist parser. signage_playlist still lives under
 # examples/, so the playlist test only builds when examples do.
 if(DRM_CXX_BUILD_EXAMPLES)
