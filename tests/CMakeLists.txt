@@ -98,6 +98,19 @@ target_link_libraries(test_layer_scene_rebind_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_rebind_vkms)
 
+# Buffer-side coverage against the kernel's virtual GEM driver (VGEM).
+# Self-skips when vgem isn't loaded, so this stays green on hosts that
+# haven't `modprobe vgem`'d. Validates the *buffer* path (dumb::Buffer
+# lifecycle, BufferMapping coherence, DMA-BUF prime export / cross-fd
+# import) without modesetting in the way — VKMS covers the display path.
+add_executable(test_vgem_buffer
+  integration/test_vgem_buffer.cpp)
+target_link_libraries(test_vgem_buffer PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_vgem_buffer)
+
 # drm::scene unit tests — scene lives in the library now (src/scene/),
 # so the test binary just links drm-cxx::drm-cxx like every other unit test.
 add_executable(test_scene unit/test_scene.cpp)
