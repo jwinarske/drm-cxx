@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include "select_connector.hpp"
 #include "select_device.hpp"
 
 #include <drm-cxx/core/device.hpp>
@@ -114,15 +115,17 @@ struct Output {
     return std::nullopt;
   }
 
-  drm::Connector conn{nullptr, &drmModeFreeConnector};
+  // Connector pickup follows kMainRank: prefer the internal panel
+  // (eDP > LVDS > DSI > DPI), fall back to cable-out (HDMI > DP >
+  // DVI > VGA). On a single-output system this is identical to the
+  // historical "first connected" behavior; on multi-output systems
+  // (docked laptop, dual-HDMI workstation) it picks the display the
+  // user usually means rather than whichever the kernel enumerated
+  // first. Examples wanting a different policy can call
+  // drm::examples::pick_connector() directly with kInternalRank or
+  // kExternalRank.
   const auto connector_ids = drm::span<const std::uint32_t>(res->connectors, res->count_connectors);
-  for (const auto cid : connector_ids) {
-    if (auto c = drm::get_connector(dev.fd(), cid);
-        c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0 && c->encoder_id != 0) {
-      conn = std::move(c);
-      break;
-    }
-  }
+  drm::Connector conn = drm::examples::pick_connector(dev.fd(), connector_ids);
   if (!conn) {
     drm::println(stderr, "No connected connector with an attached encoder");
     return std::nullopt;

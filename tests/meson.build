@@ -210,6 +210,17 @@ test('test_composite_canvas',
   ),
 )
 
+# Connector-rank helper test. select_connector.hpp lives under
+# examples/common, so include_directories points at examples/ to
+# resolve "common/select_connector.hpp".
+test('test_select_connector',
+  executable('test_select_connector',
+    'unit/test_select_connector.cpp',
+    dependencies : test_deps,
+    include_directories : include_directories('../examples'),
+  ),
+)
+
 # signage_player playlist parser. signage_playlist_dep still lives under
 # examples/, so the playlist test only exists when examples are on.
 if get_option('examples')
