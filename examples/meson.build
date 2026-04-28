@@ -30,6 +30,14 @@ executable('scene_priority',
   dependencies : [drm_cxx_dep],
 )
 
+# scene_formats — pedagogical demo for bipartite plane-matching across
+# heterogeneous layer requirements (channel orderings + scaler need).
+# Pure consumer of the existing scene API, no extra deps.
+executable('scene_formats',
+  'scene_formats/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
 executable('mouse_cursor',
