@@ -111,6 +111,13 @@ test('test_buffer_mapping',
   ),
 )
 
+test('test_log',
+  executable('test_log',
+    'unit/test_log.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 if has_xcursor
   test('test_cursor_theme',
     executable('test_cursor_theme',
