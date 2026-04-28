@@ -330,6 +330,7 @@ class LayerScene::Impl {
     const auto alloc_diag = allocator_->diagnostics();
     report.properties_written = alloc_diag.properties_written;
     report.fbs_attached = alloc_diag.fbs_attached;
+    report.test_commits_issued = alloc_diag.test_commits_issued;
 
     // Phase 2.3: rescue unassigned layers via CPU composition before
     // counting them as dropped. compose_unassigned() updates

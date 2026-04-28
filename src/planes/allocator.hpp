@@ -14,8 +14,10 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <system_error>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace drm {
@@ -92,6 +94,11 @@ class Allocator {
     // value, zero or non-zero). Isolated because FB attachment is the
     // most expensive kernel-side action a commit can carry.
     std::size_t fbs_attached{0};
+    // DRM_MODE_ATOMIC_TEST_ONLY commits issued during this apply() while
+    // probing for a viable plane assignment. 1 in steady state (warm
+    // re-validation of the cached assignment); higher when the cache
+    // misses and full_search has to preseed/greedy/backtrack.
+    std::size_t test_commits_issued{0};
   };
   [[nodiscard]] Diagnostics diagnostics() const noexcept { return diagnostics_; }
 

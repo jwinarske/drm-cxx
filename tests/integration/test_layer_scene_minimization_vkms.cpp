@@ -28,21 +28,18 @@
 #include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
-#include <drm.h>
 #include <drm_fourcc.h>
-#include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
-#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <memory>
 #include <optional>
 #include <string>
-#include <sys/types.h>
 #include <system_error>
 #include <unistd.h>
 #include <utility>
@@ -198,6 +195,8 @@ TEST(LayerSceneMinimizationVkms, SteadyStateWritesOnlyFbIdPerAssignedLayer) {
   ASSERT_TRUE(first.has_value()) << first.error().message();
   EXPECT_GT(first->properties_written, 0U) << "first commit should emit a full property set";
   EXPECT_GE(first->fbs_attached, 1U) << "first commit must attach at least one FB";
+  EXPECT_GE(first->test_commits_issued, 1U)
+      << "cold start must run full_search and issue at least one TEST_ONLY";
 
   // Second commit: nothing changed *except* FB_ID always re-emits to
   // keep the kernel's PAGE_FLIP_EVENT scheduling alive — every other
@@ -209,6 +208,8 @@ TEST(LayerSceneMinimizationVkms, SteadyStateWritesOnlyFbIdPerAssignedLayer) {
   EXPECT_EQ(second->properties_written, 1U)
       << "steady state should emit only FB_ID per assigned layer";
   EXPECT_EQ(second->fbs_attached, 1U) << "FB_ID re-attaches every frame";
+  EXPECT_EQ(second->test_commits_issued, 1U)
+      << "warm steady state still re-validates the cached assignment with one TEST_ONLY";
 
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }
