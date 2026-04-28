@@ -28,6 +28,17 @@ add_project_arguments(
 #── Dependencies ──────────────────────────────────────────────
 drm_dep     = dependency('libdrm',    include_type : 'system', required : true)
 gbm_dep     = dependency('gbm',       include_type : 'system', required : true)
+
+# gbm_bo_create_with_modifiers2 — usage-flag-aware variant added in mesa
+# 23. src/gbm/buffer.cpp falls back to gbm_bo_create_with_modifiers (no
+# usage parameter) when the probe fails, so we still build cleanly
+# against older libgbm at the cost of dropping cfg.usage on the
+# modifier path.
+has_gbm_bo_create_with_modifiers2 = cpp.has_function(
+  'gbm_bo_create_with_modifiers2',
+  dependencies : gbm_dep,
+  prefix : '#include <gbm.h>',
+)
 input_dep   = dependency('libinput',  include_type : 'system', required : true)
 udev_dep    = dependency('libudev',   include_type : 'system', required : true)
 xkb_dep     = dependency('xkbcommon', include_type : 'system', required : true)

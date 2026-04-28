@@ -239,8 +239,12 @@ drm::expected<Buffer, std::error_code> Buffer::create(const GbmDevice& dev, cons
   struct gbm_bo* bo = nullptr;
   if (cfg.modifier.has_value()) {
     const std::uint64_t mod = *cfg.modifier;
+#if defined(HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
     bo = gbm_bo_create_with_modifiers2(gdev, cfg.width, cfg.height, cfg.drm_format, &mod, 1,
                                        cfg.usage);
+#else
+    bo = gbm_bo_create_with_modifiers(gdev, cfg.width, cfg.height, cfg.drm_format, &mod, 1);
+#endif
   } else {
     bo = gbm_bo_create(gdev, cfg.width, cfg.height, cfg.drm_format, cfg.usage);
   }
