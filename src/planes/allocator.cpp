@@ -763,6 +763,7 @@ bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assi
   }
 
   ++test_commits_this_frame_;
+  ++diagnostics_.test_commits_issued;
   const auto result = test_req.test(flags);
 
   if (!result.has_value() && alloc_debug()) {
