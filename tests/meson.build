@@ -174,6 +174,19 @@ test('test_layer_scene_rebind_vkms',
   ),
 )
 
+# Buffer-side coverage against the kernel's virtual GEM driver (VGEM):
+# dumb::Buffer lifecycle, BufferMapping coherence, DMA-BUF prime export
+# / cross-fd import. Self-skips when vgem isn't loaded, so this stays
+# green on hosts that haven't `modprobe vgem`'d. Distinct from the VKMS
+# tests above, which validate the *display* path; this validates the
+# *buffer* path under it without modesetting in the way.
+test('test_vgem_buffer',
+  executable('test_vgem_buffer',
+    'integration/test_vgem_buffer.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # drm::scene unit tests — scene lives in the library now (src/scene/),
 # so test_scene just depends on test_deps like every other unit test.
 test('test_scene',
