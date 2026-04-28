@@ -32,13 +32,15 @@
 //
 // The example ships eight layers laid out in a 4x2 grid with
 // distinct solid-color fills, each tagged with a priority intent
-// in the comments below. On a typical amdgpu desktop with 3 planes
-// available to the scene (PRIMARY pinned + 2 OVERLAY slots, of
-// which one is reserved for the canvas), the four Video/UI-60Hz
-// layers should all land on hardware, and the lower-priority
-// layers should land on the composition canvas. Driver-specific
-// plane budgets shift the exact split — the printed report makes
-// the actual numbers visible.
+// in the comments below. On a typical amdgpu desktop the scene
+// has access to PRIMARY plus three or four OVERLAY slots minus
+// one reserved for the canvas — i.e. two to four hardware slots
+// for layers, the rest spilling to the composition canvas. With
+// eight layers, the higher-priority Video / UI-60Hz tiles should
+// keep their hardware planes and the lower-priority UI-30Hz /
+// Generic tiles should land on the canvas. Driver-specific plane
+// budgets shift the exact split — the printed report makes the
+// actual numbers visible.
 //
 // Pure consumer of the existing scene API. Static solid-fill
 // buffers, painted once before the loop. Buffer dirtying would
