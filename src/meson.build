@@ -105,11 +105,15 @@ if has_blend2d
   drm_cxx_deps += blend2d_dep
 endif
 
+gbm_cpp_args = has_gbm_bo_create_with_modifiers2 \
+  ? ['-DHAVE_GBM_BO_CREATE_WITH_MODIFIERS2=1'] \
+  : []
+
 drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
-  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args,
+  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args,
   install : true,
 )
 

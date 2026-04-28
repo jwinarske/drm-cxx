@@ -97,6 +97,10 @@ target_link_libraries(drm-cxx
     ${RT_LIBRARY}
     ${DL_LIBRARY})
 
+if(HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
+  target_compile_definitions(drm-cxx PRIVATE HAVE_GBM_BO_CREATE_WITH_MODIFIERS2=1)
+endif()
+
 # libseat is PRIVATE — consumers of drm-cxx don't need to link against
 # it themselves. The gate define is PRIVATE too so the session/seat.cpp
 # TU picks the real vs. stub branch; the public header compiles
