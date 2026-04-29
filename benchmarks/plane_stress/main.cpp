@@ -27,7 +27,12 @@
 //
 // The benchmark requires a real KMS device (libseat or root). Output
 // is visible on the connected display while the benchmark runs.
+//
+// `--csv PATH` writes to whatever path the user supplies; intended for
+// developer use, not setuid contexts. If you ever package this binary
+// with elevated privileges, sanitise the path or drop the `--csv` flag.
 
+#include "common/format_probe.hpp"
 #include "common/open_output.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
@@ -167,6 +172,24 @@ bool parse_size(std::string_view s, std::uint32_t& w, std::uint32_t& h) noexcept
   return w > 0 && h > 0;
 }
 
+// std::stoul / std::stod throw on garbage input; wrap so the caller
+// can decline rather than abort.
+std::optional<std::uint32_t> parse_u32(std::string_view s) noexcept {
+  try {
+    return static_cast<std::uint32_t>(std::stoul(std::string(s)));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::optional<double> parse_double(std::string_view s) noexcept {
+  try {
+    return std::stod(std::string(s));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 std::vector<std::uint32_t> parse_format_list(std::string_view s) {
   std::vector<std::uint32_t> out;
   std::size_t start = 0;
@@ -211,7 +234,12 @@ bool parse_args(int argc, char** argv, Options& opt, int& consumed) {
       if (!take(v)) {
         return false;
       }
-      opt.layers = std::stoul(std::string(v));
+      const auto n = parse_u32(v);
+      if (!n || *n == 0U) {
+        drm::println(stderr, "--layers: expected positive integer, got '{}'", v);
+        return false;
+      }
+      opt.layers = *n;
     } else if (a == "--formats") {
       std::string_view v;
       if (!take(v)) {
@@ -249,14 +277,23 @@ bool parse_args(int argc, char** argv, Options& opt, int& consumed) {
       if (!take(v)) {
         return false;
       }
-      opt.churn_rate =
-          std::max<std::uint32_t>(1U, static_cast<std::uint32_t>(std::stoul(std::string(v))));
+      const auto n = parse_u32(v);
+      if (!n) {
+        drm::println(stderr, "--churn-rate: expected non-negative integer, got '{}'", v);
+        return false;
+      }
+      opt.churn_rate = std::max<std::uint32_t>(1U, *n);
     } else if (a == "--duration") {
       std::string_view v;
       if (!take(v)) {
         return false;
       }
-      opt.duration_s = std::stod(std::string(v));
+      const auto x = parse_double(v);
+      if (!x || *x <= 0.0) {
+        drm::println(stderr, "--duration: expected positive number, got '{}'", v);
+        return false;
+      }
+      opt.duration_s = *x;
     } else if (a == "--csv") {
       std::string_view v;
       if (!take(v)) {
@@ -383,6 +420,13 @@ int main(int argc, char** argv) {
   const std::uint32_t fb_h = mode.vdisplay;
   drm::println(stderr, "plane_stress: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h,
                mode.vrefresh, output->connector_id, output->crtc_id);
+
+  // Surface capability gaps that affect the stress shape (alpha layers
+  // routing through composition, missing zpos defeating layer ordering).
+  drm::examples::warn_compat(drm::examples::probe_output(dev, output->crtc_id),
+                             {.wants_alpha_overlays = true,
+                              .wants_explicit_zpos = true,
+                              .wants_overlay_count = opt.layers - 1U});
 
   const drm::scene::LayerScene::Config cfg{output->crtc_id, output->connector_id, mode};
   auto scene_r = drm::scene::LayerScene::create(dev, cfg);

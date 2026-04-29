@@ -11,3 +11,9 @@ executable('plane_stress',
   include_directories : benchmarks_inc,
   dependencies : [drm_cxx_dep],
 )
+
+executable('allocator_torture',
+  'allocator_torture/main.cpp',
+  include_directories : benchmarks_inc,
+  dependencies : [drm_cxx_dep],
+)
