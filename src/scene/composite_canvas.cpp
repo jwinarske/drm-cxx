@@ -329,10 +329,29 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
   }
 
   const bool opaque_src = source_is_opaque(src.drm_fourcc);
+  // KMS plane alpha is u16; collapse to the 0..255 range we blend in.
+  // Round-to-nearest so the boundaries 0x0000 / 0xFFFF map exactly to
+  // 0x00 / 0xFF and intermediate values stay symmetric.
+  const auto plane_alpha8 = static_cast<std::uint32_t>(
+      (static_cast<std::uint32_t>(src.plane_alpha) * 255U + 32767U) / 65535U);
+  const bool modulate_alpha = plane_alpha8 < 0xFFU;
   const std::uint32_t dst_visible_x = xr.dst_end - xr.dst_start;
   const std::uint32_t dst_visible_y = yr.dst_end - yr.dst_start;
   const std::uint32_t dst_stride_px = dst_stride_bytes / 4U;
   const std::uint32_t src_stride_px = src.src_stride_bytes / 4U;
+  // Premultiplied per-plane alpha modulation: scale every src channel
+  // by plane_alpha8/255 in u32 math so rgb stays <= a (the SRC_OVER
+  // formula in `blend_pixel_over` assumes premultiplied input).
+  // (+127)/255 rounding matches `blend_pixel_over`'s identity-blend
+  // behavior so plane_alpha=0xFFFF reproduces the un-modulated source
+  // exactly.
+  auto modulate_pixel = [plane_alpha8](std::uint32_t s) -> std::uint32_t {
+    const std::uint32_t a = ((((s >> 24U) & 0xFFU) * plane_alpha8) + 127U) / 255U;
+    const std::uint32_t r = ((((s >> 16U) & 0xFFU) * plane_alpha8) + 127U) / 255U;
+    const std::uint32_t g = ((((s >> 8U) & 0xFFU) * plane_alpha8) + 127U) / 255U;
+    const std::uint32_t b = ((s & 0xFFU) * plane_alpha8 + 127U) / 255U;
+    return (a << 24U) | (r << 16U) | (g << 8U) | b;
+  };
   // No-scaling fast path: when src and dst have equal extents, we can
   // skip the per-pixel `(dst_idx * src_span) / dst_visible` mapping —
   // every (dx, dy) lands on exactly (xr.src_start + dx, yr.src_start + dy).
@@ -357,6 +376,9 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
         if (opaque_src) {
           s |= 0xFF000000U;
         }
+        if (modulate_alpha) {
+          s = modulate_pixel(s);
+        }
         dst_px[dx] = blend_pixel_over(s, dst_px[dx]);
       }
     } else {
@@ -365,6 +387,9 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
         std::uint32_t s = src_row[sx];
         if (opaque_src) {
           s |= 0xFF000000U;
+        }
+        if (modulate_alpha) {
+          s = modulate_pixel(s);
         }
         auto* dst_px = dst_row + xr.dst_start + dx;
         *dst_px = blend_pixel_over(s, *dst_px);

@@ -165,6 +165,16 @@ class LayerScene::Impl {
       return;
     }
     if (slot->planes_layer != nullptr) {
+      // Drop any allocator state keyed on this Layer's address before
+      // freeing it. last_committed_ stores raw Layer pointers as
+      // logical-identity keys; if we let those entries survive, the
+      // heap can hand the same address back to a freshly-added Layer
+      // and the diff-write path will treat the new Layer as a
+      // continuation of the old one, suppressing property writes the
+      // kernel needs (EINVAL on the next commit).
+      if (allocator_.has_value()) {
+        allocator_->forget_layer(slot->planes_layer);
+      }
       output_.remove_layer(*slot->planes_layer);
       slot->planes_layer = nullptr;
     }
@@ -734,7 +744,16 @@ class LayerScene::Impl {
     // unconditionally writing alpha=0xFFFF on amdgpu PRIMARY correlates
     // with the kernel accepting the commit but never queuing the vblank
     // event, wedging flip_pending. Skip the no-op write.
-    if (d.alpha != 0xFFFF) {
+    //
+    // Once a caller has explicitly touched alpha (any value, including
+    // 0xFFFF) we keep emitting it: a layer that drops alpha to 0xDFFF
+    // and then raises it back to 0xFFFF would otherwise stay stuck at
+    // the lowered value — the planes::Layer property bag is upsert-only,
+    // so the prior 0xDFFF entry survives and the diff path then sees
+    // "alpha unchanged" against the snapshot. The wedge concern only
+    // applies to layers nobody has ever poked, so the sticky bit keeps
+    // those silent while honouring an explicit set_alpha round-trip.
+    if (d.alpha != 0xFFFF || src.alpha_was_explicitly_set()) {
       dst.set_property("alpha", static_cast<std::uint64_t>(d.alpha));
     }
 
@@ -1172,6 +1191,7 @@ class LayerScene::Impl {
       src.src_width = fmt.width;
       src.src_height = fmt.height;
       src.drm_fourcc = fmt.drm_fourcc;
+      src.plane_alpha = d.alpha;
       const CompositeRect src_rect{d.src_rect.x, d.src_rect.y, d.src_rect.w, d.src_rect.h};
       const CompositeRect dst_rect{d.dst_rect.x, d.dst_rect.y, d.dst_rect.w, d.dst_rect.h};
       composition_canvas_->blend(src, src_rect, dst_rect);

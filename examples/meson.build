@@ -38,6 +38,22 @@ executable('scene_formats',
   dependencies : [drm_cxx_dep],
 )
 
+# layered_demo — interactive LayerScene mutation tour. Up to eight
+# coloured tiles toggled, moved, restacked, alpha-adjusted from the
+# keyboard against a static gradient background.
+executable('layered_demo',
+  'layered_demo/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
+# video_grid — N×N grid of synthesised "video" cells. Stresses the
+# allocator + composition fallback when cell count exceeds the plane
+# budget; the runtime layout switch (1/2/3) walks add/remove churn.
+executable('video_grid',
+  'video_grid/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
 executable('mouse_cursor',
