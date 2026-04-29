@@ -130,7 +130,7 @@ class Allocator {
       Output& output, uint32_t crtc_index) const;
 
   std::vector<std::pair<Layer*, const PlaneCapabilities*>> bipartite_preseed_group(
-      std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
+      const std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
       uint32_t crtc_index) const;
 
   // §13.2 Best-first search order
@@ -162,6 +162,24 @@ class Allocator {
   bool backtrack(std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
                  std::unordered_map<uint32_t, Layer*>& assignment, std::size_t depth,
                  std::size_t best_so_far, AtomicRequest& req, uint32_t flags, uint32_t crtc_index);
+
+  // Place a single layer set on a single plane set. Runs preseed →
+  // greedy → backtrack-drop-one (lowest priority first) and returns
+  // the largest subset that passes a TEST commit; empty when no
+  // non-empty subset survives or the per-frame TEST budget is hit.
+  // Used both by the per-group pass and by the scene-wide partial
+  // fallback in full_search.
+  std::unordered_map<uint32_t, Layer*> place_group(
+      const std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
+      uint32_t flags, uint32_t crtc_index);
+
+  // Pick the layer with the fewest statically compatible planes among
+  // `planes` (lowest layer_priority breaks ties). Returns the
+  // bottleneck layer the scene-wide fallback should drop next, or
+  // nullptr when `layers` is empty.
+  static const Layer* pick_most_constrained(const std::vector<Layer*>& layers,
+                                            const std::vector<const PlaneCapabilities*>& planes,
+                                            uint32_t crtc_index);
 
   // Test-commit a tentative assignment. Builds a fresh AtomicRequest
   // internally that (a) disables every CRTC-compatible non-cursor plane

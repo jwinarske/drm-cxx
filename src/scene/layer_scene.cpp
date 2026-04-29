@@ -800,13 +800,32 @@ class LayerScene::Impl {
   }
 
   // Decide whether to reserve a canvas plane up front for this
-  // commit. Returns the plane id to reserve, or nullopt when overflow
-  // isn't anticipated and the allocator should be free to use every
-  // plane. The heuristic compares live layer count against the count
-  // of canvas-eligible planes (CRTC-compatible, non-cursor,
-  // ARGB8888-supporting); when layers >= eligible planes, every plane
-  // would be claimed by the allocator and compose_unassigned would
-  // have nowhere to land the canvas.
+  // commit. Returns the plane id to reserve, or nullopt when neither
+  // overflow nor primary-anchor reservation is needed.
+  //
+  // Two triggers:
+  //
+  //  - **Overflow.** Live layer count exceeds canvas-eligible plane
+  //    count (CRTC-compatible, non-cursor, ARGB8888-supporting); the
+  //    allocator would otherwise claim every plane and leave
+  //    compose_unassigned with nowhere to land the canvas. Reserve an
+  //    OVERLAY (or PRIMARY as a fallback) so one stays free.
+  //
+  //  - **Primary anchor.** PRIMARY exposes an immutable zpos slot on
+  //    this CRTC (amdgpu pins PRIMARY at zpos=2; ARM Mali display
+  //    cores have similar pins) and no live layer is eligible to land
+  //    on it. Without a layer pinned to PRIMARY's slot, the
+  //    allocator's disable_unused_planes pass writes FB_ID=0 /
+  //    CRTC_ID=0 to PRIMARY during every TEST, which amdgpu (and any
+  //    driver that enforces "active CRTC requires armed PRIMARY")
+  //    rejects with EINVAL — every TEST fails and every layer falls
+  //    through to composition. Reserving PRIMARY pulls it out of the
+  //    disable pass, so TESTs validate against PRIMARY's prior state
+  //    (fbcon FB on cold start, previous canvas FB on warm) and
+  //    overlay placements succeed. A layer is "eligible" when its
+  //    caller-set zpos matches the pin, OR when it has no caller-set
+  //    zpos (the do_commit primary-affinity hint will pin it). Both
+  //    cases bypass this trigger.
   std::optional<std::uint32_t> pick_canvas_reservation_if_needed() {
     const auto crtc_index = resolve_crtc_index();
     if (!crtc_index.has_value()) {
@@ -830,6 +849,28 @@ class LayerScene::Impl {
     if (eligible.empty()) {
       return std::nullopt;
     }
+
+    // Primary-anchor trigger. Mirrors the eligibility check in
+    // do_commit's hint pass — kept self-contained here so the
+    // reservation decision is one function call from do_commit.
+    if (primary_zpos_hint_.has_value() && primary_fallback != nullptr) {
+      const auto pin = *primary_zpos_hint_;
+      bool primary_eligible_layer = false;
+      for (const auto& slot : slots_) {
+        if (!slot.alive || slot.scene_layer == nullptr) {
+          continue;
+        }
+        const auto z = slot.scene_layer->display().zpos;
+        if (!z.has_value() || static_cast<std::uint64_t>(*z) == pin) {
+          primary_eligible_layer = true;
+          break;
+        }
+      }
+      if (!primary_eligible_layer && layer_count() > 0) {
+        return primary_fallback->id;
+      }
+    }
+
     if (layer_count() <= eligible.size()) {
       // Every layer can take its own plane — reserving one for the
       // canvas would just force one of them through composition for
@@ -861,6 +902,16 @@ class LayerScene::Impl {
     // assigned layer) plus any plane the allocator routed the empty
     // composition_planes_layer_ to. Reused scratch member to keep this
     // off the per-frame heap.
+    //
+    // Exception: when composition_planes_layer_'s slot equals
+    // last_canvas_plane_id_, that's the do_commit pre-reservation
+    // landing on the same plane the allocator's any_composited path
+    // pre-armed for the empty composition layer. They're the *same*
+    // canvas slot — we want to land there, not avoid it. Skipping the
+    // composition_planes_layer_ entry in that case lets the preferred
+    // path below return the reserved plane instead of bailing out
+    // with "no free plane for canvas" while every other plane is
+    // assigned to a placed layer.
     scratch_in_use_.clear();
     scratch_in_use_.reserve(acquisitions.size() + 1);
     for (const auto& acq : acquisitions) {
@@ -869,7 +920,9 @@ class LayerScene::Impl {
       }
     }
     if (auto pid = composition_planes_layer_.assigned_plane_id(); pid.has_value()) {
-      scratch_in_use_.push_back(*pid);
+      if (!last_canvas_plane_id_.has_value() || *pid != *last_canvas_plane_id_) {
+        scratch_in_use_.push_back(*pid);
+      }
     }
     auto is_in_use = [&](std::uint32_t pid) {
       return std::find(scratch_in_use_.begin(), scratch_in_use_.end(), pid) !=
