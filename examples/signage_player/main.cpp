@@ -14,6 +14,7 @@
 // the per-layer dirty surface that Phase 2.2 will eventually minimize
 // property/FB writes against.
 
+#include "common/format_probe.hpp"
 #include "common/open_output.hpp"
 #include "signage_player/overlay_renderer.hpp"
 #include "signage_player/playlist.hpp"
@@ -374,6 +375,9 @@ int main(int argc, char** argv) {
   const std::uint32_t fb_h = mode.vdisplay;
   drm::println("Mode: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.vrefresh,
                connector_id, crtc_id);
+
+  drm::examples::warn_compat(drm::examples::probe_output(dev, crtc_id),
+                             {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
 
   bool session_paused = false;
   bool flip_pending = false;

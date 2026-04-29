@@ -1,0 +1,79 @@
+name: drmdb compat scan
+
+# Pull the drmdb (https://drmdb.emersion.fr) snapshot once a week and
+# run scripts/drmdb_compat_scan.py against the drm-cxx examples. The
+# job's purpose is intelligence, not gating: it surfaces capability
+# regressions in upstream hardware (a new generation of Intel sprite
+# planes lacking ARGB, a kernel that drops zpos somewhere, etc.) so
+# the project can react before users hit them.
+#
+# Manual trigger via workflow_dispatch is provided for one-off runs.
+
+on:
+  schedule:
+    # 03:17 UTC every Monday — odd time + early-week keep us off
+    # GitHub's busy-hour scheduler.
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    name: scan drmdb against examples
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The snapshot is ~3 MB and the upstream URL serves whatever's
+      # current — there's no version pin. We cache by ISO year-week,
+      # so a re-run inside the same week skips the download (cache
+      # hit), and the next week's run misses and pulls afresh.
+      - name: Compute week key
+        id: weekkey
+        run: echo "yw=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache drmdb snapshot
+        id: cache-drmdb
+        uses: actions/cache@v4
+        with:
+          path: drmdb-data
+          key: drmdb-snapshot-${{ steps.weekkey.outputs.yw }}
+
+      - name: Download drmdb snapshot
+        if: steps.cache-drmdb.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p drmdb-data
+          curl -sSLf https://drmdb.emersion.fr/snapshot.tar.gz -o snapshot.tar.gz
+          tar -xzf snapshot.tar.gz -C drmdb-data
+          rm snapshot.tar.gz
+          echo "Extracted $(ls drmdb-data/*.json | wc -l) drm_info entries."
+
+      - name: Run compatibility scanner
+        run: |
+          python3 scripts/drmdb_compat_scan.py \
+            --input drmdb-data \
+            --results-json scan_results.json \
+            | tee scan_summary.txt
+
+      - name: Append summary to GitHub job summary
+        if: always()
+        run: |
+          {
+            echo "# drmdb example-compat report (${{ steps.weekkey.outputs.yw }})"
+            echo
+            echo '```'
+            cat scan_summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drmdb-compat-${{ steps.weekkey.outputs.yw }}
+          path: |
+            scan_summary.txt
+            scan_results.json
+          retention-days: 90
