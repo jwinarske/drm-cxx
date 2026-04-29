@@ -24,6 +24,7 @@
 //   F1             — print the current scene state + last commit report
 //   Esc / q        — quit
 
+#include "common/format_probe.hpp"
 #include "common/open_output.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
@@ -243,6 +244,9 @@ int main(int argc, char** argv) {
   const std::uint32_t fb_h = mode.vdisplay;
   drm::println("Mode: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.vrefresh,
                connector_id, crtc_id);
+
+  drm::examples::warn_compat(drm::examples::probe_output(dev, crtc_id),
+                             {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
 
   auto bg_src = drm::scene::DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
   if (!bg_src) {

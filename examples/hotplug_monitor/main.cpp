@@ -18,6 +18,7 @@
 // the clock badge follow the new mode without restart. The udev
 // plumbing lives inside the library — this file just polls the fd.
 
+#include "../common/format_probe.hpp"
 #include "../common/open_output.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -208,6 +209,9 @@ int main(const int argc, char* argv[]) {
   }
   drm::println("Initial config:");
   print_active(*active);
+
+  drm::examples::warn_compat(drm::examples::probe_output(dev, active->crtc_id),
+                             {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
 
   // Build the scene against the initial configuration.
   drm::scene::LayerScene::Config cfg;

@@ -49,6 +49,7 @@
 //
 // Usage: scene_priority [/dev/dri/cardN]
 
+#include "../common/format_probe.hpp"
 #include "../common/open_output.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
@@ -123,6 +124,10 @@ int main(int argc, char* argv[]) {
   const std::uint32_t fb_h = mode.vdisplay;
   drm::println("Modeset: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.vrefresh,
                output->connector_id, output->crtc_id);
+
+  drm::examples::warn_compat(
+      drm::examples::probe_output(dev, output->crtc_id),
+      {.wants_alpha_overlays = true, .wants_explicit_zpos = true, .wants_overlay_count = 3U});
 
   // ── The eight layers ──────────────────────────────────────────────
   // Two of each priority class so eviction has unambiguous tiebreakers.
