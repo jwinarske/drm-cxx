@@ -264,3 +264,99 @@ TEST(LayerSceneCompositionVkms, ForceCompositedLayerLandsOnCanvas) {
   EXPECT_EQ(at(0, fb_h - 1U), 0xFFFF0000U) << "bottom-left should be background red";
   EXPECT_EQ(at(fb_w - 1U, fb_h - 1U), 0xFFFF0000U) << "bottom-right should be background red";
 }
+
+// Regression: when full_search exhausts its TEST budget without finding
+// any non-empty assignment (every layer falls through to compose_unassigned),
+// the next frame's fast path must NOT return EAGAIN. The cold-start path
+// used to mark previous_allocation_valid_=true even when best_assignment
+// was empty; the warm-start fast path then hit its empty-map guard and
+// propagated EAGAIN to the caller, killing examples that rely on full
+// composition fallback (notably scene_formats on Granite Ridge amdgpu —
+// `assigned=0 composited=4` on frame 1 followed by EAGAIN on frame 2).
+//
+// The test forces empty cold-start by marking every layer
+// `force_composited=true`, which makes plane_statically_compatible reject
+// every (plane, layer) pair. full_search then walks preseed → greedy →
+// backtracking and exits with best_assignment empty.
+TEST(LayerSceneCompositionVkms, EmptyColdStartDoesNotPoisonWarmStart) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+  const std::uint32_t fb_w = active.mode.hdisplay;
+  const std::uint32_t fb_h = active.mode.vdisplay;
+  ASSERT_GE(fb_w, 64U);
+  ASSERT_GE(fb_h, 64U);
+
+  auto bg_source = DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(bg_source.has_value()) << bg_source.error().message();
+  fill_uniform_argb(**bg_source, fb_w, fb_h, 0xFFFF0000U);
+
+  const std::uint32_t overlay_w = fb_w / 4U;
+  const std::uint32_t overlay_h = fb_h / 4U;
+  auto overlay_source = DumbBufferSource::create(dev, overlay_w, overlay_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(overlay_source.has_value()) << overlay_source.error().message();
+  fill_uniform_argb(**overlay_source, overlay_w, overlay_h, 0xFF00FF00U);
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = active.crtc_id;
+  cfg.connector_id = active.connector_id;
+  cfg.mode = active.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  LayerDesc bg_desc;
+  bg_desc.source = std::move(*bg_source);
+  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.zpos = 1;
+  bg_desc.force_composited = true;
+  ASSERT_TRUE(scene.add_layer(std::move(bg_desc)).has_value());
+
+  LayerDesc overlay_desc;
+  overlay_desc.source = std::move(*overlay_source);
+  overlay_desc.display.src_rect = drm::scene::Rect{0, 0, overlay_w, overlay_h};
+  overlay_desc.display.dst_rect =
+      drm::scene::Rect{static_cast<std::int32_t>(fb_w / 4U), static_cast<std::int32_t>(fb_h / 4U),
+                       overlay_w, overlay_h};
+  overlay_desc.display.zpos = 4;
+  overlay_desc.force_composited = true;
+  ASSERT_TRUE(scene.add_layer(std::move(overlay_desc)).has_value());
+
+  // Frame 1: cold-start. full_search returns 0 placed; both layers are
+  // rescued by compose_unassigned onto the canvas plane.
+  auto report1 = scene.commit();
+  ASSERT_TRUE(report1.has_value()) << report1.error().message();
+  EXPECT_EQ(report1->layers_total, 2U);
+  EXPECT_EQ(report1->layers_assigned, 0U);
+  EXPECT_EQ(report1->layers_composited, 2U);
+  EXPECT_EQ(report1->layers_unassigned, 0U);
+
+  // Frame 2: warm-start fast path. With the bug, this returns EAGAIN
+  // (Resource temporarily unavailable) because the empty
+  // previous_allocation_ trips the empty-map guard while
+  // previous_allocation_valid_ is still true. With the fix, valid_ is
+  // false → fast path skipped → full_search re-runs → succeeds with
+  // the same shape as frame 1.
+  auto report2 = scene.commit();
+  ASSERT_TRUE(report2.has_value())
+      << "second commit returned " << report2.error().message()
+      << " — empty cold-start should not poison the warm-start fast path";
+  EXPECT_EQ(report2->layers_assigned, 0U);
+  EXPECT_EQ(report2->layers_composited, 2U);
+  EXPECT_EQ(report2->layers_unassigned, 0U);
+
+  drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+}

@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <system_error>
@@ -263,92 +264,14 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   std::unordered_map<uint32_t, Layer*> best_assignment;
   std::size_t total_assigned = 0;
 
+  // Scene-wide plane pool, captured before the per-group loop shrinks
+  // available_planes. The partial-fallback retry below needs the
+  // unshrunk pool — its whole point is to consider plane assignments
+  // the per-group pass couldn't reach.
+  const auto all_available_planes = available_planes;
+
   for (auto& group : groups) {
-    // §13.5 Bipartite pre-solve for this group
-    auto preseed = bipartite_preseed_group(group, available_planes, crtc_index);
-
-    // Build initial assignment from preseed
-    std::unordered_map<uint32_t, Layer*> assignment;
-    for (auto& [layer, plane] : preseed) {
-      assignment.insert_or_assign(plane->id, layer);
-    }
-
-    // Test the preseed assignment
-    if (!assignment.empty()) {
-      if (alloc_debug()) {
-        std::fprintf(stderr, "[drm-cxx] TEST preseed assignment:\n");
-        for (const auto& [pid, lay] : assignment) {
-          std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", pid,
-                       static_cast<const void*>(lay));
-        }
-      }
-      bool const preseed_ok = try_test_commit(assignment, flags, crtc_index);
-      if (alloc_debug()) {
-        std::fprintf(stderr, "[drm-cxx] TEST preseed → %s\n", preseed_ok ? "PASS" : "FAIL");
-      }
-      if (!preseed_ok) {
-        // §13.2 + §13.1 Backtrack from preseed with best-first ordering
-        assignment.clear();
-        auto candidates = rank_candidates_group(group, available_planes, crtc_index);
-
-        // Simple greedy assignment from ranked candidates
-        std::unordered_map<uint32_t, bool> used_planes;
-        std::unordered_map<Layer*, bool> assigned_layers;
-
-        for (const auto& cand : candidates) {
-          if (used_planes.count(cand.plane->id) != 0) {
-            continue;
-          }
-          if (assigned_layers.count(cand.layer) != 0) {
-            continue;
-          }
-
-          // Check failure cache
-          if (auto cached = failure_cache_.lookup(cand.plane->id, cand.layer->property_hash());
-              cached.has_value() && !*cached) {
-            continue;
-          }
-
-          assignment.insert_or_assign(cand.plane->id, cand.layer);
-          used_planes.insert_or_assign(cand.plane->id, true);
-          assigned_layers.insert_or_assign(cand.layer, true);
-        }
-
-        if (alloc_debug()) {
-          std::fprintf(stderr, "[drm-cxx] TEST greedy assignment:\n");
-          for (const auto& [pid, lay] : assignment) {
-            std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", pid,
-                         static_cast<const void*>(lay));
-          }
-        }
-        bool const greedy_ok = try_test_commit(assignment, flags, crtc_index);
-        if (alloc_debug()) {
-          std::fprintf(stderr, "[drm-cxx] TEST greedy → %s\n", greedy_ok ? "PASS" : "FAIL");
-        }
-        if (!greedy_ok) {
-          // Backtrack: remove assignments one by one from the end
-          auto assigned_vec =
-              std::vector<std::pair<uint32_t, Layer*>>(assignment.begin(), assignment.end());
-
-          // Sort by layer priority (lowest priority dropped first)
-          std::sort(assigned_vec.begin(), assigned_vec.end(), [](const auto& a, const auto& b) {
-            return layer_priority(*a.second) < layer_priority(*b.second);
-          });
-
-          for (auto& [fst, snd] : assigned_vec) {
-            assignment.erase(fst);
-
-            if (try_test_commit(assignment, flags, crtc_index)) {
-              break;
-            }
-
-            if (test_commits_this_frame_ >= max_test_commits_) {
-              break;
-            }
-          }
-        }
-      }
-    }
+    auto assignment = place_group(group, available_planes, flags, crtc_index);
 
     // Apply this group's assignment
     for (auto& [plane_id, layer] : assignment) {
@@ -363,6 +286,48 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
           std::remove_if(available_planes.begin(), available_planes.end(),
                          [plane_id](const PlaneCapabilities* p) { return p->id == plane_id; }),
           available_planes.end());
+    }
+  }
+
+  // ── Best-partial fallback ─────────────────────────────────────
+  // Per-group placement returned nothing, but some layers may still
+  // be placeable when considered scene-wide. The §13.7 split is an
+  // optimization for non-overlapping layouts; when every per-group
+  // attempt drops to empty under TEST, fall back to a scene-wide
+  // pass that drops the most-constrained layer (fewest statically
+  // compatible planes) on each retry. The dropped layers are routed
+  // through composition by the post-loop needs_composition_ pass —
+  // exactly the same path a single failed group would have taken.
+  if (total_assigned == 0) {
+    std::vector<Layer*> placeable;
+    placeable.reserve(output.layers().size());
+    for (auto* l : output.layers()) {
+      if (l->force_composited_ || l->is_composition_layer()) {
+        continue;
+      }
+      placeable.push_back(l);
+    }
+
+    while (!placeable.empty() && test_commits_this_frame_ < max_test_commits_) {
+      auto attempt = place_group(placeable, all_available_planes, flags, crtc_index);
+      if (!attempt.empty()) {
+        if (alloc_debug()) {
+          std::fprintf(stderr, "[drm-cxx] partial-fallback PASS with %zu of %zu layer(s)\n",
+                       attempt.size(), placeable.size());
+        }
+        best_assignment = std::move(attempt);
+        total_assigned = best_assignment.size();
+        break;
+      }
+      const Layer* victim = pick_most_constrained(placeable, all_available_planes, crtc_index);
+      if (victim == nullptr) {
+        break;
+      }
+      if (alloc_debug()) {
+        std::fprintf(stderr, "[drm-cxx] partial-fallback drop most-constrained layer=%p\n",
+                     static_cast<const void*>(victim));
+      }
+      placeable.erase(std::find(placeable.begin(), placeable.end(), victim));
     }
   }
 
@@ -429,9 +394,17 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     disable_unused_planes(req, crtc_index, planes_in_use, /*track_state=*/true);
   }
 
-  // Save for warm-start next frame
+  // Save for warm-start next frame. An empty assignment is *not* valid
+  // warm-start state: it happens when full_search exhausts its TEST
+  // budget without finding any non-empty subset that the kernel
+  // accepts (compose_unassigned then rescues every layer onto the
+  // canvas). Marking valid_=true in that case poisons the next frame's
+  // fast path — apply_previous_allocation hits its empty-map guard and
+  // returns EAGAIN, which the fast path propagates straight to the
+  // caller (the warm-start path on lines 153-159 falls through to
+  // full_search, but the fast path on line 148 does not).
   previous_allocation_ = best_assignment;
-  previous_allocation_valid_ = true;
+  previous_allocation_valid_ = !best_assignment.empty();
 
   output.mark_clean();
   return total_assigned;
@@ -446,7 +419,7 @@ std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_pr
 
 // Helper: preseed for a group of layers and available planes
 std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_preseed_group(
-    std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
+    const std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
     const uint32_t crtc_index) const {
   std::vector<std::pair<Layer*, const PlaneCapabilities*>> result;
 
@@ -520,6 +493,118 @@ std::vector<CandidatePair> Allocator::rank_candidates_group(
   std::sort(pairs.begin(), pairs.end(),
             [](const CandidatePair& a, const CandidatePair& b) { return a.score > b.score; });
   return pairs;
+}
+
+std::unordered_map<uint32_t, Layer*> Allocator::place_group(
+    const std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
+    const uint32_t flags, const uint32_t crtc_index) {
+  // §13.5 Bipartite pre-solve
+  auto preseed = bipartite_preseed_group(layers, planes, crtc_index);
+
+  std::unordered_map<uint32_t, Layer*> assignment;
+  for (auto& [layer, plane] : preseed) {
+    assignment.insert_or_assign(plane->id, layer);
+  }
+
+  if (assignment.empty()) {
+    return assignment;
+  }
+
+  if (alloc_debug()) {
+    std::fprintf(stderr, "[drm-cxx] TEST preseed assignment:\n");
+    for (const auto& [pid, lay] : assignment) {
+      std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", pid, static_cast<const void*>(lay));
+    }
+  }
+  const bool preseed_ok = try_test_commit(assignment, flags, crtc_index);
+  if (alloc_debug()) {
+    std::fprintf(stderr, "[drm-cxx] TEST preseed → %s\n", preseed_ok ? "PASS" : "FAIL");
+  }
+  if (preseed_ok) {
+    return assignment;
+  }
+
+  // §13.2 + §13.1 Greedy from ranked candidates
+  assignment.clear();
+  auto candidates = rank_candidates_group(layers, planes, crtc_index);
+
+  std::unordered_map<uint32_t, bool> used_planes;
+  std::unordered_map<Layer*, bool> assigned_layers;
+
+  for (const auto& cand : candidates) {
+    if (used_planes.count(cand.plane->id) != 0) {
+      continue;
+    }
+    if (assigned_layers.count(cand.layer) != 0) {
+      continue;
+    }
+    if (auto cached = failure_cache_.lookup(cand.plane->id, cand.layer->property_hash());
+        cached.has_value() && !*cached) {
+      continue;
+    }
+    assignment.insert_or_assign(cand.plane->id, cand.layer);
+    used_planes.insert_or_assign(cand.plane->id, true);
+    assigned_layers.insert_or_assign(cand.layer, true);
+  }
+
+  if (alloc_debug()) {
+    std::fprintf(stderr, "[drm-cxx] TEST greedy assignment:\n");
+    for (const auto& [pid, lay] : assignment) {
+      std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", pid, static_cast<const void*>(lay));
+    }
+  }
+  const bool greedy_ok = try_test_commit(assignment, flags, crtc_index);
+  if (alloc_debug()) {
+    std::fprintf(stderr, "[drm-cxx] TEST greedy → %s\n", greedy_ok ? "PASS" : "FAIL");
+  }
+  if (greedy_ok) {
+    return assignment;
+  }
+
+  // Backtrack: remove assignments one by one (lowest priority first)
+  auto assigned_vec =
+      std::vector<std::pair<uint32_t, Layer*>>(assignment.begin(), assignment.end());
+  std::sort(assigned_vec.begin(), assigned_vec.end(), [](const auto& a, const auto& b) {
+    return layer_priority(*a.second) < layer_priority(*b.second);
+  });
+
+  for (auto& [fst, snd] : assigned_vec) {
+    assignment.erase(fst);
+    if (try_test_commit(assignment, flags, crtc_index)) {
+      break;
+    }
+    if (test_commits_this_frame_ >= max_test_commits_) {
+      break;
+    }
+  }
+
+  return assignment;
+}
+
+const Layer* Allocator::pick_most_constrained(const std::vector<Layer*>& layers,
+                                              const std::vector<const PlaneCapabilities*>& planes,
+                                              const uint32_t crtc_index) {
+  const Layer* worst = nullptr;
+  std::size_t worst_count = std::numeric_limits<std::size_t>::max();
+  int worst_priority = std::numeric_limits<int>::max();
+
+  for (const auto* layer : layers) {
+    std::size_t count = 0;
+    for (const auto* plane : planes) {
+      if (plane_statically_compatible(*plane, *layer, crtc_index)) {
+        ++count;
+      }
+    }
+    const int prio = layer_priority(*layer);
+    // Most-constrained first; lowest-priority breaks ties (least
+    // valuable to keep when constraint counts agree).
+    if (count < worst_count || (count == worst_count && prio < worst_priority)) {
+      worst = layer;
+      worst_count = count;
+      worst_priority = prio;
+    }
+  }
+  return worst;
 }
 
 int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) const {

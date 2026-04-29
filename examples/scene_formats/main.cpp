@@ -6,10 +6,13 @@
 //
 // What you should see when this runs:
 //
-//   Layer 0  ARGB8888       1:1  no-scale   → universally supported
-//   Layer 1  XRGB8888       1:1  no-scale   → universally supported
+//   Plane budget for CRTC <id>: <N> usable planes (PRIMARY+OVERLAY,
+//                                cursor excluded). Building <K>=min(4,N) layers.
+//
+//   Layer 0  ARGB8888       1:1  no-scale   → universally supported (baseline)
+//   Layer 1  ARGB8888       1:2  scaler     → scaler-capable plane only
 //   Layer 2  ABGR8888       1:1  no-scale   → channel-order swap
-//   Layer 3  ARGB8888       1:2  scaler     → scaler-capable plane only
+//   Layer 3  XRGB8888       1:1  no-scale   → universally supported
 //
 //   frame   1 assigned=N composited=M unassigned=K
 //   ...
@@ -36,12 +39,25 @@
 //   - format diversity (ARGB / XRGB / ABGR — same byte width, distinct
 //     channel orderings; not all planes accept all three on every
 //     driver, particularly older or constrained-IP embedded SoCs);
-//   - scaler matching (Layer 3's dst_rect is twice the src_rect width,
-//     so it can only land on a plane whose IN_FORMATS / capabilities
-//     advertise scaling).
+//   - scaler matching (the scaler layer's dst_rect is twice the
+//     src_rect width, so it can only land on a plane whose
+//     IN_FORMATS / capabilities advertise scaling).
 //
 // Per-driver results vary; the printed CommitReport counts make the
 // actual outcome visible.
+//
+// **Plane-budget awareness.** The full four-layer set fits drivers
+// that expose ≥4 PRIMARY+OVERLAY planes per CRTC. On constrained
+// pipes (amdgpu DCN typically gives 1 primary + 2 overlays = 3 usable
+// planes per CRTC; many embedded SoCs are tighter still), four
+// non-overlapping layers can't all land on hardware and the
+// allocator falls back to scene-wide composition — `assigned=0
+// composited=4` — which masks the demo's pedagogy. The example
+// probes the active CRTC's plane budget at startup and trims the
+// layer set to `min(4, usable_planes)`. The layer table is ordered
+// most-distinctive-first (baseline → scaler → channel-swap →
+// redundant-baseline) so each budget keeps the most pedagogically
+// interesting subset.
 //
 // **Out of scope for this example:**
 //
@@ -69,8 +85,10 @@
 #include "../common/open_output.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
+#include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
+#include <drm-cxx/planes/plane_registry.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -79,10 +97,12 @@
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <utility>
 
 namespace {
@@ -127,6 +147,43 @@ const char* format_label(std::uint32_t f) {
   }
 }
 
+// Look up the 0-based CRTC index for `crtc_id` in the device's CRTC
+// resource list. PlaneRegistry::for_crtc() and PlaneCapabilities::
+// possible_crtcs are both indexed by this position, not the object id.
+std::optional<std::uint32_t> crtc_index_of(const drm::Device& dev, std::uint32_t crtc_id) {
+  const auto res = drm::get_resources(dev.fd());
+  if (!res) {
+    return std::nullopt;
+  }
+  for (int i = 0; i < res->count_crtcs; ++i) {
+    if (res->crtcs[i] == crtc_id) {
+      return static_cast<std::uint32_t>(i);
+    }
+  }
+  return std::nullopt;
+}
+
+// Count PRIMARY+OVERLAY planes reachable from the active CRTC.
+// Cursor planes are excluded — they accept only ARGB8888 at fixed
+// small sizes and aren't candidates for general layers.
+std::size_t count_usable_planes(const drm::Device& dev, std::uint32_t crtc_id) {
+  const auto idx = crtc_index_of(dev, crtc_id);
+  if (!idx) {
+    return 0;
+  }
+  auto reg = drm::planes::PlaneRegistry::enumerate(dev);
+  if (!reg) {
+    return 0;
+  }
+  std::size_t n = 0;
+  for (const auto* p : reg->for_crtc(*idx)) {
+    if (p->type != drm::planes::DRMPlaneType::CURSOR) {
+      ++n;
+    }
+  }
+  return n;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -141,22 +198,39 @@ int main(int argc, char* argv[]) {
   drm::println("Modeset: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.vrefresh,
                output->connector_id, output->crtc_id);
 
-  // Layer table. Channel-byte values are picked so each layer is
-  // visually distinct regardless of channel-order interpretation:
-  // ARGB8888 fills (B=0x40, G=0x80, R=0x20, A=0xFF) reads as a green-
-  // dominant pixel; ABGR8888 with the same memory layout would read as
-  // red-dominant. Driver-side scanout interprets the bytes per format,
-  // so a wrong channel order shows up as a tinted strip on the screen
-  // and is easy to spot during a TTY run.
+  // Layer table, ordered most-distinctive-first so any plane-budget
+  // truncation drops the least pedagogically interesting layers last.
+  // Channel-byte values are picked so each layer is visually distinct
+  // regardless of channel-order interpretation: ARGB8888 fills
+  // (B=0x40, G=0x80, R=0x20, A=0xFF) reads as a green-dominant pixel;
+  // ABGR8888 with the same memory layout would read as red-dominant.
+  // Driver-side scanout interprets the bytes per format, so a wrong
+  // channel order shows up as a tinted strip on the screen and is
+  // easy to spot during a TTY run.
   constexpr std::array<LayerSpec, 4> layers = {{
       {DRM_FORMAT_ARGB8888, false, 0x40, 0x80, 0x20, 0xFF, "ARGB8888 1:1 no-scale"},
-      {DRM_FORMAT_XRGB8888, false, 0x80, 0x40, 0x20, 0x00, "XRGB8888 1:1 no-scale"},
-      {DRM_FORMAT_ABGR8888, false, 0x20, 0x80, 0x40, 0xFF, "ABGR8888 1:1 channel-swap"},
       {DRM_FORMAT_ARGB8888, true, 0x20, 0x40, 0x80, 0xFF, "ARGB8888 1:2 scaler-required"},
+      {DRM_FORMAT_ABGR8888, false, 0x20, 0x80, 0x40, 0xFF, "ABGR8888 1:1 channel-swap"},
+      {DRM_FORMAT_XRGB8888, false, 0x80, 0x40, 0x20, 0x00, "XRGB8888 1:1 no-scale"},
   }};
 
+  // Probe the active CRTC's plane budget and trim the layer set to
+  // fit. With layer_count <= usable_planes the bipartite solver has a
+  // chance to find a complete placement; the all-or-nothing fallback
+  // (assigned=0 composited=N) only triggers when no complete placement
+  // exists. A return of 0 here means the registry probe failed — fall
+  // through with the full set and let the allocator's report tell the
+  // truth.
+  const std::size_t usable_planes = count_usable_planes(dev, output->crtc_id);
+  const std::size_t layer_count =
+      usable_planes == 0 ? layers.size() : std::min(layers.size(), usable_planes);
+  drm::println(
+      "Plane budget: {} usable plane(s) on CRTC {} (PRIMARY+OVERLAY, cursor excluded). "
+      "Building {} layer(s).",
+      usable_planes, output->crtc_id, layer_count);
+
   drm::println("Layer requirements:");
-  for (std::size_t i = 0; i < layers.size(); ++i) {
+  for (std::size_t i = 0; i < layer_count; ++i) {
     const auto& l = layers.at(i);
     drm::println("  Layer {} format={} ({}) {}", i, format_label(l.format), l.format,
                  l.description);
@@ -171,15 +245,15 @@ int main(int argc, char* argv[]) {
   auto scene = std::move(*scene_r);
 
   // Tiles laid out non-overlapping in a 2x2 grid covering the centre
-  // of the screen. Layer 3's src_rect is half the size of its dst_rect
-  // — that 2× upscale is what makes the scaler match mandatory. The
-  // first three layers are 1:1 and don't constrain plane choice on
-  // that axis.
+  // of the screen. The scaler layer's src_rect is half the size of
+  // its dst_rect — that 2× upscale is what makes the scaler match
+  // mandatory. The other three layers are 1:1 and don't constrain
+  // plane choice on that axis.
   const std::uint32_t tile_w = fb_w / 4U;
   const std::uint32_t tile_h = (fb_h * 6U) / 20U;
   const auto y0 = static_cast<std::int32_t>(fb_h / 5U);
 
-  for (std::size_t i = 0; i < layers.size(); ++i) {
+  for (std::size_t i = 0; i < layer_count; ++i) {
     const auto& l = layers.at(i);
     const std::uint32_t buf_w = l.needs_scaling ? (tile_w / 2U) : tile_w;
     const std::uint32_t buf_h = l.needs_scaling ? (tile_h / 2U) : tile_h;
