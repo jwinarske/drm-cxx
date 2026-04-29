@@ -26,10 +26,10 @@
 
 #include "common/open_output.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
-#include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/input/seat.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
@@ -79,9 +79,12 @@ struct Cell {
 // soft motion field at any frame rate. ARGB cells pick up alpha=FF in
 // the high byte; XRGB cells get the same byte pattern (hardware ignores
 // X bits) so the painter doesn't need to branch on the cell format.
-void paint_cell(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, std::uint32_t width,
-                std::uint32_t height, std::uint32_t base_argb, std::uint32_t bar_argb,
+void paint_cell(drm::BufferMapping& map, std::uint32_t base_argb, std::uint32_t bar_argb,
                 std::uint32_t phase) noexcept {
+  const auto width = map.width();
+  const auto height = map.height();
+  const auto stride_bytes = map.stride();
+  const auto pixels = map.pixels();
   if (width == 0U || height == 0U || stride_bytes < width * 4U) {
     return;
   }
@@ -126,9 +129,14 @@ drm::expected<std::vector<Cell>, std::error_code> build_cells(drm::Device& dev,
       desc.display.dst_rect =
           drm::scene::Rect{static_cast<std::int32_t>(col * cell_w),
                            static_cast<std::int32_t>(row * cell_h), cell_w, cell_h};
-      // Cells don't overlap, so leave zpos unset and let the allocator
-      // sort plane assignment. Forcing zpos here would interact badly
-      // with amdgpu's PRIMARY-pinned-at-2 quirk on bigger grids.
+      // Distinct zpos per cell starting at 3 to clear amdgpu's PRIMARY=2
+      // pin. Without a zpos signal anywhere in the scene the canvas
+      // reservation path leaves choose_canvas_zpos at 0, arm_composition_
+      // canvas skips writing zpos, and the full-screen canvas overlaps the
+      // overlay cells at an ambiguous z — amdgpu rejects that with EINVAL
+      // for any grid past 2x2 (where overflow keeps the canvas off the
+      // request entirely).
+      desc.display.zpos = 3 + static_cast<int>(idx);
       desc.content_type = drm::planes::ContentType::Video;
       auto h = scene.add_layer(std::move(desc));
       if (!h) {
@@ -140,10 +148,13 @@ drm::expected<std::vector<Cell>, std::error_code> build_cells(drm::Device& dev,
   return cells;
 }
 
-void paint_all(std::vector<Cell>& cells, std::uint32_t cell_w, std::uint32_t cell_h,
-               std::uint32_t phase) noexcept {
+void paint_all(std::vector<Cell>& cells, std::uint32_t phase) noexcept {
   for (auto& c : cells) {
-    paint_cell(c.src->pixels(), c.src->stride(), cell_w, cell_h, c.base_argb, 0xFFFFFFFFU, phase);
+    auto m = c.src->map(drm::MapAccess::Write);
+    if (!m) {
+      continue;
+    }
+    paint_cell(*m, c.base_argb, 0xFFFFFFFFU, phase);
   }
 }
 
@@ -178,7 +189,6 @@ int main(int argc, char** argv) {
   std::size_t layout_idx = 0;
   std::uint32_t grid_n = k_layouts.at(layout_idx);
   std::uint32_t cell_w = fb_w / grid_n;
-  std::uint32_t cell_h = fb_h / grid_n;
   std::uint32_t phase = 0U;
 
   auto cells_res = build_cells(dev, *scene, fb_w, fb_h, grid_n);
@@ -187,7 +197,7 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   auto cells = std::move(*cells_res);
-  paint_all(cells, cell_w, cell_h, phase);
+  paint_all(cells, phase);
 
   bool session_paused = false;
   bool flip_pending = false;
@@ -317,7 +327,7 @@ int main(int argc, char** argv) {
           [&](std::uint32_t, std::uint64_t, std::uint64_t) { flip_pending = false; });
       // Buffer mappings were torn down on pause; repaint every cell
       // before the next commit so the resumed scanout has fresh pixels.
-      paint_all(cells, cell_w, cell_h, phase);
+      paint_all(cells, phase);
     }
 
     if (flip_pending || session_paused) {
@@ -333,7 +343,6 @@ int main(int argc, char** argv) {
       cells.clear();
       grid_n = k_layouts.at(layout_idx);
       cell_w = fb_w / grid_n;
-      cell_h = fb_h / grid_n;
       auto fresh = build_cells(dev, *scene, fb_w, fb_h, grid_n);
       if (!fresh) {
         drm::println(stderr, "rebuild ({}×{}): {}", grid_n, grid_n, fresh.error().message());
@@ -349,7 +358,7 @@ int main(int argc, char** argv) {
     if (phase >= cell_w) {
       phase = 0U;
     }
-    paint_all(cells, cell_w, cell_h, phase);
+    paint_all(cells, phase);
 
     if (auto report =
             scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);

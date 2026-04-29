@@ -87,8 +87,21 @@ class Layer {
   /// dirty.
   void set_alpha(std::uint16_t a) noexcept {
     display_.alpha = a;
+    alpha_explicit_ = true;
     dirty_ = true;
   }
+
+  /// True once `set_alpha` has been called on this layer for any
+  /// value, including 0xFFFF. Sticky for the layer's lifetime; the
+  /// scene reads it during commit lowering to decide whether to
+  /// emit the per-plane "alpha" property even when its current value
+  /// matches the kernel's default — needed so a tile that lowered
+  /// alpha and then raised it back to fully-opaque actually goes
+  /// back to opaque on scanout. (Without the sticky bit, the diff
+  /// path leaves the kernel's last-written non-default value in
+  /// place because lowering's emit-only-when-non-default guard hides
+  /// the round-trip from the property snapshot.)
+  [[nodiscard]] bool alpha_was_explicitly_set() const noexcept { return alpha_explicit_; }
   /// Update `display.zpos`. `std::nullopt` lets the allocator pick.
   /// Marks the layer dirty.
   void set_zpos(std::optional<int> z) noexcept {
@@ -129,6 +142,13 @@ class Layer {
   // freshly-added layer — no stale plane state carries over from
   // whatever used the plane before the scene did.
   bool dirty_{true};
+
+  // Sticky across the layer's lifetime once `set_alpha` is called.
+  // Distinct from `dirty_` (cleared after every commit) because we
+  // need the lowering pass to keep emitting alpha for any layer the
+  // caller has ever touched, not just on the frame where the touch
+  // happens.
+  bool alpha_explicit_{false};
 };
 
 }  // namespace drm::scene

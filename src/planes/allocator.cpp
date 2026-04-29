@@ -100,6 +100,36 @@ void Allocator::set_test_preparer(TestPreparer preparer) {
   test_preparer_ = std::move(preparer);
 }
 
+void Allocator::forget_layer(const Layer* layer) noexcept {
+  if (layer == nullptr) {
+    return;
+  }
+  // Null the layer pointer in last_committed_ but keep the properties.
+  // disable_unused_planes uses the entry's FB_ID to decide whether a
+  // plane is already off; fully erasing here would make it skip the
+  // FB_ID=0 / CRTC_ID=0 emission for the plane this layer was on,
+  // leaving the kernel with stale attachment state. Keeping the
+  // snapshot lets disable_unused_planes emit the disable on the next
+  // commit, and apply_layer_to_plane_real still triggers a full
+  // property write for any future layer assigned here because nullptr
+  // never matches a live layer pointer.
+  for (auto& [plane_id, snapshot] : last_committed_) {
+    if (snapshot.layer == layer) {
+      snapshot.layer = nullptr;
+    }
+  }
+  for (auto it = previous_allocation_.begin(); it != previous_allocation_.end();) {
+    if (it->second == layer) {
+      it = previous_allocation_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (previous_allocation_.empty()) {
+    previous_allocation_valid_ = false;
+  }
+}
+
 // ── Main entry point (§13.3 warm-start logic) ──────────────────
 
 drm::expected<std::size_t, std::error_code> Allocator::apply(

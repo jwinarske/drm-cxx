@@ -79,6 +79,15 @@ class Allocator {
   void set_force_full_property_writes(bool force) noexcept { force_full_writes_ = force; }
   [[nodiscard]] bool force_full_property_writes() const noexcept { return force_full_writes_; }
 
+  // Erase any cached state that references `layer`. Must be called
+  // before the planes::Layer pointed to by `layer` is destroyed,
+  // because the allocator's per-plane snapshot stores a raw pointer
+  // for layer-identity checks; without invalidation, heap reuse can
+  // give a freshly-added layer the same address, fool the diff path
+  // into treating the two as the same logical layer, and silently
+  // skip property writes the kernel needs.
+  void forget_layer(const Layer* layer) noexcept;
+
   // Diagnostic counters from the most recent apply() call. Reset to
   // zero at the top of every apply(), so a caller observing these
   // immediately after a successful apply() sees that frame's totals.

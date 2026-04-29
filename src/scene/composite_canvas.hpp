@@ -71,6 +71,14 @@ struct CompositeSrc {
   /// (treated as straight alpha) and DRM_FORMAT_XRGB8888 (treated as
   /// fully opaque, alpha byte ignored). Other formats are no-ops.
   std::uint32_t drm_fourcc{0};
+  /// Per-layer alpha modulation in KMS plane units (0 = fully
+  /// transparent, 0xFFFF = fully opaque). Mirrors what the kernel
+  /// would multiply through the per-plane "alpha" property on a
+  /// hardware-placed layer; applying it here keeps the visual effect
+  /// of `Layer::set_alpha` consistent regardless of whether the layer
+  /// landed on a hardware plane or fell through to composition.
+  /// Default 0xFFFF (no modulation).
+  std::uint16_t plane_alpha{0xFFFF};
 };
 
 /// Rectangles passed to blend(). Both are signed because dst_rect can

@@ -26,6 +26,7 @@
 
 #include "common/open_output.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
@@ -66,7 +67,7 @@ constexpr std::uint32_t k_tile_h = 160U;
 constexpr std::int32_t k_move_step_px = 32;
 constexpr std::int32_t k_zpos_min = 3;
 constexpr std::int32_t k_zpos_max = 10;
-constexpr std::uint16_t k_alpha_step = 0x1000U;
+constexpr std::uint16_t k_alpha_step = 0x2000U;
 constexpr std::uint32_t k_tile_count = 8U;
 
 constexpr std::array<std::uint32_t, k_tile_count> k_tile_palette{
@@ -104,8 +105,11 @@ void fill_argb_rect(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, 
 // Soft horizontal+vertical gradient for the background. Pure XRGB so
 // the byte-order check and the "did we reach scanout" check both come
 // for free — a wrong-channel write would tint the gradient obviously.
-void paint_bg_gradient(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes,
-                       std::uint32_t width, std::uint32_t height) noexcept {
+void paint_bg_gradient(drm::BufferMapping& map) noexcept {
+  const auto width = map.width();
+  const auto height = map.height();
+  const auto stride_bytes = map.stride();
+  const auto pixels = map.pixels();
   if (width == 0U || height == 0U || stride_bytes < width * 4U) {
     return;
   }
@@ -129,8 +133,11 @@ void paint_bg_gradient(drm::span<std::uint8_t> pixels, std::uint32_t stride_byte
 // Tile painter: filled colour with a 6-px contrasting border so the
 // tile's footprint reads even when the user pushes alpha down toward
 // transparency.
-void paint_tile(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, std::uint32_t width,
-                std::uint32_t height, std::uint32_t fill_argb) noexcept {
+void paint_tile(drm::BufferMapping& map, std::uint32_t fill_argb) noexcept {
+  const auto width = map.width();
+  const auto height = map.height();
+  const auto stride_bytes = map.stride();
+  const auto pixels = map.pixels();
   fill_argb_rect(pixels, stride_bytes, width, height, fill_argb);
   constexpr std::uint32_t k_border_px = 6U;
   if (width <= k_border_px * 2U || height <= k_border_px * 2U) {
@@ -153,6 +160,16 @@ void paint_tile(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, std:
       }
     }
   }
+}
+
+drm::expected<void, std::error_code> paint_dumb_source(drm::scene::DumbBufferSource& src,
+                                                       std::uint32_t fill_argb) {
+  auto m = src.map(drm::MapAccess::Write);
+  if (!m) {
+    return drm::unexpected<std::error_code>(m.error());
+  }
+  paint_tile(*m, fill_argb);
+  return {};
 }
 
 void reset_tile_state(Tile& t, std::uint32_t fb_w, std::uint32_t fb_h, std::uint32_t index) {
@@ -181,8 +198,9 @@ drm::expected<void, std::error_code> activate(Tile& t, drm::Device& dev,
   if (!src) {
     return drm::unexpected<std::error_code>(src.error());
   }
-  auto* src_ptr = src->get();
-  paint_tile(src_ptr->pixels(), src_ptr->stride(), k_tile_w, k_tile_h, t.color);
+  if (auto r = paint_dumb_source(**src, t.color); !r) {
+    return drm::unexpected<std::error_code>(r.error());
+  }
 
   drm::scene::LayerDesc desc;
   desc.source = std::move(*src);
@@ -232,7 +250,12 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   auto* bg = bg_src->get();
-  paint_bg_gradient(bg->pixels(), bg->stride(), fb_w, fb_h);
+  if (auto m = bg->map(drm::MapAccess::Write); m) {
+    paint_bg_gradient(*m);
+  } else {
+    drm::println(stderr, "bg map: {}", m.error().message());
+    return EXIT_FAILURE;
+  }
 
   drm::scene::LayerScene::Config cfg;
   cfg.crtc_id = crtc_id;
@@ -520,14 +543,16 @@ int main(int argc, char** argv) {
           [&](std::uint32_t, std::uint64_t, std::uint64_t) { flip_pending = false; });
       // Buffer mappings were torn down on pause; repaint the bg and
       // every active tile against the fresh mappings before committing.
-      paint_bg_gradient(bg->pixels(), bg->stride(), fb_w, fb_h);
+      if (auto m = bg->map(drm::MapAccess::Write); m) {
+        paint_bg_gradient(*m);
+      }
       for (auto& t : tiles) {
         if (!t.active) {
           continue;
         }
         if (auto* layer = scene->get_layer(t.handle)) {
           if (auto* dbs = dynamic_cast<drm::scene::DumbBufferSource*>(&layer->source())) {
-            paint_tile(dbs->pixels(), dbs->stride(), k_tile_w, k_tile_h, t.color);
+            (void)paint_dumb_source(*dbs, t.color);
           }
         }
       }
