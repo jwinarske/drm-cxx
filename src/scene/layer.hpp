@@ -12,6 +12,7 @@
 #pragma once
 
 #include "buffer_source.hpp"
+#include "commit_report.hpp"
 #include "display_params.hpp"
 #include "layer_handle.hpp"
 
@@ -118,6 +119,37 @@ class Layer {
   /// succeeds; consumers shouldn't normally call it directly.
   void mark_clean() noexcept { dirty_ = false; }
 
+  // ── Last-commit placement readout ──────────────────────────────────
+  //
+  // Updated by `LayerScene::commit()` after every successful real
+  // commit so consumers can tell where each layer's pixels actually
+  // landed. Not updated by `test()` — `test()`'s placement is in the
+  // returned `CommitReport::placements` only, since `test()` is meant
+  // not to mutate scene state. Default-constructed values
+  // (`Unassigned`, no plane id) hold until the first successful
+  // commit places this layer; they also persist across a commit that
+  // fails before placement runs.
+
+  /// How this layer reached scanout in its most recent successful
+  /// commit. `Unassigned` until the first commit places the layer.
+  [[nodiscard]] LayerPlacement last_placement() const noexcept { return last_placement_; }
+
+  /// The plane id this layer's content reached scanout on in its most
+  /// recent successful commit. `nullopt` when `last_placement() ==
+  /// Unassigned` (or the layer hasn't been committed yet). For
+  /// composited layers this is the canvas plane id.
+  [[nodiscard]] std::optional<std::uint32_t> last_assigned_plane_id() const noexcept {
+    return last_assigned_plane_id_;
+  }
+
+  /// Record this layer's placement for the just-completed commit.
+  /// Called by `LayerScene::commit()` only — `test()` does not write
+  /// scene state. Consumers shouldn't call directly.
+  void record_placement(LayerPlacement placement, std::optional<std::uint32_t> plane_id) noexcept {
+    last_placement_ = placement;
+    last_assigned_plane_id_ = plane_id;
+  }
+
   /// Construct a Layer. In practice this is only called from
   /// LayerScene::add_layer — the signature is deliberately awkward
   /// (needs a LayerHandle the scene mints, takes an rvalue source) to
@@ -149,6 +181,13 @@ class Layer {
   // caller has ever touched, not just on the frame where the touch
   // happens.
   bool alpha_explicit_{false};
+
+  // Last-commit placement state. Default to "never assigned" so a
+  // layer queried before its first commit reports nullopt rather than
+  // a misleading 0. Updated by record_placement() from the scene's
+  // commit path.
+  LayerPlacement last_placement_{LayerPlacement::Unassigned};
+  std::optional<std::uint32_t> last_assigned_plane_id_;
 };
 
 }  // namespace drm::scene

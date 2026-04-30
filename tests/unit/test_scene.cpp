@@ -18,15 +18,18 @@
 
 #include "core/device.hpp"
 
+#include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/composite_canvas.hpp>
 #include <drm-cxx/scene/display_params.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/gbm_buffer_source.hpp>
+#include <drm-cxx/scene/layer.hpp>
 #include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
+#include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -131,6 +134,14 @@ TEST(SceneCommitReport, DefaultsToAllZeros) {
   EXPECT_EQ(r.properties_written, 0U);
   EXPECT_EQ(r.fbs_attached, 0U);
   EXPECT_EQ(r.test_commits_issued, 0U);
+  EXPECT_TRUE(r.placements.empty());
+}
+
+TEST(SceneCommitReport, LayerPlacementEntryDefaults) {
+  const drm::scene::LayerPlacementEntry e;
+  EXPECT_FALSE(e.handle.valid());
+  EXPECT_EQ(e.placement, drm::scene::LayerPlacement::Unassigned);
+  EXPECT_EQ(e.plane_id, 0U);
 }
 
 TEST(SceneCompositeCanvasConfig, SaneDefaults) {
@@ -238,4 +249,52 @@ TEST(SceneGbmBufferSource, CreateFailsOnZeroDimensions) {
   auto r0h = drm::scene::GbmBufferSource::create(dev, 64, 0, 0x34325241U);
   EXPECT_FALSE(r0h.has_value());
   ::close(fd);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Layer placement readout — defaults visible without a live KMS device.
+// The full assigned-/composited-/dropped-via-LayerScene round-trip is
+// covered by the VKMS integration suites, where a real allocator runs
+// against a writeback CRTC.
+// ─────────────────────────────────────────────────────────────────────
+
+TEST(SceneLayer, PlacementDefaultsToUnassigned) {
+  // Construct a Layer directly through the public ctor (LayerScene
+  // would normally mint one via add_layer; the ctor is exposed for
+  // pimpl reasons and stable here).
+  const drm::scene::LayerHandle h{1, 0};
+  const drm::scene::DisplayParams dp;
+  const drm::scene::Layer layer{h, /*source=*/nullptr, dp, drm::planes::ContentType::Generic,
+                                /*update_hint_hz=*/0};
+  EXPECT_EQ(layer.last_placement(), drm::scene::LayerPlacement::Unassigned);
+  EXPECT_FALSE(layer.last_assigned_plane_id().has_value());
+}
+
+TEST(SceneLayer, RecordPlacementAssignedToPlane) {
+  const drm::scene::LayerHandle h{1, 0};
+  const drm::scene::DisplayParams dp;
+  drm::scene::Layer layer{h, /*source=*/nullptr, dp, drm::planes::ContentType::Generic, 0U};
+  layer.record_placement(drm::scene::LayerPlacement::AssignedToPlane, std::uint32_t{73});
+  EXPECT_EQ(layer.last_placement(), drm::scene::LayerPlacement::AssignedToPlane);
+  EXPECT_EQ(layer.last_assigned_plane_id().value_or(0U), 73U);
+}
+
+TEST(SceneLayer, RecordPlacementComposited) {
+  const drm::scene::LayerHandle h{2, 0};
+  const drm::scene::DisplayParams dp;
+  drm::scene::Layer layer{h, /*source=*/nullptr, dp, drm::planes::ContentType::UI, 60U};
+  layer.record_placement(drm::scene::LayerPlacement::Composited, std::uint32_t{42});
+  EXPECT_EQ(layer.last_placement(), drm::scene::LayerPlacement::Composited);
+  EXPECT_EQ(layer.last_assigned_plane_id().value_or(0U), 42U);
+}
+
+TEST(SceneLayer, RecordPlacementUnassignedClearsPlaneId) {
+  const drm::scene::LayerHandle h{3, 0};
+  const drm::scene::DisplayParams dp;
+  drm::scene::Layer layer{h, /*source=*/nullptr, dp, drm::planes::ContentType::Generic, 0U};
+  layer.record_placement(drm::scene::LayerPlacement::AssignedToPlane, std::uint32_t{55});
+  // Subsequent commit drops the layer.
+  layer.record_placement(drm::scene::LayerPlacement::Unassigned, {});
+  EXPECT_EQ(layer.last_placement(), drm::scene::LayerPlacement::Unassigned);
+  EXPECT_FALSE(layer.last_assigned_plane_id().has_value());
 }

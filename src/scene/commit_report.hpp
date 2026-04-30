@@ -15,9 +15,40 @@
 
 #pragma once
 
+#include "layer_handle.hpp"
+
 #include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace drm::scene {
+
+/// How a layer reached scanout in a given commit. Pairs with the
+/// `plane_id` field of `LayerPlacementEntry` to describe the layer's
+/// outcome.
+enum class LayerPlacement : std::uint8_t {
+  /// Layer reached scanout on its own hardware plane. `plane_id` is
+  /// the plane the allocator picked.
+  AssignedToPlane,
+  /// Layer was composited into the canvas plane. `plane_id` is the
+  /// canvas plane.
+  Composited,
+  /// Layer was dropped this frame (no hardware plane available, no
+  /// CPU mapping for composition, or canvas allocation failed).
+  /// `plane_id` is 0.
+  Unassigned,
+};
+
+/// One row of `CommitReport::placements`. Identifies a scene layer and
+/// its outcome for the commit that produced the report.
+struct LayerPlacementEntry {
+  LayerHandle handle;
+  LayerPlacement placement{LayerPlacement::Unassigned};
+  /// The plane id the layer's content reached scanout on, or 0 when
+  /// `placement == Unassigned`. For composited layers this is the
+  /// canvas plane id, not a per-layer plane.
+  std::uint32_t plane_id{0};
+};
 
 /// Diagnostic snapshot of a single `LayerScene::commit()` or `test()`
 /// call. Every field is a non-negative count; consumers use these for
@@ -60,6 +91,14 @@ struct CommitReport {
   /// whole budget (default 16); warm-start commits should normally
   /// be 0.
   std::size_t test_commits_issued{0};
+
+  /// One entry per layer the scene attempted to place this commit, in
+  /// the scene's layer-iteration order. Empty when the scene had no
+  /// layers or the commit failed before placement ran. Same ordering
+  /// across `test()` and `commit()` for an unchanged scene, so callers
+  /// can pair a `--probe` `test()` report against a real `commit()`
+  /// report verbatim.
+  std::vector<LayerPlacementEntry> placements;
 };
 
 }  // namespace drm::scene

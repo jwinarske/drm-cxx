@@ -367,6 +367,13 @@ class LayerScene::Impl {
       drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
     }
 
+    // Per-layer placement readout. Always populates `report.placements`
+    // so test() consumers (e.g. probe modes) can see the same shape a
+    // real commit would land. Scene::Layer state is only updated on
+    // the real-commit success branch below, after req.commit() lands —
+    // test() must not mutate observable layer state.
+    populate_report_placements(acquisitions, report);
+
     // Apply or validate.
     if (test_only) {
       if (auto r = req.test(); !r) {
@@ -383,12 +390,16 @@ class LayerScene::Impl {
       }
       // Only real commits flip the scene past first-commit; tests don't.
       first_commit_ = false;
-      // Mark dirty layers clean for a successful commit.
+      // Mark dirty layers clean for a successful commit, and record the
+      // placement we just wrote so `Layer::last_assigned_plane_id()` /
+      // `Layer::last_placement()` reflect this commit's outcome on
+      // subsequent reads.
       for (auto& slot : slots_) {
         if (slot.alive && slot.scene_layer) {
           slot.scene_layer->mark_clean();
         }
       }
+      record_layer_placements(acquisitions);
       output_.mark_clean();
     }
 
@@ -1211,6 +1222,59 @@ class LayerScene::Impl {
     report.layers_composited += scratch_composited_.size();
     report.composition_buckets += 1U;
     last_canvas_plane_id_ = target_plane->id;
+  }
+
+  // Classify every acquired layer as AssignedToPlane / Composited /
+  // Unassigned and append a row to report.placements. Run after
+  // compose_unassigned so its `cached_mapping` flag is the
+  // authoritative composited signal — a layer the allocator dropped
+  // and the compositor rescued shows up as Composited; a layer the
+  // allocator dropped that compose_unassigned couldn't rescue (no CPU
+  // mapping, no free canvas plane) shows up as Unassigned.
+  void populate_report_placements(const std::vector<AcquisitionSlot>& acquisitions,
+                                  CommitReport& report) const {
+    report.placements.clear();
+    report.placements.reserve(acquisitions.size());
+    for (const auto& acq : acquisitions) {
+      if (acq.scene_layer == nullptr || acq.planes_layer == nullptr) {
+        continue;
+      }
+      LayerPlacementEntry entry;
+      entry.handle = acq.scene_layer->handle();
+      const auto pid = acq.planes_layer->assigned_plane_id();
+      if (pid.has_value()) {
+        entry.placement = LayerPlacement::AssignedToPlane;
+        entry.plane_id = *pid;
+      } else if (acq.cached_mapping.has_value() && last_canvas_plane_id_.has_value()) {
+        entry.placement = LayerPlacement::Composited;
+        entry.plane_id = *last_canvas_plane_id_;
+      } else {
+        entry.placement = LayerPlacement::Unassigned;
+        entry.plane_id = 0;
+      }
+      report.placements.push_back(entry);
+    }
+  }
+
+  // Mirror the report's per-layer placement back onto each scene::Layer
+  // so future Layer::last_assigned_plane_id() / Layer::last_placement()
+  // reads return this commit's outcome. Called from the commit-success
+  // branch only — test() leaves the layer's prior placement state
+  // intact.
+  void record_layer_placements(const std::vector<AcquisitionSlot>& acquisitions) const {
+    for (const auto& acq : acquisitions) {
+      if (acq.scene_layer == nullptr || acq.planes_layer == nullptr) {
+        continue;
+      }
+      const auto pid = acq.planes_layer->assigned_plane_id();
+      if (pid.has_value()) {
+        acq.scene_layer->record_placement(LayerPlacement::AssignedToPlane, pid);
+      } else if (acq.cached_mapping.has_value() && last_canvas_plane_id_.has_value()) {
+        acq.scene_layer->record_placement(LayerPlacement::Composited, last_canvas_plane_id_);
+      } else {
+        acq.scene_layer->record_placement(LayerPlacement::Unassigned, std::nullopt);
+      }
+    }
   }
 
   // For every layer the allocator placed natively, force the plane's
