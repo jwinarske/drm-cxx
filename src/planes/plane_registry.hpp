@@ -44,6 +44,31 @@ struct PlaneCapabilities {
   bool supports_rotation{false};
   bool supports_scaling{false};
   bool has_format_modifiers{false};
+  /// True when the plane exposes the `"pixel blend mode"` enum property.
+  /// Absence means the plane has no blend control and scanout is
+  /// hardwired by the driver — typically opaque pixel-replace, so a
+  /// transparent (alpha=0) source pixel paints opaque black over
+  /// whatever lies beneath in the plane stack.
+  bool has_pixel_blend_mode{false};
+  /// True when the plane exposes the `"alpha"` u16 per-plane alpha
+  /// property. Independent of `has_pixel_blend_mode` — some hardware
+  /// exposes one without the other.
+  bool has_per_plane_alpha{false};
+  /// Cached enum integer for `"pixel blend mode" = "Pre-multiplied"`,
+  /// when the plane advertises that enum value. The integer is
+  /// driver-defined — the kernel hands back enum values in the order
+  /// the driver registered them, so callers must look up by name.
+  /// Use this to write the property via an atomic commit. nullopt
+  /// when the property doesn't expose the value at all (rare).
+  std::optional<uint64_t> blend_mode_premultiplied;
+  /// As `blend_mode_premultiplied`, for `"Coverage"` (straight-alpha
+  /// SRC_OVER). Most drivers expose both Coverage and Pre-multiplied;
+  /// callers should prefer Pre-multiplied to match the canvas's
+  /// internal premultiplied output convention.
+  std::optional<uint64_t> blend_mode_coverage;
+  /// As `blend_mode_premultiplied`, for `"None"` (pixel-replace, no
+  /// blend). Surfaced for diagnostic / explicit-replace use cases.
+  std::optional<uint64_t> blend_mode_none;
   uint32_t cursor_max_w{};
   uint32_t cursor_max_h{};
 

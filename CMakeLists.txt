@@ -12,10 +12,11 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 # Defaults switch on top-level vs subdirectory consumption.
-option(DRM_CXX_VULKAN         "Build Vulkan display support" ON)
-option(DRM_CXX_BUILD_EXAMPLES "Build example programs"       ${PROJECT_IS_TOP_LEVEL})
-option(DRM_CXX_BUILD_TESTS    "Build unit tests"             ${PROJECT_IS_TOP_LEVEL})
-option(DRM_CXX_INSTALL        "Generate install rules"       ${PROJECT_IS_TOP_LEVEL})
+option(DRM_CXX_VULKAN           "Build Vulkan display support" ON)
+option(DRM_CXX_BUILD_EXAMPLES   "Build example programs"       ${PROJECT_IS_TOP_LEVEL})
+option(DRM_CXX_BUILD_TESTS      "Build unit tests"             ${PROJECT_IS_TOP_LEVEL})
+option(DRM_CXX_BUILD_BENCHMARKS "Build perf benchmarks"        ${PROJECT_IS_TOP_LEVEL})
+option(DRM_CXX_INSTALL          "Generate install rules"       ${PROJECT_IS_TOP_LEVEL})
 
 # Optional seat-session support via libseat. When enabled, drm-cxx ships
 # a drm::session::Seat that muxes logind/seatd/builtin backends; when
@@ -329,4 +330,8 @@ endif()
 if(DRM_CXX_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(DRM_CXX_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
 endif()

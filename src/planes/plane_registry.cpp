@@ -165,6 +165,26 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
       // has_format_modifiers false and the format-only fallback path in
       // supports_format_modifier handles them.
       parse_in_formats_blob(fd, static_cast<uint32_t>(prop_vals[i]), caps);
+    } else if (std::strcmp(prop->name, "pixel blend mode") == 0) {
+      // Enum property: kernel exposes blend modes as named integers.
+      // Each driver registers its own ordering, so the integer for
+      // "Pre-multiplied" varies — cache the per-plane mapping here so
+      // arm_composition_canvas can write the right value.
+      caps.has_pixel_blend_mode = true;
+      if ((prop->flags & DRM_MODE_PROP_ENUM) != 0U) {
+        const auto enums = drm::span<const drm_mode_property_enum>(prop->enums, prop->count_enums);
+        for (const auto& en : enums) {
+          if (std::strcmp(en.name, "Pre-multiplied") == 0) {
+            caps.blend_mode_premultiplied = en.value;
+          } else if (std::strcmp(en.name, "Coverage") == 0) {
+            caps.blend_mode_coverage = en.value;
+          } else if (std::strcmp(en.name, "None") == 0) {
+            caps.blend_mode_none = en.value;
+          }
+        }
+      }
+    } else if (std::strcmp(prop->name, "alpha") == 0) {
+      caps.has_per_plane_alpha = true;
     }
 
     drmModeFreeProperty(prop);
