@@ -54,13 +54,8 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
   if (planes.empty() || planes.size() > k_max_planes) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
-  // PR-A scope: single plane, linear-or-invalid modifier. Multi-plane
-  // and tiled layouts ship in PR-B; reject explicitly so callers don't
-  // silently get partial behavior.
-  if (planes.size() != 1) {
-    return drm::unexpected<std::error_code>(
-        std::make_error_code(std::errc::operation_not_supported));
-  }
+  // Tiled modifiers are out of scope — kernel plane-format negotiation
+  // around modifiers is driver-specific in ways we can't pre-validate.
   if (!modifier_is_linear(modifier)) {
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::operation_not_supported));
