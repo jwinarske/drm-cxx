@@ -135,6 +135,13 @@ target_link_libraries(test_external_dma_buf_source PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_external_dma_buf_source)
 
+add_executable(test_page_flip unit/test_page_flip.cpp)
+target_link_libraries(test_page_flip PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_page_flip)
+
 # Connector-rank helper test. The header lives under examples/common,
 # so the test target adds examples/ to its include path to resolve
 # "common/select_connector.hpp".
