@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 
-foreach(_ex atomic_modeset hotplug_monitor overlay_planes scene_warm_start scene_priority scene_formats layered_demo video_grid)
+foreach(_ex atomic_modeset hotplug_monitor overlay_planes scene_warm_start scene_priority scene_formats layered_demo video_grid camera)
   add_executable(${_ex} ${_ex}/main.cpp)
   target_link_libraries(${_ex} PRIVATE drm-cxx::drm-cxx)
   target_include_directories(${_ex} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

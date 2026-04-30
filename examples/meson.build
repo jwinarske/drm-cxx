@@ -54,6 +54,14 @@ executable('video_grid',
   dependencies : [drm_cxx_dep],
 )
 
+# camera — zero-copy libcamera -> KMS scanout viewfinder (planned).
+# Today this is the --probe scaffold from docs/cam_example_plan.md:
+# device + output + plane IN_FORMATS dump, no libcamera dep yet.
+executable('camera',
+  'camera/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
 executable('mouse_cursor',
