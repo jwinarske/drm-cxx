@@ -44,7 +44,10 @@
 #include <libcamera/camera.h>
 #include <libcamera/camera_manager.h>
 #include <libcamera/controls.h>
+#include <libcamera/geometry.h>
+#include <libcamera/pixel_format.h>
 #include <libcamera/property_ids.h>
+#include <libcamera/stream.h>
 #include <memory>
 #include <optional>
 #include <string>
@@ -160,11 +163,65 @@ const char* camera_location_label(std::int32_t loc) noexcept {
   }
 }
 
+const char* config_status_label(libcamera::CameraConfiguration::Status s) noexcept {
+  switch (s) {
+    case libcamera::CameraConfiguration::Valid:
+      return "Valid";
+    case libcamera::CameraConfiguration::Adjusted:
+      return "Adjusted";
+    case libcamera::CameraConfiguration::Invalid:
+      return "Invalid";
+  }
+  return "Unknown";
+}
+
+// Acquire the camera, generate a Viewfinder-role configuration, dump
+// the validated default plus the full StreamFormats matrix
+// (pixelformat × sizes) the pipeline can produce, then release.
+//
+// acquire() may fail with -EBUSY when another process owns the
+// camera; that's expected on systems with a running viewer/portal,
+// not fatal to the probe — we log and move on.
+void print_camera_streams(libcamera::Camera& cam) {
+  if (const int rc = cam.acquire(); rc < 0) {
+    drm::println(stderr, "      acquire: {} (skipping streams)", std::strerror(-rc));
+    return;
+  }
+
+  auto config = cam.generateConfiguration({libcamera::StreamRole::Viewfinder});
+  if (!config || config->empty()) {
+    drm::println(stderr, "      generateConfiguration(Viewfinder): empty");
+    cam.release();
+    return;
+  }
+
+  const auto status = config->validate();
+  drm::println("      streams (Viewfinder, validate={}):", config_status_label(status));
+  for (unsigned int i = 0; i < config->size(); ++i) {
+    const auto& sc = config->at(i);
+    drm::println("        [{}] default {} {} ({:#x}) frameSize={} bufferCount={}", i,
+                 sc.size.toString(), sc.pixelFormat.toString(), sc.pixelFormat.fourcc(),
+                 sc.frameSize, sc.bufferCount);
+    const auto& fmts = sc.formats();
+    const auto pixfmts = fmts.pixelformats();
+    drm::println("            supported: {} pixel format(s)", pixfmts.size());
+    for (const auto& pf : pixfmts) {
+      const auto sizes = fmts.sizes(pf);
+      drm::print("              {} ({:#x}):", pf.toString(), pf.fourcc());
+      for (const auto& sz : sizes) {
+        drm::print(" {}", sz.toString());
+      }
+      drm::println("");
+    }
+  }
+
+  cam.release();
+}
+
 // Bring up libcamera's CameraManager, list every visible camera with
-// the properties relevant to picking one (id, model, location), then
-// tear it down. The probe doesn't acquire any camera — opening one
-// would conflict with another viewer running concurrently and we have
-// no streaming work to do here yet.
+// the properties relevant to picking one (id, model, location) plus
+// the Viewfinder StreamConfigurations it can produce, then tear it
+// down.
 int list_cameras() {
   libcamera::CameraManager cm;
   if (const int rc = cm.start(); rc < 0) {
@@ -186,6 +243,7 @@ int list_cameras() {
       drm::println("  [{}] id={}", i, cam->id());
       drm::println("      model={}  location={}", model ? *model : std::string{"<unknown>"},
                    location ? camera_location_label(*location) : "<unknown>");
+      print_camera_streams(*cam);
     }
   }
 
