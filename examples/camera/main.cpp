@@ -6,25 +6,28 @@
 // Plan: docs/cam_example_plan.md (originally drafted as `camcli`,
 // renamed to `camera`). The end-state is a single-binary CLI tool that
 // negotiates a format both libcamera and a chosen DRM plane accept,
-// imports libcamera's DMA-BUFs as a per-frame LayerScene buffer source,
-// and drives a steady-state commit loop. The `--probe` mode is the
-// first slice: it opens the device, picks an output, and prints what
-// the active CRTC's planes can scan out so the upcoming format-
-// negotiation pass has something concrete to negotiate against.
+// imports libcamera's DMA-BUFs as a per-frame LayerScene buffer
+// source, and drives a steady-state commit loop. `--probe` is the
+// diagnostic mode: it walks both sides of the pipeline and prints the
+// (camera, plane, fourcc, size, modifier) tuple a streaming run would
+// pick, without acquiring streaming resources.
 //
 // libcamera is a hard build dependency of this example only — a
 // missing libcamera fails the example target rather than the whole
-// drm-cxx build. The probe lists both the scanout side (planes,
-// formats) and the capture side (cameras, model, location) so the
-// upcoming format-negotiation pass has both halves in front of it.
+// drm-cxx build.
 //
 // Usage:
 //   camera --probe [/dev/dri/cardN]
 //
-// Output: connector / CRTC / mode summary, a per-plane table of the
-// IN_FORMATS contents (or the bare format list when the driver
-// doesn't expose IN_FORMATS), followed by the libcamera-enumerated
-// cameras with their id, model, and reported location.
+// Output:
+//   1. connector / CRTC / mode summary
+//   2. per-plane table of the IN_FORMATS contents (or the bare format
+//      list when the driver doesn't expose IN_FORMATS)
+//   3. libcamera-enumerated cameras with id, model, location, and the
+//      validated Viewfinder StreamConfiguration plus full StreamFormats
+//      matrix
+//   4. the negotiated target — the format / size / plane / modifier
+//      tuple a streaming run would commit to.
 
 #include "../common/format_probe.hpp"
 #include "../common/open_output.hpp"
@@ -52,9 +55,45 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
+
+// Probe data threaded through the plane/camera walks and consumed by
+// negotiate() at the end of the probe. Both halves are flat: one
+// DisplayFmt per (plane, fourcc) and one CaptureFmt per
+// (camera, fourcc), with their respective modifier / size lists
+// attached. The negotiator iterates fourccs by preference, finds the
+// first pair that intersects, and picks a size + modifier from the
+// intersection.
+struct DisplayFmt {
+  std::uint32_t plane_id;
+  bool is_overlay;
+  std::uint32_t fourcc;
+  std::vector<std::uint64_t> modifiers;  // empty when IN_FORMATS unsupported
+};
+
+struct CaptureSize {
+  std::uint32_t width;
+  std::uint32_t height;
+};
+
+struct CaptureFmt {
+  std::size_t camera_index;
+  std::string camera_id;
+  std::uint32_t fourcc;
+  std::vector<CaptureSize> sizes;
+};
+
+struct NegotiatedTarget {
+  std::size_t camera_index;
+  std::string camera_id;
+  std::uint32_t plane_id;
+  std::uint32_t fourcc;
+  CaptureSize size;
+  std::uint64_t modifier;
+};
 
 // Render a fourcc as the four ASCII bytes drivers expose in IN_FORMATS,
 // falling back to the hex value when any byte is non-printable. Avoids
@@ -96,13 +135,19 @@ std::optional<std::uint32_t> crtc_index_of(const drm::Device& dev, std::uint32_t
   return std::nullopt;
 }
 
-void print_plane(const drm::planes::PlaneCapabilities& p) {
+void print_plane(const drm::planes::PlaneCapabilities& p, std::vector<DisplayFmt>& out) {
   drm::println("  plane id={} type={} zpos=[{}..{}] scaling={} rotation={} blend={} alpha_prop={}",
                p.id, plane_type_label(p.type),
                p.zpos_min ? drm::format("{}", *p.zpos_min) : std::string{"-"},
                p.zpos_max ? drm::format("{}", *p.zpos_max) : std::string{"-"},
                p.supports_scaling ? "yes" : "no", p.supports_rotation ? "yes" : "no",
                p.has_pixel_blend_mode ? "yes" : "no", p.has_per_plane_alpha ? "yes" : "no");
+
+  // Cursor planes accept only ARGB8888 at fixed small sizes — they are
+  // never candidates for camera scanout, so don't emit DisplayFmt
+  // entries for them.
+  const bool collect = p.type != drm::planes::DRMPlaneType::CURSOR;
+  const bool is_overlay = p.type == drm::planes::DRMPlaneType::OVERLAY;
 
   if (p.has_format_modifiers) {
     // IN_FORMATS path: group (format, modifier) pairs by format so each
@@ -127,6 +172,9 @@ void print_plane(const drm::planes::PlaneCapabilities& p) {
         }
       }
       drm::println("");
+      if (collect) {
+        out.push_back(DisplayFmt{p.id, is_overlay, cur, mods});
+      }
     };
     for (const auto& [fmt, mod] : p.format_modifiers) {
       if (!have_cur || fmt != cur) {
@@ -146,6 +194,11 @@ void print_plane(const drm::planes::PlaneCapabilities& p) {
       const auto chars = fourcc_to_chars(fmt);
       drm::println("    {} ({:#x})  modifiers: <IN_FORMATS not exposed>",
                    std::string_view(chars.data(), 4), fmt);
+      if (collect) {
+        // Empty modifier list signals "implicit LINEAR" to the
+        // negotiator.
+        out.push_back(DisplayFmt{p.id, is_overlay, fmt, {}});
+      }
     }
   }
 }
@@ -177,12 +230,14 @@ const char* config_status_label(libcamera::CameraConfiguration::Status s) noexce
 
 // Acquire the camera, generate a Viewfinder-role configuration, dump
 // the validated default plus the full StreamFormats matrix
-// (pixelformat × sizes) the pipeline can produce, then release.
+// (pixelformat × sizes) the pipeline can produce, append every
+// (camera_index, fourcc, sizes) tuple to `out`, then release.
 //
 // acquire() may fail with -EBUSY when another process owns the
 // camera; that's expected on systems with a running viewer/portal,
 // not fatal to the probe — we log and move on.
-void print_camera_streams(libcamera::Camera& cam) {
+void print_camera_streams(libcamera::Camera& cam, std::size_t cam_index,
+                          std::vector<CaptureFmt>& out) {
   if (const int rc = cam.acquire(); rc < 0) {
     drm::println(stderr, "      acquire: {} (skipping streams)", std::strerror(-rc));
     return;
@@ -208,10 +263,14 @@ void print_camera_streams(libcamera::Camera& cam) {
     for (const auto& pf : pixfmts) {
       const auto sizes = fmts.sizes(pf);
       drm::print("              {} ({:#x}):", pf.toString(), pf.fourcc());
+      std::vector<CaptureSize> collected;
+      collected.reserve(sizes.size());
       for (const auto& sz : sizes) {
         drm::print(" {}", sz.toString());
+        collected.push_back(CaptureSize{sz.width, sz.height});
       }
       drm::println("");
+      out.push_back(CaptureFmt{cam_index, cam.id(), pf.fourcc(), std::move(collected)});
     }
   }
 
@@ -220,9 +279,9 @@ void print_camera_streams(libcamera::Camera& cam) {
 
 // Bring up libcamera's CameraManager, list every visible camera with
 // the properties relevant to picking one (id, model, location) plus
-// the Viewfinder StreamConfigurations it can produce, then tear it
-// down.
-int list_cameras() {
+// the Viewfinder StreamConfigurations it can produce, append capture
+// formats to `out`, then tear it down.
+int list_cameras(std::vector<CaptureFmt>& out) {
   libcamera::CameraManager cm;
   if (const int rc = cm.start(); rc < 0) {
     drm::println(stderr, "CameraManager::start: {}", std::strerror(-rc));
@@ -243,12 +302,153 @@ int list_cameras() {
       drm::println("  [{}] id={}", i, cam->id());
       drm::println("      model={}  location={}", model ? *model : std::string{"<unknown>"},
                    location ? camera_location_label(*location) : "<unknown>");
-      print_camera_streams(*cam);
+      print_camera_streams(*cam, i, out);
     }
   }
 
   cm.stop();
   return EXIT_SUCCESS;
+}
+
+// Pure logic: pick a (camera, plane, fourcc, size, modifier) tuple
+// from the probe data using a fixed preference order:
+//
+//   1. NV12 — half the bandwidth of RGB and the universal libcamera
+//               viewfinder default; both UVC and most ISP pipelines
+//               produce it.
+//   2. YUV420 — the planar fallback when NV12 isn't on the menu.
+//   3. XRGB8888 / ARGB8888 — last resort, 4× the bandwidth, but the
+//               only formats some Raspberry-Pi-class plane stacks
+//               accept directly.
+//
+// For the chosen fourcc:
+//   - prefer an OVERLAY plane over a PRIMARY plane (overlays don't
+//     fight the desktop background and let us scan out raw camera
+//     pixels without compositing);
+//   - pick the largest capture size that fits within the display
+//     mode, falling back to the smallest available when every camera
+//     size exceeds the display;
+//   - prefer LINEAR over any vendor modifier the plane offers, since
+//     libcamera's pipelines emit linear by default and forcing a
+//     tiled modifier requires producer cooperation we don't have yet.
+//     An empty modifier list (driver doesn't expose IN_FORMATS)
+//     collapses to LINEAR by convention.
+std::optional<NegotiatedTarget> negotiate(const std::vector<DisplayFmt>& display,
+                                          const std::vector<CaptureFmt>& capture,
+                                          std::uint32_t mode_w, std::uint32_t mode_h) {
+  static constexpr std::array<std::uint32_t, 4> preference = {
+      DRM_FORMAT_NV12,
+      DRM_FORMAT_YUV420,
+      DRM_FORMAT_XRGB8888,
+      DRM_FORMAT_ARGB8888,
+  };
+
+  auto pick_size = [&](const std::vector<CaptureSize>& sizes) -> std::optional<CaptureSize> {
+    if (sizes.empty()) {
+      return std::nullopt;
+    }
+    const CaptureSize* best = nullptr;
+    for (const auto& sz : sizes) {
+      if (sz.width <= mode_w && sz.height <= mode_h) {
+        if (best == nullptr || (static_cast<std::uint64_t>(sz.width) * sz.height) >
+                                   (static_cast<std::uint64_t>(best->width) * best->height)) {
+          best = &sz;
+        }
+      }
+    }
+    if (best != nullptr) {
+      return *best;
+    }
+    // Every camera size exceeds the display mode — fall back to the
+    // smallest so the consumer can still scale down to fit.
+    best = &sizes.front();
+    for (const auto& sz : sizes) {
+      if ((static_cast<std::uint64_t>(sz.width) * sz.height) <
+          (static_cast<std::uint64_t>(best->width) * best->height)) {
+        best = &sz;
+      }
+    }
+    return *best;
+  };
+
+  auto pick_modifier = [](const std::vector<std::uint64_t>& modifiers) -> std::uint64_t {
+    if (modifiers.empty()) {
+      return DRM_FORMAT_MOD_LINEAR;
+    }
+    for (const auto m : modifiers) {
+      if (m == DRM_FORMAT_MOD_LINEAR) {
+        return DRM_FORMAT_MOD_LINEAR;
+      }
+    }
+    return modifiers.front();
+  };
+
+  for (const auto fourcc : preference) {
+    const CaptureFmt* cap = nullptr;
+    for (const auto& cf : capture) {
+      if (cf.fourcc == fourcc && !cf.sizes.empty()) {
+        cap = &cf;
+        break;
+      }
+    }
+    if (cap == nullptr) {
+      continue;
+    }
+
+    const DisplayFmt* disp = nullptr;
+    for (const auto& df : display) {
+      if (df.fourcc == fourcc && df.is_overlay) {
+        disp = &df;
+        break;
+      }
+    }
+    if (disp == nullptr) {
+      for (const auto& df : display) {
+        if (df.fourcc == fourcc) {
+          disp = &df;
+          break;
+        }
+      }
+    }
+    if (disp == nullptr) {
+      continue;
+    }
+
+    const auto picked = pick_size(cap->sizes);
+    if (!picked) {
+      continue;
+    }
+
+    return NegotiatedTarget{cap->camera_index, cap->camera_id,
+                            disp->plane_id,    fourcc,
+                            *picked,           pick_modifier(disp->modifiers)};
+  }
+  return std::nullopt;
+}
+
+std::string modifier_label(std::uint64_t modifier) {
+  if (modifier == DRM_FORMAT_MOD_LINEAR) {
+    return "LINEAR";
+  }
+  if (modifier == DRM_FORMAT_MOD_INVALID) {
+    return "INVALID";
+  }
+  return drm::format("{:#x}", modifier);
+}
+
+void print_negotiation(const std::optional<NegotiatedTarget>& target) {
+  drm::println("");
+  if (!target) {
+    drm::println("No common format between any visible camera and any scanout plane.");
+    return;
+  }
+  const auto chars = fourcc_to_chars(target->fourcc);
+  drm::println("Negotiated target:");
+  drm::println("  camera [{}] id={}", target->camera_index, target->camera_id);
+  drm::println("  plane id={}", target->plane_id);
+  drm::println("  format {} ({:#x}) {}x{} modifier={}", std::string_view(chars.data(), 4),
+               target->fourcc, target->size.width, target->size.height,
+               modifier_label(target->modifier));
 }
 
 void print_usage() {
@@ -289,12 +489,19 @@ int run_probe(int argc, char* argv[]) {
   }
 
   drm::println("Plane formats (IN_FORMATS) reachable from CRTC {}:", output->crtc_id);
+  std::vector<DisplayFmt> display_formats;
   for (const auto* p : reg->for_crtc(*idx)) {
-    print_plane(*p);
+    print_plane(*p, display_formats);
   }
 
   drm::println("");
-  return list_cameras();
+  std::vector<CaptureFmt> capture_formats;
+  if (const int rc = list_cameras(capture_formats); rc != EXIT_SUCCESS) {
+    return rc;
+  }
+
+  print_negotiation(negotiate(display_formats, capture_formats, mode.hdisplay, mode.vdisplay));
+  return EXIT_SUCCESS;
 }
 
 }  // namespace
