@@ -210,6 +210,13 @@ test('test_external_dma_buf_source',
   ),
 )
 
+test('test_page_flip',
+  executable('test_page_flip',
+    'unit/test_page_flip.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_composite_canvas',
   executable('test_composite_canvas',
     'unit/test_composite_canvas.cpp',
