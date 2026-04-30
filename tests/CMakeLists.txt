@@ -128,6 +128,13 @@ target_link_libraries(test_composite_canvas PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_composite_canvas)
 
+add_executable(test_external_dma_buf_source unit/test_external_dma_buf_source.cpp)
+target_link_libraries(test_external_dma_buf_source PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_external_dma_buf_source)
+
 # Connector-rank helper test. The header lives under examples/common,
 # so the test target adds examples/ to its include path to resolve
 # "common/select_connector.hpp".

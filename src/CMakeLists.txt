@@ -29,6 +29,7 @@ set(DRM_CXX_SOURCES
   dumb/buffer.cpp
   scene/composite_canvas.cpp
   scene/dumb_buffer_source.cpp
+  scene/external_dma_buf_source.cpp
   scene/gbm_buffer_source.cpp
   scene/layer_scene.cpp
   sync/fence.cpp)
@@ -271,6 +272,7 @@ install(FILES
     scene/composite_canvas.hpp
     scene/display_params.hpp
     scene/dumb_buffer_source.hpp
+    scene/external_dma_buf_source.hpp
     scene/gbm_buffer_source.hpp
     scene/layer.hpp
     scene/layer_desc.hpp
