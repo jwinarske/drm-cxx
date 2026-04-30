@@ -44,6 +44,7 @@
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
@@ -176,9 +177,11 @@ int main(int argc, char** argv) {
   drm::println("Mode: {}x{}@{}Hz on connector {} / CRTC {}", fb_w, fb_h, mode.vrefresh,
                connector_id, crtc_id);
 
-  drm::examples::warn_compat(
-      drm::examples::probe_output(dev, crtc_id),
-      {.wants_alpha_overlays = true, .wants_explicit_zpos = true, .wants_overlay_count = 3U});
+  drm::examples::warn_compat(drm::examples::probe_output(dev, crtc_id),
+                             {.wants_alpha_overlays = true,
+                              .wants_explicit_zpos = true,
+                              .wants_overlay_count = 3U,
+                              .wants_alpha_blending = true});
 
   drm::scene::LayerScene::Config cfg;
   cfg.crtc_id = crtc_id;
@@ -359,10 +362,10 @@ int main(int argc, char** argv) {
       pending_layout.reset();
     }
 
-    ++phase;
-    if (phase >= cell_w) {
-      phase = 0U;
-    }
+    // 8 px/frame at 60 Hz = ~480 px/s — clearly visible motion on every
+    // cell size we ship (840/560/420 px wide). 1 px/frame is technically
+    // moving but reads as stationary at any plausible viewing distance.
+    phase = (phase + 8U) % std::max<std::uint32_t>(1U, cell_w);
     paint_all(cells, phase);
 
     if (auto report =

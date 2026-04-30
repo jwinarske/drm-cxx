@@ -251,15 +251,21 @@ void paint_crosshatch(const PaintTarget& t) noexcept {
   }
 }
 
-// ── Pattern 8: 5×5 procedural "H" glyph grid ───────────────────────────
+// ── Pattern 8: dense procedural "H" glyph grid ─────────────────────────
 //
 // Procedural so the example doesn't drag in a font dependency. Each
 // glyph is two vertical bars + one horizontal cross-bar at vertical
-// midpoint.
-constexpr std::uint32_t k_glyph_size = 64;
-constexpr std::uint32_t k_stroke_width = 4;
-constexpr std::uint32_t k_grid_cols = 5;
-constexpr std::uint32_t k_grid_rows = 5;
+// midpoint, sized small enough to tile the framebuffer at high density
+// for focus-uniformity testing across the whole panel.
+//
+// Geometry: 12-px glyph, 2-px stroke, 2-px gap → 14-px cell pitch.
+// At 1080p that's ~137×77 = ~10.5k glyphs; at 4K ~274×154 = ~42k.
+// Stroke width is the floor for sharp scanout (1-px strokes alias on
+// most displays); the 2-px inter-glyph gap keeps adjacent verticals
+// clearly separated rather than merging into a continuous bar.
+constexpr std::uint32_t k_glyph_size = 12;
+constexpr std::uint32_t k_stroke_width = 2;
+constexpr std::uint32_t k_glyph_spacing = 2;
 
 void draw_h_glyph(const PaintTarget& t, std::uint32_t cx, std::uint32_t cy) noexcept {
   const std::uint32_t half = k_glyph_size / 2U;
@@ -281,15 +287,17 @@ void draw_h_glyph(const PaintTarget& t, std::uint32_t cx, std::uint32_t cy) noex
 
 void paint_h_pattern(const PaintTarget& t) noexcept {
   fill_rows(t, 0, t.height, k_black);
-  // Anchor each glyph in its grid cell's centre. Skip cells whose
-  // centre lies less than half a glyph from the frame edge — happens on
-  // very small modes where the 5×5 grid can't fit k_glyph_size tiles.
-  const std::uint32_t cell_w = t.width / k_grid_cols;
-  const std::uint32_t cell_h = t.height / k_grid_rows;
-  for (std::uint32_t gy = 0; gy < k_grid_rows; ++gy) {
-    for (std::uint32_t gx = 0; gx < k_grid_cols; ++gx) {
-      const std::uint32_t cx = (gx * cell_w) + (cell_w / 2U);
-      const std::uint32_t cy = (gy * cell_h) + (cell_h / 2U);
+  // Tile glyphs at fixed pitch from the origin; trailing partial cell
+  // (< pitch from the right/bottom edge) is left blank rather than
+  // squashing a misshapen final glyph in.
+  constexpr std::uint32_t k_pitch = k_glyph_size + k_glyph_spacing;
+  const std::uint32_t cols = t.width / k_pitch;
+  const std::uint32_t rows = t.height / k_pitch;
+  const std::uint32_t half = k_glyph_size / 2U;
+  for (std::uint32_t gy = 0; gy < rows; ++gy) {
+    for (std::uint32_t gx = 0; gx < cols; ++gx) {
+      const std::uint32_t cx = (gx * k_pitch) + half;
+      const std::uint32_t cy = (gy * k_pitch) + half;
       draw_h_glyph(t, cx, cy);
     }
   }

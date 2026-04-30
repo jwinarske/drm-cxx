@@ -342,6 +342,18 @@ class LayerScene::Impl {
     report.fbs_attached = alloc_diag.fbs_attached;
     report.test_commits_issued = alloc_diag.test_commits_issued;
 
+    // Reset stale `pixel blend mode` on layer planes the allocator
+    // just claimed. layer.properties() carries no entry for it (the
+    // enum integer for "Pre-multiplied" is per-driver, only known
+    // once the layer-to-plane assignment is in hand), so the
+    // allocator's apply_layer_to_plane_real never emits it; without
+    // this pass the plane keeps whatever mode the previous compositor
+    // last wrote — typically "None" or "Coverage" — and a partially-
+    // transparent layer ghosts whatever scans out below it on the
+    // CRTC. Match the canvas's premultiplied output convention so
+    // both natively-assigned and composited cells blend identically.
+    arm_layer_plane_blend_defaults(acquisitions, req, report);
+
     // Phase 2.3: rescue unassigned layers via CPU composition before
     // counting them as dropped. compose_unassigned() updates
     // report.layers_composited and report.composition_buckets; the
@@ -738,24 +750,18 @@ class LayerScene::Impl {
     } else if (default_zpos_hint.has_value()) {
       dst.set_property("zpos", *default_zpos_hint);
     }
-    // Only write alpha when the caller asked for something other than
-    // fully opaque. The pre-LayerScene thorvg_janitor path never wrote
-    // alpha and reliably got PAGE_FLIP_EVENT back on first commit;
-    // unconditionally writing alpha=0xFFFF on amdgpu PRIMARY correlates
-    // with the kernel accepting the commit but never queuing the vblank
-    // event, wedging flip_pending. Skip the no-op write.
-    //
-    // Once a caller has explicitly touched alpha (any value, including
-    // 0xFFFF) we keep emitting it: a layer that drops alpha to 0xDFFF
-    // and then raises it back to 0xFFFF would otherwise stay stuck at
-    // the lowered value — the planes::Layer property bag is upsert-only,
-    // so the prior 0xDFFF entry survives and the diff path then sees
-    // "alpha unchanged" against the snapshot. The wedge concern only
-    // applies to layers nobody has ever poked, so the sticky bit keeps
-    // those silent while honouring an explicit set_alpha round-trip.
-    if (d.alpha != 0xFFFF || src.alpha_was_explicitly_set()) {
-      dst.set_property("alpha", static_cast<std::uint64_t>(d.alpha));
-    }
+    // Always emit the layer's intended alpha. Earlier versions skipped
+    // the write when `d.alpha == 0xFFFF` and no caller had touched it,
+    // assuming the kernel default was also 0xFFFF — but that
+    // assumption fails when a previous compositor session left a
+    // partial value on the plane (e.g. mutter at 0x4000 / sway at
+    // 0x8000 from a fade animation). The plane's `alpha` property is
+    // sticky across processes; without this write, our layers scan
+    // out at someone else's faded intensity. amdgpu PRIMARY doesn't
+    // expose `alpha` so the apply-time `property_id()` lookup skips
+    // the write there silently, matching the earlier wedge-avoidance
+    // intent without needing the conditional.
+    dst.set_property("alpha", static_cast<std::uint64_t>(d.alpha));
 
     dst.set_content_type(src.content_type());
     if (src.update_hint_hz() != 0) {
@@ -1198,7 +1204,7 @@ class LayerScene::Impl {
     }
 
     const std::int32_t canvas_zpos = choose_canvas_zpos(acquisitions, scratch_composited_);
-    if (auto r = arm_composition_canvas(req, target_plane->id, canvas_zpos, report); !r) {
+    if (auto r = arm_composition_canvas(req, *target_plane, canvas_zpos, report); !r) {
       drm::log_warn("scene::LayerScene: arm composition canvas failed: {}", r.error().message());
       return;
     }
@@ -1207,15 +1213,62 @@ class LayerScene::Impl {
     last_canvas_plane_id_ = target_plane->id;
   }
 
+  // For every layer the allocator placed natively, force the plane's
+  // `pixel blend mode` to Pre-multiplied (when the plane exposes the
+  // property and advertises that enum value). This neutralizes any
+  // stale mode left by a previous session — the property is
+  // process-sticky and amdgpu/i915 keep whatever value the last
+  // compositor wrote across our open() of the device. Skipped silently
+  // when the plane lacks the property (amdgpu PRIMARY is a notable
+  // example: no pixel_blend_mode at all). Per-frame cost: one prop_id
+  // lookup + one add_property per native layer; amortized fully into
+  // the allocator's existing snapshot-diff in apply_layer_to_plane_real
+  // would need allocator-side knowledge of plane enum values, which
+  // doesn't belong in the per-plane assignment loop.
+  void arm_layer_plane_blend_defaults(const std::vector<AcquisitionSlot>& acquisitions,
+                                      drm::AtomicRequest& req, CommitReport& report) {
+    const auto crtc_index_opt = resolve_crtc_index();
+    if (!crtc_index_opt.has_value()) {
+      return;
+    }
+    for (const auto& acq : acquisitions) {
+      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        continue;
+      }
+      const drm::planes::PlaneCapabilities* caps = nullptr;
+      for (const auto* p : registry_.for_crtc(*crtc_index_opt)) {
+        if (p->id == *plane_id) {
+          caps = p;
+          break;
+        }
+      }
+      if (caps == nullptr || !caps->blend_mode_premultiplied.has_value()) {
+        continue;
+      }
+      const auto prop_id = props_.property_id(*plane_id, "pixel blend mode");
+      if (!prop_id) {
+        continue;
+      }
+      if (props_.is_immutable(*plane_id, "pixel blend mode").value_or(false)) {
+        continue;
+      }
+      if (auto r = req.add_property(*plane_id, *prop_id, *caps->blend_mode_premultiplied);
+          r.has_value()) {
+        ++report.properties_written;
+      }
+    }
+  }
+
   // Write the canvas's plane properties directly to `req`. Mirrors
   // Allocator::apply_layer_to_plane minus the immutable-property guard
   // (the canvas only sets writable properties). Bumps the report's
   // diagnostic counters per actual write so the totals account for
   // canvas-arm traffic the allocator never sees.
-  drm::expected<void, std::error_code> arm_composition_canvas(drm::AtomicRequest& req,
-                                                              std::uint32_t plane_id,
-                                                              std::int32_t zpos,
-                                                              CommitReport& report) {
+  drm::expected<void, std::error_code> arm_composition_canvas(
+      drm::AtomicRequest& req, const drm::planes::PlaneCapabilities& plane, std::int32_t zpos,
+      CommitReport& report) {
+    const std::uint32_t plane_id = plane.id;
     auto write = [&](std::string_view name,
                      std::uint64_t value) -> drm::expected<void, std::error_code> {
       auto id = props_.property_id(plane_id, name);
@@ -1267,6 +1320,33 @@ class LayerScene::Impl {
     }
     if (auto r = write("SRC_H", to_16_16(ch)); !r) {
       return r;
+    }
+    // Force premultiplied alpha-blending on the canvas plane: the
+    // canvas covers the whole screen at the topmost zpos (or, on
+    // PRIMARY-pinned drivers, at whatever zpos the kernel grants),
+    // and its cleared regions sit over the natively-assigned cells
+    // beneath. Without an explicit blend-mode write the plane keeps
+    // whatever value it inherited (driver default OR a previous frame
+    // where the same plane held an opaque XRGB layer); on amdgpu in
+    // particular this can be "None", which makes alpha=0 canvas
+    // pixels paint *opaque black* over the natives — exactly the
+    // "non-uniform black squares" video_grid symptom. The blend-mode
+    // enum integer is driver-defined, so use the value the registry
+    // cached at enumeration time. Skip silently when the plane doesn't
+    // expose the property at all (very old hardware / DRM stacks).
+    if (plane.blend_mode_premultiplied.has_value()) {
+      if (auto r = write("pixel blend mode", *plane.blend_mode_premultiplied); !r) {
+        return r;
+      }
+    }
+    // Per-plane alpha: same risk as blend mode — a previous frame may
+    // have left a partial value on this plane (e.g. a fade animation
+    // that ended at 0x8000). Pin to fully opaque so the canvas's own
+    // per-pixel alpha is the only modulator.
+    if (plane.has_per_plane_alpha) {
+      if (auto r = write("alpha", 0xFFFFU); !r) {
+        return r;
+      }
     }
     // zpos is best-effort — skipped silently when the plane doesn't
     // expose it or pins it immutable (amdgpu PRIMARY at 2). The canvas
