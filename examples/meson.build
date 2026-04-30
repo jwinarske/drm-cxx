@@ -85,9 +85,14 @@ if has_blend2d
 endif
 
 if get_option('vulkan')
+  # libvulkan is reached only through dlsym(RTLD_DEFAULT, ...) inside
+  # drm::vulkan::Display, so the linker's --as-needed pass strips it
+  # even though it sits on the link line. Disable as-needed for this
+  # target so libvulkan ends up DT_NEEDED (matches the CMake build).
   executable('vulkan_display',
     'vulkan_display/main.cpp',
     dependencies : [drm_cxx_dep],
+    override_options : ['b_asneeded=false'],
   )
 endif
 
