@@ -1,11 +1,25 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 
-foreach(_ex atomic_modeset hotplug_monitor overlay_planes scene_warm_start scene_priority scene_formats layered_demo video_grid camera)
+foreach(_ex atomic_modeset hotplug_monitor overlay_planes scene_warm_start scene_priority scene_formats layered_demo video_grid)
   add_executable(${_ex} ${_ex}/main.cpp)
   target_link_libraries(${_ex} PRIVATE drm-cxx::drm-cxx)
   target_include_directories(${_ex} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
+
+# camera — libcamera is a hard dep of this example only. Its public
+# headers go through INTERFACE_SYSTEM_INCLUDE_DIRECTORIES so their
+# warnings don't trip our -Werror build (matches libseat / libxcursor
+# / blend2d treatment in src/CMakeLists.txt).
+pkg_check_modules(libcamera REQUIRED IMPORTED_TARGET libcamera>=0.3.0)
+get_target_property(_libcamera_incs PkgConfig::libcamera INTERFACE_INCLUDE_DIRECTORIES)
+if(_libcamera_incs)
+  set_property(TARGET PkgConfig::libcamera
+               APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_libcamera_incs})
+endif()
+add_executable(camera camera/main.cpp)
+target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera)
+target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.

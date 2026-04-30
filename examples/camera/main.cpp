@@ -12,17 +12,19 @@
 // the active CRTC's planes can scan out so the upcoming format-
 // negotiation pass has something concrete to negotiate against.
 //
-// libcamera is intentionally not yet a build dependency. The probe is
-// pure drm-cxx so it remains useful for diagnosing scanout-side
-// problems (a wrong plane, a missing format) on hardware where the
-// camera side hasn't been wired up yet.
+// libcamera is a hard build dependency of this example only — a
+// missing libcamera fails the example target rather than the whole
+// drm-cxx build. The probe lists both the scanout side (planes,
+// formats) and the capture side (cameras, model, location) so the
+// upcoming format-negotiation pass has both halves in front of it.
 //
 // Usage:
 //   camera --probe [/dev/dri/cardN]
 //
-// Output: connector / CRTC / mode summary, followed by a per-plane
-// table of the IN_FORMATS contents (or the bare format list when the
-// driver doesn't expose IN_FORMATS).
+// Output: connector / CRTC / mode summary, a per-plane table of the
+// IN_FORMATS contents (or the bare format list when the driver
+// doesn't expose IN_FORMATS), followed by the libcamera-enumerated
+// cameras with their id, model, and reported location.
 
 #include "../common/format_probe.hpp"
 #include "../common/open_output.hpp"
@@ -39,7 +41,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <libcamera/camera.h>
+#include <libcamera/camera_manager.h>
+#include <libcamera/controls.h>
+#include <libcamera/property_ids.h>
+#include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -139,6 +147,52 @@ void print_plane(const drm::planes::PlaneCapabilities& p) {
   }
 }
 
+const char* camera_location_label(std::int32_t loc) noexcept {
+  switch (loc) {
+    case libcamera::properties::CameraLocationFront:
+      return "Front";
+    case libcamera::properties::CameraLocationBack:
+      return "Back";
+    case libcamera::properties::CameraLocationExternal:
+      return "External";
+    default:
+      return "Unknown";
+  }
+}
+
+// Bring up libcamera's CameraManager, list every visible camera with
+// the properties relevant to picking one (id, model, location), then
+// tear it down. The probe doesn't acquire any camera — opening one
+// would conflict with another viewer running concurrently and we have
+// no streaming work to do here yet.
+int list_cameras() {
+  libcamera::CameraManager cm;
+  if (const int rc = cm.start(); rc < 0) {
+    drm::println(stderr, "CameraManager::start: {}", std::strerror(-rc));
+    return EXIT_FAILURE;
+  }
+
+  // Scope the shared_ptrs so they drop before CameraManager::stop().
+  // stop() warns "Removing media device ... while still in use" when
+  // any Camera shared_ptr outlives it.
+  {
+    const std::vector<std::shared_ptr<libcamera::Camera>> cameras = cm.cameras();
+    drm::println("Cameras: {} visible to libcamera", cameras.size());
+    for (std::size_t i = 0; i < cameras.size(); ++i) {
+      const std::shared_ptr<libcamera::Camera>& cam = cameras.at(i);
+      const libcamera::ControlList& props = cam->properties();
+      const auto model = props.get(libcamera::properties::Model);
+      const auto location = props.get(libcamera::properties::Location);
+      drm::println("  [{}] id={}", i, cam->id());
+      drm::println("      model={}  location={}", model ? *model : std::string{"<unknown>"},
+                   location ? camera_location_label(*location) : "<unknown>");
+    }
+  }
+
+  cm.stop();
+  return EXIT_SUCCESS;
+}
+
 void print_usage() {
   drm::println(stderr, "usage: camera --probe [/dev/dri/cardN]");
 }
@@ -180,7 +234,9 @@ int run_probe(int argc, char* argv[]) {
   for (const auto* p : reg->for_crtc(*idx)) {
     print_plane(*p);
   }
-  return EXIT_SUCCESS;
+
+  drm::println("");
+  return list_cameras();
 }
 
 }  // namespace

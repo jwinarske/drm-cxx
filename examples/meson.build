@@ -55,11 +55,15 @@ executable('video_grid',
 )
 
 # camera — zero-copy libcamera -> KMS scanout viewfinder (planned).
-# Today this is the --probe scaffold from docs/cam_example_plan.md:
-# device + output + plane IN_FORMATS dump, no libcamera dep yet.
+# libcamera is a hard dependency of this example only — not the
+# library — so a missing libcamera fails the example target rather
+# than the whole build. include_type: 'system' pushes its public
+# headers behind -isystem so their warnings stay out of -Werror.
+libcamera_dep = dependency('libcamera', include_type : 'system',
+                           required : true, version : '>=0.3.0')
 executable('camera',
   'camera/main.cpp',
-  dependencies : [drm_cxx_dep],
+  dependencies : [drm_cxx_dep, libcamera_dep],
 )
 
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
