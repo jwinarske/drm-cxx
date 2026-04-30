@@ -203,6 +203,13 @@ test('test_scene',
   ),
 )
 
+test('test_external_dma_buf_source',
+  executable('test_external_dma_buf_source',
+    'unit/test_external_dma_buf_source.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_composite_canvas',
   executable('test_composite_canvas',
     'unit/test_composite_canvas.cpp',
