@@ -55,10 +55,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -156,38 +158,56 @@ const char* format_name(std::uint32_t fmt) noexcept {
   }
 }
 
-bool parse_size(std::string_view s, std::uint32_t& w, std::uint32_t& h) noexcept {
-  const auto x = s.find('x');
-  if (x == std::string_view::npos || x == 0U || x + 1U >= s.size()) {
-    return false;
-  }
-  const auto wstr = std::string(s.substr(0, x));
-  const auto hstr = std::string(s.substr(x + 1));
-  try {
-    w = static_cast<std::uint32_t>(std::stoul(wstr));
-    h = static_cast<std::uint32_t>(std::stoul(hstr));
-  } catch (...) {
-    return false;
-  }
-  return w > 0 && h > 0;
-}
-
-// std::stoul / std::stod throw on garbage input; wrap so the caller
-// can decline rather than abort.
+// std::stoul / std::stod throw on bad input but happily accept partial
+// parses ("5abc" → 5), values beyond the requested width (2^32 → 0
+// after cast), and non-finite doubles ("NaN", "inf"). Reject all of
+// those — `--duration NaN` otherwise loops forever because every
+// comparison against NaN is false.
 std::optional<std::uint32_t> parse_u32(std::string_view s) noexcept {
+  if (s.empty() || s.front() == '-') {
+    return std::nullopt;
+  }
   try {
-    return static_cast<std::uint32_t>(std::stoul(std::string(s)));
+    std::size_t pos = 0;
+    const auto v = std::stoul(std::string(s), &pos);
+    if (pos != s.size() || v > std::numeric_limits<std::uint32_t>::max()) {
+      return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(v);
   } catch (...) {
     return std::nullopt;
   }
 }
 
 std::optional<double> parse_double(std::string_view s) noexcept {
+  if (s.empty()) {
+    return std::nullopt;
+  }
   try {
-    return std::stod(std::string(s));
+    std::size_t pos = 0;
+    const auto v = std::stod(std::string(s), &pos);
+    if (pos != s.size() || !std::isfinite(v)) {
+      return std::nullopt;
+    }
+    return v;
   } catch (...) {
     return std::nullopt;
   }
+}
+
+bool parse_size(std::string_view s, std::uint32_t& w, std::uint32_t& h) noexcept {
+  const auto x = s.find('x');
+  if (x == std::string_view::npos || x == 0U || x + 1U >= s.size()) {
+    return false;
+  }
+  const auto pw = parse_u32(s.substr(0, x));
+  const auto ph = parse_u32(s.substr(x + 1));
+  if (!pw || !ph || *pw == 0U || *ph == 0U) {
+    return false;
+  }
+  w = *pw;
+  h = *ph;
+  return true;
 }
 
 std::vector<std::uint32_t> parse_format_list(std::string_view s) {

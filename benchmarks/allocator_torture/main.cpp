@@ -74,8 +74,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -92,12 +94,22 @@ struct Options {
   std::uint32_t burst_recovery{4U};
 };
 
-// std::stoul / std::stod throw on garbage input; wrap so the caller
-// can decline rather than abort. Returns nullopt on parse failure or
-// negative values (we cast unsigned, so negatives would wrap silently).
+// std::stoul / std::stod throw on bad input but happily accept partial
+// parses ("5abc" → 5), values beyond the requested width (2^32 → 0
+// after cast), and non-finite doubles ("NaN", "inf"). Reject all of
+// those — otherwise `--rapid-threshold NaN` would silently pass the
+// `< 0.0` validator (NaN compares false to anything) and corrupt the
+// pass/fail decision.
 std::optional<std::uint32_t> parse_u32(std::string_view s) noexcept {
+  if (s.empty() || s.front() == '-') {
+    return std::nullopt;
+  }
   try {
-    const auto v = std::stoul(std::string(s));
+    std::size_t pos = 0;
+    const auto v = std::stoul(std::string(s), &pos);
+    if (pos != s.size() || v > std::numeric_limits<std::uint32_t>::max()) {
+      return std::nullopt;
+    }
     return static_cast<std::uint32_t>(v);
   } catch (...) {
     return std::nullopt;
@@ -105,8 +117,16 @@ std::optional<std::uint32_t> parse_u32(std::string_view s) noexcept {
 }
 
 std::optional<double> parse_double(std::string_view s) noexcept {
+  if (s.empty()) {
+    return std::nullopt;
+  }
   try {
-    return std::stod(std::string(s));
+    std::size_t pos = 0;
+    const auto v = std::stod(std::string(s), &pos);
+    if (pos != s.size() || !std::isfinite(v)) {
+      return std::nullopt;
+    }
+    return v;
   } catch (...) {
     return std::nullopt;
   }
