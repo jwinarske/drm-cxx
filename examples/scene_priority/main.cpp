@@ -56,6 +56,7 @@
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
+#include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -229,6 +230,31 @@ int main(int argc, char* argv[]) {
     drm::println("frame {:>3} assigned={} composited={} unassigned={} (test_commits={})", frame,
                  report->layers_assigned, report->layers_composited, report->layers_unassigned,
                  report->test_commits_issued);
+
+    // Per-layer placement table — printed once after the first
+    // successful commit when the allocator's choices have settled.
+    // The aggregate counters above tell you the shape of the result;
+    // this table tells you which specific layer landed on which
+    // specific plane, and whether it got there directly or via the
+    // canvas.
+    if (frame == 1) {
+      drm::println("Per-layer placement (commit {}):", frame);
+      for (std::size_t i = 0; i < report->placements.size() && i < tiles.size(); ++i) {
+        const auto& p = report->placements.at(i);
+        const char* kind = "dropped";
+        if (p.placement == drm::scene::LayerPlacement::AssignedToPlane) {
+          kind = "assigned";
+        } else if (p.placement == drm::scene::LayerPlacement::Composited) {
+          kind = "composited";
+        }
+        if (p.placement == drm::scene::LayerPlacement::Unassigned) {
+          drm::println("  Layer {} ({}) → {}", i, tiles.at(i).description, kind);
+        } else {
+          drm::println("  Layer {} ({}) → plane {} ({})", i, tiles.at(i).description, p.plane_id,
+                       kind);
+        }
+      }
+    }
   }
 
   while (flip_pending) {
