@@ -3,8 +3,8 @@
 //
 // Unit tests for drm::scene::ExternalDmaBufSource. Covers the contract
 // visible without a live KMS device: argument validation, modifier-scope
-// rejection, multi-plane rejection (PR-A scope), graceful failure on
-// invalid fds, and the on_release callback firing exactly once.
+// rejection, plane-count bounds, graceful failure on invalid fds, and
+// the on_release callback firing exactly once.
 //
 // The full prime-import + drmModeAddFB2WithModifiers round-trip lives in
 // an integration test against vgem/vkms (the test_vgem_buffer pattern is
@@ -102,18 +102,8 @@ TEST(SceneExternalDmaBufSource, RejectsZeroPitch) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// PR-A scope — multi-plane and tiled modifiers are rejected explicitly
-// rather than silently giving partial behavior. PR-B widens both.
+// Plane-count bounds + modifier scope.
 // ─────────────────────────────────────────────────────────────────────
-
-TEST(SceneExternalDmaBufSource, RejectsMultiPlanePrA) {
-  auto dev = drm::Device::from_fd(-1);
-  std::array<drm::scene::ExternalPlaneInfo, 2> planes{dummy_plane(0), dummy_plane(0)};
-  auto r = drm::scene::ExternalDmaBufSource::create(dev, k_w, k_h, DRM_FORMAT_NV12,
-                                                    DRM_FORMAT_MOD_LINEAR, planes);
-  ASSERT_FALSE(r.has_value());
-  EXPECT_EQ(r.error(), std::make_error_code(std::errc::operation_not_supported));
-}
 
 TEST(SceneExternalDmaBufSource, RejectsTooManyPlanes) {
   auto dev = drm::Device::from_fd(-1);
@@ -127,7 +117,7 @@ TEST(SceneExternalDmaBufSource, RejectsTooManyPlanes) {
   EXPECT_EQ(r.error(), std::make_error_code(std::errc::invalid_argument));
 }
 
-TEST(SceneExternalDmaBufSource, RejectsTiledModifierPrA) {
+TEST(SceneExternalDmaBufSource, RejectsTiledModifier) {
   auto dev = drm::Device::from_fd(-1);
   std::array<drm::scene::ExternalPlaneInfo, 1> planes{dummy_plane(0)};
   // I915_FORMAT_MOD_X_TILED — picked as a representative non-LINEAR
@@ -137,6 +127,64 @@ TEST(SceneExternalDmaBufSource, RejectsTiledModifierPrA) {
                                                     planes);
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error(), std::make_error_code(std::errc::operation_not_supported));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Multi-plane formats — NV12 (2 planes) and YUV420 (3 planes) must
+// pass argument validation and reach the device-fd check; without a
+// real DRM device the failure surfaces as bad_file_descriptor, but the
+// point is that the factory no longer rejects the layout up front.
+// ─────────────────────────────────────────────────────────────────────
+
+TEST(SceneExternalDmaBufSource, AcceptsNv12LayoutValidation) {
+  auto dev = drm::Device::from_fd(-1);
+  drm::scene::ExternalPlaneInfo y;
+  y.fd = 0;
+  y.offset = 0;
+  y.pitch = k_w;  // NV12 Y plane is 8bpp
+  drm::scene::ExternalPlaneInfo uv;
+  uv.fd = 0;
+  uv.offset = k_w * k_h;
+  uv.pitch = k_w;  // NV12 UV plane is interleaved 8bpp
+  std::array<drm::scene::ExternalPlaneInfo, 2> planes{y, uv};
+  auto r = drm::scene::ExternalDmaBufSource::create(dev, k_w, k_h, DRM_FORMAT_NV12,
+                                                    DRM_FORMAT_MOD_LINEAR, planes);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::bad_file_descriptor));
+}
+
+TEST(SceneExternalDmaBufSource, AcceptsYuv420LayoutValidation) {
+  auto dev = drm::Device::from_fd(-1);
+  drm::scene::ExternalPlaneInfo y;
+  y.fd = 0;
+  y.offset = 0;
+  y.pitch = k_w;
+  drm::scene::ExternalPlaneInfo u;
+  u.fd = 0;
+  u.offset = k_w * k_h;
+  u.pitch = k_w / 2;
+  drm::scene::ExternalPlaneInfo v;
+  v.fd = 0;
+  v.offset = (k_w * k_h) + ((k_w / 2) * (k_h / 2));
+  v.pitch = k_w / 2;
+  std::array<drm::scene::ExternalPlaneInfo, 3> planes{y, u, v};
+  auto r = drm::scene::ExternalDmaBufSource::create(dev, k_w, k_h, DRM_FORMAT_YUV420,
+                                                    DRM_FORMAT_MOD_LINEAR, planes);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::bad_file_descriptor));
+}
+
+TEST(SceneExternalDmaBufSource, RejectsMultiPlaneWithBadPlaneFd) {
+  // Mid-loop fd validation must catch a bad fd in any plane, not just
+  // the first.
+  auto dev = drm::Device::from_fd(-1);
+  const drm::scene::ExternalPlaneInfo good = dummy_plane(0);
+  const drm::scene::ExternalPlaneInfo bad = dummy_plane(/*fd=*/-1);
+  std::array<drm::scene::ExternalPlaneInfo, 2> planes{good, bad};
+  auto r = drm::scene::ExternalDmaBufSource::create(dev, k_w, k_h, DRM_FORMAT_NV12,
+                                                    DRM_FORMAT_MOD_LINEAR, planes);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::invalid_argument));
 }
 
 // ─────────────────────────────────────────────────────────────────────

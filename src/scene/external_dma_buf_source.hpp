@@ -13,9 +13,13 @@
 // caller's; the caller is free to close their fds the moment the
 // factory returns.
 //
-// PR-A scope (this file): exactly one plane, modifier == LINEAR or
-// INVALID. Multi-plane (NV12 / YUV420) and tiled modifiers extend the
-// same shape in PR-B.
+// Format scope: 1 to 4 planes, modifier == LINEAR or INVALID. Covers
+// the layouts libcamera and V4L2 typically deliver — single-plane
+// ARGB / XRGB / ABGR / XBGR, two-plane NV12, three-plane YUV420 (I420).
+// Tiled modifiers (AFBC, X_TILED, Y_TILED, etc.) are out of scope:
+// the kernel's plane-format negotiation around modifiers is driver-
+// specific in ways the source can't validate up front, and producers
+// that need them can extend this type without breaking callers.
 //
 // Single-use semantics. The source caches one fb_id at create() time
 // and returns it from every acquire(). on_release fires exactly once
@@ -63,13 +67,18 @@ class ExternalDmaBufSource : public LayerBufferSource {
   ///
   /// The factory:
   ///   1. validates inputs (non-zero dimensions, non-zero fourcc,
-  ///      LINEAR/INVALID modifier, exactly one plane in PR-A scope),
+  ///      LINEAR/INVALID modifier, 1..4 planes each with a non-negative
+  ///      fd and non-zero pitch),
   ///   2. duplicates each plane's fd so the source's lifetime is
   ///      independent of the caller's,
   ///   3. resolves each duped fd into a GEM handle on `dev` via
   ///      drmPrimeFDToHandle,
   ///   4. binds those handles to a KMS FB via
   ///      drmModeAddFB2WithModifiers, caching the fb_id.
+  ///
+  /// Plane count vs. fourcc consistency (NV12 wants 2, YUV420 wants 3,
+  /// etc.) is left to the kernel — drmModeAddFB2WithModifiers returns
+  /// EINVAL on a mismatch and the factory propagates that.
   ///
   /// On any failure the partial state (duped fds, GEM handles) is
   /// unwound before returning. `on_release` is *not* fired on failure —
