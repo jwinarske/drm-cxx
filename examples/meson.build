@@ -54,16 +54,20 @@ executable('video_grid',
   dependencies : [drm_cxx_dep],
 )
 
-# camera — zero-copy libcamera -> KMS scanout viewfinder (planned).
-# libcamera is a hard dependency of this example only — not the
-# library — so a missing libcamera fails the example target rather
-# than the whole build. include_type: 'system' pushes its public
-# headers behind -isystem so their warnings stay out of -Werror.
+# camera — zero-copy libcamera -> KMS scanout viewfinder, with libyuv
+# fallbacks for cameras whose stride / fourcc can't be scanned out
+# directly (YUY2 -> NV12 repack, MJPEG -> NV12 decode-and-repack).
+# Both libcamera and libyuv are hard deps of this example only — not
+# the library — so a missing dep fails the example target rather than
+# the whole build. include_type: 'system' pushes their public headers
+# behind -isystem so their warnings stay out of -Werror.
 libcamera_dep = dependency('libcamera', include_type : 'system',
                            required : true, version : '>=0.3.0')
+libyuv_dep = dependency('libyuv', include_type : 'system', required : true)
 executable('camera',
   'camera/main.cpp',
-  dependencies : [drm_cxx_dep, libcamera_dep],
+  'camera/convert.cpp',
+  dependencies : [drm_cxx_dep, libcamera_dep, libyuv_dep],
 )
 
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor

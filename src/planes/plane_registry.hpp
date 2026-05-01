@@ -25,6 +25,28 @@ enum class DRMPlaneType : uint8_t {
   CURSOR,
 };
 
+/// Plane `COLOR_ENCODING` enum. Selects the YCbCr → RGB matrix the
+/// display engine applies when scanning out a YUV format. Ignored by
+/// the kernel for RGB formats. Writing a value that the plane doesn't
+/// expose (because the property's enum table omits it) is silently
+/// skipped at commit time — `PlaneCapabilities` caches the integer
+/// each driver assigns to each entry, so callers can detect unsupported
+/// values up front via the `color_encoding_*` optionals.
+enum class ColorEncoding : uint8_t {
+  BT_601,
+  BT_709,
+  BT_2020,
+};
+
+/// Plane `COLOR_RANGE` enum. Selects whether YCbCr 8-bit data is
+/// interpreted as full-range (0..255) or limited-range (16..235 for
+/// luma, 16..240 for chroma). Most camera and broadcast YCbCr is
+/// limited-range; PC-generated YCbCr is sometimes full-range.
+enum class ColorRange : uint8_t {
+  Limited,
+  Full,
+};
+
 struct PlaneCapabilities {
   uint32_t id{};
   uint32_t possible_crtcs{};
@@ -69,6 +91,22 @@ struct PlaneCapabilities {
   /// As `blend_mode_premultiplied`, for `"None"` (pixel-replace, no
   /// blend). Surfaced for diagnostic / explicit-replace use cases.
   std::optional<uint64_t> blend_mode_none;
+  /// True when the plane exposes the `"COLOR_ENCODING"` enum property.
+  /// Only YCbCr-capable planes set this — RGB-only planes leave it
+  /// false and `LayerScene` skips writing the property for them.
+  bool has_color_encoding{false};
+  /// Cached enum integer for each `COLOR_ENCODING` entry. nullopt when
+  /// the plane lacks that specific entry (e.g. older drivers expose
+  /// only BT.601 + BT.709, no BT.2020).
+  std::optional<uint64_t> color_encoding_bt601;
+  std::optional<uint64_t> color_encoding_bt709;
+  std::optional<uint64_t> color_encoding_bt2020;
+  /// True when the plane exposes the `"COLOR_RANGE"` enum property.
+  bool has_color_range{false};
+  /// Cached enum integer for each `COLOR_RANGE` entry. nullopt when
+  /// the plane lacks that specific entry.
+  std::optional<uint64_t> color_range_limited;
+  std::optional<uint64_t> color_range_full;
   uint32_t cursor_max_w{};
   uint32_t cursor_max_h{};
 

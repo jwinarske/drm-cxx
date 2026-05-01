@@ -13,6 +13,7 @@
 #pragma once
 
 #include <drm-cxx/planes/layer.hpp>
+#include <drm-cxx/planes/plane_registry.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -44,6 +45,17 @@ struct DisplayParams {
   std::uint64_t rotation{0};    // DRM_MODE_ROTATE_* | DRM_MODE_REFLECT_*
   std::uint16_t alpha{0xFFFF};  // 0xFFFF = fully opaque
   std::optional<int> zpos;
+  /// Override the YCbCr → RGB matrix the display engine applies to
+  /// this layer's pixels. nullopt means "let LayerScene write its
+  /// default" (BT.709), which neutralizes whatever stale value a
+  /// previous compositor left on the plane. Only matters for YUV
+  /// formats — RGB layers leave this alone and the scene still writes
+  /// the default to keep the plane's state predictable.
+  std::optional<drm::planes::ColorEncoding> color_encoding;
+  /// Override `COLOR_RANGE` (limited vs. full). nullopt means "let
+  /// LayerScene write its default" (limited, matching most camera /
+  /// broadcast YCbCr).
+  std::optional<drm::planes::ColorRange> color_range;
 
   [[nodiscard]] constexpr bool needs_scaling() const noexcept {
     return src_rect.w != dst_rect.w || src_rect.h != dst_rect.h;

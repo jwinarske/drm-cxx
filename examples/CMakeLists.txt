@@ -7,18 +7,26 @@ foreach(_ex atomic_modeset hotplug_monitor overlay_planes scene_warm_start scene
   target_include_directories(${_ex} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
 
-# camera — libcamera is a hard dep of this example only. Its public
-# headers go through INTERFACE_SYSTEM_INCLUDE_DIRECTORIES so their
-# warnings don't trip our -Werror build (matches libseat / libxcursor
-# / blend2d treatment in src/CMakeLists.txt).
+# camera — libcamera + libyuv are hard deps of this example only.
+# libyuv (which transitively pulls in libjpeg-turbo for its MJPGToNV12
+# path) handles the YUY2/MJPEG-to-NV12 fallback when zero-copy from a
+# camera into a scanout plane is unavailable. Their public headers go
+# through INTERFACE_SYSTEM_INCLUDE_DIRECTORIES so their warnings don't
+# trip our -Werror build (matches libseat / libxcursor / blend2d
+# treatment in src/CMakeLists.txt).
 pkg_check_modules(libcamera REQUIRED IMPORTED_TARGET libcamera>=0.3.0)
-get_target_property(_libcamera_incs PkgConfig::libcamera INTERFACE_INCLUDE_DIRECTORIES)
-if(_libcamera_incs)
-  set_property(TARGET PkgConfig::libcamera
-               APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_libcamera_incs})
-endif()
-add_executable(camera camera/main.cpp)
-target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera)
+pkg_check_modules(libyuv REQUIRED IMPORTED_TARGET libyuv)
+foreach(_dep libcamera libyuv)
+  get_target_property(_incs PkgConfig::${_dep} INTERFACE_INCLUDE_DIRECTORIES)
+  if(_incs)
+    set_property(TARGET PkgConfig::${_dep}
+                 APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_incs})
+  endif()
+endforeach()
+add_executable(camera
+  camera/main.cpp
+  camera/convert.cpp)
+target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera PkgConfig::libyuv)
 target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor

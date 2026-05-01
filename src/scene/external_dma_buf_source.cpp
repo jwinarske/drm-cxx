@@ -18,6 +18,8 @@
 #include <array>
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
@@ -42,6 +44,23 @@ constexpr std::uint64_t k_mod_invalid = (1ULL << 56U) - 1U;  // DRM_FORMAT_MOD_I
   return {e != 0 ? e : static_cast<int>(fallback), std::system_category()};
 }
 
+bool ext_dmabuf_debug() {
+  static const bool enabled = std::getenv("DRM_EXT_DMABUF_DEBUG") != nullptr;
+  return enabled;
+}
+
+void debug_step(const char* step, int saved_errno = 0) {
+  if (!ext_dmabuf_debug()) {
+    return;
+  }
+  if (saved_errno != 0) {
+    std::fprintf(stderr, "[drm-cxx] ExternalDmaBufSource::create: %s (errno=%d: %s)\n", step,
+                 saved_errno, std::strerror(saved_errno));
+  } else {
+    std::fprintf(stderr, "[drm-cxx] ExternalDmaBufSource::create: %s\n", step);
+  }
+}
+
 }  // namespace
 
 drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDmaBufSource::create(
@@ -49,25 +68,30 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
     std::uint64_t modifier, drm::span<const ExternalPlaneInfo> planes,
     std::function<void()> on_release) {
   if (width == 0 || height == 0 || drm_format == 0) {
+    debug_step("validate args (width/height/drm_format must be non-zero)");
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
   if (planes.empty() || planes.size() > k_max_planes) {
+    debug_step("validate plane count");
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
   // Tiled modifiers are out of scope — kernel plane-format negotiation
   // around modifiers is driver-specific in ways we can't pre-validate.
   if (!modifier_is_linear(modifier)) {
+    debug_step("validate modifier (only LINEAR/INVALID supported)");
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::operation_not_supported));
   }
   for (const auto& p : planes) {
     if (p.fd < 0 || p.pitch == 0) {
+      debug_step("validate plane fields (fd >= 0, pitch != 0)");
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
     }
   }
 
   const int fd = dev.fd();
   if (fd < 0) {
+    debug_step("validate device fd");
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
@@ -85,6 +109,7 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
     const int duped = ::fcntl(planes[i].fd, F_DUPFD_CLOEXEC, 0);
     if (duped < 0) {
       const auto ec = last_errno_or(std::errc::bad_file_descriptor);
+      debug_step("fcntl F_DUPFD_CLOEXEC", ec.value());
       return drm::unexpected<std::error_code>(ec);
     }
     auto& dst = src->planes_.at(i);
@@ -102,6 +127,7 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
     const int rc = drmPrimeFDToHandle(fd, rec.duped_fd, &handle);
     if (rc != 0 || handle == 0) {
       const auto ec = last_errno_or(std::errc::io_error);
+      debug_step("drmPrimeFDToHandle", ec.value());
       return drm::unexpected<std::error_code>(ec);
     }
     rec.gem_handle = handle;
@@ -130,6 +156,17 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
                                  &src->fb_id_, use_modifiers ? DRM_MODE_FB_MODIFIERS : 0U);
   if (rc != 0 || src->fb_id_ == 0) {
     const auto ec = last_errno_or(std::errc::io_error);
+    if (ext_dmabuf_debug()) {
+      std::fprintf(stderr,
+                   "[drm-cxx] ExternalDmaBufSource::create: drmModeAddFB2WithModifiers "
+                   "(errno=%d: %s) — w=%u h=%u fourcc=0x%08x mod=0x%016lx use_mod=%d planes=%zu\n",
+                   ec.value(), std::strerror(ec.value()), width, height, drm_format,
+                   static_cast<unsigned long>(modifier), use_modifiers ? 1 : 0, src->plane_count_);
+      for (std::size_t i = 0; i < src->plane_count_; ++i) {
+        std::fprintf(stderr, "[drm-cxx]   plane[%zu] handle=%u pitch=%u offset=%u\n", i,
+                     handles.at(i), pitches.at(i), offsets.at(i));
+      }
+    }
     return drm::unexpected<std::error_code>(ec);
   }
 
