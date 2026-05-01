@@ -175,13 +175,46 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
     }
   }
 
+  // A "new" layer is one in the scene this frame that wasn't placed by
+  // the previous frame — i.e., not represented as a value in
+  // previous_allocation_. apply_previous_allocation is structurally
+  // unable to place such a layer: it iterates previous_allocation_ to
+  // emit property writes, then dumps everything else through
+  // needs_composition_. That's correct when no layer was added (the
+  // composition path is genuine fallback) but it's a trap when a fresh
+  // layer arrives in steady state — warm-start succeeds with the old
+  // set, the new layer is force-composited, and previous_allocation_
+  // never grows so the same fate hits every subsequent frame. Detect
+  // it here and force full_search so the new layer gets a real shot at
+  // a plane.
+  bool has_new_layer = false;
+  if (previous_allocation_valid_) {
+    for (const auto* layer : output.layers()) {
+      if (layer->is_composition_layer()) {
+        continue;
+      }
+      bool seen = false;
+      for (const auto& [plane_id, prev_layer] : previous_allocation_) {
+        if (prev_layer == layer) {
+          seen = true;
+          break;
+        }
+      }
+      if (!seen) {
+        has_new_layer = true;
+        break;
+      }
+    }
+  }
+
   // Fast path: nothing changed since last frame
-  if (!output.any_layer_dirty() && previous_allocation_valid_) {
+  if (!output.any_layer_dirty() && previous_allocation_valid_ && !has_new_layer) {
     return apply_previous_allocation(output, req, commit_flags, crtc_index);
   }
 
-  // Warm-start: try previous allocation first (one test commit)
-  if (previous_allocation_valid_) {
+  // Warm-start: try previous allocation first (one test commit). Skipped
+  // when a new layer is present — see has_new_layer comment above.
+  if (previous_allocation_valid_ && !has_new_layer) {
     if (const auto result = apply_previous_allocation(output, req, commit_flags, crtc_index);
         result.has_value()) {
       output.mark_clean();
