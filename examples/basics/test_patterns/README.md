@@ -40,7 +40,7 @@ drm-cxx demos — passes through to `drm::examples::select_device`.
 
 ## Pattern reference
 
-- **SMPTE 75 % bars + PLUGE.** Three-band layout: 75 %-intensity colour
+- **SMPTE 75 % bars + PLUGE.** Three-band layout: 75 %-intensity color
   bars across the top two-thirds, a reverse-blue band for chroma-decode
   verification, and a PLUGE-style bottom strip with three near-black
   pulses (≈ +2 %, 0 %, +4 %). The −2 % sub-black bar of the canonical
@@ -67,13 +67,13 @@ drm-cxx demos — passes through to `drm::examples::select_device`.
 
 - **R/G/B gradients.** Three stacked horizontal sweeps, one per
   channel. Per-channel non-linearity in the panel's gamma curves
-  shows as colour cast at intermediate values.
+  shows as color cast at intermediate values.
 
 - **Cross-hatch.** White grid on black, lines every 64 px, single
   pixel thick. Convergence / keystone / pincushion reference.
 
 - **H pattern.** Procedural 5 × 5 grid of capital H glyphs. Used on
-  projectors to check focus uniformity from centre to edge — the
+  projectors to check focus uniformity from center to edge — the
   letter shape's two parallel vertical strokes make any defocus
   visible immediately. No font dependency; the glyph is just three
   filled rectangles per cell.

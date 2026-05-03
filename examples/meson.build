@@ -44,7 +44,7 @@ subdir('basics/test_patterns')
 #
 
 # layered_demo — interactive LayerScene mutation tour. Up to eight
-# coloured tiles toggled, moved, restacked, alpha-adjusted from the
+# colored tiles toggled, moved, restacked, alpha-adjusted from the
 # keyboard against a static gradient background.
 executable('layered_demo',
   'scene/layered_demo/main.cpp',
