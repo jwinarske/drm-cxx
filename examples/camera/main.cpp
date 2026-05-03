@@ -30,6 +30,7 @@
 
 #include "../common/format_probe.hpp"
 #include "../common/open_output.hpp"
+#include "../common/vt_switch.hpp"
 #include "convert.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
@@ -37,13 +38,13 @@
 #include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/input/seat.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/display_params.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
-#include <drm-cxx/scene/external_dma_buf_source.hpp>
 #include <drm-cxx/scene/layer.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_handle.hpp>
@@ -82,7 +83,9 @@
 #include <string_view>
 #include <sys/mman.h>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -115,14 +118,14 @@ struct CaptureFmt {
 
 // libcamera and V4L2 expose MJPEG via the fourcc 'MJPG' (0x47504a4d).
 // drm_fourcc.h doesn't define a constant for it because MJPEG isn't a
-// scanout format — when the example picks the MJPEG path the camera
+// scanout format — when the example picks the MJPEG path, the camera
 // fourcc and the plane fourcc differ.
 constexpr std::uint32_t k_fourcc_mjpeg = 0x47504a4d;
 
 // amdgpu DC requires LINEAR scanout pitches to be 256-byte aligned.
 // Other GPUs differ; this is what we predict for in negotiate(), and
 // the kernel-side CREATE_DUMB ioctl rounds dumb pitches up to whatever
-// the driver actually demands so AlignedNV12Surface works regardless.
+// the driver actually demands, so AlignedNV12Surface works regardless.
 constexpr std::uint32_t k_predicted_pitch_align = 256;
 
 enum class ConversionMode : std::uint8_t {
@@ -365,11 +368,11 @@ void walk_cameras(const std::vector<std::shared_ptr<libcamera::Camera>>& cameras
 //      the YCbCr-matrix-on-the-plane question entirely (most amdgpu
 //      OVERLAY planes don't expose COLOR_ENCODING / COLOR_RANGE).
 //   3. MJPEG -> XRGB8888 — libyuv MJPGToARGB chains libjpeg-turbo's
-//      SIMD entropy decode with the same color conversion.
+//      SIMD entropy decoded with the same color conversion.
 //
 // The destination plane must accept NV12 LINEAR (tier 1) or
 // XRGB8888 LINEAR (tiers 2-3). Within a tier:
-//   - prefer OVERLAY over PRIMARY (overlays don't fight the desktop
+//   - prefer OVERLAY to PRIMARY (overlays don't fight the desktop
 //     background);
 //   - pick the largest capture size that fits within the display mode,
 //     falling back to the smallest if everything exceeds it.
@@ -466,7 +469,7 @@ std::optional<NegotiatedTarget> negotiate(const std::vector<DisplayFmt>& display
   }
 
   // Tiers 2-3 target an XRGB8888 plane: libyuv applies BT.601 limited
-  // YCbCr -> sRGB so the display engine just blits RGB and we don't
+  // YCbCr -> sRGB so the display engine just blits RGB, and we don't
   // need to write COLOR_ENCODING / COLOR_RANGE plane properties (which
   // amdgpu DC doesn't expose on its OVERLAY planes anyway).
   const auto* xrgb_plane = find_plane(DRM_FORMAT_XRGB8888);
@@ -561,7 +564,7 @@ void print_negotiation(const std::optional<NegotiatedTarget>& target) {
 }
 
 // Place `cam_w x cam_h` inside a centered `target_w x target_h`
-// rectangle, preserving aspect — fill whichever axis is the binding
+// rectangle, preserving the aspect ratio — fill whichever axis is the binding
 // constraint. The returned rect's x/y are absolute display
 // coordinates, so the caller can plug it straight into a `LayerDesc`.
 drm::scene::Rect fit_within(std::uint32_t cam_w, std::uint32_t cam_h, std::uint32_t target_w,
@@ -585,9 +588,9 @@ drm::scene::Rect fit_within(std::uint32_t cam_w, std::uint32_t cam_h, std::uint3
 }
 
 // Soft horizontal+vertical gradient for the scene background. Pure
-// XRGB byte order so a wrong-channel write tints the result obviously.
+// XRGB byte order so a wrong-channel writing tints the result.
 // Mirrors `examples/layered_demo/main.cpp::paint_bg_gradient`.
-void paint_bg_gradient(drm::BufferMapping& map) noexcept {
+void paint_bg_gradient(drm::BufferMapping const& map) noexcept {
   const auto width = map.width();
   const auto height = map.height();
   const auto stride_bytes = map.stride();
@@ -642,24 +645,43 @@ std::vector<CaptureFmt> enumerate_camera_streams(libcamera::Camera& cam, std::si
   return out;
 }
 
-// Inbox for libcamera's `requestCompleted` signal. Held by shared_ptr
-// from CameraSlot AND captured as weak_ptr by the signal slot lambda,
-// so a callback in flight on libcamera's worker thread when the slot
-// is torn down doesn't dereference freed memory — the worker locks
-// the weak_ptr and no-ops if the slot has gone. Belt-and-braces: in
-// the graceful-shutdown path we already call `cam->stop()` (which
-// blocks for in-flight callbacks) before disconnect; in the
-// hot-unplug path we skip stop() to avoid V4L2-on-dead-device errors,
-// and the weak_ptr is what keeps that race safe.
+// Inbox for the two libcamera signals we listen to per camera —
+// `requestCompleted` (frames) and `disconnected` (hot-unplug). Held by
+// shared_ptr from CameraSlot AND captured as weak_ptr by both signal
+// slot lambdas, so a callback in flight on libcamera's worker thread
+// when the slot is torn down doesn't dereference freed memory — the
+// worker locks the weak_ptr and no-ops if the slot has gone.
+// Belt-and-braces: in the graceful-shutdown path we already call
+// `cam->stop()` (which blocks for in-flight callbacks) before
+// disconnect; in the hot-unplug path we skip stop() to avoid
+// V4L2-on-dead-device errors, and the weak_ptr is what keeps that
+// race safe.
 struct SlotMailbox {
   std::mutex mu;
   std::queue<libcamera::Request*> ready;
+  // Set by libcamera's per-camera `disconnected` signal so the main
+  // loop can reap the slot the moment the pipeline handler observes
+  // the device is gone, without waiting for `cameraRemoved` to
+  // marshal through or for `cull_stalled_slots`'s timer to fire.
+  std::atomic<bool> disconnected{false};
+};
+
+// Marshalls libcamera's CameraManager `cameraAdded` / `cameraRemoved`
+// signals (which fire from a libcamera worker thread) onto the main
+// loop, where `drain_hotplug_events` swaps both vectors out per
+// iteration. Held by shared_ptr; the connect-time lambdas keep a
+// weak_ptr as a late emission after run_streaming returns no-ops
+// instead of touching freed memory.
+struct PendingHotplug {
+  std::mutex mu;
+  std::vector<std::shared_ptr<libcamera::Camera>> added;
+  std::vector<std::shared_ptr<libcamera::Camera>> removed;
 };
 
 // Per-camera streaming state. Built by configure_slot, drained per
 // iteration by drain_slot. Lifetime is tied to the camera's presence
 // in `libcamera::CameraManager::cameras()` — when the camera goes
-// away (USB unplug) the slot is removed and torn down.
+// away (USB unplug), the slot is removed and torn down.
 struct CameraSlot {
   std::shared_ptr<libcamera::Camera> camera;
   std::unique_ptr<libcamera::CameraConfiguration> config;
@@ -674,6 +696,22 @@ struct CameraSlot {
   // Sticky once we hit at least one successful conversion+commit, so
   // hotplug churn doesn't keep "first frame" diagnostics bouncing.
   bool first_frame_seen{false};
+  // Wall-time of the last successful frame conversion (or of slot
+  // `configure` when no frame has arrived yet). The main loop tears down
+  // any slot whose timestamp goes stale, so an OVERLAY plane
+  // showing a now-defunct camera (e.g., USB unplug that libcamera hasn't
+  // reflected in cm.cameras() yet) actually gets disabled instead of
+  // freezing on the last frame.
+  std::chrono::steady_clock::time_point last_frame_at;
+  // mmap cache for libcamera-allocated buffers. libcamera rotates a
+  // small fixed pool (typically 3-4) of FrameBuffers, so mapping each
+  // dmabuf once on first use and reusing the mapping for every frame
+  // saves two syscalls per frame per camera. Unmapped on slot teardown.
+  struct MappedPlane {
+    void* base{nullptr};
+    std::size_t length{0};
+  };
+  std::unordered_map<int, MappedPlane> mmap_cache;
 };
 
 // Build a CameraSlot for `camera` and add its layer to the scene.
@@ -681,7 +719,7 @@ struct CameraSlot {
 // the run loop just drains and re-queues. Returns nullptr (logging to
 // stderr) on any failure; the caller drops the camera from the active
 // set in that case.
-std::unique_ptr<CameraSlot> configure_slot(drm::Device& dev, drm::scene::LayerScene& scene,
+std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::LayerScene& scene,
                                            const std::shared_ptr<libcamera::Camera>& camera,
                                            const std::vector<DisplayFmt>& display_formats,
                                            std::uint32_t mode_w, std::uint32_t mode_h,
@@ -784,12 +822,21 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device& dev, drm::scene::LayerSc
   // requestCompleted fires from libcamera's internal thread; push the
   // request pointer onto the mailbox and let the main loop drain. The
   // weak_ptr capture means a callback racing the slot's destruction
-  // (e.g. hot-unplug, where we skip cam->stop) safely no-ops.
+  // (e.g., hot-unplug, where we skip cam->stop) safely no-ops.
   const std::weak_ptr<SlotMailbox> mailbox_weak = slot->mailbox;
   camera->requestCompleted.connect(camera.get(), [mailbox_weak](libcamera::Request* req) {
-    if (auto mb = mailbox_weak.lock()) {
+    if (const auto mb = mailbox_weak.lock()) {
       const std::scoped_lock lock(mb->mu);
       mb->ready.push(req);
+    }
+  });
+  // Per-camera disconnect signal. Fires from a libcamera worker
+  // thread the moment the pipeline handler observes the device is
+  // gone. The same weak_ptr lifetime trick — slot teardown nulls the
+  // shared_ptr and any in-flight emission no-ops.
+  camera->disconnected.connect(camera.get(), [mailbox_weak] {
+    if (const auto mb = mailbox_weak.lock()) {
+      mb->disconnected.store(true, std::memory_order_relaxed);
     }
   });
 
@@ -818,6 +865,7 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device& dev, drm::scene::LayerSc
     slot->requests.push_back(std::move(req));
   }
 
+  slot->last_frame_at = std::chrono::steady_clock::now();
   drm::println("camera[{}] {} {}x{} stride={} -> {}", cam_index, camera->id(), target->size.width,
                target->size.height, slot->src_stride, mode_label(target->mode));
   return slot;
@@ -833,7 +881,7 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device& dev, drm::scene::LayerSc
 // release) — they would fail with "No such device" and libcamera prints
 // V4L2 errors via its logger. The kernel reclaims the dead fd's
 // resources on Camera destruction.
-void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, bool still_present) {
+void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, const bool still_present) {
   if (still_present && slot.started) {
     slot.camera->stop();
   }
@@ -844,8 +892,15 @@ void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, bool still_p
     }
   }
   slot.camera->requestCompleted.disconnect(slot.camera.get());
+  slot.camera->disconnected.disconnect(slot.camera.get());
   scene.remove_layer(slot.layer_handle);
   slot.requests.clear();
+  for (auto& [fd, mp] : slot.mmap_cache) {
+    if (mp.base != nullptr) {
+      ::munmap(mp.base, mp.length);
+    }
+  }
+  slot.mmap_cache.clear();
   if (still_present && slot.allocator) {
     slot.allocator->free(slot.stream);
   }
@@ -884,27 +939,38 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
     slot.camera->queueRequest(req);
     return;
   }
-  auto* fb = req->buffers().begin()->second;
-  auto* layer = scene.get_layer(slot.layer_handle);
-  if (layer != nullptr) {
-    auto map_r = layer->source().map(drm::MapAccess::Write);
-    if (map_r) {
-      auto& dst_map = *map_r;
+  const auto* fb = req->buffers().begin()->second;
+  if (auto* layer = scene.get_layer(slot.layer_handle); layer != nullptr) {
+    if (auto map_r = layer->source().map(drm::MapAccess::Write)) {
+      const auto& dst_map = *map_r;
       auto* dst = dst_map.pixels().data();
       const auto dst_pitch = dst_map.stride();
-      const auto lc_planes = fb->planes();
-      if (!lc_planes.empty() && dst != nullptr) {
-        const auto& src_plane = *lc_planes.begin();
-        const int fd = src_plane.fd.get();
+      if (const auto lc_planes = fb->planes(); !lc_planes.empty() && dst != nullptr) {
+        const auto& [fd_, offset, length] = *lc_planes.begin();
+        const int fd = fd_.get();
         std::size_t map_len = 0;
         for (const auto& p : lc_planes) {
           const std::size_t end = static_cast<std::size_t>(p.offset) + p.length;
           map_len = std::max(end, map_len);
         }
-        void* map = ::mmap(nullptr, map_len, PROT_READ, MAP_SHARED, fd, 0);
-        if (map != MAP_FAILED) {
-          const auto* base = static_cast<const std::uint8_t*>(map);
-          const auto* src = base + src_plane.offset;
+        // Reuse a prior mmap when the same fd reappears (libcamera
+        // rotates a fixed buffer pool, so this hits the cache after the
+        // first pass through every buffer in the queue). On size growth
+        // the prior mapping is unmapped before remapping.
+        auto& cached = slot.mmap_cache[fd];
+        if (cached.base != nullptr && cached.length < map_len) {
+          ::munmap(cached.base, cached.length);
+          cached = {};
+        }
+        if (cached.base == nullptr) {
+          if (void* map = ::mmap(nullptr, map_len, PROT_READ, MAP_SHARED, fd, 0);
+              map != MAP_FAILED) {
+            cached = {map, map_len};
+          }
+        }
+        if (cached.base != nullptr) {
+          const auto* base = static_cast<const std::uint8_t*>(cached.base);
+          const auto* src = base + offset;
           switch (slot.target.mode) {
             case ConversionMode::Yuy2ToXrgb:
               (void)drm::examples::camera::yuy2_to_xrgb(src, slot.src_stride, dst, dst_pitch,
@@ -925,7 +991,7 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
             case ConversionMode::MjpegToXrgb: {
               const auto md_planes = fb->metadata().planes();
               const std::size_t jpeg_size =
-                  md_planes.empty() ? src_plane.length : md_planes.begin()->bytesused;
+                  md_planes.empty() ? length : md_planes.begin()->bytesused;
               (void)drm::examples::camera::mjpeg_to_xrgb(
                   src, jpeg_size, dst, dst_pitch, slot.target.size.width, slot.target.size.height);
               break;
@@ -933,10 +999,10 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
             case ConversionMode::ZeroCopy:
               break;  // unreachable in multi-cam streaming
           }
-          ::munmap(map, map_len);
           if (!slot.first_frame_seen) {
             slot.first_frame_seen = true;
           }
+          slot.last_frame_at = std::chrono::steady_clock::now();
         }
       }
     }
@@ -980,22 +1046,25 @@ struct GridDims {
 // Place each slot into a (cols × rows) grid sized for the current
 // camera count. Cells are mode_w/cols × mode_h/rows; the camera image
 // is fit-within at 90% of cell width × 90% of cell height, preserving
-// aspect, then centered in its cell.
+// the aspect ratio, then centered in its cell.
 void apply_layout(const std::vector<std::unique_ptr<CameraSlot>>& slots,
-                  drm::scene::LayerScene& scene, std::uint32_t mode_w, std::uint32_t mode_h) {
+                  drm::scene::LayerScene& scene, const std::uint32_t mode_w, std::uint32_t mode_h) {
   if (slots.empty()) {
     return;
   }
   const auto n = static_cast<std::uint32_t>(slots.size());
-  const auto grid = pick_grid(n);
-  const std::uint32_t cell_w = mode_w / grid.cols;
-  const std::uint32_t cell_h = mode_h / grid.rows;
+  const auto [cols, rows] = pick_grid(n);
+  if (cols == 0U || rows == 0U) {
+    return;
+  }
+  const std::uint32_t cell_w = mode_w / cols;
+  const std::uint32_t cell_h = mode_h / rows;
   const std::uint32_t pane_w_max = (cell_w * 90U) / 100U;
   const std::uint32_t pane_h_max = (cell_h * 90U) / 100U;
   for (std::uint32_t i = 0; i < n; ++i) {
-    const auto& slot = slots[i];
-    const std::uint32_t col = i % grid.cols;
-    const std::uint32_t row = i / grid.cols;
+    const auto& slot = slots.at(i);
+    const std::uint32_t col = i % cols;
+    const std::uint32_t row = i / cols;
     auto rect = fit_within(slot->target.size.width, slot->target.size.height, pane_w_max,
                            pane_h_max, cell_w, cell_h);
     rect.x += static_cast<std::int32_t>(col * cell_w);
@@ -1006,28 +1075,77 @@ void apply_layout(const std::vector<std::unique_ptr<CameraSlot>>& slots,
   }
 }
 
-// Compare libcamera's current camera list against the active slots:
-// configure newcomers (add layer + start), tear down departures.
-// Returns true when membership changed (caller should re-layout).
-bool reconcile_cameras(drm::Device& dev, drm::scene::LayerScene& scene,
-                       libcamera::CameraManager& cm,
-                       std::vector<std::unique_ptr<CameraSlot>>& slots,
-                       const std::vector<DisplayFmt>& display_formats, std::uint32_t mode_w,
-                       std::uint32_t mode_h) {
-  bool changed = false;
-  const auto current = cm.cameras();
+// Drain pending CameraManager hotplug events and per-slot disconnect
+// flags into slot adds/removes. Returns true when membership changed
+// (caller should re-layout).
+//
+// Replaces the prior `cm.cameras()` poll: libcamera's pipeline handler
+// fires `cameraAdded` / `cameraRemoved` (and per-camera `disconnected`)
+// the moment the device state changes, so the main loop reacts on the
+// very next iteration instead of waiting for the next snapshot to
+// confirm the change. Closes a multi-second freeze window where the
+// dropped overlay kept scanning out the dead camera's last frame
+// because `cull_stalled_slots`'s 6 s startup threshold (or 2 s steady
+// threshold) was the only thing that would tear the slot down when
+// libcamera's manager-list poll lagged the actual unplugging.
+//
+// Two unplug paths run here on purpose, and they overlap:
+//
+//   1. `removed` (CameraManager::cameraRemoved) — canonical "this
+//      Camera object is retired" signal. Also fires for non-physical
+//      retirements (cm.stop(), pipeline-handler shutdown) where
+//      `disconnected` may not.
+//   2. `disconnected` flag (Camera::disconnected per camera) —
+//      latency-critical; the pipeline handler fires it the instant it
+//      notices the device is gone, typically ahead of the
+//      manager-level `cameraRemoved`. This is what closes the freeze
+//      window above.
+//
+// In the common case both fire for the same unplugging; whichever arrives
+// first tears the slot down, and the other becomes a no-op pass (the
+// `removed` loop finds nothing matching by Camera*, or the
+// `disconnected` sweep finds the slot already erased). The cost is
+// one extra O(slots) walk with an atomic load per slot — kept
+// deliberately as belt-and-suspenders so neither signal lagging nor
+// failing to fire reopens the freeze.
+bool drain_hotplug_events(drm::Device const& dev, drm::scene::LayerScene& scene, PendingHotplug& pending,
+                          std::vector<std::unique_ptr<CameraSlot>>& slots,
+                          const std::vector<DisplayFmt>& display_formats,
+                          const std::uint32_t mode_w,
+                          const std::uint32_t mode_h) {
+  std::vector<std::shared_ptr<libcamera::Camera>> added;
+  std::vector<std::shared_ptr<libcamera::Camera>> removed;
+  {
+    const std::scoped_lock lock(pending.mu);
+    std::swap(added, pending.added);
+    std::swap(removed, pending.removed);
+  }
 
-  // Drop slots whose camera is no longer in `current`.
-  for (auto it = slots.begin(); it != slots.end();) {
-    bool still_present = false;
-    for (const auto& c : current) {
-      if (c.get() == (*it)->camera.get()) {
-        still_present = true;
+  bool changed = false;
+
+  // Removes first, by Camera* identity. A rapid bounce surfaces as
+  // (removed A_v1, added A_v2) with two distinct Camera pointers;
+  // ordering means the new slot for A_v2 doesn't get short-circuited
+  // by an `already_have` check against the still-attached old slot.
+  for (const auto& cam : removed) {
+    for (auto it = slots.begin(); it != slots.end(); ++it) {
+      if ((*it)->camera.get() == cam.get()) {
+        drm::println("camera removed: {}", (*it)->camera->id());
+        teardown_slot(**it, scene, /*still_present=*/false);
+        slots.erase(it);
+        changed = true;
         break;
       }
     }
-    if (!still_present) {
-      drm::println("camera removed: {}", (*it)->camera->id());
+  }
+
+  // Per-slot disconnect-flag sweep. libcamera's `disconnected` signal
+  // fires a frame or two ahead of the manager-level `cameraRemoved`
+  // when the pipeline handler observes the device is gone; the slot
+  // is reaped here before the matching `removed` event arrives.
+  for (auto it = slots.begin(); it != slots.end();) {
+    if ((*it)->mailbox->disconnected.load(std::memory_order_relaxed)) {
+      drm::println("camera disconnected: {}", (*it)->camera->id());
       teardown_slot(**it, scene, /*still_present=*/false);
       it = slots.erase(it);
       changed = true;
@@ -1036,11 +1154,15 @@ bool reconcile_cameras(drm::Device& dev, drm::scene::LayerScene& scene,
     }
   }
 
-  // Add slots for cameras that aren't yet active.
-  for (const auto& camera : current) {
+  // Adds. A fresh `cameraAdded` for an already-present Camera* is
+  // already de-duplicated by the `already_have` check; libcamera
+  // doesn't re-emit cameraAdded for the same Camera instance, so
+  // we don't need a separate "culled-id" gate here — a hotplug bounce
+  // surfaces as a different Camera*.
+  for (const auto& cam : added) {
     bool already_have = false;
     for (const auto& s : slots) {
-      if (s->camera.get() == camera.get()) {
+      if (s->camera.get() == cam.get()) {
         already_have = true;
         break;
       }
@@ -1048,9 +1170,9 @@ bool reconcile_cameras(drm::Device& dev, drm::scene::LayerScene& scene,
     if (already_have) {
       continue;
     }
-    drm::println("camera added: {}", camera->id());
-    auto slot = configure_slot(dev, scene, camera, display_formats, mode_w, mode_h, slots.size());
-    if (slot) {
+    drm::println("camera added: {}", cam->id());
+    if (auto slot =
+            configure_slot(dev, scene, cam, display_formats, mode_w, mode_h, slots.size())) {
       slots.push_back(std::move(slot));
       changed = true;
     }
@@ -1059,7 +1181,60 @@ bool reconcile_cameras(drm::Device& dev, drm::scene::LayerScene& scene,
   return changed;
 }
 
-// Signal handlers in C++ need a globally-reachable state-bit, and an
+// Tear down any slot that has gone `threshold` without delivering a
+// frame. libcamera's `cm.cameras()` doesn't always reflect a USB unplugged
+// promptly — without this pass the OVERLAY plane keeps scanning out the
+// last converted frame because reconcile_cameras still considers the
+// camera present and no new frames ever land in the mailbox. The
+// staleness check uses `last_frame_at` (set at `configure` and refreshed
+// on every successful conversion), so a slot that never produced a
+// frame gets reaped on the same timer as one that delivered for a
+// while and then stalled.
+//
+// Two thresholds: `startup_threshold` (used until first_frame_seen
+// flips) covers the cold-start window where two USB cameras enumerated
+// back-to-back can take several seconds to deliver their first frame
+// because libcamera's pipeline handlers contend on USB-host bandwidth
+// and media-ctl topology setup. `steady_threshold` (used after the
+// slot has produced at least one frame) catches mid-stream stalls.
+bool cull_stalled_slots(drm::scene::LayerScene& scene,
+                        std::vector<std::unique_ptr<CameraSlot>>& slots,
+                        const std::chrono::milliseconds steady_threshold,
+                        const std::chrono::milliseconds startup_threshold) {
+  bool changed = false;
+  const auto now = std::chrono::steady_clock::now();
+  for (auto it = slots.begin(); it != slots.end();) {
+    const auto threshold = (*it)->first_frame_seen ? steady_threshold : startup_threshold;
+    if (now - (*it)->last_frame_at > threshold) {
+      drm::println(
+          "camera stalled: {} ({}ms without a frame, first_frame={}) — releasing",
+          (*it)->camera->id(),
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - (*it)->last_frame_at).count(),
+          (*it)->first_frame_seen ? "yes" : "no");
+      // still_present=false: a stalled camera is indistinguishable from
+      // a hot-unplug from our side, and camera->stop() on a yanked UVC
+      // fd can block inside the kernel while in-flight URBs unwind.
+      // While we're stalled in stop() the main loop never reaches the
+      // next scene->commit, so the OVERLAY plane keeps scanning out the
+      // last converted frame even after teardown_slot returns. Skipping
+      // the device-side ioctls lets the loop reach commit immediately
+      // (FB_ID=0 written, plane is off). The Camera shared_ptr's
+      // destruction handles libcamera-side pipeline cleanup
+      // asynchronously; if the device was just slow rather than gone,
+      // the next time reconcile_cameras observes it, we'll re-acquire
+      // and re-configure cleanly.
+      teardown_slot(**it, scene, /*still_present=*/false);
+      it = slots.erase(it);
+      changed = true;
+      continue;
+    }
+    ++it;
+  }
+
+  return changed;
+}
+
+// Signal handlers in C++ need a globally reachable state-bit, and an
 // async-signal-safe one at that — `std::atomic<bool>` qualifies because
 // it's lock-free on every platform we target. clang-tidy's
 // non-const-globals lint can't model that constraint.
@@ -1072,10 +1247,11 @@ extern "C" void on_sigint(int /*signum*/) noexcept {
 
 // Multi-camera streaming loop. Builds the LayerScene with a fullscreen
 // gradient background, then runs until SIGINT: each iteration drains
-// completed camera requests, re-queues them, commits the scene, and
-// blocks on the next vblank (with a poll timeout so hotplug detection
-// runs at vblank cadence even when no commits land — e.g. when no
-// cameras are visible).
+// pending hotplug events + completed camera requests, re-queues them,
+// commits the scene, and blocks on the next vblank (with a poll
+// timeout so the hotplug-event drain still runs when no commits land
+// — e.g., when no cameras are visible — and so the loop ticks during a
+// session pause).
 int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connector_id,
                   const drmModeModeInfo& mode, const std::vector<DisplayFmt>& display_formats,
                   libcamera::CameraManager& cm, std::optional<drm::session::Seat>& seat) {
@@ -1150,6 +1326,54 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     }
   };
 
+  // libinput-backed keyboard so the user can exit when libseat has put
+  // the TTY into graphics mode (the kernel suppresses Ctrl-C signal
+  // generation in that mode, so std::signal(SIGINT) alone is not a
+  // reliable exit path on a real VT). Routed through the seat's
+  // privileged opener when available, so /dev/input/event* fds are
+  // revoked on VT switch alongside the DRM fd. Optionally — if the
+  // process can't open input devices (no seat backend, no input-group
+  // membership), we log and continue without an in-app exit path.
+  drm::input::InputDeviceOpener libinput_opener;
+  if (seat) {
+    libinput_opener = seat->input_opener();
+  }
+  auto input_seat_res = drm::input::Seat::open({}, std::move(libinput_opener));
+  std::optional<drm::input::Seat> input_seat;
+  drm::examples::VtChordTracker vt_chord;
+  if (input_seat_res) {
+    input_seat = std::move(*input_seat_res);
+    input_seat->set_event_handler([&seat, &vt_chord](const drm::input::InputEvent& event) {
+      const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event);
+      if (ke == nullptr) {
+        return;
+      }
+      if (vt_chord.observe(*ke, seat ? &*seat : nullptr)) {
+        return;
+      }
+      if (vt_chord.is_quit_key(*ke)) {
+        g_running.store(false, std::memory_order_relaxed);
+      }
+    });
+  } else {
+    drm::println(
+        stderr,
+        "input::Seat::open: {} — Esc/q exit unavailable (need 'input' group or a seat backend)",
+        input_seat_res.error().message());
+  }
+
+  auto attach_input_source = [&] {
+    if (!input_seat) {
+      return;
+    }
+    if (const int ifd = input_seat->fd(); ifd >= 0) {
+      if (auto r = page_flip.add_source(ifd, [&] { (void)input_seat->dispatch(); }); !r) {
+        drm::println(stderr, "page_flip.add_source(input): {}", r.error().message());
+      }
+    }
+  };
+  attach_input_source();
+
   // Session integration. On VT switch-out we mark `session_active`
   // false so the loop stops committing. On switch-back libseat hands
   // us a fresh fd; we record it under `pending_resume_fd` and let the
@@ -1161,7 +1385,12 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
   std::atomic<bool> session_active{true};
   std::atomic<int> pending_resume_fd{-1};
   if (seat) {
-    seat->set_pause_callback([&] { session_active.store(false, std::memory_order_relaxed); });
+    seat->set_pause_callback([&] {
+      session_active.store(false, std::memory_order_relaxed);
+      if (input_seat) {
+        (void)input_seat->suspend();
+      }
+    });
     seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
       pending_resume_fd.store(new_fd, std::memory_order_relaxed);
     });
@@ -1190,6 +1419,10 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     page_flip = drm::PageFlip(dev);
     install_page_flip_handler();
     attach_seat_source();
+    if (input_seat) {
+      (void)input_seat->resume();
+    }
+    attach_input_source();
     repaint_bg();
     // The page-flip event for the pre-pause commit was lost when the
     // fd died; clear the pending flag so we can re-arm.
@@ -1201,23 +1434,98 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
   std::signal(SIGTERM, on_sigint);
 
   std::vector<std::unique_ptr<CameraSlot>> slots;
-  drm::println("streaming — Ctrl-C to stop");
+
+  // Wire up libcamera's CameraManager hotplug signals onto a
+  // main-loop-drained queue. Both signals fire from libcamera's
+  // worker thread; the lambdas push the shared_ptr<Camera> under a
+  // mutex. weak_ptr capture means a late emission (e.g. cm.stop()
+  // teardown after run_streaming returns) no-ops instead of touching
+  // the dead PendingHotplug.
+  //
+  // Important: bind to a non-libcamera::Object pointer so the slot
+  // dispatches *directly* on the libcamera worker thread that emits
+  // the signal. libcamera's `connect(Object*, slot)` overload posts
+  // a Message to the Object's thread queue, which only fires when
+  // that thread runs `Thread::dispatchMessages` / `EventLoop::exec`
+  // — upstream `cam` does this, our DRM page-flip loop does not.
+  // With `&cm` as the binding, the slot would target the main thread
+  // (cm was constructed there) and never run; cameraAdded for a
+  // hot-plugged UVC device would queue and rot. PendingHotplug is
+  // not derived from libcamera::Object, so the non-Object connect
+  // overload picks direct dispatch; the lambda's mutex makes
+  // off-main-thread invocation safe.
+  //
+  // The connections are explicitly disconnected before the function
+  // returns so libcamera doesn't keep a `pending_hotplug.get()`
+  // receiver pointer past its lifetime — the weak_ptr capture is
+  // belt-and-suspenders, but we shouldn't lean on libcamera's
+  // implementation detail of not dereferencing the receiver.
+  auto pending_hotplug = std::make_shared<PendingHotplug>();
+  {
+    const std::weak_ptr<PendingHotplug> pending_weak = pending_hotplug;
+    cm.cameraAdded.connect(pending_hotplug.get(),
+                           [pending_weak](std::shared_ptr<libcamera::Camera> cam) {
+                             if (auto p = pending_weak.lock()) {
+                               const std::scoped_lock lock(p->mu);
+                               p->added.push_back(std::move(cam));
+                             }
+                           });
+    cm.cameraRemoved.connect(pending_hotplug.get(),
+                             [pending_weak](std::shared_ptr<libcamera::Camera> cam) {
+                               if (auto p = pending_weak.lock()) {
+                                 const std::scoped_lock lock(p->mu);
+                                 p->removed.push_back(std::move(cam));
+                               }
+                             });
+  }
+  // Seed the initial cameras as pending adds. cm.start() (called by
+  // the caller) listed cameras present at startup; cameraAdded
+  // only fires for hot-plugs after start(). Inject the snapshot so
+  // the main loop's drain treats startup-attached cameras the same as
+  // later-arriving ones — single code path for slot creation.
+  {
+    auto initial_cameras = cm.cameras();
+    const std::scoped_lock lock(pending_hotplug->mu);
+    for (auto& cam : initial_cameras) {
+      pending_hotplug->added.push_back(std::move(cam));
+    }
+  }
+  if (input_seat) {
+    if (seat) {
+      drm::println("streaming — Esc/q (or Ctrl-C) to stop; Ctrl+Alt+F<n> to switch VT");
+    } else {
+      drm::println("streaming — press Esc or q (or Ctrl-C) to stop");
+    }
+  } else {
+    drm::println("streaming — Ctrl-C to stop");
+  }
 
   std::uint64_t commits_landed = 0;
   auto fps_window_start = std::chrono::steady_clock::now();
 
   while (g_running.load(std::memory_order_relaxed)) {
     apply_pending_resume();
-    const bool active = session_active.load(std::memory_order_relaxed);
-    if (active) {
-      const bool changed =
-          reconcile_cameras(dev, *scene, cm, slots, display_formats, mode.hdisplay, mode.vdisplay);
-      if (changed) {
-        apply_layout(slots, *scene, mode.hdisplay, mode.vdisplay);
-      }
+    if (session_active.load(std::memory_order_relaxed)) {
+      bool changed = drain_hotplug_events(dev, *scene, *pending_hotplug, slots,
+                                          display_formats, mode.hdisplay, mode.vdisplay);
 
       for (auto& slot : slots) {
         drain_slot(*slot, *scene);
+      }
+
+      // Steady-state: 2 s without a frame is "stalled" and the slot is
+      // dropped (so the OVERLAY plane drops to the bg layer below it)
+      // until libcamera re-advertises the device. Cold-start: we give
+      // each newly configured slot 6 seconds to deliver its first frame —
+      // two USB cameras coming up together can take several seconds to
+      // round-trip the first capture because libcamera's pipeline
+      // handlers contend on USB host bandwidth and media-ctl setup.
+      if (cull_stalled_slots(*scene, slots, std::chrono::milliseconds(2000),
+                             std::chrono::milliseconds(6000))) {
+        changed = true;
+      }
+      if (changed) {
+        apply_layout(slots, *scene, mode.hdisplay, mode.vdisplay);
       }
 
       if (!page_pending.load(std::memory_order_relaxed)) {
@@ -1232,8 +1540,10 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     }
 
     // Wait for vblank, seat-event readiness, or a 33ms timeout so
-    // hotplug detection runs at ~30 Hz even when no cameras are
-    // visible (and so the loop ticks at all during a session pause).
+    // the hotplug-event drain still runs at ~30 Hz when no cameras
+    // are visible (and so the loop ticks during a session
+    // pause). With CameraManager signals wired up, hotplug latency
+    // is bounded by this tick rather than libcamera's poll cycle.
     if (auto r = page_flip.dispatch(33); !r) {
       if (r.error() != std::errc::timed_out) {
         drm::println(stderr, "dispatch: {}", r.error().message());
@@ -1249,6 +1559,18 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
   }
   drm::println("\nshutting down");
 
+  // Disconnect CameraManager hotplug signals before pending_hotplug
+  // goes out of scope, so libcamera doesn't keep a stale receiver
+  // pointer and a worker-thread emission racing teardown can't even
+  // try to dispatch into it.
+  cm.cameraAdded.disconnect(pending_hotplug.get());
+  cm.cameraRemoved.disconnect(pending_hotplug.get());
+
+  if (input_seat) {
+    if (const int ifd = input_seat->fd(); ifd >= 0) {
+      page_flip.remove_source(ifd);
+    }
+  }
   if (seat) {
     if (const int sfd = seat->poll_fd(); sfd >= 0) {
       page_flip.remove_source(sfd);
