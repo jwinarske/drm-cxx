@@ -1,5 +1,72 @@
 # Changelog
 
+## v1.2.0 — Scene API + example tree
+
+### `drm::scene` — high-level layer scene
+- **`drm::scene::LayerScene`** — declarative layer API above `planes::Allocator::apply`. `add_layer` / `remove_layer` / `set_dst_rect` / `set_src_rect` / `set_zpos` / `set_alpha` / `set_source` mutate state; `commit()` runs the allocator, builds the `AtomicRequest`, and returns a `CommitReport` with `layers_assigned` / `layers_composited` / `layers_unassigned` / `properties_written` / `fbs_attached` / `test_commits`.
+- **Property minimization** — per-plane snapshot diffing skips redundant property writes; `FB_ID` always re-emits (page-flip protocol). `force_full_property_writes` opt-out for debugging.
+- **Composition fallback** — `CompositeCanvas` (double-buffered ARGB8888 surface, ping-pong via `begin_frame()`); `compose_unassigned()` blends layers that did not reach a hardware plane and arms the canvas onto a free plane. `LayerDesc::force_composited` knob; canvas plane pre-reservation when `layer_count() > eligible_canvas_planes`.
+- **`LayerScene::rebind(crtc, connector, mode)`** — explicit teardown + re-enumerate + rebuild; layer handles + sources survive. `CompatibilityReport` flags off-screen layers.
+- **VT-switch lifecycle** — `on_session_paused()` / `on_session_resumed()` tear down + restore buffer mappings; pairs with `drm::session::Seat`.
+- **Per-layer placement readout** — `Layer::assigned_plane_id()` exposes which hardware plane the allocator landed each layer on.
+- **Polymorphic buffer sources** — `LayerBufferSource` abstract base + `AcquiredBuffer { fb_id, acquire_fence_fd, opaque }`. `cpu_mapping()` returns `nullopt` for tiled / non-LINEAR sources.
+  - `DumbBufferSource` — scene-allocated 32bpp dumb buffer.
+  - `ExternalDmaBufSource` — caller-owned DMA-BUF fds with `(format, modifier, plane[])` metadata; single-plane LINEAR + multi-plane (NV12, YUV420). `on_release()` callback fires after scanout completes.
+
+### `drm::cursor` — hardware cursor with software fallback
+- XCursor theme resolver + KMS cursor renderer with runtime rotation, `HOTSPOT_X` / `HOTSPOT_Y` virtualization, hardware-validated rotation harness.
+
+### `drm::session::Seat` — session manager glue (gated by `DRM_CXX_SESSION`)
+- libseat-backed logind / seatd / builtin mux. `enable_seat` / `disable_seat` / `switch_session`. `InputDeviceOpener` lets `input::Seat` route privileged opens through libseat.
+
+### `drm::display::HotplugMonitor`
+- Connector hotplug event stream over `udev`. `fd()` for poll/epoll integration, `dispatch()` to drain.
+
+### `drm::capture` — Blend2D-backed CRTC snapshot
+- Per-plane composition snapshot of an active CRTC, PNG encode via Blend2D. Companion `capture_demo` example, VKMS integration-test harness.
+
+### Allocator improvements
+- **Format-modifier-aware bipartite matching** — `IN_FORMATS` modifier list considered in plane eligibility; `LayerDesc::modifier` field.
+- **Priority eviction** — `ContentType::Video` = 100, `update_hint_hz > 30` = 80, `update_hint_hz > 0` = 50, default = 10. Eviction is priority-driven.
+- **Warm-start path** — `apply_previous_allocation` re-validates with one `TEST_ONLY`, producing `test_commits=0` (after the validating one) in steady state.
+- **Two-tier placement** — per-group spatial placement, then a scene-wide partial fallback (drop most-constrained, retry) when total_assigned == 0.
+
+### Plane registry
+- `ColorEncoding` (`BT_601` / `BT_709` / `BT_2020`) + `ColorRange` (`Limited` / `Full`) enums.
+- `PlaneCapabilities::has_color_encoding` / `has_color_range` plus cached enum integers.
+- `DisplayParams::color_encoding` / `color_range` per-frame overrides; `LayerScene::arm_layer_plane_color_props` arms them on planes that expose the props.
+
+### `drm::PageFlip`
+- `add_source(fd, callback)` — register foreign fds (libcamera `eventfd`, `signalfd`, etc.) on the same epoll loop the page-flip dispatcher uses.
+
+### `drm::Device`
+- `Device::from_fd(int)` — wrap a caller-owned fd (e.g. one handed back by `libseat_open_device`).
+
+### `drm::input::Seat`
+- `InputDeviceOpener { open, close }` — caller-supplied open/close callbacks routed through libseat for `/dev/input/event*` opens. Per-fd cap re-enable on resume.
+
+### Examples
+- Bucketed tree: `examples/{basics,scene,allocator,advanced}/`.
+- New: `signage_player`, `hotplug_monitor`, `cursor_rotate`, `capture_demo`, `video_grid`, `layered_demo`, `scene_warm_start`, `scene_priority`, `scene_formats`, `test_patterns`, `camera`, `thorvg_janitor`.
+- Rewritten: `atomic_modeset` on `LayerScene`, `mouse_cursor` on `drm::cursor`.
+- Shared helpers: `examples/common/open_output.hpp` (`open_device` + `open_and_pick_output` factor the libseat fd-open + first-connected-connector pickup), `select_connector.hpp` (`pick_connector` with `k_main_rank` / `k_internal_rank` / `k_external_rank`), `select_device.hpp`, `vt_switch.hpp` (Ctrl+Alt+F<n> chord), `format_probe.hpp`.
+
+### Benchmarks (gated by `DRM_CXX_BUILD_BENCHMARKS=ON` / `-Dbenchmarks=true`)
+- `plane_stress` — synthetic LayerScene workload; `--layers / --formats / --size / --churn / --churn-rate / --duration / --csv / --quiet` with per-frame CSV output.
+- `allocator_torture` — six adversarial cases (N+1, format cascade, scaler monopoly, rapid churn, slow drift, burst-then-calm); PASS/FAIL/SKIP exit codes.
+
+### Documentation
+- `README.md` rewritten around `LayerScene` as the headline feature.
+- `docs/scene.md` — design rationale, buffer-source model, extension points (EGL Streams, foreign DMA-BUF, multi-CRTC, animation), out-of-charter items.
+- Per-example `README.md` files across the bucketed tree.
+- Doxygen briefs filled in across the public scene headers.
+
+### Build + CI
+- thorvg 1.0.4, Blend2D, and libcamera v0.5.2 built from source in CI; cached.
+- libseat-dev installed from apt.
+- Weekly `drmdb` compat CI.
+- VKMS integration-test pattern (`tests/integration/test_*_vkms.cpp` with `GTEST_SKIP` self-skip when VKMS isn't loaded).
+
 ## v1.1.0 — C++17 migration
 
 - **Project language target lowered from C++23 to C++17** (Phase D of the C++17
