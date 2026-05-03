@@ -26,6 +26,7 @@
 
 #include "common/format_probe.hpp"
 #include "common/open_output.hpp"
+#include "common/vt_switch.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
@@ -228,16 +229,23 @@ int main(int argc, char** argv) {
 
   bool quit = false;
   std::optional<std::size_t> pending_layout;
+  drm::examples::VtChordTracker vt_chord;
   input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
     const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event);
-    if (ke == nullptr || !ke->pressed) {
+    if (ke == nullptr) {
+      return;
+    }
+    if (vt_chord.observe(*ke, seat ? &*seat : nullptr)) {
+      return;
+    }
+    if (vt_chord.is_quit_key(*ke)) {
+      quit = true;
+      return;
+    }
+    if (!ke->pressed) {
       return;
     }
     switch (ke->key) {
-      case KEY_ESC:
-      case KEY_Q:
-        quit = true;
-        return;
       case KEY_1:
         pending_layout = 0;
         return;

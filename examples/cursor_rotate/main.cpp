@@ -6,6 +6,11 @@
 // Usage: cursor_rotate [--theme NAME] [--cursor NAME] [--size N]
 //                     [--period MS] [--no-rotate] [/dev/dri/cardN]
 //
+// Exit: Esc or q (via libinput) or Ctrl-C. The libinput path is the
+// only reliable one on a real VT — when libseat puts the TTY into
+// KD_GRAPHICS the kernel suppresses Ctrl-C signal generation. The
+// same input source carries Ctrl+Alt+F<n> for VT switching.
+//
 // What this example validates on real hardware:
 //
 //   1. Theme resolve cache. Two back-to-back resolve() calls for the
@@ -36,16 +41,20 @@
 //      cycle still works, and blit_frame does the work on the CPU.
 
 #include "../common/open_output.hpp"
+#include "../common/vt_switch.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "cursor/cursor.hpp"
 #include "cursor/renderer.hpp"
 #include "cursor/theme.hpp"
 #include "drm-cxx/detail/format.hpp"
+#include "input/seat.hpp"
 
 #include <xf86drmMode.h>
 
+#include <algorithm>
 #include <array>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -54,10 +63,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string_view>
+#include <sys/poll.h>
 #include <system_error>
-#include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -104,23 +115,23 @@ struct CrtcInfo {
 // Every connected connector with an active mode gets a CRTC entry.
 // Multi-head systems produce multiple; on single-head we still bind
 // the shared_ptr to the one we found, which exercises the API.
-std::vector<CrtcInfo> discover_active_crtcs(int fd) {
+std::vector<CrtcInfo> discover_active_crtcs(const int fd) {
   std::vector<CrtcInfo> out;
   const auto res = drm::get_resources(fd);
   if (!res) {
     return out;
   }
   for (int i = 0; i < res->count_connectors; ++i) {
-    auto conn = drm::get_connector(fd, res->connectors[i]);
+    const auto conn = drm::get_connector(fd, res->connectors[i]);
     if (!conn || conn->connection != DRM_MODE_CONNECTED || conn->count_modes == 0 ||
         conn->encoder_id == 0) {
       continue;
     }
-    auto enc = drm::get_encoder(fd, conn->encoder_id);
+    const auto enc = drm::get_encoder(fd, conn->encoder_id);
     if (!enc || enc->crtc_id == 0) {
       continue;
     }
-    auto crtc = drm::get_crtc(fd, enc->crtc_id);
+    const auto crtc = drm::get_crtc(fd, enc->crtc_id);
     if (!crtc || crtc->mode_valid == 0) {
       continue;
     }
@@ -131,7 +142,7 @@ std::vector<CrtcInfo> discover_active_crtcs(int fd) {
 
 // Parse a non-negative integer with overflow detection via from_chars
 // — unlike strtol, it doesn't need errno and happily takes a
-// string_view so the endptr/pointee-const issue that trips
+// string_view, so the endptr/pointee-const issue that trips
 // misc-const-correctness in the strtol variant doesn't apply here.
 bool parse_uint(const char* s, int max_val, int& out) {
   if (s == nullptr || *s == '\0') {
@@ -153,13 +164,13 @@ int main(int argc, char* argv[]) {
   // ---------------------------------------------------------------------------
   // CLI parse. Strip our own flags before handing argv to select_device.
   // ---------------------------------------------------------------------------
-  const char* cli_theme = "Adwaita";
-  const char* cli_cursor = "default";
+  const auto *cli_theme = "Adwaita";
+  const auto *cli_cursor = "default";
   int cli_size = 0;
   int cli_period = 2000;
   bool cli_no_rotate = false;
 
-  auto strip = [&](int i, int n) {
+  auto strip = [&](const int i, const int n) {
     for (int j = i; j + n < argc; ++j) {
       argv[j] = argv[j + n];
     }
@@ -262,12 +273,12 @@ int main(int argc, char* argv[]) {
   // ---------------------------------------------------------------------------
   std::vector<drm::cursor::Renderer> renderers;
   renderers.reserve(crtcs.size());
-  for (const auto& crtc : crtcs) {
+  for (const auto& [crtc_id, mode_w, mode_h] : crtcs) {
     drm::cursor::RendererConfig cfg;
-    cfg.crtc_id = crtc.crtc_id;
+    cfg.crtc_id = crtc_id;
     auto r = drm::cursor::Renderer::create(dev, cfg);
     if (!r) {
-      drm::println(stderr, "Renderer::create(crtc={}) failed: {}", crtc.crtc_id,
+      drm::println(stderr, "Renderer::create(crtc={}) failed: {}", crtc_id,
                    r.error().message());
       return EXIT_FAILURE;
     }
@@ -275,18 +286,18 @@ int main(int argc, char* argv[]) {
 
     // Items 2 + 5 per-renderer introspection.
     drm::println("[crtc {}] {}x{}  plane_id={}  path={}  hw_rotation={}  hotspot_props={}",
-                 crtc.crtc_id, crtc.mode_w, crtc.mode_h, rend.plane_id(), path_name(rend.path()),
+                 crtc_id, mode_w, mode_h, rend.plane_id(), path_name(rend.path()),
                  rend.has_hardware_rotation() ? "yes" : "no",
                  rend.has_hotspot_properties() ? "yes" : "no");
 
     if (auto set = rend.set_cursor(shared_cursor); !set) {
-      drm::println(stderr, "set_cursor(crtc={}) failed: {}", crtc.crtc_id, set.error().message());
+      drm::println(stderr, "set_cursor(crtc={}) failed: {}", crtc_id, set.error().message());
       return EXIT_FAILURE;
     }
     if (auto mv =
-            rend.move_to(static_cast<int>(crtc.mode_w) / 2, static_cast<int>(crtc.mode_h) / 2);
+            rend.move_to(static_cast<int>(mode_w) / 2, static_cast<int>(mode_h) / 2);
         !mv) {
-      drm::println(stderr, "move_to(crtc={}) failed: {}", crtc.crtc_id, mv.error().message());
+      drm::println(stderr, "move_to(crtc={}) failed: {}", crtc_id, mv.error().message());
       return EXIT_FAILURE;
     }
   }
@@ -302,9 +313,71 @@ int main(int argc, char* argv[]) {
   // Items 4 + 5 — rotation cycle. set_rotation() is dispatched across all
   // bound renderers; each reports which path (hw vs sw) handled it via
   // has_hardware_rotation().
+  //
+  // Exit handling: SIGINT/SIGTERM cover the case where stdin is still a
+  // line-discipline TTY, but when libseat takes the seat the kernel puts
+  // the TTY into KD_GRAPHICS and stops translating ^C — so we also open
+  // a libinput keyboard and quit on Esc/q. The same input source carries
+  // Ctrl+Alt+F<n> for VT switching (routed through VtChordTracker).
   // ---------------------------------------------------------------------------
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);
+
+  drm::input::InputDeviceOpener libinput_opener;
+  if (ctx->seat) {
+    libinput_opener = ctx->seat->input_opener();
+  }
+  auto input_seat_res = drm::input::Seat::open({}, std::move(libinput_opener));
+  std::optional<drm::input::Seat> input_seat;
+  drm::examples::VtChordTracker vt_chord;
+  if (input_seat_res) {
+    input_seat = std::move(*input_seat_res);
+    input_seat->set_event_handler([&](const drm::input::InputEvent& event) {
+      const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event);
+      if (ke == nullptr) {
+        return;
+      }
+      if (vt_chord.observe(*ke, ctx->seat ? &*ctx->seat : nullptr)) {
+        return;
+      }
+      if (vt_chord.is_quit_key(*ke)) {
+        g_quit = 1;
+      }
+    });
+  } else {
+    drm::println(stderr,
+                 "input::Seat::open: {} — Esc/q exit unavailable (need 'input' group or a seat "
+                 "backend); Ctrl-C only works on a non-graphics TTY",
+                 input_seat_res.error().message());
+  }
+
+  // Seat pause/resume. Each Renderer holds an fd snapshot, so on
+  // resume every renderer needs on_session_resumed(new_fd); the Device
+  // wrapper itself also gets swapped so client caps (UNIVERSAL_PLANES,
+  // ATOMIC) can be re-enabled on the fresh fd before the next atomic
+  // commit. Work happens in the main loop, not the libseat callback,
+  // so a transient drmIsMaster lag at handover gets a retry instead of
+  // a hard fail.
+  bool session_paused = false;
+  int pending_resume_fd = -1;
+  if (ctx->seat) {
+    ctx->seat->set_pause_callback([&]() {
+      session_paused = true;
+      for (auto& rend : renderers) {
+        rend.on_session_paused();
+      }
+      if (input_seat) {
+        (void)input_seat->suspend();
+      }
+    });
+    ctx->seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
+      pending_resume_fd = new_fd;
+      session_paused = false;
+      if (input_seat) {
+        (void)input_seat->resume();
+      }
+    });
+  }
 
   constexpr std::array<drm::cursor::Rotation, 4> k_cycle = {
       drm::cursor::Rotation::k0,
@@ -314,36 +387,93 @@ int main(int argc, char* argv[]) {
   };
 
   const auto period = std::chrono::milliseconds(cli_period);
-  drm::println("[item 4] cycling rotation every {} ms (Ctrl-C to exit)...", cli_period);
+  drm::println("[item 4] cycling rotation every {} ms ({} to exit)...", cli_period,
+               input_seat ? "Esc/q or Ctrl-C" : "Ctrl-C");
+
+  std::array<pollfd, 2> pfds{};
+  pfds[0].fd = input_seat ? input_seat->fd() : -1;
+  pfds[0].events = POLLIN;
+  pfds[1].fd = ctx->seat ? ctx->seat->poll_fd() : -1;
+  pfds[1].events = POLLIN;
 
   std::size_t idx = 0;
   auto next_change = std::chrono::steady_clock::now();
   while (g_quit == 0) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= next_change) {
-      const auto rot = k_cycle.at(idx);
-      idx = (idx + 1) % k_cycle.size();
+    if (pending_resume_fd != -1) {
+      const int new_fd = pending_resume_fd;
+      pending_resume_fd = -1;
+      // dev is a reference into ctx->device; move-assigning swaps the
+      // underlying Device so renderer fd-snapshots refresh below.
+      ctx->device = drm::Device::from_fd(new_fd);
+      if (auto r = dev.enable_universal_planes(); !r) {
+        drm::println(stderr, "resume: enable_universal_planes failed: {}", r.error().message());
+        break;
+      }
+      if (auto r = dev.enable_atomic(); !r) {
+        drm::println(stderr, "resume: enable_atomic failed: {}", r.error().message());
+        break;
+      }
       for (std::size_t i = 0; i < renderers.size(); ++i) {
-        auto& rend = renderers.at(i);
-        if (auto sr = rend.set_rotation(rot); !sr) {
-          drm::println(stderr, "set_rotation(crtc={}, rot={}): {}", crtcs.at(i).crtc_id,
-                       rotation_name(rot), sr.error().message());
-        } else {
-          drm::println("  crtc={} rotation={} via {}", crtcs.at(i).crtc_id, rotation_name(rot),
-                       rend.has_hardware_rotation() ? "hardware" : "software blit");
+        if (auto r = renderers.at(i).on_session_resumed(new_fd); !r) {
+          drm::println(stderr, "Renderer resume (crtc={}) failed: {}", crtcs.at(i).crtc_id,
+                       r.error().message());
         }
       }
-      next_change = now + period;
+      // Don't blast through the rotation backlog accumulated while paused.
+      next_change = std::chrono::steady_clock::now() + period;
     }
 
-    // Advance animation for animated cursors (wait, progress, etc.)
-    // and sleep a short tick so Ctrl-C responds promptly.
-    for (auto& rend : renderers) {
-      (void)rend.tick();
+    if (!session_paused) {
+      if (const auto now = std::chrono::steady_clock::now(); now >= next_change) {
+        const auto rot = k_cycle.at(idx);
+        idx = (idx + 1) % k_cycle.size();
+        for (std::size_t i = 0; i < renderers.size(); ++i) {
+          auto& rend = renderers.at(i);
+          if (auto sr = rend.set_rotation(rot); !sr) {
+            drm::println(stderr, "set_rotation(crtc={}, rot={}): {}", crtcs.at(i).crtc_id,
+                         rotation_name(rot), sr.error().message());
+          } else {
+            drm::println("  crtc={} rotation={} via {}", crtcs.at(i).crtc_id, rotation_name(rot),
+                         rend.has_hardware_rotation() ? "hardware" : "software blit");
+          }
+        }
+        next_change = now + period;
+      }
+
+      // Advance animation for animated cursors (wait, progress, etc.).
+      for (auto& rend : renderers) {
+        (void)rend.tick();
+      }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+
+    // Paused: block until the seat fd wakes us with a resume event.
+    // Active: wake on input or at the next rotation step, whichever is
+    // sooner; 16 ms cap keeps animated cursors at refresh-ish cadence.
+    int timeout_ms = -1;
+    if (!session_paused) {
+      const auto until_next =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              next_change - std::chrono::steady_clock::now())
+              .count();
+      timeout_ms = static_cast<int>(std::clamp<long long>(until_next, 0, 16));
+    }
+    if (const int rc = poll(pfds.data(), pfds.size(), timeout_ms); rc < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      drm::println(stderr, "poll: {}", std::system_category().message(errno));
+      break;
+    }
+    if (input_seat && (pfds[0].revents & POLLIN) != 0) {
+      if (auto r = input_seat->dispatch(); !r) {
+        drm::println(stderr, "input dispatch failed: {}", r.error().message());
+      }
+    }
+    if (ctx->seat && (pfds[1].revents & POLLIN) != 0) {
+      ctx->seat->dispatch();
+    }
   }
 
-  drm::println("cursor_rotate: exiting on signal");
+  drm::println("cursor_rotate: exiting");
   return EXIT_SUCCESS;
 }

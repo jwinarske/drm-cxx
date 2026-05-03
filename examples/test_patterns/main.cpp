@@ -15,6 +15,7 @@
 //   Esc / q — quit
 
 #include "common/open_output.hpp"
+#include "common/vt_switch.hpp"
 #include "test_patterns/patterns.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
@@ -105,6 +106,7 @@ int main(int argc, char** argv) {
 
   bool session_paused = false;
   bool flip_pending = false;
+  bool resume_commit_retry = false;
   int pending_resume_fd = -1;
 
   // Single full-screen XRGB8888 layer. XRGB (not ARGB) — this is the
@@ -176,13 +178,20 @@ int main(int argc, char** argv) {
   // next idle iteration. Avoids piling commits on top of each other.
   bool quit = false;
   std::optional<PatternKind> pending_kind;
+  drm::examples::VtChordTracker vt_chord;
   input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
     const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event);
-    if (ke == nullptr || !ke->pressed) {
+    if (ke == nullptr) {
       return;
     }
-    if (ke->key == KEY_ESC || ke->key == KEY_Q) {
+    if (vt_chord.observe(*ke, seat ? &*seat : nullptr)) {
+      return;
+    }
+    if (vt_chord.is_quit_key(*ke)) {
       quit = true;
+      return;
+    }
+    if (!ke->pressed) {
       return;
     }
     if (ke->key == KEY_N || ke->key == KEY_SPACE) {
@@ -277,6 +286,35 @@ int main(int argc, char** argv) {
       // Buffer mapping was torn down on pause; repaint the current
       // pattern against the fresh mmap before the next commit.
       repaint(current);
+      // Push the freshly-painted buffer back to the screen — this
+      // example only commits on pattern changes, so without an
+      // explicit post-resume commit the display would stay frozen on
+      // whatever the kernel restored when the VT swapped back. On
+      // EACCES we set resume_commit_retry so the next loop iteration
+      // re-attempts the commit on its own — drmIsMaster is lagged on
+      // some backends and there's no guarantee of another resume
+      // signal.
+      if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip); !r) {
+        if (r.error() == std::errc::permission_denied) {
+          resume_commit_retry = true;
+          flip_pending = false;
+          continue;
+        }
+        drm::println(stderr, "post-resume commit failed: {}", r.error().message());
+        break;
+      }
+      flip_pending = true;
+      resume_commit_retry = false;
+    } else if (resume_commit_retry && !flip_pending) {
+      if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip); !r) {
+        if (r.error() == std::errc::permission_denied) {
+          continue;
+        }
+        drm::println(stderr, "post-resume retry commit failed: {}", r.error().message());
+        break;
+      }
+      flip_pending = true;
+      resume_commit_retry = false;
     }
 
     if (flip_pending || session_paused) {

@@ -19,6 +19,7 @@
 // several overlays.
 
 #include "../common/open_output.hpp"
+#include "../common/vt_switch.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
 #include "cursor/cursor.hpp"
@@ -296,7 +297,12 @@ int main(int argc, char* argv[]) {
 
   bool cursor_dirty = false;
 
+  drm::examples::VtChordTracker vt_chord;
   input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
+    if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event);
+        ke != nullptr && vt_chord.observe(*ke, seat ? &*seat : nullptr)) {
+      return;
+    }
     if (const auto* pe = std::get_if<drm::input::PointerEvent>(&event)) {
       if (const auto* m = std::get_if<drm::input::PointerMotionEvent>(pe)) {
         pointer.accumulate_motion(m->dx, m->dy);
@@ -313,30 +319,37 @@ int main(int argc, char* argv[]) {
       }
     }
     if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event)) {
-      if (ke->pressed) {
-        if (ke->key == KEY_ESC) {
-          g_quit = 1;
-        } else if (ke->key >= KEY_1 && ke->key <= KEY_9) {
-          const auto digit = static_cast<std::size_t>(ke->key - KEY_1);
-          load_and_apply(std::min(digit, k_cycle.size() - 1));
-        }
+      if (vt_chord.is_quit_key(*ke)) {
+        g_quit = 1;
+      } else if (ke->pressed && ke->key >= KEY_1 && ke->key <= KEY_9) {
+        const auto digit = static_cast<std::size_t>(ke->key - KEY_1);
+        load_and_apply(std::min(digit, k_cycle.size() - 1));
       }
     }
   });
 
   // ---------------------------------------------------------------------------
-  // Seat pause/resume — the renderer handles fd rebuild internally;
-  // we only need to stop/start libinput around it.
+  // Seat pause/resume. The renderer handles its own buffer + property
+  // rebuild against a fresh fd, but DRM client caps (UNIVERSAL_PLANES,
+  // ATOMIC) are per-fd kernel state — they don't survive across the
+  // libseat fd swap, so the new fd needs them re-enabled before the
+  // renderer's atomic-path commit will succeed (otherwise EINVAL and
+  // the cursor never reappears post-resume).
+  //
+  // We defer the actual rebuild out of the libseat callback into the
+  // main loop, both so the work is short-lived inside the listener and
+  // so the post-rebuild commit can be re-attempted on the next
+  // iteration if it transiently fails (drmIsMaster lag — see
+  // reference_drmismaster_lag.md).
   // ---------------------------------------------------------------------------
+  int pending_resume_fd = -1;
   if (seat) {
     seat->set_pause_callback([&]() {
       renderer.on_session_paused();
       (void)input_seat.suspend();
     });
     seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
-      if (auto r = renderer.on_session_resumed(new_fd); !r) {
-        drm::println(stderr, "Renderer resume failed: {}", r.error().message());
-      }
+      pending_resume_fd = new_fd;
       (void)input_seat.resume();
     });
   }
@@ -382,6 +395,31 @@ int main(int argc, char* argv[]) {
     }
     if ((pfds[1].revents & POLLIN) != 0 && seat) {
       seat->dispatch();
+    }
+
+    if (pending_resume_fd != -1) {
+      const int new_fd = pending_resume_fd;
+      pending_resume_fd = -1;
+      // Replace the stale Device wrapper so caps are enabled on the
+      // fresh fd; without this the renderer's atomic commit below
+      // fails with EINVAL on the new fd. dev is a reference into ctx,
+      // so move-assigning ctx->device updates the same underlying
+      // Device the renderer will read through new_fd.
+      ctx->device = drm::Device::from_fd(new_fd);
+      if (auto r = dev.enable_universal_planes(); !r) {
+        drm::println(stderr, "resume: enable_universal_planes failed: {}", r.error().message());
+        break;
+      }
+      if (auto r = dev.enable_atomic(); !r) {
+        drm::println(stderr, "resume: enable_atomic failed: {}", r.error().message());
+        break;
+      }
+      if (auto r = renderer.on_session_resumed(new_fd); !r) {
+        drm::println(stderr, "Renderer resume failed: {}", r.error().message());
+        // Don't bail — force a retry on the next move via cursor_dirty
+        // in case the failure was the drmIsMaster lag window.
+      }
+      cursor_dirty = true;
     }
 
     // Animated cursors advance the frame via tick(); the renderer
