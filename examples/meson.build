@@ -1,48 +1,53 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
+#
+# Examples are organised into four buckets matching docs/scene.md:
+#
+#   basics/    — minimal LayerScene introductions and small one-feature demos.
+#   scene/     — substantial LayerScene workloads (the "sales deck" tier).
+#   allocator/ — pedagogical demos for individual planes::Allocator features.
+#   advanced/  — demos that exercise non-scene modules (Vulkan, capture, cursor).
+#
+# Common helpers (open_output, format_probe, vt_switch, select_*) live under
+# examples/common/ and are pulled in by sources via "../../common/foo.hpp".
 
-executable('overlay_planes',
-  'overlay_planes/main.cpp',
-  dependencies : [drm_cxx_dep],
-)
+#
+# basics/
+#
 
 executable('atomic_modeset',
-  'atomic_modeset/main.cpp',
+  'basics/atomic_modeset/main.cpp',
   dependencies : [drm_cxx_dep],
 )
 
 executable('hotplug_monitor',
-  'hotplug_monitor/main.cpp',
+  'basics/hotplug_monitor/main.cpp',
   dependencies : [drm_cxx_dep],
 )
 
-# scene_warm_start — pedagogical demo for CommitReport::test_commits_issued.
-# Pure consumer of the existing scene API, no extra deps.
-executable('scene_warm_start',
-  'scene_warm_start/main.cpp',
+# mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
+# module — no direct libxcursor dep needed here, the library owns that.
+executable('mouse_cursor',
+  'basics/mouse_cursor/main.cpp',
   dependencies : [drm_cxx_dep],
 )
 
-# scene_priority — pedagogical demo for content-type / update-hint-driven
-# priority eviction. Eight layers, typical 3-plane budget, no extra deps.
-executable('scene_priority',
-  'scene_priority/main.cpp',
+executable('xcursor_smoke',
+  'basics/mouse_cursor/xcursor_smoke.cpp',
   dependencies : [drm_cxx_dep],
 )
 
-# scene_formats — pedagogical demo for bipartite plane-matching across
-# heterogeneous layer requirements (channel orderings + scaler need).
-# Pure consumer of the existing scene API, no extra deps.
-executable('scene_formats',
-  'scene_formats/main.cpp',
-  dependencies : [drm_cxx_dep],
-)
+subdir('basics/test_patterns')
+
+#
+# scene/
+#
 
 # layered_demo — interactive LayerScene mutation tour. Up to eight
 # coloured tiles toggled, moved, restacked, alpha-adjusted from the
 # keyboard against a static gradient background.
 executable('layered_demo',
-  'layered_demo/main.cpp',
+  'scene/layered_demo/main.cpp',
   dependencies : [drm_cxx_dep],
 )
 
@@ -50,7 +55,7 @@ executable('layered_demo',
 # allocator + composition fallback when cell count exceeds the plane
 # budget; the runtime layout switch (1/2/3) walks add/remove churn.
 executable('video_grid',
-  'video_grid/main.cpp',
+  'scene/video_grid/main.cpp',
   dependencies : [drm_cxx_dep],
 )
 
@@ -77,8 +82,8 @@ if not camera_feature.disabled()
                                 required : camera_feature.enabled())
   if libcamera_dep.found() and libyuv_dep.found()
     executable('camera',
-      'camera/main.cpp',
-      'camera/convert.cpp',
+      'scene/camera/main.cpp',
+      'scene/camera/convert.cpp',
       dependencies : [drm_cxx_dep, libcamera_dep, libyuv_dep],
     )
   else
@@ -86,24 +91,63 @@ if not camera_feature.disabled()
   endif
 endif
 
-# mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
-# module — no direct libxcursor dep needed here, the library owns that.
-executable('mouse_cursor',
-  'mouse_cursor/main.cpp',
+subdir('scene/signage_player')
+
+# ThorVG Janitor example — scaffold only (see scene/thorvg_janitor/README.md).
+# Upstream ThorVG is auto-detected; set -Dthorvg_janitor=disabled to skip the
+# probe entirely, or -Dthorvg_janitor=enabled to hard-require ThorVG.
+thorvg_feature = get_option('thorvg_janitor')
+if not thorvg_feature.disabled()
+  thorvg_dep = dependency('thorvg', required : thorvg_feature.enabled(),
+                          version : '>=1.0.4')
+  if thorvg_dep.found()
+    subdir('scene/thorvg_janitor')
+  else
+    message('thorvg_janitor: thorvg not found, skipping (pass -Dthorvg_janitor=enabled to hard-fail)')
+  endif
+endif
+
+#
+# allocator/
+#
+
+executable('overlay_planes',
+  'allocator/overlay_planes/main.cpp',
   dependencies : [drm_cxx_dep],
 )
 
-executable('xcursor_smoke',
-  'mouse_cursor/xcursor_smoke.cpp',
+# scene_warm_start — pedagogical demo for CommitReport::test_commits_issued.
+# Pure consumer of the existing scene API, no extra deps.
+executable('scene_warm_start',
+  'allocator/scene_warm_start/main.cpp',
   dependencies : [drm_cxx_dep],
 )
+
+# scene_priority — pedagogical demo for content-type / update-hint-driven
+# priority eviction. Eight layers, typical 3-plane budget, no extra deps.
+executable('scene_priority',
+  'allocator/scene_priority/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
+# scene_formats — pedagogical demo for bipartite plane-matching across
+# heterogeneous layer requirements (channel orderings + scaler need).
+# Pure consumer of the existing scene API, no extra deps.
+executable('scene_formats',
+  'allocator/scene_formats/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
+#
+# advanced/
+#
 
 # cursor_rotate — V2 hardware-validation harness for drm::cursor.
 # Exercises the theme resolve cache, HOTSPOT_X/Y writes, shared Cursor
 # across multi-CRTC Renderers, set_rotation(), and software pre-
 # rotation. Pure library consumer — no direct libxcursor dep.
 executable('cursor_rotate',
-  'cursor_rotate/main.cpp',
+  'advanced/cursor_rotate/main.cpp',
   dependencies : [drm_cxx_dep],
 )
 
@@ -111,7 +155,7 @@ executable('cursor_rotate',
 # on blend2d since it #includes drm-cxx/capture/*.hpp.
 if has_blend2d
   executable('capture_demo',
-    'capture_demo/main.cpp',
+    'advanced/capture_demo/main.cpp',
     dependencies : [drm_cxx_dep],
   )
 endif
@@ -122,25 +166,8 @@ if get_option('vulkan')
   # even though it sits on the link line. Disable as-needed for this
   # target so libvulkan ends up DT_NEEDED (matches the CMake build).
   executable('vulkan_display',
-    'vulkan_display/main.cpp',
+    'advanced/vulkan_display/main.cpp',
     dependencies : [drm_cxx_dep],
     override_options : ['b_asneeded=false'],
   )
-endif
-
-subdir('signage_player')
-subdir('test_patterns')
-
-# ThorVG Janitor example — scaffold only (see examples/thorvg_janitor/README.md).
-# Upstream ThorVG is auto-detected; set -Dthorvg_janitor=disabled to skip the
-# probe entirely, or -Dthorvg_janitor=enabled to hard-require ThorVG.
-thorvg_feature = get_option('thorvg_janitor')
-if not thorvg_feature.disabled()
-  thorvg_dep = dependency('thorvg', required : thorvg_feature.enabled(),
-                          version : '>=1.0.4')
-  if thorvg_dep.found()
-    subdir('thorvg_janitor')
-  else
-    message('thorvg_janitor: thorvg not found, skipping (pass -Dthorvg_janitor=enabled to hard-fail)')
-  endif
 endif

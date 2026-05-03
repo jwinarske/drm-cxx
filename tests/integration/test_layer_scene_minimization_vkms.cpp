@@ -271,7 +271,7 @@ TEST(LayerSceneMinimizationVkms, ForceFullWritesEmitsEveryProperty) {
 // place a layer it doesn't already remember. Once compositing started,
 // `previous_allocation_` never grew to include the new layer, so the
 // next frame hit the same trap and the layer stayed on the canvas
-// forever — observed in examples/camera as a 60→6 fps cliff every
+// forever — observed in examples/scene/camera as a 60→6 fps cliff every
 // time a USB camera was hot-plugged after a prior unplug. The fix
 // detects "scene has a layer not represented in previous_allocation_"
 // and falls through to full_search so the new layer gets a real shot
