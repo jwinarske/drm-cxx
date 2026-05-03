@@ -23,23 +23,37 @@ set_property(CACHE DRM_CXX_BUILD_CAMERA PROPERTY STRINGS AUTO ON OFF)
 if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
   if(DRM_CXX_BUILD_CAMERA STREQUAL "ON")
     pkg_check_modules(libcamera REQUIRED IMPORTED_TARGET libcamera>=0.3.0)
-    pkg_check_modules(libyuv REQUIRED IMPORTED_TARGET libyuv)
   else()
     pkg_check_modules(libcamera IMPORTED_TARGET libcamera>=0.3.0)
-    pkg_check_modules(libyuv IMPORTED_TARGET libyuv)
   endif()
-  if(TARGET PkgConfig::libcamera AND TARGET PkgConfig::libyuv)
-    foreach(_dep libcamera libyuv)
-      get_target_property(_incs PkgConfig::${_dep} INTERFACE_INCLUDE_DIRECTORIES)
-      if(_incs)
-        set_property(TARGET PkgConfig::${_dep}
-                     APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_incs})
-      endif()
-    endforeach()
+
+  # libyuv is detected manually rather than via pkg-config: Fedora's
+  # libyuv-devel ships a libyuv.pc but Ubuntu/Debian's libyuv-dev does
+  # not, so the pkg-config probe is unreliable. find_path / find_library
+  # works on both distros (header at /usr/include/libyuv.h, lib at
+  # /usr/lib*/libyuv.so).
+  find_path(LIBYUV_INCLUDE_DIR NAMES libyuv.h)
+  find_library(LIBYUV_LIBRARY NAMES yuv)
+  if(LIBYUV_INCLUDE_DIR AND LIBYUV_LIBRARY)
+    add_library(drm_cxx_libyuv INTERFACE)
+    target_include_directories(drm_cxx_libyuv SYSTEM INTERFACE ${LIBYUV_INCLUDE_DIR})
+    target_link_libraries(drm_cxx_libyuv INTERFACE ${LIBYUV_LIBRARY})
+  elseif(DRM_CXX_BUILD_CAMERA STREQUAL "ON")
+    message(FATAL_ERROR
+      "camera: libyuv not found (libyuv-dev on Debian/Ubuntu, "
+      "libyuv-devel on Fedora). Set DRM_CXX_BUILD_CAMERA=OFF to skip.")
+  endif()
+
+  if(TARGET PkgConfig::libcamera AND TARGET drm_cxx_libyuv)
+    get_target_property(_incs PkgConfig::libcamera INTERFACE_INCLUDE_DIRECTORIES)
+    if(_incs)
+      set_property(TARGET PkgConfig::libcamera
+                   APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_incs})
+    endif()
     add_executable(camera
       camera/main.cpp
       camera/convert.cpp)
-    target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera PkgConfig::libyuv)
+    target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera drm_cxx_libyuv)
     target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   else()
     message(STATUS

@@ -164,8 +164,8 @@ int main(int argc, char* argv[]) {
   // ---------------------------------------------------------------------------
   // CLI parse. Strip our own flags before handing argv to select_device.
   // ---------------------------------------------------------------------------
-  const auto *cli_theme = "Adwaita";
-  const auto *cli_cursor = "default";
+  const auto* cli_theme = "Adwaita";
+  const auto* cli_cursor = "default";
   int cli_size = 0;
   int cli_period = 2000;
   bool cli_no_rotate = false;
@@ -278,15 +278,14 @@ int main(int argc, char* argv[]) {
     cfg.crtc_id = crtc_id;
     auto r = drm::cursor::Renderer::create(dev, cfg);
     if (!r) {
-      drm::println(stderr, "Renderer::create(crtc={}) failed: {}", crtc_id,
-                   r.error().message());
+      drm::println(stderr, "Renderer::create(crtc={}) failed: {}", crtc_id, r.error().message());
       return EXIT_FAILURE;
     }
     auto& rend = renderers.emplace_back(std::move(*r));
 
     // Items 2 + 5 per-renderer introspection.
-    drm::println("[crtc {}] {}x{}  plane_id={}  path={}  hw_rotation={}  hotspot_props={}",
-                 crtc_id, mode_w, mode_h, rend.plane_id(), path_name(rend.path()),
+    drm::println("[crtc {}] {}x{}  plane_id={}  path={}  hw_rotation={}  hotspot_props={}", crtc_id,
+                 mode_w, mode_h, rend.plane_id(), path_name(rend.path()),
                  rend.has_hardware_rotation() ? "yes" : "no",
                  rend.has_hotspot_properties() ? "yes" : "no");
 
@@ -294,9 +293,7 @@ int main(int argc, char* argv[]) {
       drm::println(stderr, "set_cursor(crtc={}) failed: {}", crtc_id, set.error().message());
       return EXIT_FAILURE;
     }
-    if (auto mv =
-            rend.move_to(static_cast<int>(mode_w) / 2, static_cast<int>(mode_h) / 2);
-        !mv) {
+    if (auto mv = rend.move_to(static_cast<int>(mode_w) / 2, static_cast<int>(mode_h) / 2); !mv) {
       drm::println(stderr, "move_to(crtc={}) failed: {}", crtc_id, mv.error().message());
       return EXIT_FAILURE;
     }
@@ -451,10 +448,9 @@ int main(int argc, char* argv[]) {
     // sooner; 16 ms cap keeps animated cursors at refresh-ish cadence.
     int timeout_ms = -1;
     if (!session_paused) {
-      const auto until_next =
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              next_change - std::chrono::steady_clock::now())
-              .count();
+      const auto until_next = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  next_change - std::chrono::steady_clock::now())
+                                  .count();
       timeout_ms = static_cast<int>(std::clamp<long long>(until_next, 0, 16));
     }
     if (const int rc = poll(pfds.data(), pfds.size(), timeout_ms); rc < 0) {

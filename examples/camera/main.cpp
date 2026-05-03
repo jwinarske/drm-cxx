@@ -1108,11 +1108,10 @@ void apply_layout(const std::vector<std::unique_ptr<CameraSlot>>& slots,
 // one extra O(slots) walk with an atomic load per slot — kept
 // deliberately as belt-and-suspenders so neither signal lagging nor
 // failing to fire reopens the freeze.
-bool drain_hotplug_events(drm::Device const& dev, drm::scene::LayerScene& scene, PendingHotplug& pending,
-                          std::vector<std::unique_ptr<CameraSlot>>& slots,
+bool drain_hotplug_events(drm::Device const& dev, drm::scene::LayerScene& scene,
+                          PendingHotplug& pending, std::vector<std::unique_ptr<CameraSlot>>& slots,
                           const std::vector<DisplayFmt>& display_formats,
-                          const std::uint32_t mode_w,
-                          const std::uint32_t mode_h) {
+                          const std::uint32_t mode_w, const std::uint32_t mode_h) {
   std::vector<std::shared_ptr<libcamera::Camera>> added;
   std::vector<std::shared_ptr<libcamera::Camera>> removed;
   {
@@ -1506,8 +1505,8 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
   while (g_running.load(std::memory_order_relaxed)) {
     apply_pending_resume();
     if (session_active.load(std::memory_order_relaxed)) {
-      bool changed = drain_hotplug_events(dev, *scene, *pending_hotplug, slots,
-                                          display_formats, mode.hdisplay, mode.vdisplay);
+      bool changed = drain_hotplug_events(dev, *scene, *pending_hotplug, slots, display_formats,
+                                          mode.hdisplay, mode.vdisplay);
 
       for (auto& slot : slots) {
         drain_slot(*slot, *scene);

@@ -67,8 +67,14 @@ if not camera_feature.disabled()
   libcamera_dep = dependency('libcamera', include_type : 'system',
                              required : camera_feature.enabled(),
                              version : '>=0.3.0')
-  libyuv_dep = dependency('libyuv', include_type : 'system',
-                          required : camera_feature.enabled())
+  # libyuv via pkg-config is unreliable: Fedora's libyuv-devel ships a
+  # libyuv.pc but Ubuntu/Debian's libyuv-dev does not. Skip dependency()
+  # entirely and use cxx.find_library + has_headers, which works on
+  # both distros.
+  cxx = meson.get_compiler('cpp')
+  libyuv_dep = cxx.find_library('yuv',
+                                has_headers : ['libyuv.h'],
+                                required : camera_feature.enabled())
   if libcamera_dep.found() and libyuv_dep.found()
     executable('camera',
       'camera/main.cpp',
