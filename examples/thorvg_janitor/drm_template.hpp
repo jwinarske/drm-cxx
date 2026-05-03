@@ -56,6 +56,7 @@
 
 // drm-cxx
 #include "../common/select_device.hpp"
+#include "../common/vt_switch.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
@@ -601,12 +602,16 @@ inline int main(Demo* demo, int argc, char** argv, bool clearBuffer = false, uin
       (void)input_seat.resume();
     });
   }
+  drm::examples::VtChordTracker vt_chord;
   input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
     if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event)) {
       if (ke->key <= KEY_MAX) {
         detail::keystate_storage().at(static_cast<std::size_t>(ke->key)) = ke->pressed;
       }
-      if (ke->key == KEY_ESC && ke->pressed) {
+      if (vt_chord.observe(*ke, seat ? &*seat : nullptr)) {
+        return;
+      }
+      if (vt_chord.is_quit_key(*ke)) {
         quit = true;
       }
     } else if (const auto* pe = std::get_if<drm::input::PointerEvent>(&event)) {

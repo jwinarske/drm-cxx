@@ -6,3 +6,4 @@ option('thorvg_janitor', type : 'feature', value : 'auto', description : 'Build 
 option('session', type : 'feature', value : 'auto', description : 'Build drm::session::Seat on top of libseat (auto-mux of logind/seatd/builtin)')
 option('cursor',  type : 'feature', value : 'auto', description : 'Build drm::cursor (XCursor theme resolver + KMS cursor renderer, needs libxcursor)')
 option('blend2d', type : 'feature', value : 'auto', description : 'Build drm::capture and drm::csd on top of Blend2D (CMake-config dep, no pkg-config upstream)')
+option('camera',  type : 'feature', value : 'auto', description : 'Build the camera example (needs libcamera>=0.3.0 and libyuv)')

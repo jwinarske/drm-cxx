@@ -353,6 +353,7 @@ class LayerScene::Impl {
     // CRTC. Match the canvas's premultiplied output convention so
     // both natively-assigned and composited cells blend identically.
     arm_layer_plane_blend_defaults(acquisitions, req, report);
+    arm_layer_plane_color_props(acquisitions, req, report);
 
     // Phase 2.3: rescue unassigned layers via CPU composition before
     // counting them as dropped. compose_unassigned() updates
@@ -1320,6 +1321,96 @@ class LayerScene::Impl {
       if (auto r = req.add_property(*plane_id, *prop_id, *caps->blend_mode_premultiplied);
           r.has_value()) {
         ++report.properties_written;
+      }
+    }
+  }
+
+  // For every layer the allocator placed natively, write the plane's
+  // `COLOR_ENCODING` and `COLOR_RANGE` properties to the layer's
+  // override (when set) or to the scene's default of BT.709 + Limited.
+  // Mirrors `arm_layer_plane_blend_defaults`: the properties are
+  // process-sticky and a previous compositor's stale settings
+  // shift colors on YUV layers (cyan / magenta tint), so re-emit on
+  // every native plane each frame regardless of the format being
+  // scanned out.
+  void arm_layer_plane_color_props(const std::vector<AcquisitionSlot>& acquisitions,
+                                   drm::AtomicRequest& req, CommitReport& report) {
+    const auto crtc_index_opt = resolve_crtc_index();
+    if (!crtc_index_opt.has_value()) {
+      return;
+    }
+    for (const auto& acq : acquisitions) {
+      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        continue;
+      }
+      const drm::planes::PlaneCapabilities* caps = nullptr;
+      for (const auto* p : registry_.for_crtc(*crtc_index_opt)) {
+        if (p->id == *plane_id) {
+          caps = p;
+          break;
+        }
+      }
+      if (caps == nullptr) {
+        continue;
+      }
+
+      const auto& display = acq.scene_layer->display();
+
+      auto write_enum = [&](const char* prop_name, std::optional<std::uint64_t> value) {
+        if (!value.has_value()) {
+          return;
+        }
+        const auto prop_id = props_.property_id(*plane_id, prop_name);
+        if (!prop_id) {
+          return;
+        }
+        if (props_.is_immutable(*plane_id, prop_name).value_or(false)) {
+          return;
+        }
+        if (auto r = req.add_property(*plane_id, *prop_id, *value); r.has_value()) {
+          ++report.properties_written;
+        }
+      };
+
+      if (caps->has_color_encoding) {
+        const auto enc = display.color_encoding.value_or(drm::planes::ColorEncoding::BT_709);
+        std::optional<std::uint64_t> raw;
+        switch (enc) {
+          case drm::planes::ColorEncoding::BT_601:
+            raw = caps->color_encoding_bt601;
+            break;
+          case drm::planes::ColorEncoding::BT_709:
+            raw = caps->color_encoding_bt709;
+            break;
+          case drm::planes::ColorEncoding::BT_2020:
+            raw = caps->color_encoding_bt2020;
+            break;
+        }
+        // If the requested entry is missing from this driver's enum
+        // table, fall back to whichever named entry the driver does
+        // expose. BT.709 is ubiquitous; BT.601 is the next-most.
+        if (!raw.has_value()) {
+          raw = caps->color_encoding_bt709.has_value() ? caps->color_encoding_bt709
+                                                       : caps->color_encoding_bt601;
+        }
+        write_enum("COLOR_ENCODING", raw);
+      }
+
+      if (caps->has_color_range) {
+        const auto range = display.color_range.value_or(drm::planes::ColorRange::Limited);
+        const auto raw = (range == drm::planes::ColorRange::Limited) ? caps->color_range_limited
+                                                                     : caps->color_range_full;
+        // Same fallback shape as encoding: Limited > Full when the
+        // driver only exposes one named entry.
+        std::optional<std::uint64_t> resolved = raw;
+        if (!resolved.has_value()) {
+          resolved = caps->color_range_limited;
+        }
+        if (!resolved.has_value()) {
+          resolved = caps->color_range_full;
+        }
+        write_enum("COLOR_RANGE", resolved);
       }
     }
   }

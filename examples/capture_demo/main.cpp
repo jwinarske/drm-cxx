@@ -42,6 +42,7 @@
 //     root.
 
 #include "../common/select_device.hpp"
+#include "../common/vt_switch.hpp"
 #include "capture/png.hpp"
 #include "capture/snapshot.hpp"
 #include "core/device.hpp"
@@ -298,16 +299,23 @@ int main(int argc, char* argv[]) {
     drm::println("wrote {} ({}x{})", out, img->width(), img->height());
   };
 
+  drm::examples::VtChordTracker vt_chord;
   input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
     const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event);
-    if (ke == nullptr || !ke->pressed) {
+    if (ke == nullptr) {
+      return;
+    }
+    if (vt_chord.observe(*ke, seat ? &*seat : nullptr)) {
+      return;
+    }
+    if (vt_chord.is_quit_key(*ke)) {
+      g_quit = 1;
+      return;
+    }
+    if (!ke->pressed) {
       return;
     }
     switch (ke->key) {
-      case KEY_ESC:
-      case KEY_Q:
-        g_quit = 1;
-        break;
       case KEY_C:
       case KEY_SPACE:
         do_capture();
@@ -322,14 +330,19 @@ int main(int argc, char* argv[]) {
   });
 
   // ---------------------------------------------------------------------------
-  // Seat pause/resume — input suspends, device re-binds on the new fd.
-  // A compositor snatching the seat mid-run is rare for this example,
-  // but the plumbing costs nothing and mirrors cursor_rotate.
+  // Seat pause/resume. The new fd from libseat needs UNIVERSAL_PLANES
+  // and ATOMIC re-enabled before the next snapshot — those caps are
+  // per-fd kernel state and don't survive the swap. Defer the rebuild
+  // out of the libseat callback into the main loop so the listener
+  // stays short.
   // ---------------------------------------------------------------------------
+  int pending_resume_fd = -1;
   if (seat) {
     seat->set_pause_callback([&]() { (void)input_seat.suspend(); });
-    seat->set_resume_callback(
-        [&](std::string_view /*path*/, int /*new_fd*/) { (void)input_seat.resume(); });
+    seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
+      pending_resume_fd = new_fd;
+      (void)input_seat.resume();
+    });
   }
 
   drm::println("Press C or SPACE to capture, R for a state dump, Escape or Q to quit.");
@@ -363,6 +376,22 @@ int main(int argc, char* argv[]) {
     }
     if ((pfds[1].revents & POLLIN) != 0 && seat) {
       seat->dispatch();
+    }
+
+    if (pending_resume_fd != -1) {
+      const int new_fd = pending_resume_fd;
+      pending_resume_fd = -1;
+      // dev is a reference into dev_holder, so reseating the optional
+      // updates the device the rest of the loop reads through.
+      dev_holder = drm::Device::from_fd(new_fd);
+      if (auto r = dev.enable_universal_planes(); !r) {
+        drm::println(stderr, "resume: enable_universal_planes failed: {}", r.error().message());
+        break;
+      }
+      if (auto r = dev.enable_atomic(); !r) {
+        drm::println(stderr, "resume: enable_atomic failed: {}", r.error().message());
+        break;
+      }
     }
   }
 

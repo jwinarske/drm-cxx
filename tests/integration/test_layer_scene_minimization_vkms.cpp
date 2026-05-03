@@ -265,6 +265,105 @@ TEST(LayerSceneMinimizationVkms, ForceFullWritesEmitsEveryProperty) {
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }
 
+// Regression: warm-start used to keep the cached `previous_allocation_`
+// when a fresh layer was added in steady state, and that layer would
+// be force-composited because warm-start is structurally unable to
+// place a layer it doesn't already remember. Once compositing started,
+// `previous_allocation_` never grew to include the new layer, so the
+// next frame hit the same trap and the layer stayed on the canvas
+// forever — observed in examples/camera as a 60→6 fps cliff every
+// time a USB camera was hot-plugged after a prior unplug. The fix
+// detects "scene has a layer not represented in previous_allocation_"
+// and falls through to full_search so the new layer gets a real shot
+// at a hardware plane.
+TEST(LayerSceneMinimizationVkms, NewLayerInWarmStateLandsOnHardwarePlane) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+  auto bg_source = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(bg_source.has_value());
+
+  LayerDesc bg;
+  bg.source = std::move(*bg_source);
+  bg.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg.display.zpos = 1;
+  auto bg_handle_r = fx.scene->add_layer(std::move(bg));
+  ASSERT_TRUE(bg_handle_r.has_value());
+  const auto bg_handle = *bg_handle_r;
+
+  // Establish the warm-start state: bg in previous_allocation_, valid.
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  auto warm = fx.scene->commit();
+  ASSERT_TRUE(warm.has_value()) << warm.error().message();
+  ASSERT_EQ(warm->test_commits_issued, 1U)
+      << "second commit should be the warm-start re-validation, not full_search";
+
+  // Add a new overlay layer mid-flight, sized so it cannot scale (VKMS
+  // overlay can't scale) and small enough to fit on top of bg without
+  // covering it. With the bug the next commit places bg from
+  // previous_allocation_ and force-composites this new layer onto the
+  // canvas; with the fix full_search runs and assigns it a plane.
+  const std::uint32_t over_w = fb_w / 4U;
+  const std::uint32_t over_h = fb_h / 4U;
+  auto over_source = DumbBufferSource::create(*fx.dev, over_w, over_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(over_source.has_value());
+
+  LayerDesc over;
+  over.source = std::move(*over_source);
+  over.display.src_rect = drm::scene::Rect{0, 0, over_w, over_h};
+  over.display.dst_rect = drm::scene::Rect{32, 32, over_w, over_h};
+  over.display.zpos = 2;
+  auto over_handle_r = fx.scene->add_layer(std::move(over));
+  ASSERT_TRUE(over_handle_r.has_value());
+  const auto over_handle = *over_handle_r;
+
+  auto report = fx.scene->commit();
+  ASSERT_TRUE(report.has_value()) << report.error().message();
+  EXPECT_EQ(report->layers_total, 2U);
+  EXPECT_EQ(report->layers_assigned, 2U) << "both layers must reach scanout on hardware planes";
+  EXPECT_EQ(report->layers_composited, 0U)
+      << "new layer should not be force-composited just because it post-dates "
+         "the previous allocation";
+
+  // Locate the new layer's placement entry and confirm it landed on a
+  // dedicated plane that's distinct from the bg plane.
+  const drm::scene::LayerPlacementEntry* over_entry = nullptr;
+  const drm::scene::LayerPlacementEntry* bg_entry = nullptr;
+  for (const auto& p : report->placements) {
+    if (p.handle == over_handle) {
+      over_entry = &p;
+    } else if (p.handle == bg_handle) {
+      bg_entry = &p;
+    }
+  }
+  ASSERT_NE(over_entry, nullptr);
+  ASSERT_NE(bg_entry, nullptr);
+  EXPECT_EQ(over_entry->placement, drm::scene::LayerPlacement::AssignedToPlane);
+  EXPECT_EQ(bg_entry->placement, drm::scene::LayerPlacement::AssignedToPlane);
+  EXPECT_NE(over_entry->plane_id, bg_entry->plane_id)
+      << "overlay must be on a different plane from bg";
+
+  // And the next frame, with both layers known to previous_allocation_,
+  // should re-engage the warm-start re-validation (one TEST_ONLY).
+  auto steady = fx.scene->commit();
+  ASSERT_TRUE(steady.has_value()) << steady.error().message();
+  EXPECT_EQ(steady->test_commits_issued, 1U)
+      << "warm-start should re-engage now that previous_allocation_ knows the new layer";
+  EXPECT_EQ(steady->layers_assigned, 2U);
+  EXPECT_EQ(steady->layers_composited, 0U);
+
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
 TEST(LayerSceneMinimizationVkms, TranslatingLayerEmitsOnlyOneRectProperty) {
   const auto node = find_vkms_node();
   if (!node) {

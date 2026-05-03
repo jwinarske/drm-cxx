@@ -90,7 +90,11 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
+          # libyuv-dev satisfies examples/camera's libyuv pkg-config probe.
+          # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps
+          # (yaml/jinja2/ply drive its source-generators; libyaml-dev is the
+          # runtime config parser).
+          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libyaml-dev python3-yaml python3-jinja2 python3-ply ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
           version: 1.0
 
       # ThorVG 1.0.4 isn't packaged on ubuntu-24.04; build from source and cache
@@ -150,14 +154,49 @@ jobs:
           cmake --build blend2d-src/build
           cmake --install blend2d-src/build
 
+      # libcamera 0.3+ isn't packaged on Ubuntu 24.04 (noble ships 0.2.0).
+      # Build a recent stable tag from source so examples/camera's
+      # libcamera>=0.3.0 pkg-config probe is satisfied. Same cache pattern
+      # as thorvg / blend2d; bump the version literal here and in the
+      # cache key together.
+      - name: Cache libcamera install
+        id: cache-libcamera
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/libcamera-install
+          key: libcamera-v0.5.2-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.version }}
+
+      - name: Build libcamera from source
+        if: steps.cache-libcamera.outputs.cache-hit != 'true'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          git clone --depth 1 --branch v0.5.2 https://git.libcamera.org/libcamera/libcamera.git libcamera-src
+          meson setup libcamera-src/build libcamera-src \
+            --prefix="$GITHUB_WORKSPACE/libcamera-install" \
+            --buildtype=release \
+            -Dpipelines=uvcvideo \
+            -Dipas= \
+            -Dgstreamer=disabled \
+            -Dpycamera=disabled \
+            -Dqcam=disabled \
+            -Ddocumentation=disabled \
+            -Dlc-compliance=disabled \
+            -Dcam=disabled \
+            -Dv4l2=disabled \
+            -Dtracing=disabled \
+            -Dtest=false
+          meson install -C libcamera-src/build
+
       # libseat replaces the old sdbus-c++-from-source dance: it's packaged
-      # on Ubuntu 24.04 as libseat-dev and pulled in via apt above. thorvg
-      # and blend2d still need their install prefixes exported.
+      # on Ubuntu 24.04 as libseat-dev and pulled in via apt above. thorvg,
+      # blend2d, and libcamera still need their install prefixes exported.
       - name: Export third-party environment
         run: |
-          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/thorvg-install/lib/pkgconfig:$GITHUB_WORKSPACE/thorvg-install/lib64/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
-          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$GITHUB_WORKSPACE/blend2d-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/thorvg-install/lib/pkgconfig:$GITHUB_WORKSPACE/thorvg-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$GITHUB_WORKSPACE/blend2d-install:$GITHUB_WORKSPACE/libcamera-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib:$GITHUB_WORKSPACE/libcamera-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
@@ -169,6 +208,7 @@ jobs:
             -DDRM_CXX_BUILD_EXAMPLES=ON \
             -DDRM_CXX_BUILD_TESTS=ON \
             -DDRM_CXX_BUILD_THORVG_JANITOR=ON \
+            -DDRM_CXX_BUILD_CAMERA=ON \
             -DDRM_CXX_SESSION=ON
 
       - name: Build
@@ -240,7 +280,9 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev clang-19 clang-tidy-19 clang-format-19
+          # libyuv-dev satisfies examples/camera's libyuv pkg-config probe.
+          # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps.
+          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libyaml-dev python3-yaml python3-jinja2 python3-ply clang-19 clang-tidy-19 clang-format-19
           version: 1.0
 
       # Blend2D isn't packaged on ubuntu-24.04 (upstream ships no stable
@@ -273,10 +315,47 @@ jobs:
           cmake --build blend2d-src/build
           cmake --install blend2d-src/build
 
-      - name: Export blend2d environment
+      # libcamera 0.3+ isn't packaged on Ubuntu 24.04 (noble ships 0.2.0).
+      # Without it, examples/camera/*.cpp drops out of compile_commands.json
+      # and clang-tidy's find-walk falls back to default flags, which then
+      # spuriously flag init/include-cleaner issues on the partial parse.
+      # Build a recent stable tag from source so the camera TUs end up in
+      # compile_commands.json with proper include paths.
+      - name: Cache libcamera install
+        id: cache-libcamera
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/libcamera-install
+          key: libcamera-v0.5.2-${{ runner.os }}-clang-19
+
+      - name: Build libcamera from source
+        if: steps.cache-libcamera.outputs.cache-hit != 'true'
+        env:
+          CC: clang-19
+          CXX: clang++-19
         run: |
-          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/blend2d-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          git clone --depth 1 --branch v0.5.2 https://git.libcamera.org/libcamera/libcamera.git libcamera-src
+          meson setup libcamera-src/build libcamera-src \
+            --prefix="$GITHUB_WORKSPACE/libcamera-install" \
+            --buildtype=release \
+            -Dpipelines=uvcvideo \
+            -Dipas= \
+            -Dgstreamer=disabled \
+            -Dpycamera=disabled \
+            -Dqcam=disabled \
+            -Ddocumentation=disabled \
+            -Dlc-compliance=disabled \
+            -Dcam=disabled \
+            -Dv4l2=disabled \
+            -Dtracing=disabled \
+            -Dtest=false
+          meson install -C libcamera-src/build
+
+      - name: Export third-party environment
+        run: |
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/libcamera-install/lib/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/blend2d-install:$GITHUB_WORKSPACE/libcamera-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib:$GITHUB_WORKSPACE/libcamera-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
@@ -286,6 +365,7 @@ jobs:
           meson setup builddir \
             -Dvulkan=true \
             -Dexamples=true \
+            -Dcamera=enabled \
             -Dtests=false \
             -Db_lto=false
 

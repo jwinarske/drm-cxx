@@ -185,6 +185,32 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
       }
     } else if (std::strcmp(prop->name, "alpha") == 0) {
       caps.has_per_plane_alpha = true;
+    } else if (std::strcmp(prop->name, "COLOR_ENCODING") == 0) {
+      caps.has_color_encoding = true;
+      if ((prop->flags & DRM_MODE_PROP_ENUM) != 0U) {
+        const auto enums = drm::span<const drm_mode_property_enum>(prop->enums, prop->count_enums);
+        for (const auto& en : enums) {
+          if (std::strcmp(en.name, "ITU-R BT.601 YCbCr") == 0) {
+            caps.color_encoding_bt601 = en.value;
+          } else if (std::strcmp(en.name, "ITU-R BT.709 YCbCr") == 0) {
+            caps.color_encoding_bt709 = en.value;
+          } else if (std::strcmp(en.name, "ITU-R BT.2020 YCbCr") == 0) {
+            caps.color_encoding_bt2020 = en.value;
+          }
+        }
+      }
+    } else if (std::strcmp(prop->name, "COLOR_RANGE") == 0) {
+      caps.has_color_range = true;
+      if ((prop->flags & DRM_MODE_PROP_ENUM) != 0U) {
+        const auto enums = drm::span<const drm_mode_property_enum>(prop->enums, prop->count_enums);
+        for (const auto& en : enums) {
+          if (std::strcmp(en.name, "YCbCr limited range") == 0) {
+            caps.color_range_limited = en.value;
+          } else if (std::strcmp(en.name, "YCbCr full range") == 0) {
+            caps.color_range_full = en.value;
+          }
+        }
+      }
     }
 
     drmModeFreeProperty(prop);

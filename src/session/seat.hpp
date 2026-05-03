@@ -22,10 +22,13 @@
 
 #include "input/seat.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <system_error>
 
 // Forward declaration at global scope so the trampoline declarations
 // below don't pull libseat's header into every TU that includes this.
@@ -94,6 +97,16 @@ class Seat {
   /// Drain pending libseat events. Callbacks fire synchronously from
   /// inside this call.
   void dispatch();
+
+  /// Request a session switch (for VT-bound seats this is the VT
+  /// number; F1=1, F2=2, etc.). The transition is asynchronous: the
+  /// backend will fire the pause callback once the request is honored,
+  /// then the resume callback when the seat comes back. Useful for
+  /// re-implementing Ctrl+Alt+F<n> in apps that own the TTY in
+  /// KD_GRAPHICS mode, where the kernel no longer drives VT switching
+  /// itself. Returns std::errc::not_supported on a build without
+  /// libseat, or std::errc::bad_file_descriptor if the seat is closed.
+  [[nodiscard]] drm::expected<void, std::error_code> switch_session(int session);
 
   /// Returns a `drm::input::InputDeviceOpener` whose open/close
   /// callbacks route through this Seat. Pass it to

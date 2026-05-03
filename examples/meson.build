@@ -54,6 +54,38 @@ executable('video_grid',
   dependencies : [drm_cxx_dep],
 )
 
+# camera — zero-copy libcamera -> KMS scanout viewfinder, with libyuv
+# fallbacks for cameras whose stride / fourcc can't be scanned out
+# directly (YUY2 -> NV12 repack, MJPEG -> NV12 decode-and-repack).
+# Both libcamera and libyuv are example-only deps; auto-feature so a
+# missing dep skips the target rather than failing the whole build
+# (Ubuntu 24.04 ships libcamera 0.2.0; 0.3+ needs source/PPA).
+# include_type: 'system' pushes their public headers behind -isystem
+# so their warnings stay out of -Werror.
+camera_feature = get_option('camera')
+if not camera_feature.disabled()
+  libcamera_dep = dependency('libcamera', include_type : 'system',
+                             required : camera_feature.enabled(),
+                             version : '>=0.3.0')
+  # libyuv via pkg-config is unreliable: Fedora's libyuv-devel ships a
+  # libyuv.pc but Ubuntu/Debian's libyuv-dev does not. Skip dependency()
+  # entirely and use cxx.find_library + has_headers, which works on
+  # both distros.
+  cxx = meson.get_compiler('cpp')
+  libyuv_dep = cxx.find_library('yuv',
+                                has_headers : ['libyuv.h'],
+                                required : camera_feature.enabled())
+  if libcamera_dep.found() and libyuv_dep.found()
+    executable('camera',
+      'camera/main.cpp',
+      'camera/convert.cpp',
+      dependencies : [drm_cxx_dep, libcamera_dep, libyuv_dep],
+    )
+  else
+    message('camera: libcamera>=0.3.0 or libyuv not found, skipping (pass -Dcamera=enabled to hard-fail)')
+  endif
+endif
+
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
 executable('mouse_cursor',

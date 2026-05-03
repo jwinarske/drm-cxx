@@ -3,6 +3,8 @@
 
 #include "seat.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 #include <memory>
 #include <optional>
 
@@ -67,6 +69,9 @@ int Seat::poll_fd() const {
   return -1;
 }
 void Seat::dispatch() {}
+drm::expected<void, std::error_code> Seat::switch_session(int /*session*/) {
+  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+}
 drm::input::InputDeviceOpener Seat::input_opener() {
   return {};
 }
@@ -290,6 +295,16 @@ void Seat::dispatch() {
   while (libseat_dispatch(impl_->seat, 0) > 0) {
     // keep draining
   }
+}
+
+drm::expected<void, std::error_code> Seat::switch_session(int session) {
+  if (!impl_ || impl_->seat == nullptr) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+  if (libseat_switch_session(impl_->seat, session) < 0) {
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
+  }
+  return {};
 }
 
 drm::input::InputDeviceOpener Seat::input_opener() {
