@@ -90,7 +90,7 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          # libyuv-dev satisfies examples/camera's libyuv pkg-config probe.
+          # libyuv-dev satisfies examples/scene/camera's libyuv pkg-config probe.
           # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps
           # (yaml/jinja2/ply drive its source-generators; libyaml-dev is the
           # runtime config parser).
@@ -155,7 +155,7 @@ jobs:
           cmake --install blend2d-src/build
 
       # libcamera 0.3+ isn't packaged on Ubuntu 24.04 (noble ships 0.2.0).
-      # Build a recent stable tag from source so examples/camera's
+      # Build a recent stable tag from source so examples/scene/camera's
       # libcamera>=0.3.0 pkg-config probe is satisfied. Same cache pattern
       # as thorvg / blend2d; bump the version literal here and in the
       # cache key together.
@@ -280,7 +280,7 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          # libyuv-dev satisfies examples/camera's libyuv pkg-config probe.
+          # libyuv-dev satisfies examples/scene/camera's libyuv pkg-config probe.
           # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps.
           packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libyaml-dev python3-yaml python3-jinja2 python3-ply clang-19 clang-tidy-19 clang-format-19
           version: 1.0
@@ -316,7 +316,7 @@ jobs:
           cmake --install blend2d-src/build
 
       # libcamera 0.3+ isn't packaged on Ubuntu 24.04 (noble ships 0.2.0).
-      # Without it, examples/camera/*.cpp drops out of compile_commands.json
+      # Without it, examples/scene/camera/*.cpp drops out of compile_commands.json
       # and clang-tidy's find-walk falls back to default flags, which then
       # spuriously flag init/include-cleaner issues on the partial parse.
       # Build a recent stable tag from source so the camera TUs end up in
@@ -377,7 +377,7 @@ jobs:
       # the -isystem rationale for {fmt}).
       - name: clang-tidy
         run: |
-          find src examples -name '*.cpp' -not -path 'examples/thorvg_janitor/*' | \
+          find src examples -name '*.cpp' -not -path 'examples/scene/thorvg_janitor/*' | \
             xargs clang-tidy-19 -p builddir
 
       - name: clang-format

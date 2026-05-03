@@ -1,19 +1,79 @@
 ![drm-cxx logo](docs/logo.svg)
 
-C++17 library for Linux DRM/KMS display, input, and hardware plane allocation. Adapter headers (`drm::expected`, `drm::span`, `drm::print`) alias the standard types on C++23 toolchains and `tl::expected` / `tcb::span` / `fmt::print` on older ones.
+C++17 library for Linux DRM/KMS display, input, and hardware plane
+allocation. Adapter headers (`drm::expected`, `drm::span`, `drm::print`)
+alias the standard types on C++23 toolchains and `tl::expected` /
+`tcb::span` / `fmt::print` on older ones.
+
+The headline feature is **`drm::scene::LayerScene`** — a handle-based
+layer model that owns plane assignment, dirty tracking, CPU
+composition fallback, and session pause/resume on top of the native
+`drm::planes::Allocator`. See [`docs/scene.md`](docs/scene.md) for the
+design rationale.
+
+## Hello world
+
+```cpp
+#include <drm-cxx/buffer_mapping.hpp>
+#include <drm-cxx/modeset/page_flip.hpp>
+#include <drm-cxx/scene/dumb_buffer_source.hpp>
+#include <drm-cxx/scene/layer_desc.hpp>
+#include <drm-cxx/scene/layer_scene.hpp>
+
+auto dev = drm::Device::open("/dev/dri/card0").value();
+dev.enable_universal_planes().value();
+dev.enable_atomic().value();
+
+drm::scene::LayerScene::Config cfg{crtc_id, connector_id, mode};
+auto scene = drm::scene::LayerScene::create(dev, cfg).value();
+
+auto bg = drm::scene::DumbBufferSource::create(
+              dev, mode.hdisplay, mode.vdisplay, DRM_FORMAT_ARGB8888).value();
+{
+  auto map = bg->map(drm::scene::MapAccess::Write).value();
+  // Paint into map.pixels() ...
+}
+
+drm::scene::LayerDesc desc;
+desc.source = std::move(bg);
+desc.display.dst_rect = {0, 0, mode.hdisplay, mode.vdisplay};
+auto handle = scene->add_layer(std::move(desc)).value();
+
+drm::PageFlip page_flip(dev);
+page_flip.set_handler([&](auto, auto, auto) { /* flip done */ });
+
+auto report = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip).value();
+// report.layers_assigned / layers_composited / layers_unassigned
+```
+
+The first commit implicitly carries `DRM_MODE_ATOMIC_ALLOW_MODESET`;
+subsequent commits don't. Page-flip events are not auto-injected —
+pass `DRM_MODE_PAGE_FLIP_EVENT` and route the kernel's `user_data`
+through `drm::PageFlip::dispatch()` yourself.
 
 ## Features
 
-- RAII wrappers for DRM devices, dumb buffers, GBM buffers, libinput contexts, and xkbcommon state.
-- `drm::expected<T, E>` on every fallible operation.
-- **`drm::scene::LayerScene`** — handle-based layer model with allocator-driven plane assignment, session pause/resume, and a CPU composition fallback for layers the hardware can't fit.
-- **Native plane allocator** with bipartite pre-solve, warm-start across frames, failure memoization, content-type priority, and spatial group splitting. Replaces libliftoff.
-- **`drm::cursor`** — XCursor theme resolver and KMS cursor renderer with runtime rotation and `HOTSPOT_X/Y` virtualization.
-- **`drm::session::Seat`** — libseat-backed session multiplexer over logind / seatd / builtin (gated on `DRM_CXX_SESSION`).
-- **`drm::display::HotplugMonitor`** — udev netlink hotplug stream with connector-id fast-path.
-- **`drm::capture`** — Blend2D-backed CRTC plane-composition snapshot with PNG encode (gated on `DRM_CXX_BLEND2D`).
+- **`drm::scene::LayerScene`** — handle-based layer model with
+  allocator-driven plane assignment, session pause/resume, rebind on
+  hotplug, and a CPU composition fallback for layers the hardware
+  can't fit.
+- **Native plane allocator** with bipartite pre-solve, warm-start
+  across frames, failure memoization, content-type priority, and
+  spatial group splitting. Replaces libliftoff.
+- **`drm::cursor`** — XCursor theme resolver and KMS cursor renderer
+  with runtime rotation and `HOTSPOT_X/Y` virtualization.
+- **`drm::session::Seat`** — libseat-backed session multiplexer over
+  logind / seatd / builtin (gated on `DRM_CXX_SESSION`).
+- **`drm::display::HotplugMonitor`** — udev netlink hotplug stream
+  with connector-id fast path.
+- **`drm::capture`** — Blend2D-backed CRTC plane-composition snapshot
+  with PNG encode (gated on `DRM_CXX_BLEND2D`).
+- RAII wrappers for DRM devices, dumb buffers, GBM buffers, libinput
+  contexts, and xkbcommon state, with `drm::expected<T, E>` on every
+  fallible operation.
 - Atomic modeset builder around `drmModeAtomicCommit`.
-- libinput / xkbcommon input with typed event variants and `std::function` dispatch.
+- libinput / xkbcommon input with typed event variants and
+  `std::function` dispatch.
 - EDID parsing via libdisplay-info (colorimetry, HDR, EOTFs).
 - GBM device / surface / buffer with DMA-BUF.
 - Optional `VK_KHR_display` Vulkan support.
@@ -36,6 +96,8 @@ C++17 library for Linux DRM/KMS display, input, and hardware plane allocation. A
 | libxcursor | any (optional, for `DRM_CXX_CURSOR`) |
 | Blend2D | 0.10 (optional, for `DRM_CXX_BLEND2D`) |
 | ThorVG | 1.0.4 (optional, for the `thorvg_janitor` example) |
+| libcamera | 0.3.0 (optional, for the `camera` example) |
+| libyuv | any (optional, for the `camera` example) |
 | Vulkan-Headers | 1.3 (optional) |
 
 ## Building
@@ -67,36 +129,42 @@ ctest --test-dir build
 | `cursor` | `DRM_CXX_CURSOR` | auto | `drm::cursor` (libxcursor) |
 | `blend2d` | `DRM_CXX_BLEND2D` | auto | `drm::capture` + `drm::csd` (Blend2D) |
 | `thorvg_janitor` | `DRM_CXX_BUILD_THORVG_JANITOR` | auto | `thorvg_janitor` example (ThorVG) |
+| `camera` | `DRM_CXX_BUILD_CAMERA` | auto | `camera` example (libcamera + libyuv) |
 
-## Usage
+## Examples
 
-### Single header
+Examples are organized into four buckets under `examples/`:
 
-```cpp
-#include <drm-cxx/drm-cxx.hpp>
+```
+examples/
+├── basics/      — minimal LayerScene introductions and small one-feature demos
+├── scene/       — substantial LayerScene workloads
+├── allocator/   — pedagogical demos for individual planes::Allocator features
+└── advanced/    — demos that exercise non-scene modules (Vulkan, capture, cursor)
 ```
 
-### LayerScene
+Each example has its own README. Suggested reading order for new
+consumers:
 
-```cpp
-auto dev = drm::Device::open("/dev/dri/card0").value();
-dev.enable_universal_planes();
-dev.enable_atomic();
+1. **`basics/atomic_modeset/`** — the smallest possible scene
+   program. Single layer, one commit, exit on the first page-flip.
+2. **`basics/test_patterns/`** — a single-layer scene cycling
+   reference patterns from the keyboard. Demonstrates per-event
+   repaint without allocator churn.
+3. **`scene/layered_demo/`** — interactive mutation tour. Add /
+   remove / move / re-stack layers and watch the `CommitReport`.
+4. **`scene/signage_player/`** — playlist-driven five-layer signage
+   workload that exercises composition fallback, hotplug rebind, and
+   libseat pause/resume.
+5. **`scene/camera/`** — libcamera → KMS scanout viewfinder built on
+   `LayerScene`, with libyuv format-repack fallbacks.
+6. **`allocator/scene_warm_start/`**, **`scene_priority/`**,
+   **`scene_formats/`** — read these when you want to understand
+   *which* allocator behavior you're seeing in your own scene.
+7. **`allocator/overlay_planes/`** — the bare-minimum raw allocator
+   surface, when you need to drop below `LayerScene`.
 
-drm::scene::LayerScene::Config cfg{crtc_id, connector_id, mode};
-auto scene = drm::scene::LayerScene::create(dev, cfg).value();
-
-auto bg = drm::scene::DumbBufferSource::create(dev, w, h, DRM_FORMAT_ARGB8888).value();
-// ... fill bg->pixels() ...
-
-drm::scene::LayerDesc desc;
-desc.source = std::move(bg);
-desc.display.dst_rect = {0, 0, w, h};
-auto handle = scene->add_layer(std::move(desc)).value();
-
-auto report = scene->commit().value();
-// report.layers_assigned / layers_composited / layers_unassigned
-```
+## Other usage
 
 ### Raw plane allocation
 

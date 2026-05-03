@@ -1,8 +1,30 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
+#
+# Examples are organised into four buckets matching docs/scene.md:
+#
+#   basics/    — minimal LayerScene introductions and small one-feature demos.
+#   scene/     — substantial LayerScene workloads (the "sales deck" tier).
+#   allocator/ — pedagogical demos for individual planes::Allocator features.
+#   advanced/  — demos that exercise non-scene modules (Vulkan, capture, cursor).
+#
+# Common helpers (open_output, format_probe, vt_switch, select_*) live under
+# examples/common/ and are pulled in by sources via "../../common/foo.hpp".
 
-foreach(_ex atomic_modeset hotplug_monitor overlay_planes scene_warm_start scene_priority scene_formats layered_demo video_grid)
-  add_executable(${_ex} ${_ex}/main.cpp)
+# Single-source examples in basics/, scene/, and allocator/ that need
+# nothing beyond drm-cxx itself. Each entry is "<bucket>/<name>"; the
+# CMake target name is the basename.
+foreach(_path
+    basics/atomic_modeset
+    basics/hotplug_monitor
+    allocator/overlay_planes
+    allocator/scene_warm_start
+    allocator/scene_priority
+    allocator/scene_formats
+    scene/layered_demo
+    scene/video_grid)
+  get_filename_component(_ex ${_path} NAME)
+  add_executable(${_ex} ${_path}/main.cpp)
   target_link_libraries(${_ex} PRIVATE drm-cxx::drm-cxx)
   target_include_directories(${_ex} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
@@ -51,8 +73,8 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
                    APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_incs})
     endif()
     add_executable(camera
-      camera/main.cpp
-      camera/convert.cpp)
+      scene/camera/main.cpp
+      scene/camera/convert.cpp)
     target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera drm_cxx_libyuv)
     target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   else()
@@ -64,41 +86,41 @@ endif()
 
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
-add_executable(mouse_cursor mouse_cursor/main.cpp)
+add_executable(mouse_cursor basics/mouse_cursor/main.cpp)
 target_link_libraries(mouse_cursor PRIVATE drm-cxx::drm-cxx)
 target_include_directories(mouse_cursor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_executable(xcursor_smoke mouse_cursor/xcursor_smoke.cpp)
+add_executable(xcursor_smoke basics/mouse_cursor/xcursor_smoke.cpp)
 target_link_libraries(xcursor_smoke PRIVATE drm-cxx::drm-cxx)
 target_include_directories(xcursor_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # cursor_rotate — V2 hardware-validation harness for drm::cursor.
-add_executable(cursor_rotate cursor_rotate/main.cpp)
+add_executable(cursor_rotate advanced/cursor_rotate/main.cpp)
 target_link_libraries(cursor_rotate PRIVATE drm-cxx::drm-cxx)
 target_include_directories(cursor_rotate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # capture_demo — libinput-driven snapshot demo for drm::capture.
 # Only built when Blend2D is on (same gate as the library module it exercises).
 if(DRM_CXX_HAS_BLEND2D)
-  add_executable(capture_demo capture_demo/main.cpp)
+  add_executable(capture_demo advanced/capture_demo/main.cpp)
   target_link_libraries(capture_demo PRIVATE drm-cxx::drm-cxx)
   target_include_directories(capture_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 if(DRM_CXX_VULKAN)
-  add_executable(vulkan_display vulkan_display/main.cpp)
+  add_executable(vulkan_display advanced/vulkan_display/main.cpp)
   target_link_libraries(vulkan_display PRIVATE drm-cxx::drm-cxx)
   target_include_directories(vulkan_display PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
-# ThorVG Janitor example — scaffold only (see examples/thorvg_janitor/README.md).
+add_subdirectory(scene/signage_player)
+add_subdirectory(basics/test_patterns)
+
+# ThorVG Janitor example — scaffold only (see scene/thorvg_janitor/README.md).
 # AUTO = probe thorvg, build if found; ON = hard-require; OFF = skip entirely.
 set(DRM_CXX_BUILD_THORVG_JANITOR "AUTO" CACHE STRING
     "Build the ThorVG Janitor example: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_BUILD_THORVG_JANITOR PROPERTY STRINGS AUTO ON OFF)
-
-add_subdirectory(signage_player)
-add_subdirectory(test_patterns)
 
 if(NOT DRM_CXX_BUILD_THORVG_JANITOR STREQUAL "OFF")
   if(DRM_CXX_BUILD_THORVG_JANITOR STREQUAL "ON")
@@ -107,7 +129,7 @@ if(NOT DRM_CXX_BUILD_THORVG_JANITOR STREQUAL "OFF")
     pkg_check_modules(thorvg IMPORTED_TARGET thorvg-1>=1.0.4)
   endif()
   if(TARGET PkgConfig::thorvg)
-    add_subdirectory(thorvg_janitor)
+    add_subdirectory(scene/thorvg_janitor)
   else()
     message(STATUS
       "thorvg_janitor: thorvg not found, skipping "

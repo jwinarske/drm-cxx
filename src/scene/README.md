@@ -167,9 +167,9 @@ Spanning a logical scene across two physical CRTCs (dashboards, automotive multi
 
 ## Examples
 
-- **`examples/signage_player/`** — five-layer signage workload: GBM background, Blend2D overlay, scrolling ticker, clock, logo. Exercises composition fallback (gates optional layers on plane budget), `--hotplug-follow` mode swaps via `rebind()`, and libseat VT pause/resume. Hardware-validated on amdgpu.
-- **`examples/thorvg_janitor/`** — ThorVG `tvggame` ported onto the scene; a single full-screen GBM-backed layer driven by ThorVG's SW renderer.
-- **`examples/hotplug_monitor/`** — connector-id fast-path on top of `drm::display::HotplugMonitor` with an optional scene to verify rebind correctness across real hotplug events.
+- **`examples/scene/signage_player/`** — five-layer signage workload: GBM background, Blend2D overlay, scrolling ticker, clock, logo. Exercises composition fallback (gates optional layers on plane budget), `--hotplug-follow` mode swaps via `rebind()`, and libseat VT pause/resume. Hardware-validated on amdgpu.
+- **`examples/scene/thorvg_janitor/`** — ThorVG `tvggame` ported onto the scene; a single full-screen GBM-backed layer driven by ThorVG's SW renderer.
+- **`examples/basics/hotplug_monitor/`** — connector-id fast-path on top of `drm::display::HotplugMonitor` with an optional scene to verify rebind correctness across real hotplug events.
 
 ## Where to look in the code
 
