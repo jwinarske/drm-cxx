@@ -7,27 +7,46 @@ foreach(_ex atomic_modeset hotplug_monitor overlay_planes scene_warm_start scene
   target_include_directories(${_ex} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
 
-# camera — libcamera + libyuv are hard deps of this example only.
-# libyuv (which transitively pulls in libjpeg-turbo for its MJPGToNV12
-# path) handles the YUY2/MJPEG-to-NV12 fallback when zero-copy from a
-# camera into a scanout plane is unavailable. Their public headers go
+# camera — libcamera + libyuv are example-only deps. libyuv (which
+# transitively pulls in libjpeg-turbo for its MJPGToNV12 path) handles
+# the YUY2/MJPEG-to-NV12 fallback when zero-copy from a camera into a
+# scanout plane is unavailable. AUTO = probe and build if both found;
+# ON = hard-require; OFF = skip. Ubuntu 24.04 ships libcamera 0.2.0,
+# so AUTO silently skips on stock CI runners. Public headers go
 # through INTERFACE_SYSTEM_INCLUDE_DIRECTORIES so their warnings don't
 # trip our -Werror build (matches libseat / libxcursor / blend2d
 # treatment in src/CMakeLists.txt).
-pkg_check_modules(libcamera REQUIRED IMPORTED_TARGET libcamera>=0.3.0)
-pkg_check_modules(libyuv REQUIRED IMPORTED_TARGET libyuv)
-foreach(_dep libcamera libyuv)
-  get_target_property(_incs PkgConfig::${_dep} INTERFACE_INCLUDE_DIRECTORIES)
-  if(_incs)
-    set_property(TARGET PkgConfig::${_dep}
-                 APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_incs})
+set(DRM_CXX_BUILD_CAMERA "AUTO" CACHE STRING
+    "Build the camera example: AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_BUILD_CAMERA PROPERTY STRINGS AUTO ON OFF)
+
+if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
+  if(DRM_CXX_BUILD_CAMERA STREQUAL "ON")
+    pkg_check_modules(libcamera REQUIRED IMPORTED_TARGET libcamera>=0.3.0)
+    pkg_check_modules(libyuv REQUIRED IMPORTED_TARGET libyuv)
+  else()
+    pkg_check_modules(libcamera IMPORTED_TARGET libcamera>=0.3.0)
+    pkg_check_modules(libyuv IMPORTED_TARGET libyuv)
   endif()
-endforeach()
-add_executable(camera
-  camera/main.cpp
-  camera/convert.cpp)
-target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera PkgConfig::libyuv)
-target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  if(TARGET PkgConfig::libcamera AND TARGET PkgConfig::libyuv)
+    foreach(_dep libcamera libyuv)
+      get_target_property(_incs PkgConfig::${_dep} INTERFACE_INCLUDE_DIRECTORIES)
+      if(_incs)
+        set_property(TARGET PkgConfig::${_dep}
+                     APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_incs})
+      endif()
+    endforeach()
+    add_executable(camera
+      camera/main.cpp
+      camera/convert.cpp)
+    target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera PkgConfig::libyuv)
+    target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  else()
+    message(STATUS
+      "camera: libcamera>=0.3.0 or libyuv not found, skipping "
+      "(set DRM_CXX_BUILD_CAMERA=ON to hard-fail)")
+  endif()
+endif()
 
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
