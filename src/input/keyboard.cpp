@@ -11,6 +11,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -160,6 +161,15 @@ void Keyboard::process_key(KeyboardEvent& event) const {
                          sizeof(event.utf8));
 }
 
+bool Keyboard::should_repeat(uint32_t key) const noexcept {
+  if (keymap_ == nullptr) {
+    return false;
+  }
+  // xkbcommon uses evdev keycodes + 8.
+  xkb_keycode_t const keycode = key + 8;
+  return xkb_keymap_key_repeats(keymap_, keycode) != 0;
+}
+
 bool Keyboard::shift_active() const noexcept {
   if (state_ == nullptr) {
     return false;
@@ -190,6 +200,42 @@ bool Keyboard::super_active() const noexcept {
   }
   return xkb_state_mod_name_is_active(const_cast<struct xkb_state*>(state_), XKB_MOD_NAME_LOGO,
                                       XKB_STATE_MODS_EFFECTIVE) > 0;
+}
+
+bool Keyboard::caps_lock_active() const noexcept {
+  if (state_ == nullptr) {
+    return false;
+  }
+  return xkb_state_led_name_is_active(const_cast<struct xkb_state*>(state_), XKB_LED_NAME_CAPS) > 0;
+}
+
+bool Keyboard::num_lock_active() const noexcept {
+  if (state_ == nullptr) {
+    return false;
+  }
+  return xkb_state_led_name_is_active(const_cast<struct xkb_state*>(state_), XKB_LED_NAME_NUM) > 0;
+}
+
+bool Keyboard::scroll_lock_active() const noexcept {
+  if (state_ == nullptr) {
+    return false;
+  }
+  return xkb_state_led_name_is_active(const_cast<struct xkb_state*>(state_), XKB_LED_NAME_SCROLL) >
+         0;
+}
+
+KeyboardLeds Keyboard::leds_state() const noexcept {
+  KeyboardLeds out;
+  if (state_ == nullptr) {
+    return out;
+  }
+  out.caps_lock =
+      xkb_state_led_name_is_active(const_cast<struct xkb_state*>(state_), XKB_LED_NAME_CAPS) > 0;
+  out.num_lock =
+      xkb_state_led_name_is_active(const_cast<struct xkb_state*>(state_), XKB_LED_NAME_NUM) > 0;
+  out.scroll_lock =
+      xkb_state_led_name_is_active(const_cast<struct xkb_state*>(state_), XKB_LED_NAME_SCROLL) > 0;
+  return out;
 }
 
 }  // namespace drm::input

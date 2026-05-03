@@ -17,6 +17,7 @@ set(DRM_CXX_SOURCES
   planes/matching.cpp
   input/seat.cpp
   input/keyboard.cpp
+  input/key_repeater.cpp
   input/pointer.cpp
   input/event_dispatcher.cpp
   display/edid.cpp
@@ -219,6 +220,7 @@ install(FILES
 install(FILES
     input/seat.hpp
     input/keyboard.hpp
+    input/key_repeater.hpp
     input/pointer.hpp
     input/event_dispatcher.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/input)

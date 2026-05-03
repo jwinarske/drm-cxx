@@ -196,6 +196,54 @@ TEST(KeyboardTest, ModifierStateAfterKeyRelease) {
   EXPECT_FALSE(kb.shift_active());
 }
 
+TEST(KeyboardTest, CapsLockLatchesAndExposesLedState) {
+  auto kb_result = drm::input::Keyboard::create({{}, {}, "us"});
+  ASSERT_TRUE(kb_result.has_value());
+  auto& kb = *kb_result;
+
+  EXPECT_FALSE(kb.caps_lock_active());
+  EXPECT_FALSE(kb.leds_state().caps_lock);
+
+  // Press + release Caps Lock (KEY_CAPSLOCK = 58). xkb toggles the
+  // Lock modifier on press; release is a no-op for the latch.
+  drm::input::KeyboardEvent caps_down;
+  caps_down.key = 58;
+  caps_down.pressed = true;
+  kb.process_key(caps_down);
+  drm::input::KeyboardEvent caps_up;
+  caps_up.key = 58;
+  caps_up.pressed = false;
+  kb.process_key(caps_up);
+
+  EXPECT_TRUE(kb.caps_lock_active());
+  EXPECT_TRUE(kb.leds_state().caps_lock);
+  EXPECT_FALSE(kb.leds_state().num_lock);
+  EXPECT_FALSE(kb.leds_state().scroll_lock);
+
+  // 'a' now resolves to 'A' because the Lock modifier is effective.
+  drm::input::KeyboardEvent a_down;
+  a_down.key = 30;  // KEY_A
+  a_down.pressed = true;
+  kb.process_key(a_down);
+  EXPECT_STREQ(a_down.utf8, "A");
+
+  // A second toggle clears the latch.
+  drm::input::KeyboardEvent caps_down2 = caps_down;
+  drm::input::KeyboardEvent caps_up2 = caps_up;
+  kb.process_key(caps_down2);
+  kb.process_key(caps_up2);
+  EXPECT_FALSE(kb.caps_lock_active());
+  EXPECT_FALSE(kb.leds_state().caps_lock);
+}
+
+TEST(KeyboardTest, LedsStateEqualityDetectsTransitions) {
+  drm::input::KeyboardLeds const a;
+  drm::input::KeyboardLeds b;
+  EXPECT_EQ(a, b);
+  b.caps_lock = true;
+  EXPECT_NE(a, b);
+}
+
 // ── Seat tests ────────────────────────────────────────────────
 
 TEST(SeatTest, OpenWithInvalidSeatFails) {

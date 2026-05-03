@@ -3,11 +3,15 @@
 
 #include "seat.hpp"
 
+#include "keyboard.hpp"
+
 #include <drm-cxx/detail/expected.hpp>
 
 #include <libinput.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <fcntl.h>
 #include <libudev.h>
 #include <memory>
@@ -61,6 +65,10 @@ const struct libinput_interface li_interface = {
 }  // namespace
 
 Seat::~Seat() {
+  for (void* p : keyboard_devices_) {
+    libinput_device_unref(static_cast<libinput_device*>(p));
+  }
+  keyboard_devices_.clear();
   if (li_ != nullptr) {
     libinput_unref(li(li_));
   }
@@ -74,6 +82,8 @@ Seat::Seat(Seat&& other) noexcept
       udev_(other.udev_),
       handler_(std::move(other.handler_)),
       opener_(std::move(other.opener_)),
+      keyboard_devices_(std::move(other.keyboard_devices_)),
+      last_leds_(other.last_leds_),
       fd_(other.fd_) {
   other.li_ = nullptr;
   other.udev_ = nullptr;
@@ -82,6 +92,10 @@ Seat::Seat(Seat&& other) noexcept
 
 Seat& Seat::operator=(Seat&& other) noexcept {
   if (this != &other) {
+    for (void* p : keyboard_devices_) {
+      libinput_device_unref(static_cast<libinput_device*>(p));
+    }
+    keyboard_devices_.clear();
     if (li_ != nullptr) {
       libinput_unref(li(li_));
     }
@@ -93,6 +107,8 @@ Seat& Seat::operator=(Seat&& other) noexcept {
     udev_ = other.udev_;
     handler_ = std::move(other.handler_);
     opener_ = std::move(other.opener_);
+    keyboard_devices_ = std::move(other.keyboard_devices_);
+    last_leds_ = other.last_leds_;
     fd_ = other.fd_;
 
     other.li_ = nullptr;
@@ -178,14 +194,80 @@ drm::expected<void, std::error_code> Seat::resume() {
   return {};
 }
 
-void Seat::process_events() {
-  if (!handler_) {
-    return;
+void Seat::update_keyboard_leds(KeyboardLeds leds) {
+  last_leds_ = leds;
+  std::uint32_t mask = 0;
+  if (leds.caps_lock) {
+    mask |= LIBINPUT_LED_CAPS_LOCK;
   }
+  if (leds.num_lock) {
+    mask |= LIBINPUT_LED_NUM_LOCK;
+  }
+  if (leds.scroll_lock) {
+    mask |= LIBINPUT_LED_SCROLL_LOCK;
+  }
+  for (void* p : keyboard_devices_) {
+    // libinput_led is a bitmask enum; OR'd combinations aren't single
+    // enumerators, so the analyzer's range check fires spuriously.
+    // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+    auto led_mask = static_cast<libinput_led>(mask);
+    libinput_device_led_update(static_cast<libinput_device*>(p), led_mask);
+  }
+}
 
+void Seat::process_events() {
   struct libinput_event* ev = nullptr;
   while ((ev = libinput_get_event(li(li_))) != nullptr) {
     auto type = libinput_event_get_type(ev);
+
+    // Device add/remove tracking happens regardless of whether a user
+    // event handler is set, so update_keyboard_leds() works even when
+    // the caller hasn't installed a handler yet.
+    if (type == LIBINPUT_EVENT_DEVICE_ADDED) {
+      auto* dev = libinput_event_get_device(ev);
+      if (dev != nullptr &&
+          libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_KEYBOARD) != 0) {
+        libinput_device_ref(dev);
+        keyboard_devices_.push_back(dev);
+        // Re-apply the last known LED state so a hotplugged keyboard
+        // (or the post-VT-switch resume that re-adds every device)
+        // matches the xkb state instead of coming up dark.
+        if (last_leds_.has_value()) {
+          std::uint32_t mask = 0;
+          if (last_leds_->caps_lock) {
+            mask |= LIBINPUT_LED_CAPS_LOCK;
+          }
+          if (last_leds_->num_lock) {
+            mask |= LIBINPUT_LED_NUM_LOCK;
+          }
+          if (last_leds_->scroll_lock) {
+            mask |= LIBINPUT_LED_SCROLL_LOCK;
+          }
+          // See update_keyboard_leds() for the bitmask-enum NOLINT rationale.
+          // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+          auto led_mask = static_cast<libinput_led>(mask);
+          libinput_device_led_update(dev, led_mask);
+        }
+      }
+      libinput_event_destroy(ev);
+      continue;
+    }
+    if (type == LIBINPUT_EVENT_DEVICE_REMOVED) {
+      auto* dev = libinput_event_get_device(ev);
+      auto it =
+          std::find(keyboard_devices_.begin(), keyboard_devices_.end(), static_cast<void*>(dev));
+      if (it != keyboard_devices_.end()) {
+        libinput_device_unref(static_cast<libinput_device*>(*it));
+        keyboard_devices_.erase(it);
+      }
+      libinput_event_destroy(ev);
+      continue;
+    }
+
+    if (!handler_) {
+      libinput_event_destroy(ev);
+      continue;
+    }
 
     switch (type) {
       case LIBINPUT_EVENT_KEYBOARD_KEY: {

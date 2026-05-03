@@ -116,6 +116,24 @@ endif()
 add_subdirectory(scene/signage_player)
 add_subdirectory(basics/test_patterns)
 
+# keyboard — interactive keyboard-input + Unicode-entry demo.
+# Default OFF because the configure step downloads Noto Sans, which
+# does not work in sandboxed builds (Yocto, OE, distro packagers).
+# Set DRM_CXX_BUILD_KEYBOARD=ON when network access is available
+# at configure time and Blend2D is present.
+set(DRM_CXX_BUILD_KEYBOARD "OFF" CACHE STRING
+    "Build the keyboard demo (downloads Noto Sans at configure time): ON or OFF")
+set_property(CACHE DRM_CXX_BUILD_KEYBOARD PROPERTY STRINGS ON OFF)
+
+if(DRM_CXX_BUILD_KEYBOARD)
+  if(NOT DRM_CXX_HAS_BLEND2D)
+    message(FATAL_ERROR
+      "keyboard demo needs Blend2D (DRM_CXX_BLEND2D=ON); "
+      "set DRM_CXX_BUILD_KEYBOARD=OFF to skip.")
+  endif()
+  add_subdirectory(basics/keyboard)
+endif()
+
 # ThorVG Janitor example — scaffold only (see scene/thorvg_janitor/README.md).
 # AUTO = probe thorvg, build if found; ON = hard-require; OFF = skip entirely.
 set(DRM_CXX_BUILD_THORVG_JANITOR "AUTO" CACHE STRING
