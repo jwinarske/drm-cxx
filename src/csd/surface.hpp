@@ -57,7 +57,7 @@ struct SurfaceConfig {
 };
 
 /// Which buffer-allocation path produced this Surface. Mostly a
-/// diagnostic — callers select behaviour from the public accessors
+/// diagnostic — callers select behavior from the public accessors
 /// (fb_id, paint, dma_buf_fd), not from the backing tag. Undefined when
 /// the Surface is empty().
 enum class SurfaceBacking : std::uint8_t {
