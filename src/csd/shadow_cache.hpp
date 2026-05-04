@@ -78,15 +78,15 @@ class ShadowCache {
   // session, doubled for blurred/focused per window. Larger sessions
   // pay only per-eviction recompute cost (single-shot blur, ~5 ms at
   // 800×600 on a modern x86 host).
-  static constexpr std::size_t kDefaultCapacity = 8;
+  static constexpr std::size_t k_default_capacity = 8;
 
-  explicit ShadowCache(std::size_t capacity = kDefaultCapacity);
+  explicit ShadowCache(std::size_t capacity = k_default_capacity);
   ~ShadowCache();
 
   ShadowCache(const ShadowCache&) = delete;
   ShadowCache& operator=(const ShadowCache&) = delete;
-  ShadowCache(ShadowCache&&) noexcept;
-  ShadowCache& operator=(ShadowCache&&) noexcept;
+  ShadowCache(ShadowCache&& other) noexcept;
+  ShadowCache& operator=(ShadowCache&& other) noexcept;
 
   // Look up (or compute on miss) the shadow for `key` rendered with
   // `theme` and SRC_OVER-blend it into `dst`. The destination region

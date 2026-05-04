@@ -3,6 +3,8 @@
 
 #include "shadow_cache.hpp"
 
+#include "theme.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -21,7 +23,8 @@ namespace {
 constexpr std::uint64_t k_fnv_offset = 0xCBF29CE484222325ULL;
 constexpr std::uint64_t k_fnv_prime = 0x100000001B3ULL;
 
-std::uint64_t fnv1a(const void* data, std::size_t bytes, std::uint64_t seed = k_fnv_offset) noexcept {
+std::uint64_t fnv1a(const void* data, std::size_t bytes,
+                    std::uint64_t seed = k_fnv_offset) noexcept {
   const auto* p = static_cast<const std::uint8_t*>(data);
   std::uint64_t h = seed;
   for (std::size_t i = 0; i < bytes; ++i) {
@@ -286,13 +289,13 @@ struct ShadowCache::Impl {
   using List = std::list<CacheEntry>;
   using Map = std::unordered_map<ShadowKey, List::iterator, KeyHash>;
 
-  std::size_t capacity{ShadowCache::kDefaultCapacity};
+  std::size_t capacity{ShadowCache::k_default_capacity};
   List order;  // front = most recently used.
   Map index;
 };
 
 ShadowCache::ShadowCache(std::size_t capacity) : impl_(new Impl{}) {
-  impl_->capacity = capacity == 0 ? kDefaultCapacity : capacity;
+  impl_->capacity = capacity == 0 ? ShadowCache::k_default_capacity : capacity;
 }
 
 ShadowCache::~ShadowCache() {
@@ -367,7 +370,8 @@ bool ShadowCache::blit_into(const ShadowKey& key, const Theme& theme, const Shad
   const std::uint32_t copy_w = std::min(dst.width, key.width);
   const std::uint32_t copy_h = std::min(dst.height, key.height);
   for (std::uint32_t y = 0; y < copy_h; ++y) {
-    const std::uint8_t* src_row = entry.pixels.data() + (static_cast<std::size_t>(y) * key.width * 4U);
+    const std::uint8_t* src_row =
+        entry.pixels.data() + (static_cast<std::size_t>(y) * key.width * 4U);
     std::uint8_t* dst_row = dst.pixels + (static_cast<std::size_t>(y) * dst.stride);
     for (std::uint32_t x = 0; x < copy_w; ++x) {
       const std::uint8_t* sp = src_row + (static_cast<std::size_t>(x) * 4U);

@@ -36,22 +36,23 @@ enum class HoverButton : std::uint8_t {
   Maximize,
 };
 
-// Bitfield for renderer's partial-redraw tracking. V1 always paints
-// kDirtyAll; the named bits are here so the shell can already write
-// the right value when the partial-redraw pass lands.
-enum DirtyBit : std::uint32_t {
-  kDirtyTitle = 1U << 0U,
-  kDirtyFocus = 1U << 1U,
-  kDirtyHover = 1U << 2U,
-  kDirtyGeometry = 1U << 3U,
-  kDirtyAll = ~0U,
-};
+// Bitfield masks for WindowState::dirty. V1 always paints k_dirty_all;
+// the named bits are here so the shell can already write the right
+// value when the partial-redraw pass lands. Plain constexpr (not enum
+// class) because the field is a uint32_t and the typical use is
+// `state.dirty |= k_dirty_focus` — no scoping value over the noise of
+// per-call casts to / from the underlying type.
+inline constexpr std::uint32_t k_dirty_title = 1U << 0U;
+inline constexpr std::uint32_t k_dirty_focus = 1U << 1U;
+inline constexpr std::uint32_t k_dirty_hover = 1U << 2U;
+inline constexpr std::uint32_t k_dirty_geometry = 1U << 3U;
+inline constexpr std::uint32_t k_dirty_all = ~0U;
 
 struct WindowState {
   std::string title;
   bool focused{false};
   HoverButton hover{HoverButton::None};
-  std::uint32_t dirty{kDirtyAll};
+  std::uint32_t dirty{k_dirty_all};
 };
 
 }  // namespace drm::csd

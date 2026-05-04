@@ -5,6 +5,8 @@
 
 #include "../log.hpp"
 
+#include <drm-cxx/detail/expected.hpp>
+
 // Blend2D's header layout differs across distros (Fedora puts it under
 // blend2d/, some older Debians at the top level). Mirror the same
 // __has_include guard + NOLINT used in capture/snapshot.cpp; when
@@ -22,9 +24,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <string>
-#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -61,8 +61,7 @@ bool load_font_face(const RendererConfig& cfg, BLFontFace& out) {
     if (out.create_from_file(cfg.font_path.c_str()) == BL_SUCCESS) {
       return true;
     }
-    drm::log_warn("csd::Renderer: font_path '{}' failed to load; falling back",
-                  cfg.font_path);
+    drm::log_warn("csd::Renderer: font_path '{}' failed to load; falling back", cfg.font_path);
   }
   if (!cfg.try_system_font) {
     return false;
@@ -72,8 +71,9 @@ bool load_font_face(const RendererConfig& cfg, BLFontFace& out) {
       return true;
     }
   }
-  drm::log_warn("csd::Renderer: no system font found in well-known paths; "
-                "title text will be skipped");
+  drm::log_warn(
+      "csd::Renderer: no system font found in well-known paths; "
+      "title text will be skipped");
   return false;
 }
 
@@ -81,9 +81,9 @@ bool load_font_face(const RendererConfig& cfg, BLFontFace& out) {
 // by a fixed constant keeps the pattern reproducible across runs (and
 // across processes — useful for golden-image diffs).
 BLImage make_noise_tile() {
-  constexpr int kTile = 64;
+  constexpr int k_tile = 64;
   BLImage img;
-  if (img.create(kTile, kTile, BL_FORMAT_PRGB32) != BL_SUCCESS) {
+  if (img.create(k_tile, k_tile, BL_FORMAT_PRGB32) != BL_SUCCESS) {
     return img;
   }
   BLImageData data{};
@@ -97,11 +97,11 @@ BLImage make_noise_tile() {
     s = (s * 1664525U) + 1013904223U;
     return s;
   };
-  for (int y = 0; y < kTile; ++y) {
+  for (int y = 0; y < k_tile; ++y) {
     auto* row = static_cast<std::uint8_t*>(data.pixel_data) +
                 (static_cast<std::ptrdiff_t>(y) * data.stride);
-    for (int x = 0; x < kTile; ++x) {
-      const std::uint8_t v = static_cast<std::uint8_t>(next() & 0xFFU);
+    for (int x = 0; x < k_tile; ++x) {
+      const auto v = static_cast<std::uint8_t>(next() & 0xFFU);
       // PRGB32 layout: BGRA bytes, fully opaque grayscale tile. The
       // renderer multiplies this in via BL_COMP_OP_MULTIPLY at the
       // amplitude the theme requests.
@@ -126,11 +126,12 @@ constexpr double k_button_right_pad = 10.0;
 constexpr int k_button_count = 3;
 
 double button_strip_width() noexcept {
-  return (k_button_count * (2.0 * k_button_radius)) +
-         ((k_button_count - 1) * k_button_gap) + k_button_right_pad;
+  return (k_button_count * (2.0 * k_button_radius)) + ((k_button_count - 1) * k_button_gap) +
+         k_button_right_pad;
 }
 
-void draw_button(BLContext& ctx, double cx, double cy, BLRgba32 fill, BLRgba32 hover, bool is_hover) {
+void draw_button(BLContext& ctx, double cx, double cy, BLRgba32 fill, BLRgba32 hover,
+                 bool is_hover) {
   // Radial gradient: a touch lighter at the top-left, theme color at
   // the bottom-right. Gives the button a faux-spherical highlight.
   const BLRgba32 top = is_hover ? hover : fill;
@@ -143,9 +144,8 @@ void draw_button(BLContext& ctx, double cx, double cy, BLRgba32 fill, BLRgba32 h
   ctx.stroke_circle(BLCircle(cx, cy, k_button_radius - 0.5), BLRgba32(0x33000000U));
 }
 
-void draw_glass(BLImage& target, const Theme& theme, const WindowState& state,
-                ShadowCache& shadows, BLFontFace& font_face, BLImage& noise_tile,
-                bool has_font) {
+void draw_glass(BLImage& target, const Theme& theme, const WindowState& state, ShadowCache& shadows,
+                BLFontFace& font_face, BLImage& noise_tile, bool has_font) {
   const int w = target.width();
   const int h = target.height();
   if (w <= 0 || h <= 0) {
@@ -171,8 +171,8 @@ void draw_glass(BLImage& target, const Theme& theme, const WindowState& state,
       dst.width = static_cast<std::uint32_t>(w);
       dst.height = static_cast<std::uint32_t>(h);
       const Elevation elev = state.focused ? Elevation::Focused : Elevation::Blurred;
-      ShadowKey k{static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), elev,
-                  theme_id(theme)};
+      const ShadowKey k{static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), elev,
+                        theme_id(theme)};
       shadows.blit_into(k, theme, dst);
     }
   }
@@ -235,8 +235,8 @@ void draw_glass(BLImage& target, const Theme& theme, const WindowState& state,
       // Vertically center within the title bar; horizontally inset
       // from the left edge.
       const double tx = panel_x + 12.0;
-      const double ty = panel_y + (theme.title_bar.height * 0.5) +
-                        (theme.title_bar.font_size * 0.35);
+      const double ty =
+          panel_y + (theme.title_bar.height * 0.5) + (theme.title_bar.font_size * 0.35);
       // 2-pass shadow: dark below, then the actual text on top. Keeps
       // light titles legible against the translucent panel.
       ctx.fill_utf8_text(BLPoint(tx + 1.0, ty + 1.0), font, state.title.data(), state.title.size(),
@@ -269,8 +269,8 @@ void draw_glass(BLImage& target, const Theme& theme, const WindowState& state,
 
   // ── Step 8: rim ──────────────────────────────────────────
   {
-    const BLRgba32 rim = state.focused ? to_bl(theme.colors.rim_focused)
-                                       : to_bl(theme.colors.rim_blurred);
+    const BLRgba32 rim =
+        state.focused ? to_bl(theme.colors.rim_focused) : to_bl(theme.colors.rim_blurred);
     ctx.set_stroke_width(1.0);
     // Inner stroke: inset by 0.5 px so the rim sits on the panel
     // pixels rather than straddling them.

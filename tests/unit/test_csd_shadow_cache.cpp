@@ -8,8 +8,10 @@
 #include <drm-cxx/csd/shadow_cache.hpp>
 #include <drm-cxx/csd/theme.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <utility>
 #include <vector>
 
 using drm::csd::Elevation;
@@ -54,14 +56,14 @@ TEST(CsdShadowCacheThemeId, StableAcrossRebuilds) {
 }
 
 TEST(CsdShadowCacheThemeId, DiffersOnColorChange) {
-  Theme a = drm::csd::glass_default_theme();
+  const Theme& a = drm::csd::glass_default_theme();
   Theme b = a;
   b.colors.shadow.r ^= 0x01U;
   EXPECT_NE(theme_id(a), theme_id(b));
 }
 
 TEST(CsdShadowCacheThemeId, IgnoresName) {
-  Theme a = drm::csd::glass_default_theme();
+  const Theme& a = drm::csd::glass_default_theme();
   Theme b = a;
   b.name = "renamed";
   EXPECT_EQ(theme_id(a), theme_id(b));
@@ -69,14 +71,14 @@ TEST(CsdShadowCacheThemeId, IgnoresName) {
 
 TEST(CsdShadowCacheThemeId, IgnoresAnimationDuration) {
   // animation_duration_ms doesn't affect the rasterized shadow.
-  Theme a = drm::csd::glass_default_theme();
+  const Theme& a = drm::csd::glass_default_theme();
   Theme b = a;
   b.animation_duration_ms += 100;
   EXPECT_EQ(theme_id(a), theme_id(b));
 }
 
 TEST(CsdShadowCacheThemeId, DiffersOnShadowExtentChange) {
-  Theme a = drm::csd::glass_default_theme();
+  const Theme& a = drm::csd::glass_default_theme();
   Theme b = a;
   b.shadow_extent += 1;
   EXPECT_NE(theme_id(a), theme_id(b));
@@ -85,26 +87,26 @@ TEST(CsdShadowCacheThemeId, DiffersOnShadowExtentChange) {
 // ── ShadowCache lifecycle ───────────────────────────────────────
 
 TEST(CsdShadowCache, DefaultCapacityIsEightWhenZeroRequested) {
-  ShadowCache c(0);
-  EXPECT_EQ(c.capacity(), ShadowCache::kDefaultCapacity);
+  const ShadowCache c(0);
+  EXPECT_EQ(c.capacity(), ShadowCache::k_default_capacity);
   EXPECT_EQ(c.size(), 0U);
 }
 
 TEST(CsdShadowCache, RespectsExplicitCapacity) {
-  ShadowCache c(3);
+  const ShadowCache c(3);
   EXPECT_EQ(c.capacity(), 3U);
 }
 
 TEST(CsdShadowCache, MoveCtorTransfersState) {
   ShadowCache a(4);
-  ShadowCache b(std::move(a));
+  const ShadowCache b(std::move(a));
   EXPECT_EQ(b.capacity(), 4U);
 }
 
 TEST(CsdShadowCache, ClearEmptiesIndex) {
   ShadowCache c(4);
   const Theme& t = drm::csd::glass_default_theme();
-  ShadowKey k{64, 64, Elevation::Focused, theme_id(t)};
+  const ShadowKey k{64, 64, Elevation::Focused, theme_id(t)};
   auto buf = make_dest(64, 64);
   ASSERT_TRUE(c.blit_into(k, t, dest_view(buf, 64, 64)));
   EXPECT_EQ(c.size(), 1U);
@@ -119,23 +121,23 @@ TEST(CsdShadowCacheBlit, RejectsZeroSizedKey) {
   ShadowCache c;
   const Theme& t = drm::csd::glass_default_theme();
   auto buf = make_dest(16, 16);
-  EXPECT_FALSE(c.blit_into(ShadowKey{0, 16, Elevation::Focused, theme_id(t)}, t,
-                           dest_view(buf, 16, 16)));
-  EXPECT_FALSE(c.blit_into(ShadowKey{16, 0, Elevation::Focused, theme_id(t)}, t,
-                           dest_view(buf, 16, 16)));
+  EXPECT_FALSE(
+      c.blit_into(ShadowKey{0, 16, Elevation::Focused, theme_id(t)}, t, dest_view(buf, 16, 16)));
+  EXPECT_FALSE(
+      c.blit_into(ShadowKey{16, 0, Elevation::Focused, theme_id(t)}, t, dest_view(buf, 16, 16)));
 }
 
 TEST(CsdShadowCacheBlit, RejectsNullDest) {
   ShadowCache c;
   const Theme& t = drm::csd::glass_default_theme();
-  ShadowDest d{};
+  const ShadowDest d{};
   EXPECT_FALSE(c.blit_into(ShadowKey{16, 16, Elevation::Focused, theme_id(t)}, t, d));
 }
 
 TEST(CsdShadowCacheBlit, FirstCallPopulatesAlpha) {
   ShadowCache c;
   const Theme& t = drm::csd::glass_default_theme();
-  ShadowKey k{96, 96, Elevation::Focused, theme_id(t)};
+  const ShadowKey k{96, 96, Elevation::Focused, theme_id(t)};
   auto buf = make_dest(96, 96);
   ASSERT_TRUE(c.blit_into(k, t, dest_view(buf, 96, 96)));
   EXPECT_GT(alpha_sum(buf), 0U);  // soft halo wrote some alpha into the buffer
@@ -146,7 +148,7 @@ TEST(CsdShadowCacheBlit, FirstCallPopulatesAlpha) {
 TEST(CsdShadowCacheBlit, SecondCallIsCacheHit) {
   ShadowCache c;
   const Theme& t = drm::csd::glass_default_theme();
-  ShadowKey k{96, 96, Elevation::Focused, theme_id(t)};
+  const ShadowKey k{96, 96, Elevation::Focused, theme_id(t)};
 
   auto buf1 = make_dest(96, 96);
   ASSERT_TRUE(c.blit_into(k, t, dest_view(buf1, 96, 96)));
@@ -161,8 +163,8 @@ TEST(CsdShadowCacheBlit, SecondCallIsCacheHit) {
 TEST(CsdShadowCacheBlit, FocusedAndBlurredAreDistinctEntries) {
   ShadowCache c;
   const Theme& t = drm::csd::glass_default_theme();
-  ShadowKey kf{96, 96, Elevation::Focused, theme_id(t)};
-  ShadowKey kb{96, 96, Elevation::Blurred, theme_id(t)};
+  const ShadowKey kf{96, 96, Elevation::Focused, theme_id(t)};
+  const ShadowKey kb{96, 96, Elevation::Blurred, theme_id(t)};
 
   auto buf_f = make_dest(96, 96);
   auto buf_b = make_dest(96, 96);
@@ -180,9 +182,9 @@ TEST(CsdShadowCacheBlit, EvictsOldestPastCapacity) {
   const Theme& t = drm::csd::glass_default_theme();
   const auto tid = theme_id(t);
 
-  ShadowKey ka{64, 64, Elevation::Focused, tid};
-  ShadowKey kb{72, 72, Elevation::Focused, tid};
-  ShadowKey kc{80, 80, Elevation::Focused, tid};
+  const ShadowKey ka{64, 64, Elevation::Focused, tid};
+  const ShadowKey kb{72, 72, Elevation::Focused, tid};
+  const ShadowKey kc{80, 80, Elevation::Focused, tid};
 
   auto buf = make_dest(96, 96);
   ASSERT_TRUE(c.blit_into(ka, t, dest_view(buf, 64, 64)));
@@ -203,9 +205,9 @@ TEST(CsdShadowCacheBlit, LruRefreshKeepsRecentlyUsedEntry) {
   const Theme& t = drm::csd::glass_default_theme();
   const auto tid = theme_id(t);
 
-  ShadowKey ka{64, 64, Elevation::Focused, tid};
-  ShadowKey kb{72, 72, Elevation::Focused, tid};
-  ShadowKey kc{80, 80, Elevation::Focused, tid};
+  const ShadowKey ka{64, 64, Elevation::Focused, tid};
+  const ShadowKey kb{72, 72, Elevation::Focused, tid};
+  const ShadowKey kc{80, 80, Elevation::Focused, tid};
 
   auto buf = make_dest(96, 96);
   ASSERT_TRUE(c.blit_into(ka, t, dest_view(buf, 64, 64)));
@@ -223,7 +225,7 @@ TEST(CsdShadowCacheBlit, LruRefreshKeepsRecentlyUsedEntry) {
 TEST(CsdShadowCacheBlit, ZeroExtentProducesTransparent) {
   ShadowCache c;
   const Theme& t = drm::csd::glass_minimal_theme();  // shadow_extent == 0
-  ShadowKey k{64, 64, Elevation::Focused, theme_id(t)};
+  const ShadowKey k{64, 64, Elevation::Focused, theme_id(t)};
   auto buf = make_dest(64, 64);
   ASSERT_TRUE(c.blit_into(k, t, dest_view(buf, 64, 64)));
   // Shadow color in glass-minimal is transparent (alpha 0); the blur
@@ -235,7 +237,7 @@ TEST(CsdShadowCacheBlit, ZeroExtentProducesTransparent) {
 TEST(CsdShadowCacheBlit, SmallerDestClipsRatherThanCrashes) {
   ShadowCache c;
   const Theme& t = drm::csd::glass_default_theme();
-  ShadowKey k{96, 96, Elevation::Focused, theme_id(t)};
+  const ShadowKey k{96, 96, Elevation::Focused, theme_id(t)};
   // 32×32 destination but a 96×96 cached patch — should clip cleanly.
   auto buf = make_dest(32, 32);
   ASSERT_TRUE(c.blit_into(k, t, dest_view(buf, 32, 32)));

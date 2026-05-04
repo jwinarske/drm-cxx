@@ -11,15 +11,16 @@
 #include <drm-cxx/csd/theme.hpp>
 #include <drm-cxx/csd/window_state.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <utility>
 #include <vector>
 
 using drm::csd::HoverButton;
 using drm::csd::Renderer;
 using drm::csd::RendererConfig;
 using drm::csd::ShadowCache;
-using drm::csd::Theme;
 using drm::csd::WindowState;
 
 namespace {
@@ -38,19 +39,18 @@ struct Canvas {
         pixels(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4U, 0U) {}
 
   drm::BufferMapping view(drm::MapAccess access = drm::MapAccess::ReadWrite) {
-    return drm::BufferMapping(pixels.data(), pixels.size(), width * 4U, width, height, access,
-                              nullptr, nullptr);
+    return {pixels.data(), pixels.size(), width * 4U, width, height, access, nullptr, nullptr};
   }
 
   // Read alpha at (x, y). Layout is PRGB32 (BGRA bytes on LE).
-  std::uint8_t alpha_at(std::uint32_t x, std::uint32_t y) const {
+  [[nodiscard]] std::uint8_t alpha_at(std::uint32_t x, std::uint32_t y) const {
     const std::size_t off = ((static_cast<std::size_t>(y) * width) + x) * 4U;
     return pixels[off + 3U];
   }
 
   // Read packed 0xAARRGGBB at (x, y). Useful for "did *any* color
   // land here" checks rather than per-channel decomposition.
-  std::uint32_t packed_at(std::uint32_t x, std::uint32_t y) const {
+  [[nodiscard]] std::uint32_t packed_at(std::uint32_t x, std::uint32_t y) const {
     const std::size_t off = ((static_cast<std::size_t>(y) * width) + x) * 4U;
     return (static_cast<std::uint32_t>(pixels[off + 3U]) << 24U) |
            (static_cast<std::uint32_t>(pixels[off + 2U]) << 16U) |
@@ -64,7 +64,7 @@ struct Canvas {
 // ── Construction ────────────────────────────────────────────────
 
 TEST(CsdRenderer, ConstructWithDefaultsDoesNotCrash) {
-  Renderer r;
+  const Renderer r;
   // has_font may be true or false depending on whether the host has
   // any of the well-known font paths available — both are valid.
   (void)r.has_font();
@@ -73,13 +73,13 @@ TEST(CsdRenderer, ConstructWithDefaultsDoesNotCrash) {
 TEST(CsdRenderer, NoSystemFontMeansNoFont) {
   RendererConfig cfg;
   cfg.try_system_font = false;
-  Renderer r(std::move(cfg));
+  const Renderer r(std::move(cfg));
   EXPECT_FALSE(r.has_font());
 }
 
 TEST(CsdRenderer, MoveCtorWorks) {
   Renderer a;
-  Renderer b(std::move(a));
+  const Renderer b(std::move(a));
   (void)b.has_font();
 }
 
@@ -118,8 +118,7 @@ TEST(CsdRendererDraw, CornerPixelsStayTransparentBeyondShadow) {
   ShadowCache cache;
   Canvas c(64, 64);
   auto map = c.view();
-  ASSERT_TRUE(
-      r.draw(drm::csd::glass_minimal_theme(), WindowState{}, map, cache).has_value());
+  ASSERT_TRUE(r.draw(drm::csd::glass_minimal_theme(), WindowState{}, map, cache).has_value());
 
   EXPECT_EQ(c.alpha_at(0, 0), 0U);
   EXPECT_EQ(c.alpha_at(c.width - 1, 0), 0U);
@@ -164,7 +163,7 @@ TEST(CsdRendererDraw, FocusedAndBlurredDifferAtRim) {
   // differ between focused and blurred. Sample a row near the top of
   // the panel (inside the shadow margin so it lands on the rim).
   const auto& theme = drm::csd::glass_default_theme();
-  const std::uint32_t rim_y = static_cast<std::uint32_t>(theme.shadow_extent);
+  const auto rim_y = static_cast<std::uint32_t>(theme.shadow_extent);
   bool any_diff = false;
   for (std::uint32_t x = 0; x < focused.width; ++x) {
     if (focused.packed_at(x, rim_y) != blurred.packed_at(x, rim_y)) {
