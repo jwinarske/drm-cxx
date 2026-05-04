@@ -125,6 +125,14 @@ class PlaneRegistry {
  public:
   static drm::expected<PlaneRegistry, std::error_code> enumerate(const Device& dev);
 
+  // Build a registry directly from a caller-supplied capability list.
+  // Used by synthetic-source consumers (notably unit tests for helpers
+  // that take a `const PlaneRegistry&`) and by replay/snapshot tools
+  // that have a serialized capability set rather than a live device.
+  // The resulting registry behaves identically to one returned by
+  // `enumerate` — `all()` and `for_crtc()` see the supplied entries.
+  static PlaneRegistry from_capabilities(std::vector<PlaneCapabilities> caps);
+
   // Copying would invalidate the for_crtc cache (its pointers would
   // dangle into the source's `planes_`), and the enumerate-then-move
   // construction pattern is the only consumer; explicit delete keeps

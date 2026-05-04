@@ -47,7 +47,8 @@ if(DRM_CXX_HAS_BLEND2D)
     test_csd_theme
     test_csd_surface
     test_csd_shadow_cache
-    test_csd_renderer)
+    test_csd_renderer
+    test_csd_overlay_reservation)
 endif()
 
 foreach(_t ${DRM_CXX_TESTS})

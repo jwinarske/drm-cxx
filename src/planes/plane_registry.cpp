@@ -255,6 +255,12 @@ drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
   return registry;
 }
 
+PlaneRegistry PlaneRegistry::from_capabilities(std::vector<PlaneCapabilities> caps) {
+  PlaneRegistry registry;
+  registry.planes_ = std::move(caps);
+  return registry;
+}
+
 drm::span<const PlaneCapabilities> PlaneRegistry::all() const noexcept {
   return planes_;
 }
