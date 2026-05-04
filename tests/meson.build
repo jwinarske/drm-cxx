@@ -76,6 +76,13 @@ test('test_input',
   ),
 )
 
+test('test_key_repeater',
+  executable('test_key_repeater',
+    'unit/test_key_repeater.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_mode',
   executable('test_mode',
     'unit/test_mode.cpp',

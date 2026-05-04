@@ -27,6 +27,7 @@ set(DRM_CXX_TESTS
   test_output
   test_plane_allocator
   test_input
+  test_key_repeater
   test_mode
   test_display
   test_gbm

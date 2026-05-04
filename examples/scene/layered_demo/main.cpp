@@ -33,6 +33,8 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/input/key_repeater.hpp>
+#include <drm-cxx/input/keyboard.hpp>
 #include <drm-cxx/input/seat.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
@@ -106,8 +108,8 @@ void fill_argb_rect(drm::span<std::uint8_t> pixels, std::uint32_t stride_bytes, 
 
 // Soft horizontal+vertical gradient for the background. Pure XRGB so
 // the byte-order check and the "did we reach scanout" check both come
-// for free — a wrong-channel write would tint the gradient obviously.
-void paint_bg_gradient(drm::BufferMapping& map) noexcept {
+// for free — a wrong-channel `write` would tint the gradient.
+void paint_bg_gradient(drm::BufferMapping const& map) noexcept {
   const auto width = map.width();
   const auto height = map.height();
   const auto stride_bytes = map.stride();
@@ -132,10 +134,10 @@ void paint_bg_gradient(drm::BufferMapping& map) noexcept {
   }
 }
 
-// Tile painter: filled colour with a 6-px contrasting border so the
+// Tile painter: filled color with a 6-px contrasting border so the
 // tile's footprint reads even when the user pushes alpha down toward
 // transparency.
-void paint_tile(drm::BufferMapping& map, std::uint32_t fill_argb) noexcept {
+void paint_tile(drm::BufferMapping const& map, std::uint32_t fill_argb) noexcept {
   const auto width = map.width();
   const auto height = map.height();
   const auto stride_bytes = map.stride();
@@ -177,8 +179,8 @@ drm::expected<void, std::error_code> paint_dumb_source(drm::scene::DumbBufferSou
 void reset_tile_state(Tile& t, std::uint32_t fb_w, std::uint32_t fb_h, std::uint32_t index) {
   // Stagger the eight tiles diagonally across the screen so a fresh
   // "all on" state spreads them out instead of stacking them.
-  const std::uint32_t cols = 4U;
-  const std::uint32_t rows = 2U;
+  constexpr std::uint32_t cols = 4U;
+  constexpr std::uint32_t rows = 2U;
   const std::uint32_t col = index % cols;
   const std::uint32_t row = index / cols;
   const std::uint32_t cell_w = fb_w / cols;
@@ -194,7 +196,7 @@ void reset_tile_state(Tile& t, std::uint32_t fb_w, std::uint32_t fb_h, std::uint
   t.color = k_tile_palette.at(index);
 }
 
-drm::expected<void, std::error_code> activate(Tile& t, drm::Device& dev,
+drm::expected<void, std::error_code> activate(Tile& t, drm::Device const& dev,
                                               drm::scene::LayerScene& scene) {
   auto src = drm::scene::DumbBufferSource::create(dev, k_tile_w, k_tile_h, DRM_FORMAT_ARGB8888);
   if (!src) {
@@ -310,6 +312,20 @@ int main(int argc, char** argv) {
   }
   auto& input_seat = *input_seat_res;
 
+  auto keyboard_res = drm::input::Keyboard::create();
+  if (!keyboard_res) {
+    drm::println(stderr, "Failed to create keyboard: {}", keyboard_res.error().message());
+    return EXIT_FAILURE;
+  }
+  auto& keyboard = *keyboard_res;
+
+  auto repeater_res = drm::input::KeyRepeater::create(&keyboard);
+  if (!repeater_res) {
+    drm::println(stderr, "Failed to create key repeater: {}", repeater_res.error().message());
+    return EXIT_FAILURE;
+  }
+  auto& repeater = *repeater_res;
+
   auto cycle_selection = [&]() {
     for (std::size_t step = 1; step <= k_tile_count; ++step) {
       const std::size_t idx = (selection + step) % k_tile_count;
@@ -410,22 +426,15 @@ int main(int argc, char** argv) {
 
   bool quit = false;
   drm::examples::VtChordTracker vt_chord;
-  input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
-    const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event);
-    if (ke == nullptr) {
+
+  // Action handler is shared between real key events (from the seat) and
+  // synthesized repeat events (from the repeater). Modifier-only presses
+  // and releases naturally fall through the switch's default arm.
+  auto handle_key_action = [&](const drm::input::KeyboardEvent& ke) {
+    if (!ke.pressed) {
       return;
     }
-    if (vt_chord.observe(*ke, seat ? &*seat : nullptr)) {
-      return;
-    }
-    if (vt_chord.is_quit_key(*ke)) {
-      quit = true;
-      return;
-    }
-    if (!ke->pressed) {
-      return;
-    }
-    switch (ke->key) {
+    switch (ke.key) {
       case KEY_1:
       case KEY_2:
       case KEY_3:
@@ -434,7 +443,7 @@ int main(int argc, char** argv) {
       case KEY_6:
       case KEY_7:
       case KEY_8: {
-        const auto idx = static_cast<std::size_t>(ke->key - KEY_1);
+        const auto idx = static_cast<std::size_t>(ke.key - KEY_1);
         if (idx < k_tile_count) {
           toggle_tile(idx);
         }
@@ -476,12 +485,38 @@ int main(int argc, char** argv) {
       default:
         return;
     }
+  };
+
+  input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
+    const auto* raw = std::get_if<drm::input::KeyboardEvent>(&event);
+    if (raw == nullptr) {
+      return;
+    }
+    // Mutable copy so process_key can fill sym/utf8 and update xkb's
+    // internal modifier state — the latter matters even though the
+    // demo's switch doesn't read sym/utf8, because KeyRepeater re-runs
+    // process_key on every synthesized tick.
+    drm::input::KeyboardEvent ke = *raw;
+    keyboard.process_key(ke);
+
+    if (vt_chord.observe(ke, seat ? &*seat : nullptr)) {
+      return;
+    }
+    if (vt_chord.is_quit_key(ke)) {
+      quit = true;
+      return;
+    }
+    repeater.on_key(ke);
+    handle_key_action(ke);
   });
+
+  repeater.set_handler(handle_key_action);
 
   if (seat) {
     seat->set_pause_callback([&]() {
       session_paused = true;
       flip_pending = false;
+      repeater.cancel();
       (void)input_seat.suspend();
     });
     seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
@@ -502,20 +537,22 @@ int main(int argc, char** argv) {
       "Running — 1..8 toggle, Tab cycle, arrows move, z/x zpos, [/] alpha, r reset, "
       "F1 stats, Esc/q quit.");
 
-  pollfd pfds[3]{};
+  pollfd pfds[4]{};
   pfds[0].fd = input_seat.fd();
   pfds[0].events = POLLIN;
   pfds[1].fd = dev.fd();
   pfds[1].events = POLLIN;
   pfds[2].fd = seat ? seat->poll_fd() : -1;
   pfds[2].events = POLLIN;
+  pfds[3].fd = repeater.fd();
+  pfds[3].events = POLLIN;
 
   while (!quit) {
     int timeout = -1;
     if (flip_pending) {
       timeout = 16;
     }
-    if (const int ret = poll(pfds, 3, timeout); ret < 0) {
+    if (const int ret = poll(pfds, 4, timeout); ret < 0) {
       if (errno == EINTR) {
         continue;
       }
@@ -530,6 +567,9 @@ int main(int argc, char** argv) {
     }
     if ((pfds[2].revents & POLLIN) != 0 && seat) {
       seat->dispatch();
+    }
+    if ((pfds[3].revents & POLLIN) != 0) {
+      repeater.dispatch();
     }
 
     if (pending_resume_fd != -1) {

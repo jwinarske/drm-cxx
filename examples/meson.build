@@ -39,6 +39,22 @@ executable('xcursor_smoke',
 
 subdir('basics/test_patterns')
 
+# keyboard — interactive keyboard-input + Unicode-entry demo. Default
+# disabled because the build downloads Noto Sans at configure time,
+# which doesn't work in sandboxed environments (Yocto, OE, distro
+# packagers). Pass `-Dkeyboard=enabled` when network is available and
+# blend2d is present.
+keyboard_feature = get_option('keyboard')
+if not keyboard_feature.disabled()
+  if not has_blend2d
+    if keyboard_feature.enabled()
+      error('keyboard demo needs blend2d; either enable -Dblend2d=enabled or set -Dkeyboard=disabled')
+    endif
+  else
+    subdir('basics/keyboard')
+  endif
+endif
+
 #
 # scene/
 #

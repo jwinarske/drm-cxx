@@ -3,15 +3,19 @@
 
 #pragma once
 
+#include "keyboard.hpp"
+
 #include <drm-cxx/detail/expected.hpp>
 
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <variant>
+#include <vector>
 
 namespace drm::input {
 
@@ -21,6 +25,7 @@ struct KeyboardEvent {
   uint32_t time_ms{};
   uint32_t key{};  // Linux key code (KEY_*)
   bool pressed{};  // true = press, false = release
+  bool repeat{};   // true if synthesized by KeyRepeater (sym/utf8 re-resolved)
   uint32_t sym{};  // XKB keysym (filled by Keyboard)
   char utf8[8]{};  // UTF-8 representation (filled by Keyboard)
 };
@@ -111,6 +116,12 @@ class Seat {
   drm::expected<void, std::error_code> suspend();
   drm::expected<void, std::error_code> resume();
 
+  // Push the given Caps/Num/Scroll Lock state to every keyboard-capable
+  // libinput device on this seat. The xkb state has already been updated
+  // by Keyboard::process_key — this writes the LED state back to the
+  // kernel so the physical LEDs light up.
+  void update_keyboard_leds(KeyboardLeds leds);
+
   ~Seat();
   Seat(Seat&& /*other*/) noexcept;
   Seat& operator=(Seat&& /*other*/) noexcept;
@@ -129,6 +140,15 @@ class Seat {
   // libinput's open/close_restricted callbacks get this pointer via
   // user_data and dereference it on every device open.
   std::unique_ptr<InputDeviceOpener> opener_;
+  // Keyboard-capable libinput_device* (opaque). Tracked from
+  // LIBINPUT_EVENT_DEVICE_ADDED/REMOVED so update_keyboard_leds can
+  // iterate them. Each entry holds a libinput_device_ref; ~Seat unrefs.
+  std::vector<void*> keyboard_devices_;
+  // Last LED state pushed via update_keyboard_leds. Re-applied to any
+  // newly-added keyboard device so VT-resume / hotplug doesn't leave
+  // the physical LEDs lagging the xkb state. Empty until the first
+  // update_keyboard_leds call.
+  std::optional<KeyboardLeds> last_leds_;
   int fd_{-1};
 };
 
