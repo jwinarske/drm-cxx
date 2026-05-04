@@ -103,8 +103,10 @@ if has_blend2d
   drm_cxx_sources += files(
     'capture/snapshot.cpp',
     'capture/png.cpp',
+    'csd/theme.cpp',
   )
   drm_cxx_deps += blend2d_dep
+  drm_cxx_deps += tomlplusplus_dep
 endif
 
 gbm_cpp_args = has_gbm_bo_create_with_modifiers2 \
@@ -206,6 +208,10 @@ if has_blend2d
     'capture/snapshot.hpp',
     'capture/png.hpp',
     subdir : 'drm-cxx/capture',
+  )
+  install_headers(
+    'csd/theme.hpp',
+    subdir : 'drm-cxx/csd',
   )
 endif
 

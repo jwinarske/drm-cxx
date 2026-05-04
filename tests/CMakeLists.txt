@@ -43,7 +43,8 @@ endif()
 
 if(DRM_CXX_HAS_BLEND2D)
   list(APPEND DRM_CXX_TESTS
-    test_capture_snapshot)
+    test_capture_snapshot
+    test_csd_theme)
 endif()
 
 foreach(_t ${DRM_CXX_TESTS})

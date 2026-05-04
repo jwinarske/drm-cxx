@@ -299,6 +299,40 @@ if(NOT DRM_CXX_HAS_STD_SPAN AND NOT TARGET tcb::span)
   endif()
 endif()
 
+# toml++ backs drm::csd theme loading. Header-only, C++17, only pulled
+# when the Blend2D gate resolves on. Prefer a system install
+# (Fedora tomlplusplus-devel, Arch tomlplusplus); fall back to the
+# vendored subproject the meson wrap also points at. INTERFACE target
+# with SYSTEM include dirs so toml++'s own warnings stay quiet under
+# -Werror clang-tidy (same treatment as tl-expected / tcb-span above).
+if(DRM_CXX_HAS_BLEND2D AND NOT TARGET tomlplusplus::tomlplusplus)
+  find_package(tomlplusplus CONFIG QUIET)
+  if(NOT tomlplusplus_FOUND)
+    _drm_cxx_fetch_header_only(tomlplusplus
+      https://github.com/marzer/tomlplusplus.git v3.4.0
+      include/toml++/toml.hpp)
+    add_library(drm-cxx-tomlplusplus INTERFACE)
+    target_include_directories(drm-cxx-tomlplusplus SYSTEM INTERFACE
+      $<BUILD_INTERFACE:${_drm_cxx_tomlplusplus_dir}/include>)
+    add_library(tomlplusplus::tomlplusplus ALIAS drm-cxx-tomlplusplus)
+  else()
+    # System config exposes the imported target but doesn't mark its
+    # headers SYSTEM. Promote them so -Werror tidy passes don't see
+    # toml++ diagnostics.
+    get_target_property(_tomlpp_alias tomlplusplus::tomlplusplus ALIASED_TARGET)
+    if(_tomlpp_alias)
+      set(_tomlpp_real ${_tomlpp_alias})
+    else()
+      set(_tomlpp_real tomlplusplus::tomlplusplus)
+    endif()
+    get_target_property(_tomlpp_incs ${_tomlpp_real} INTERFACE_INCLUDE_DIRECTORIES)
+    if(_tomlpp_incs)
+      set_property(TARGET ${_tomlpp_real}
+                   APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_tomlpp_incs})
+    endif()
+  endif()
+endif()
+
 if(DRM_CXX_VULKAN)
   set(HAVE_VULKAN 1)
 else()

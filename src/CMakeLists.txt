@@ -51,7 +51,8 @@ endif()
 if(DRM_CXX_HAS_BLEND2D)
   list(APPEND DRM_CXX_SOURCES
     capture/snapshot.cpp
-    capture/png.cpp)
+    capture/png.cpp
+    csd/theme.cpp)
 endif()
 
 include(GNUInstallDirs)
@@ -148,6 +149,9 @@ if(DRM_CXX_HAS_BLEND2D)
   endif()
   target_link_libraries(drm-cxx PRIVATE blend2d::blend2d)
   target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_BLEND2D=1)
+  # toml++ is header-only, PRIVATE link, included as -isystem so its
+  # generated diagnostics never reach our -Werror build.
+  target_link_libraries(drm-cxx PRIVATE tomlplusplus::tomlplusplus)
 else()
   target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_BLEND2D=0)
 endif()
@@ -253,6 +257,9 @@ if(DRM_CXX_HAS_BLEND2D)
       capture/snapshot.hpp
       capture/png.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/capture)
+  install(FILES
+      csd/theme.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/csd)
 endif()
 
 install(FILES

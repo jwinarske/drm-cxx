@@ -181,6 +181,22 @@ if not has_blend2d and not blend2d_feature.disabled()
   message('drm-cxx: blend2d not found — drm::capture will not be built')
 endif
 
+# toml++ backs drm::csd theme loading. Header-only, C++17, and only
+# pulled when the Blend2D gate resolves on. Prefer a system install
+# (Fedora ships tomlplusplus-devel, Arch ships tomlplusplus); fall back
+# to the vendored subproject. Treated as -isystem so the header pile
+# doesn't leak warnings into our -Werror build.
+if has_blend2d
+  tomlplusplus_dep = dependency('tomlplusplus', required : false,
+                                include_type : 'system')
+  if not tomlplusplus_dep.found()
+    tomlplusplus_proj = subproject('tomlplusplus')
+    tomlplusplus_dep = tomlplusplus_proj.get_variable('tomlplusplus_dep')
+  endif
+else
+  tomlplusplus_dep = disabler()
+endif
+
 #── Configuration ─────────────────────────────────────────────
 conf = configuration_data()
 conf.set('DRM_CXX_VERSION', meson.project_version())
