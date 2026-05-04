@@ -105,6 +105,8 @@ if has_blend2d
     'capture/png.cpp',
     'csd/theme.cpp',
     'csd/surface.cpp',
+    'csd/shadow_cache.cpp',
+    'csd/renderer.cpp',
   )
   drm_cxx_deps += blend2d_dep
   drm_cxx_deps += tomlplusplus_dep
@@ -213,6 +215,9 @@ if has_blend2d
   install_headers(
     'csd/theme.hpp',
     'csd/surface.hpp',
+    'csd/window_state.hpp',
+    'csd/shadow_cache.hpp',
+    'csd/renderer.hpp',
     subdir : 'drm-cxx/csd',
   )
 endif

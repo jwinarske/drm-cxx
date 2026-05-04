@@ -102,7 +102,7 @@ drm::expected<Theme, std::error_code> load_theme_file(std::string_view path, The
 // (Wayland config-fd, embedded-resource, test fixture).
 drm::expected<Theme, std::error_code> load_theme_string(std::string_view toml, Theme base = {});
 
-// Built-in variants. Each is a function-local static initialised on
+// Built-in variants. Each is a function-local static initialized on
 // first call; callers may bind by const reference and rely on the
 // values living for the lifetime of the program.
 const Theme& glass_default_theme();
