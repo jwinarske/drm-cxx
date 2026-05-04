@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 struct xkb_context;
 struct xkb_keymap;
@@ -47,6 +48,33 @@ class Keyboard {
   // Create from a keymap file path (e.g. $HOME/.xkb/keymap.xkb).
   static drm::expected<Keyboard, std::error_code> create_from_file(std::string_view keymap_path);
 
+  // Create from an in-memory XKB v1 text buffer. Handy for Wayland-style
+  // mmap'd keymap fds where the bytes never touch disk. The buffer is
+  // copied internally; the caller may free it once this returns.
+  static drm::expected<Keyboard, std::error_code> create_from_string(std::string_view buffer);
+
+  // Rebuild the keymap+state in place from new RMLVO names while
+  // preserving currently-held keys (replays XKB_KEY_DOWN for each so a
+  // subsequent release transitions cleanly) and the lock latch
+  // (snapshots leds_state() before the swap and restores it via
+  // set_leds() after). On failure, the existing keymap is left
+  // untouched. After a successful reload(), call
+  // seat.update_keyboard_leds(kb.leds_state()) to push the latch out
+  // to the physical LEDs.
+  drm::expected<void, std::error_code> reload(KeymapOptions opts);
+
+  // Drive the xkb-tracked Caps/Num/Scroll Lock latch to match `desired`
+  // by synthesising press+release for each lock key whose state needs
+  // to flip. Used internally by reload(); also exposed for callers
+  // that want to honour an externally-provided lock-state hint (e.g.
+  // a logind "Caps Lock was on at session start" signal). Does not
+  // emit KeyboardEvents and does not touch the held-key set.
+  //
+  // Note: Scroll Lock is dead by default in xkb's complete compat
+  // (no <SCLK> mod-mapping); set_leds() will silently no-op the
+  // scroll_lock field on layouts that don't opt in.
+  void set_leds(KeyboardLeds desired) noexcept;
+
   // Process a key event: fills in sym and utf8 fields.
   void process_key(KeyboardEvent& event) const;
 
@@ -85,6 +113,13 @@ class Keyboard {
   struct xkb_context* ctx_{};
   struct xkb_keymap* keymap_{};
   struct xkb_state* state_{};
+
+  // Held-key set, in evdev keycodes (no +8 offset). Updated by
+  // process_key on press / release and replayed by reload() so a
+  // mid-keystroke layout swap doesn't strand the modifier state.
+  // Mutable because process_key is logically observational from the
+  // public API perspective.
+  mutable std::vector<std::uint32_t> held_keys_;
 };
 
 }  // namespace drm::input
