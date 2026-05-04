@@ -174,6 +174,14 @@ if has_blend2d
     'advanced/capture_demo/main.cpp',
     dependencies : [drm_cxx_dep],
   )
+
+  # csd_smoke — throwaway hardware-validation harness for drm::csd.
+  # Paints one glass decoration via csd::Renderer on top of a gradient
+  # background and arms the resulting composition for a few seconds.
+  executable('csd_smoke',
+    'advanced/csd_smoke/main.cpp',
+    dependencies : [drm_cxx_dep],
+  )
 endif
 
 if get_option('vulkan')

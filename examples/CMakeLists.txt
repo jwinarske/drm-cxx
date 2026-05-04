@@ -105,6 +105,11 @@ if(DRM_CXX_HAS_BLEND2D)
   add_executable(capture_demo advanced/capture_demo/main.cpp)
   target_link_libraries(capture_demo PRIVATE drm-cxx::drm-cxx)
   target_include_directories(capture_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # csd_smoke — throwaway hardware-validation harness for drm::csd.
+  add_executable(csd_smoke advanced/csd_smoke/main.cpp)
+  target_link_libraries(csd_smoke PRIVATE drm-cxx::drm-cxx)
+  target_include_directories(csd_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 if(DRM_CXX_VULKAN)
