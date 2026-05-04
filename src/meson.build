@@ -108,6 +108,7 @@ if has_blend2d
     'csd/shadow_cache.cpp',
     'csd/renderer.cpp',
     'csd/overlay_reservation.cpp',
+    'csd/presenter_plane.cpp',
   )
   drm_cxx_deps += blend2d_dep
   drm_cxx_deps += tomlplusplus_dep
@@ -220,6 +221,8 @@ if has_blend2d
     'csd/shadow_cache.hpp',
     'csd/renderer.hpp',
     'csd/overlay_reservation.hpp',
+    'csd/presenter.hpp',
+    'csd/presenter_plane.hpp',
     subdir : 'drm-cxx/csd',
   )
 endif
