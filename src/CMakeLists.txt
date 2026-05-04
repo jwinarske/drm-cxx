@@ -52,7 +52,8 @@ if(DRM_CXX_HAS_BLEND2D)
   list(APPEND DRM_CXX_SOURCES
     capture/snapshot.cpp
     capture/png.cpp
-    csd/theme.cpp)
+    csd/theme.cpp
+    csd/surface.cpp)
 endif()
 
 include(GNUInstallDirs)
@@ -259,6 +260,7 @@ if(DRM_CXX_HAS_BLEND2D)
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/capture)
   install(FILES
       csd/theme.hpp
+      csd/surface.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/csd)
 endif()
 
