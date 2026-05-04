@@ -49,10 +49,15 @@ target_link_libraries(signage_player PRIVATE
   signage_playlist)
 target_include_directories(signage_player PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
-# Overlay text painter uses Blend2D when available; the .cpp's
-# __has_include probe degrades to a bg-only fill when it isn't. The
-# top-level CMakeLists.txt already runs the find_package(blend2d) probe
-# and sets DRM_CXX_HAS_BLEND2D; here we just gate the link.
+# Overlay text painter uses Blend2D when the project's gate is on.
+# Distros (Fedora, Arch) ship blend2d headers under /usr/include
+# whether or not we linked against blend2d, so a bare __has_include
+# probe in overlay_renderer.cpp is unreliable — it can compile in
+# the BL paths while the link line lacks blend2d, which breaks
+# `cmake -DDRM_CXX_BLEND2D=OFF`. Drive the .cpp from the gate
+# directly: define SIGNAGE_OVERLAY_HAS_BLEND2D iff we actually link
+# blend2d here, and let the .cpp's #ifdef do the rest.
 if(DRM_CXX_HAS_BLEND2D)
   target_link_libraries(signage_player PRIVATE blend2d::blend2d)
+  target_compile_definitions(signage_player PRIVATE SIGNAGE_OVERLAY_HAS_BLEND2D)
 endif()

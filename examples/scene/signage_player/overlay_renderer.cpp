@@ -6,18 +6,28 @@
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/log.hpp>
 
-// Blend2D's umbrella header layout varies by distro: Fedora ships
+// SIGNAGE_OVERLAY_HAS_BLEND2D is set by the build system iff the
+// project's blend2d gate is on (see the example's CMakeLists.txt /
+// meson.build). A bare __has_include probe is not enough: distros
+// (Fedora, Arch) ship blend2d headers under /usr/include even when
+// we did not link against blend2d, so the probe would silently pull
+// the BL paths into the TU and the link would fail.
+//
+// The umbrella header layout varies by distro — Fedora ships
 // /usr/include/blend2d/blend2d.h, some Debian packages ship the flat
-// /usr/include/blend2d.h. Mirror src/capture/snapshot.cpp's probe so
-// either reaches us, and so a clang-tidy pass that doesn't see the
-// build system's -isystem path can still parse this TU as a no-op
-// overlay (bg-only) without #error'ing out.
+// /usr/include/blend2d.h — so we still pick whichever the
+// preprocessor can reach. A clang-tidy pass that runs without the
+// build system's -isystem flags will see neither path, and the TU
+// parses cleanly as a bg-only overlay.
+#ifdef SIGNAGE_OVERLAY_HAS_BLEND2D
 #if __has_include(<blend2d/blend2d.h>)
 #include <blend2d/blend2d.h>  // NOLINT(misc-include-cleaner)
-#define SIGNAGE_OVERLAY_HAS_BLEND2D
 #elif __has_include(<blend2d.h>)
 #include <blend2d.h>  // NOLINT(misc-include-cleaner)
-#define SIGNAGE_OVERLAY_HAS_BLEND2D
+#else
+// Build system promised blend2d is linked but no header reaches us.
+#undef SIGNAGE_OVERLAY_HAS_BLEND2D
+#endif
 #endif
 
 #include <algorithm>

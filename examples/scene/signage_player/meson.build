@@ -21,17 +21,24 @@ signage_playlist_dep = declare_dependency(
 )
 
 signage_player_deps = [drm_cxx_dep, signage_playlist_dep]
-# Overlay text painter uses Blend2D when available; the .cpp's
-# __has_include probe degrades to a bg-only fill when it isn't. The
-# top-level meson.build already runs the blend2d probe; here we just
-# gate the link dependency.
+signage_player_args = []
+# Overlay text painter uses Blend2D when the project's gate is on.
+# Distros (Fedora, Arch) ship blend2d headers under /usr/include
+# whether or not we linked against blend2d, so a bare __has_include
+# probe in overlay_renderer.cpp is unreliable — it can compile in
+# the BL paths while the link line lacks blend2d, which breaks
+# `meson setup -Dblend2d=disabled`. Drive the .cpp from the gate
+# directly: define SIGNAGE_OVERLAY_HAS_BLEND2D iff we actually link
+# blend2d here.
 if has_blend2d
   signage_player_deps += blend2d_dep
+  signage_player_args += '-DSIGNAGE_OVERLAY_HAS_BLEND2D'
 endif
 
 executable('signage_player',
   'main.cpp',
   'overlay_renderer.cpp',
   dependencies : signage_player_deps,
+  cpp_args : signage_player_args,
   include_directories : include_directories('..'),
 )
