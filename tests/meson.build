@@ -170,6 +170,13 @@ if has_blend2d
     ),
   )
 
+  test('test_csd_renderer',
+    executable('test_csd_renderer',
+      'unit/test_csd_renderer.cpp',
+      dependencies : test_deps,
+    ),
+  )
+
   # VKMS smoke test. Self-skips when the vkms module isn't loaded, so
   # this stays green on boxes / CI runners that haven't modprobed it.
   # Under `meson test` the skip is reported as PASSED (skipped).
