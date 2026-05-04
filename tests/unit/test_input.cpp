@@ -6,8 +6,12 @@
 #include "input/pointer.hpp"
 #include "input/seat.hpp"
 
+#include <xkbcommon/xkbcommon.h>
+
 #include <cstdint>
+#include <cstdlib>
 #include <gtest/gtest.h>
+#include <string>
 #include <variant>
 
 // ── Event type tests ──────────────────────────────────────────
@@ -242,6 +246,141 @@ TEST(KeyboardTest, LedsStateEqualityDetectsTransitions) {
   EXPECT_EQ(a, b);
   b.caps_lock = true;
   EXPECT_NE(a, b);
+}
+
+namespace {
+
+// Round-trip helper: serialize a "us" RMLVO keymap to its XKB v1 text
+// form so we can feed it to Keyboard::create_from_string. Uses xkb
+// directly because Keyboard intentionally doesn't expose a serializer.
+std::string serialize_us_keymap() {
+  auto* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+  EXPECT_NE(ctx, nullptr);
+  xkb_rule_names const names{nullptr, nullptr, "us", nullptr, nullptr};
+  auto* keymap = xkb_keymap_new_from_names(ctx, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+  EXPECT_NE(keymap, nullptr);
+  char* raw = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+  std::string out(raw);
+  std::free(raw);
+  xkb_keymap_unref(keymap);
+  xkb_context_unref(ctx);
+  return out;
+}
+
+}  // namespace
+
+TEST(KeyboardTest, CreateFromStringRoundTripsUs) {
+  std::string const buffer = serialize_us_keymap();
+  ASSERT_FALSE(buffer.empty());
+
+  auto kb_result = drm::input::Keyboard::create_from_string(buffer);
+  ASSERT_TRUE(kb_result.has_value());
+  auto& kb = *kb_result;
+
+  drm::input::KeyboardEvent ke;
+  ke.key = 30;  // KEY_A
+  ke.pressed = true;
+  kb.process_key(ke);
+  EXPECT_EQ(ke.sym, 0x61U);
+  EXPECT_STREQ(ke.utf8, "a");
+}
+
+TEST(KeyboardTest, CreateFromStringRejectsGarbage) {
+  auto kb_result = drm::input::Keyboard::create_from_string("not a keymap");
+  EXPECT_FALSE(kb_result.has_value());
+}
+
+TEST(KeyboardTest, SetLedsDrivesCapsAndNumLatches) {
+  auto kb_result = drm::input::Keyboard::create({{}, {}, "us"});
+  ASSERT_TRUE(kb_result.has_value());
+  auto& kb = *kb_result;
+
+  EXPECT_FALSE(kb.caps_lock_active());
+  EXPECT_FALSE(kb.num_lock_active());
+
+  kb.set_leds({true, true, false});
+  EXPECT_TRUE(kb.caps_lock_active());
+  EXPECT_TRUE(kb.num_lock_active());
+
+  // Idempotent — setting the same target leaves the latches untouched.
+  kb.set_leds({true, true, false});
+  EXPECT_TRUE(kb.caps_lock_active());
+  EXPECT_TRUE(kb.num_lock_active());
+
+  kb.set_leds({false, false, false});
+  EXPECT_FALSE(kb.caps_lock_active());
+  EXPECT_FALSE(kb.num_lock_active());
+}
+
+TEST(KeyboardTest, ReloadPreservesHeldShiftLevel) {
+  auto kb_result = drm::input::Keyboard::create({{}, {}, "us"});
+  ASSERT_TRUE(kb_result.has_value());
+  auto& kb = *kb_result;
+
+  // Press Shift, leave it held across the reload.
+  drm::input::KeyboardEvent shift_down;
+  shift_down.key = 42;  // KEY_LEFTSHIFT
+  shift_down.pressed = true;
+  kb.process_key(shift_down);
+  ASSERT_TRUE(kb.shift_active());
+
+  ASSERT_TRUE(kb.reload({{}, {}, "us"}).has_value());
+
+  // After reload, Shift should still be effective — typing 'a' yields 'A'.
+  EXPECT_TRUE(kb.shift_active());
+  drm::input::KeyboardEvent a_down;
+  a_down.key = 30;  // KEY_A
+  a_down.pressed = true;
+  kb.process_key(a_down);
+  EXPECT_STREQ(a_down.utf8, "A");
+
+  // Releasing Shift after the reload should drop back to lowercase.
+  drm::input::KeyboardEvent shift_up;
+  shift_up.key = 42;
+  shift_up.pressed = false;
+  kb.process_key(shift_up);
+  EXPECT_FALSE(kb.shift_active());
+}
+
+TEST(KeyboardTest, ReloadPreservesCapsLockLatch) {
+  auto kb_result = drm::input::Keyboard::create({{}, {}, "us"});
+  ASSERT_TRUE(kb_result.has_value());
+  auto& kb = *kb_result;
+
+  drm::input::KeyboardEvent caps_down;
+  caps_down.key = 58;  // KEY_CAPSLOCK
+  caps_down.pressed = true;
+  drm::input::KeyboardEvent caps_up;
+  caps_up.key = 58;
+  caps_up.pressed = false;
+  kb.process_key(caps_down);
+  kb.process_key(caps_up);
+  ASSERT_TRUE(kb.caps_lock_active());
+
+  ASSERT_TRUE(kb.reload({{}, {}, "us"}).has_value());
+
+  EXPECT_TRUE(kb.caps_lock_active());
+  drm::input::KeyboardEvent a_down;
+  a_down.key = 30;
+  a_down.pressed = true;
+  kb.process_key(a_down);
+  EXPECT_STREQ(a_down.utf8, "A");
+}
+
+TEST(KeyboardTest, ReloadWithBogusOptsLeavesKeymapIntact) {
+  auto kb_result = drm::input::Keyboard::create({{}, {}, "us"});
+  ASSERT_TRUE(kb_result.has_value());
+  auto& kb = *kb_result;
+
+  auto bad = kb.reload({{}, {}, "totally-not-a-real-layout-zzzz"});
+  EXPECT_FALSE(bad.has_value());
+
+  // Original "us" layout still works.
+  drm::input::KeyboardEvent a_down;
+  a_down.key = 30;
+  a_down.pressed = true;
+  kb.process_key(a_down);
+  EXPECT_STREQ(a_down.utf8, "a");
 }
 
 // ── Seat tests ────────────────────────────────────────────────
