@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.3.0 — unreleased: CSD module + keyboard repeat / LED state / keymap reload
+
+### `drm::csd` — client-side decorations (gated on Blend2D, `-Dblend2d=enabled` / `DRM_CXX_HAS_BLEND2D`)
+- **`drm::csd::Theme`** — toml++-loaded theme schema. `Color` POD (r/g/b/a), `Theme` carries panel gradient stops, specular, noise amplitude, traffic-light fills + hover variants, shadow color, rim color, title font hints. Built-in themes: `default`, `lite`, `minimal`.
+- **`drm::csd::Surface`** — one CPU-mappable, KMS-scanout-ready ARGB8888 buffer + framebuffer ID per managed decoration. `Surface::create` tries GBM first (LINEAR ARGB8888 with SCANOUT+WRITE, modifier `DRM_FORMAT_MOD_LINEAR` pinned) and falls back to dumb on GBM unavailability or allocation failure; chosen path recorded on `backing()` (`SurfaceBacking::Gbm` / `SurfaceBacking::Dumb`). A second overload takes just a `Device` for the dumb-only path used by headless tests.
+- **`drm::csd::WindowState`** — POD the shell hands the renderer per paint pass: title, focused flag, `HoverButton`, dirty bitfield reserved for partial-redraw. Header-only, Blend2D-free.
+- **`drm::csd::ShadowCache`** — LRU of pre-blurred decoration shadows keyed on `(width, height, Elevation, theme_id)`. Single-channel alpha mask of the rounded-rect panel, three-pass separable box blur, PRGB32 tinting by the theme's shadow color. Composites via SRC_OVER through the `ShadowDest` interface; intentionally Blend2D-free.
+- **`drm::csd::Renderer`** — paints one decoration into a `Surface` per call. Glass theme: soft shadow halo from `ShadowCache` (Option C — pre-blurred patch from the alpha margin, SRC_OVER underneath the panel), vertical linear-gradient panel, specular highlight via `BL_COMP_OP_SCREEN` clipped to the top edge, frosted noise tile (deterministic 64×64 LCG, MULTIPLY at the theme's noise amplitude), title text (2-pass shadow, skipped when no font face loads), three traffic-light buttons with radial-gradient fills + per-button hover variant, 1-px inner-stroke rim (focused vs blurred color). `RendererConfig` carries the theme + font face + content rect.
+
+### `drm::input` — keyboard repeat, LED state, keymap reload
+- **`drm::input::KeyRepeater`** — timerfd-driven auto-repeat synthesis for held keys. Per-key eligibility from `xkb_keymap_key_repeats` (modifiers + lock keys do not repeat). `sym` / `utf8` re-resolved on every tick against current xkb state, so Shift / AltGr level switches during a hold take effect on the next repeat. Defaults: 600 ms initial delay, 25 Hz interval. `fd()` for poll/epoll integration, `dispatch()` to drain expirations and emit one event per tick. `cancel()` to drop in-flight repeat across session pause.
+- **`KeyboardEvent::repeat`** — flag distinguishing synthesized events from real ones.
+- **`Keyboard::should_repeat`, `caps_lock()` / `num_lock()` / `scroll_lock()` accessors, `KeyboardLeds` snapshot struct, `leds_state()`.**
+- **`Keyboard::create_from_string(buffer)`** — wraps `xkb_keymap_new_from_buffer` for Wayland-style mmap'd keymap fds; buffer copied internally; explicit-length form handles non-NUL-terminated `string_view` safely.
+- **`Keyboard::reload(KeymapOptions)`** — rebuilds `xkb_keymap` + `xkb_state` in place from new RMLVO names. Strong-exception: a malformed RMLVO leaves the existing keymap intact. Held-key state preserved (replays `XKB_KEY_DOWN` for each tracked evdev keycode so a still-pressed Shift / Ctrl / letter survives the swap and a subsequent release transitions cleanly). Lock latch preserved (snapshots `leds_state()` before the swap, restores via `set_leds()` after the held-key replay). Caller is expected to push the latch out via `seat.update_keyboard_leds(kb.leds_state())` after success.
+- **`Keyboard::set_leds(KeyboardLeds)`** — synthesizes press+release for each lock key whose desired state differs from the current xkb-tracked state. Used internally by `reload` and externally by callers honouring an externally-provided lock-state hint (e.g. logind "Caps Lock was on at session start"). Documented limitation: Scroll Lock silently no-ops on layouts whose compat doesn't mod-map `<SCLK>` (xkb's default complete compat).
+- **`input::Seat::update_keyboard_leds`** — pushes the xkb-tracked lock state back to the kernel so the physical LEDs follow Caps / Num / Scroll Lock. Tracks keyboard-capable libinput devices internally; the last applied state is re-pushed to any newly-added device so VT-resume and hotplug do not leave LEDs lagging.
+
+### Examples
+- **`examples/basics/keyboard/`** — Blend2D-rendered keyboard demo: text entry with auto-repeat + IBus/GTK Ctrl+Shift+u Unicode-codepoint sequence. Downloads Noto Sans at configure time; gated off by default behind `-Dkeyboard` / `-DDRM_CXX_BUILD_KEYBOARD`; hard-requires Blend2D when enabled.
+- **`examples/advanced/csd_smoke/`** — throwaway hardware-validation harness for `csd::Renderer`. Paints one glass decoration into a `csd::Surface` and arms it on an overlay plane via `LayerScene`. Validates the `(format, modifier, zpos)` story end-to-end and exposes `--seconds N` / `--theme {default|lite|minimal}` / `--png OUT.png` (round-trip via `drm::capture::snapshot` for headless regression checks). Gated on `DRM_CXX_HAS_BLEND2D`.
+- **`examples/scene/layered_demo`** — `KeyRepeater` wired into the poll loop so arrow-key nudging and the `[` / `]` alpha controls auto-repeat. Real and synthesized events share the action handler; `Keyboard::process_key` always runs on the raw event so xkb modifier state stays current for the repeater's re-resolution. `repeater.cancel()` on session pause.
+
+### Fixes
+- **`signage_player`** — `overlay_renderer.cpp` Blend2D paths now gate on `DRM_CXX_HAS_BLEND2D` instead of `__has_include(<blend2d/...>)`, so a `-Dblend2d=disabled` configure actually disables the Blend2D path on distros (Fedora, Arch) that always ship `blend2d-devel` under `/usr/include`.
+
+### Tests
+- `tests/unit/test_csd_theme.cpp`, `test_csd_surface.cpp`, `test_csd_shadow_cache.cpp`, `test_csd_renderer.cpp`.
+- `tests/unit/test_key_repeater.cpp` — config validation, release-disarms-the-timer invariant, repeat-eligibility filtering, synthesized-event ignore path.
+- `tests/unit/test_input.cpp` gains Caps Lock latch + LED snapshot coverage; round-trip `create_from_string` against a serialized "us" RMLVO keymap; bogus buffer fails; `set_leds` drives caps + num lock latches up and down idempotently; `reload` preserves a held Shift across the swap (level switch survives, release after reload still transitions); `reload` preserves the Caps Lock latch; `reload` with bogus RMLVO leaves the existing "us" keymap working.
+
 ## v1.2.0 — Scene API + example tree
 
 ### `drm::scene` — high-level layer scene

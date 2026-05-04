@@ -107,6 +107,7 @@ if has_blend2d
     'csd/surface.cpp',
     'csd/shadow_cache.cpp',
     'csd/renderer.cpp',
+    'csd/overlay_reservation.cpp',
   )
   drm_cxx_deps += blend2d_dep
   drm_cxx_deps += tomlplusplus_dep
@@ -218,6 +219,7 @@ if has_blend2d
     'csd/window_state.hpp',
     'csd/shadow_cache.hpp',
     'csd/renderer.hpp',
+    'csd/overlay_reservation.hpp',
     subdir : 'drm-cxx/csd',
   )
 endif

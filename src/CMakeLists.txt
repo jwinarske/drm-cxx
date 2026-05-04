@@ -55,7 +55,8 @@ if(DRM_CXX_HAS_BLEND2D)
     csd/theme.cpp
     csd/surface.cpp
     csd/shadow_cache.cpp
-    csd/renderer.cpp)
+    csd/renderer.cpp
+    csd/overlay_reservation.cpp)
 endif()
 
 include(GNUInstallDirs)
@@ -266,6 +267,7 @@ if(DRM_CXX_HAS_BLEND2D)
       csd/window_state.hpp
       csd/shadow_cache.hpp
       csd/renderer.hpp
+      csd/overlay_reservation.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/csd)
 endif()
 
