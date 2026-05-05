@@ -37,11 +37,18 @@ Cursor::~Cursor() = default;
 
 drm::expected<Cursor, std::error_code> Cursor::load(const ThemeResolution& resolved,
                                                     std::uint32_t requested_size) {
+  // 0 is a foot-gun: libxcursor's 0 path falls back to 24 px, which is
+  // tiny against typical KMS cursor planes (64 px on i915, 256 px on
+  // amdgpu DC). Substitute a default that lines up with the smallest
+  // commonly-supported plane size so the sprite reaches the buffer
+  // edges instead of floating in the middle.
+  constexpr std::uint32_t k_default_size = 64;
+  const int xcursor_size = static_cast<int>(requested_size != 0 ? requested_size : k_default_size);
+
   // XcursorFilenameLoadImages selects the on-disk size closest to the
   // requested one (XCursor files are multi-resolution packs); we do not
   // get to pick between >= vs. <= — libxcursor returns "best match".
-  XcursorImages* imgs =
-      XcursorFilenameLoadImages(resolved.source.c_str(), static_cast<int>(requested_size));
+  XcursorImages* imgs = XcursorFilenameLoadImages(resolved.source.c_str(), xcursor_size);
   if (imgs == nullptr || imgs->nimage == 0) {
     if (imgs != nullptr) {
       XcursorImagesDestroy(imgs);

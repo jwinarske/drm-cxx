@@ -46,13 +46,30 @@ inline constexpr std::uint32_t k_dirty_title = 1U << 0U;
 inline constexpr std::uint32_t k_dirty_focus = 1U << 1U;
 inline constexpr std::uint32_t k_dirty_hover = 1U << 2U;
 inline constexpr std::uint32_t k_dirty_geometry = 1U << 3U;
+inline constexpr std::uint32_t k_dirty_animation = 1U << 4U;
 inline constexpr std::uint32_t k_dirty_all = ~0U;
+
+// Sentinel that tells the renderer to derive the continuous progress
+// from the binary `focused` / `hover` fields. Lets v1 callers (no
+// animator) keep their existing field setup and still see correct
+// visuals; the animator path overwrites the sentinel with a value in
+// [0, 1] via WindowAnim::apply_to.
+inline constexpr float k_progress_unset = -1.0F;
 
 struct WindowState {
   std::string title;
   bool focused{false};
   HoverButton hover{HoverButton::None};
   std::uint32_t dirty{k_dirty_all};
+
+  // Continuous animator outputs read by the renderer.
+  // `focus_progress` is the eased weight in [0, 1] from blurred (0) to
+  // focused (1). `hover_progress` is the eased weight in [0, 1] from
+  // fill (0) to hover (1) for whichever button is named in `hover`.
+  // Both default to k_progress_unset; the renderer falls back to the
+  // binary fields in that case so unanimated callers stay correct.
+  float focus_progress{k_progress_unset};
+  float hover_progress{k_progress_unset};
 };
 
 }  // namespace drm::csd

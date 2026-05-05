@@ -177,6 +177,13 @@ if has_blend2d
     ),
   )
 
+  test('test_csd_animator',
+    executable('test_csd_animator',
+      'unit/test_csd_animator.cpp',
+      dependencies : test_deps,
+    ),
+  )
+
   test('test_csd_overlay_reservation',
     executable('test_csd_overlay_reservation',
       'unit/test_csd_overlay_reservation.cpp',

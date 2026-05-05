@@ -335,6 +335,26 @@ bool ShadowCache::contains(const ShadowKey& key) const noexcept {
   return impl_ != nullptr && impl_->index.find(key) != impl_->index.end();
 }
 
+namespace {
+
+// Manual SRC_OVER blend of one PRGB32 row onto another. Both buffers
+// are premultiplied so the per-channel math is the straight Porter-
+// Duff over. Extracted so blit_into and the cross-fade path share
+// identical compositing.
+void src_over_row(const std::uint8_t* src, std::uint8_t* dst, std::uint32_t pixels) noexcept {
+  for (std::uint32_t x = 0; x < pixels; ++x) {
+    const std::uint8_t* sp = src + (static_cast<std::size_t>(x) * 4U);
+    std::uint8_t* dp = dst + (static_cast<std::size_t>(x) * 4U);
+    const std::uint32_t inv_a = 255U - sp[3];
+    dp[0] = static_cast<std::uint8_t>(sp[0] + ((dp[0] * inv_a) / 255U));
+    dp[1] = static_cast<std::uint8_t>(sp[1] + ((dp[1] * inv_a) / 255U));
+    dp[2] = static_cast<std::uint8_t>(sp[2] + ((dp[2] * inv_a) / 255U));
+    dp[3] = static_cast<std::uint8_t>(sp[3] + ((dp[3] * inv_a) / 255U));
+  }
+}
+
+}  // namespace
+
 bool ShadowCache::blit_into(const ShadowKey& key, const Theme& theme, const ShadowDest& dst) {
   if (impl_ == nullptr || dst.pixels == nullptr || dst.width == 0 || dst.height == 0 ||
       key.width == 0 || key.height == 0) {
@@ -364,24 +384,98 @@ bool ShadowCache::blit_into(const ShadowKey& key, const Theme& theme, const Shad
 
   const CacheEntry& entry = *it->second;
 
-  // Manual SRC_OVER alpha composite: dst = src + dst * (1 - src.a).
-  // Both src and dst are PRGB32 (premultiplied) so the math is the
-  // straightforward Porter-Duff over.
   const std::uint32_t copy_w = std::min(dst.width, key.width);
   const std::uint32_t copy_h = std::min(dst.height, key.height);
   for (std::uint32_t y = 0; y < copy_h; ++y) {
     const std::uint8_t* src_row =
         entry.pixels.data() + (static_cast<std::size_t>(y) * key.width * 4U);
     std::uint8_t* dst_row = dst.pixels + (static_cast<std::size_t>(y) * dst.stride);
-    for (std::uint32_t x = 0; x < copy_w; ++x) {
-      const std::uint8_t* sp = src_row + (static_cast<std::size_t>(x) * 4U);
-      std::uint8_t* dp = dst_row + (static_cast<std::size_t>(x) * 4U);
-      const std::uint32_t inv_a = 255U - sp[3];
-      dp[0] = static_cast<std::uint8_t>(sp[0] + ((dp[0] * inv_a) / 255U));
-      dp[1] = static_cast<std::uint8_t>(sp[1] + ((dp[1] * inv_a) / 255U));
-      dp[2] = static_cast<std::uint8_t>(sp[2] + ((dp[2] * inv_a) / 255U));
-      dp[3] = static_cast<std::uint8_t>(sp[3] + ((dp[3] * inv_a) / 255U));
+    src_over_row(src_row, dst_row, copy_w);
+  }
+  return true;
+}
+
+bool ShadowCache::blit_cross_fade(const ShadowKey& key_a, const ShadowKey& key_b,
+                                  const Theme& theme, const ShadowDest& dst, float t) {
+  if (impl_ == nullptr || dst.pixels == nullptr || dst.width == 0 || dst.height == 0 ||
+      key_a.width == 0 || key_a.height == 0 || key_a.width != key_b.width ||
+      key_a.height != key_b.height) {
+    return false;
+  }
+
+  // Endpoints short-circuit to a single blit_into; keeps the
+  // no-animation path identical to v1 and avoids paying for the lerp
+  // when nothing is moving.
+  const float clamped = std::clamp(t, 0.0F, 1.0F);
+  if (clamped <= 0.0F) {
+    return blit_into(key_a, theme, dst);
+  }
+  if (clamped >= 1.0F) {
+    return blit_into(key_b, theme, dst);
+  }
+
+  // Force both entries into the cache (rendering on miss) so we can
+  // hold raw pixel pointers stable across the lerp. The two
+  // intermediate iterator splices reorder LRU; that's intentional —
+  // both keys are about to be used together so they belong at the
+  // front.
+  auto fetch = [&](const ShadowKey& k) -> const CacheEntry* {
+    auto it = impl_->index.find(k);
+    if (it == impl_->index.end()) {
+      CacheEntry entry;
+      entry.key = k;
+      entry.pixels = render_shadow(k, theme);
+      if (entry.pixels.empty()) {
+        return nullptr;
+      }
+      impl_->order.push_front(std::move(entry));
+      impl_->index[k] = impl_->order.begin();
+      while (impl_->order.size() > impl_->capacity) {
+        impl_->index.erase(impl_->order.back().key);
+        impl_->order.pop_back();
+      }
+      it = impl_->index.find(k);
+    } else {
+      impl_->order.splice(impl_->order.begin(), impl_->order, it->second);
     }
+    return &*it->second;
+  };
+
+  const CacheEntry* ea = fetch(key_a);
+  const CacheEntry* eb = fetch(key_b);
+  if (ea == nullptr || eb == nullptr) {
+    return false;
+  }
+
+  // Build one row of (1 - t) * A + t * B in PRGB32, then SRC_OVER it
+  // onto the destination. Per-row scratch is small (a few KB) and
+  // keeps allocations off the hot path.
+  const std::uint32_t copy_w = std::min(dst.width, key_a.width);
+  const std::uint32_t copy_h = std::min(dst.height, key_a.height);
+  std::vector<std::uint8_t> scratch(static_cast<std::size_t>(copy_w) * 4U);
+  const auto wa = static_cast<std::uint32_t>(std::clamp((1.0F - clamped) * 256.0F, 0.0F, 256.0F));
+  const auto wb = static_cast<std::uint32_t>(std::clamp(clamped * 256.0F, 0.0F, 256.0F));
+
+  for (std::uint32_t y = 0; y < copy_h; ++y) {
+    const std::uint8_t* row_a =
+        ea->pixels.data() + (static_cast<std::size_t>(y) * key_a.width * 4U);
+    const std::uint8_t* row_b =
+        eb->pixels.data() + (static_cast<std::size_t>(y) * key_b.width * 4U);
+    for (std::uint32_t x = 0; x < copy_w; ++x) {
+      const std::size_t off = static_cast<std::size_t>(x) * 4U;
+      // Linear blend in premultiplied space — mathematically correct
+      // because both inputs are premultiplied PRGB32.
+      scratch[off + 0U] =
+          static_cast<std::uint8_t>(((row_a[off + 0U] * wa) + (row_b[off + 0U] * wb) + 128U) >> 8U);
+      scratch[off + 1U] =
+          static_cast<std::uint8_t>(((row_a[off + 1U] * wa) + (row_b[off + 1U] * wb) + 128U) >> 8U);
+      scratch[off + 2U] =
+          static_cast<std::uint8_t>(((row_a[off + 2U] * wa) + (row_b[off + 2U] * wb) + 128U) >> 8U);
+      scratch[off + 3U] =
+          static_cast<std::uint8_t>(((row_a[off + 3U] * wa) + (row_b[off + 3U] * wb) + 128U) >> 8U);
+    }
+    std::uint8_t* dst_row = dst.pixels + (static_cast<std::size_t>(y) * dst.stride);
+    src_over_row(scratch.data(), dst_row, copy_w);
   }
   return true;
 }

@@ -21,6 +21,7 @@
 #include <xf86drmMode.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -207,20 +208,45 @@ struct Renderer::Impl {
   bool allow_legacy{true};
   drm::Clock* clock{nullptr};
 
-  // --- dumb buffer --------------------------------------------------
-  // Backed by drm::dumb::Buffer. buffer.fb_id() is 0 on the legacy path (we tell
-  // the factory to skip drmModeAddFB2 in that case). Linear ARGB8888
-  // in all cases; stride is driver-chosen (typically width * 4 but may
-  // be padded for alignment — always consult buffer.stride()).
-  drm::dumb::Buffer buffer;
+  // --- dumb buffers (ping-pong) -------------------------------------
+  // Two ARGB8888 dumb buffers on the atomic path so SW pre-rotation
+  // and animation re-blits don't race scanout. blit_frame writes to
+  // the back buffer (the one the kernel isn't currently scanning out
+  // of); the next stage_position emits its FB_ID and the atomic flip
+  // hands scanout to it at vblank. Without this, drivers that pull
+  // cursor pixels straight from the surface each frame (amdgpu DC)
+  // visibly tear during the rewrite for ~1 vblank between blit_frame
+  // and the commit taking effect — i915 happens to mask the race in
+  // its cursor pipeline, but we can't rely on that. Linear ARGB8888,
+  // stride driver-chosen (consult .stride()). Legacy uses buffers[0]
+  // only; drmModeSetCursor uploads on first install + would need
+  // re-install for content updates anyway, and rotation is rejected.
+  std::array<drm::dumb::Buffer, 2> buffers;
+  std::size_t active_idx{0};
+  // True iff back_buffer() holds pixels that haven't been published
+  // to scanout yet. Set by blit_frame on the atomic path; cleared
+  // (with a buffer-index swap) when commit_position succeeds.
+  bool dirty_back{false};
 
-  [[nodiscard]] std::uint32_t* mapped32() noexcept {
-    return reinterpret_cast<std::uint32_t*>(
-        buffer.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  [[nodiscard]] drm::dumb::Buffer& active_buffer() noexcept { return buffers.at(active_idx); }
+  [[nodiscard]] const drm::dumb::Buffer& active_buffer() const noexcept {
+    return buffers.at(active_idx);
   }
-  [[nodiscard]] const std::uint32_t* mapped32() const noexcept {
-    return reinterpret_cast<const std::uint32_t*>(
-        buffer.data());  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  [[nodiscard]] drm::dumb::Buffer& back_buffer() noexcept { return buffers.at(active_idx ^ 1U); }
+  [[nodiscard]] const drm::dumb::Buffer& back_buffer() const noexcept {
+    return buffers.at(active_idx ^ 1U);
+  }
+  // The buffer the next atomic commit will publish via FB_ID. When
+  // back_buffer() is dirty (blit_frame ran since the last successful
+  // commit) this is back_buffer(); otherwise it's active_buffer() —
+  // a position-only commit re-emits the FB already on screen. On the
+  // legacy path it is always active_buffer(): there is only one
+  // buffer and drmModeSetCursor handles uploads.
+  [[nodiscard]] drm::dumb::Buffer& commit_buffer() noexcept {
+    return (dirty_back && path != PlanePath::kLegacy) ? back_buffer() : active_buffer();
+  }
+  [[nodiscard]] const drm::dumb::Buffer& commit_buffer() const noexcept {
+    return (dirty_back && path != PlanePath::kLegacy) ? back_buffer() : active_buffer();
   }
 
   // --- cached plane props (atomic paths only) -----------------------
@@ -242,6 +268,18 @@ struct Renderer::Impl {
   // commit. Resurveyed at every session resume because property ids
   // can change when the DRM fd is replaced.
   std::optional<std::uint32_t> rotation_prop;
+
+  // Bitmask of DRM_MODE_ROTATE_* values the plane actually accepts.
+  // The "rotation" property being present (rotation_prop set) is not
+  // enough — i915's cursor plane exposes the property but advertises
+  // only ROTATE_0 | ROTATE_180 in its enum, while ROTATE_90/270 fail
+  // atomic_check. We probe the property's enum_blob at create + resume
+  // and consult this mask in effective_sw_rotation() so unsupported
+  // rotations transparently fall back to software pre-rotation in
+  // blit_frame instead of EINVAL'ing on commit. 0 when rotation_prop
+  // is unset (legacy/no-rotation planes); always includes ROTATE_0
+  // when set, since every plane that has the property accepts k0.
+  std::uint64_t rotation_supported_mask{0};
 
   // --- cursor binding + animation -----------------------------------
   // shared_ptr so multi-CRTC compositors can load once and hand the
@@ -363,17 +401,34 @@ drm::expected<void, std::error_code> Renderer::Impl::alloc_buffer(std::uint32_t 
   cfg.bpp = 32;
   cfg.add_fb = (path != PlanePath::kLegacy);
   auto dev = drm::Device::from_fd(drm_fd);
-  auto r = drm::dumb::Buffer::create(dev, cfg);
-  if (!r) {
-    return drm::unexpected<std::error_code>(r.error());
+  // Atomic paths allocate both ping-pong buffers; legacy uses buffers[0]
+  // only. Reset bookkeeping so a re-alloc (resize during probe, or
+  // resume) starts from a known active=0, no-dirty state.
+  active_idx = 0;
+  dirty_back = false;
+  const std::size_t alloc_count = (path == PlanePath::kLegacy) ? 1U : 2U;
+  for (std::size_t i = 0; i < alloc_count; ++i) {
+    auto r = drm::dumb::Buffer::create(dev, cfg);
+    if (!r) {
+      // Roll back any earlier successful allocation in this call so
+      // probe_acceptable_size sees a clean .empty() on retry.
+      for (auto& b : buffers) {
+        b = drm::dumb::Buffer{};
+      }
+      return drm::unexpected<std::error_code>(r.error());
+    }
+    buffers.at(i) = std::move(*r);
   }
-  buffer = std::move(*r);
   // drm::dumb::Buffer already zero-fills the mapping during create().
   return {};
 }
 
 void Renderer::Impl::free_buffer() {
-  buffer = drm::dumb::Buffer{};
+  for (auto& b : buffers) {
+    b = drm::dumb::Buffer{};
+  }
+  active_idx = 0;
+  dirty_back = false;
 }
 
 std::uint32_t Renderer::Impl::probe_acceptable_size(std::uint32_t preferred) {
@@ -422,11 +477,19 @@ std::uint32_t Renderer::Impl::probe_acceptable_size(std::uint32_t preferred) {
 // ---------------------------------------------------------------------------
 
 void Renderer::Impl::blit_frame(const Frame& f) {
-  if (buffer.empty()) {
+  // Atomic paths write to the back buffer so scanout (still pulling
+  // from the active one) doesn't see torn pixels. Legacy has a single
+  // buffer and drmModeSetCursor handles upload; rewriting in place is
+  // unavoidable but rotation is rejected on legacy anyway, so the
+  // race window is narrow and only mid-animation updates touch it.
+  auto& dst_buf = (path == PlanePath::kLegacy) ? active_buffer() : back_buffer();
+  if (dst_buf.empty()) {
     return;
   }
-  auto* const dst = mapped32();
-  const auto stride_px = static_cast<std::size_t>(buffer.stride() / 4);
+  auto* const dst =
+      reinterpret_cast<std::uint32_t*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+          dst_buf.data());
+  const auto stride_px = static_cast<std::size_t>(dst_buf.stride() / 4);
 
   // Wipe the full buffer — a smaller-than-buffer frame must not leak
   // stale pixels around its edges (prior frames in an animation or a
@@ -434,8 +497,8 @@ void Renderer::Impl::blit_frame(const Frame& f) {
   // rely on this wipe: the post-rotation sprite may not overlap the
   // pre-rotation sprite's footprint, and any stale pixels outside
   // the new footprint would otherwise ghost on screen.
-  for (std::size_t y = 0; y < buffer.height(); ++y) {
-    std::memset(dst + (y * stride_px), 0, static_cast<std::size_t>(buffer.width()) * 4);
+  for (std::size_t y = 0; y < dst_buf.height(); ++y) {
+    std::memset(dst + (y * stride_px), 0, static_cast<std::size_t>(dst_buf.width()) * 4);
   }
 
   // Rotated sprite dimensions: k90 and k270 swap width and height,
@@ -456,16 +519,16 @@ void Renderer::Impl::blit_frame(const Frame& f) {
   // (preserving aspect by shrinking each axis independently to its
   // own buffer dim) so the entire sprite fits and stays centered. When
   // it already fits, take the existing fast/rotation paths.
-  const bool needs_downscale = (rot_w > buffer.width()) || (rot_h > buffer.height());
+  const bool needs_downscale = (rot_w > dst_buf.width()) || (rot_h > dst_buf.height());
 
-  std::uint32_t blit_w = std::min(rot_w, buffer.width());
-  std::uint32_t blit_h = std::min(rot_h, buffer.height());
+  std::uint32_t blit_w = std::min(rot_w, dst_buf.width());
+  std::uint32_t blit_h = std::min(rot_h, dst_buf.height());
   if (needs_downscale) {
     // Aspect ratios in fixed-point (no FP). Pick the more aggressive
     // shrink ratio to drive both axes so the sprite stays
     // proportional even if only one axis exceeded the buffer.
-    const std::uint64_t rx = (static_cast<std::uint64_t>(buffer.width()) << 16U) / rot_w;
-    const std::uint64_t ry = (static_cast<std::uint64_t>(buffer.height()) << 16U) / rot_h;
+    const std::uint64_t rx = (static_cast<std::uint64_t>(dst_buf.width()) << 16U) / rot_w;
+    const std::uint64_t ry = (static_cast<std::uint64_t>(dst_buf.height()) << 16U) / rot_h;
     const std::uint64_t r = std::min(rx, ry);
     // Round to nearest (add 0.5 in 16.16 before the shift) so a
     // 72→64 shrink lands on 64, not 63 — truncation here would leave
@@ -473,8 +536,8 @@ void Renderer::Impl::blit_frame(const Frame& f) {
     constexpr std::uint64_t k_half = 1ULL << 15U;
     blit_w = static_cast<std::uint32_t>(((static_cast<std::uint64_t>(rot_w) * r) + k_half) >> 16U);
     blit_h = static_cast<std::uint32_t>(((static_cast<std::uint64_t>(rot_h) * r) + k_half) >> 16U);
-    blit_w = std::min(blit_w, buffer.width());
-    blit_h = std::min(blit_h, buffer.height());
+    blit_w = std::min(blit_w, dst_buf.width());
+    blit_h = std::min(blit_h, dst_buf.height());
     if (blit_w == 0) {
       blit_w = 1;
     }
@@ -483,8 +546,8 @@ void Renderer::Impl::blit_frame(const Frame& f) {
     }
   }
 
-  const std::size_t x_off = (buffer.width() > blit_w) ? (buffer.width() - blit_w) / 2 : 0;
-  const std::size_t y_off = (buffer.height() > blit_h) ? (buffer.height() - blit_h) / 2 : 0;
+  const std::size_t x_off = (dst_buf.width() > blit_w) ? (dst_buf.width() - blit_w) / 2 : 0;
+  const std::size_t y_off = (dst_buf.height() > blit_h) ? (dst_buf.height() - blit_h) / 2 : 0;
 
   if (needs_downscale) {
     // Box-filter sampler reads through sample_rotated so rotation +
@@ -540,6 +603,12 @@ void Renderer::Impl::blit_frame(const Frame& f) {
   last_frame = &f;
   last_blit_w = blit_w;
   last_blit_h = blit_h;
+  // Mark the back buffer dirty so the next stage_position emits its
+  // FB_ID and the next successful commit swaps active↔back. Legacy
+  // owns a single buffer; commit_buffer() always picks active there.
+  if (path != PlanePath::kLegacy) {
+    dirty_back = true;
+  }
 }
 
 bool Renderer::Impl::advance(drm::Clock::time_point now) {
@@ -569,12 +638,14 @@ Rotation Renderer::Impl::effective_sw_rotation() const noexcept {
   if (path == PlanePath::kLegacy) {
     return Rotation::k0;
   }
-  // Hardware rotation property present → the kernel handles it at
-  // scanout; blit_frame writes pixels in source orientation.
-  if (rotation_prop) {
+  // Hardware rotation requires both the property and the specific
+  // value to be in the plane's supported bitmask. i915 cursor planes
+  // expose the prop but only list rotate-0/180; rotate-90/270 fall
+  // through to software pre-rotation here. When neither path can run
+  // hardware (no prop) every non-k0 also lands in software.
+  if (rotation_prop && (rotation_supported_mask & rotation_to_drm_mask(rotation)) != 0U) {
     return Rotation::k0;
   }
-  // Atomic plane without the rotation property → pre-rotate in software.
   return rotation;
 }
 
@@ -630,8 +701,12 @@ Renderer::Impl::BufferHotspot Renderer::Impl::buffer_hotspot() const noexcept {
   }
   const std::uint32_t bw = (last_blit_w != 0) ? last_blit_w : rw;
   const std::uint32_t bh = (last_blit_h != 0) ? last_blit_h : rh;
-  const int x_off = (buffer.width() > bw) ? static_cast<int>((buffer.width() - bw) / 2) : 0;
-  const int y_off = (buffer.height() > bh) ? static_cast<int>((buffer.height() - bh) / 2) : 0;
+  // Both ping-pong buffers share dimensions; commit_buffer() picks
+  // whichever one stage_position will publish next, keeping the
+  // hotspot consistent with the FB the kernel will scan out.
+  const auto& cb = commit_buffer();
+  const int x_off = (cb.width() > bw) ? static_cast<int>((cb.width() - bw) / 2) : 0;
+  const int y_off = (cb.height() > bh) ? static_cast<int>((cb.height() - bh) / 2) : 0;
   return {rx + x_off, ry + y_off};
 }
 
@@ -639,6 +714,7 @@ void Renderer::Impl::probe_plane_properties() noexcept {
   hotspot_x_prop.reset();
   hotspot_y_prop.reset();
   rotation_prop.reset();
+  rotation_supported_mask = 0;
   if (path == PlanePath::kLegacy) {
     return;
   }
@@ -650,6 +726,25 @@ void Renderer::Impl::probe_plane_properties() noexcept {
   }
   if (auto id = props.property_id(plane_id, "rotation")) {
     rotation_prop = *id;
+    // The rotation prop is a BITMASK type: each enum entry's `value`
+    // is the bit *index* (0..63), and a plane advertises support by
+    // listing bits in its enums table. Unlisted bits will EINVAL at
+    // atomic_check. i915's cursor plane is the live offender —
+    // exposes only rotate-0 and rotate-180 — so we have to ask the
+    // kernel rather than trust property-presence alone.
+    if (auto* p = drmModeGetProperty(drm_fd, *id); p != nullptr) {
+      for (int i = 0; i < p->count_enums; ++i) {
+        rotation_supported_mask |= (1ULL << p->enums[i].value);
+      }
+      drmModeFreeProperty(p);
+    }
+    // Defensive floor: every kernel-shipped rotation prop includes
+    // rotate-0. If the enum walk somehow returned nothing (driver bug
+    // or a malformed prop), pretend k0 works so the rest of the code
+    // can rely on the mask being non-zero whenever rotation_prop is.
+    if (rotation_supported_mask == 0) {
+      rotation_supported_mask = DRM_MODE_ROTATE_0;
+    }
   }
 }
 
@@ -673,7 +768,13 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   // commits, but a cursor plane that toggled off during a hide() needs
   // every field re-armed to go visible again, and it's cheaper to just
   // always write them than to track a dirty bitmap.
-  if (auto r = add("FB_ID", buffer.fb_id()); !r) {
+  //
+  // commit_buffer() picks the back buffer when blit_frame has run
+  // since the last successful commit, otherwise the active one. Both
+  // ping-pong buffers share dimensions so CRTC_W/H and SRC_W/H read
+  // the same regardless; FB_ID is what actually swaps.
+  const auto& cb = commit_buffer();
+  if (auto r = add("FB_ID", cb.fb_id()); !r) {
     return r;
   }
   if (auto r = add("CRTC_ID", crtc_id); !r) {
@@ -685,10 +786,10 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   if (auto r = add("CRTC_Y", static_cast<std::uint64_t>(py)); !r) {
     return r;
   }
-  if (auto r = add("CRTC_W", buffer.width()); !r) {
+  if (auto r = add("CRTC_W", cb.width()); !r) {
     return r;
   }
-  if (auto r = add("CRTC_H", buffer.height()); !r) {
+  if (auto r = add("CRTC_H", cb.height()); !r) {
     return r;
   }
   if (auto r = add("SRC_X", 0); !r) {
@@ -698,20 +799,26 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
     return r;
   }
   // Source rect is in 16.16 fixed-point; CRTC rect is plain pixels.
-  if (auto r = add("SRC_W", static_cast<std::uint64_t>(buffer.width()) << 16U); !r) {
+  if (auto r = add("SRC_W", static_cast<std::uint64_t>(cb.width()) << 16U); !r) {
     return r;
   }
-  if (auto r = add("SRC_H", static_cast<std::uint64_t>(buffer.height()) << 16U); !r) {
+  if (auto r = add("SRC_H", static_cast<std::uint64_t>(cb.height()) << 16U); !r) {
     return r;
   }
 
   // rotation — optional (some planes don't expose it). Written on
   // every commit so the value is re-armed on the first post-resume
   // commit (fresh fd lost the prior kernel state) and so set_rotation
-  // doesn't need its own commit path. Validated at create time: a
-  // plane without this property can only run Rotation::k0.
+  // doesn't need its own commit path. When the requested rotation
+  // isn't in the plane's supported mask, we send ROTATE_0 — blit_frame
+  // pre-rotated the pixels in software for that case (see
+  // effective_sw_rotation), so the scanout hardware just sees a k0
+  // sprite.
   if (rotation_prop) {
-    if (auto r = req.add_property(plane_id, *rotation_prop, rotation_to_drm_mask(rotation)); !r) {
+    const std::uint64_t want = rotation_to_drm_mask(rotation);
+    const std::uint64_t hw_value =
+        ((rotation_supported_mask & want) != 0U) ? want : DRM_MODE_ROTATE_0;
+    if (auto r = req.add_property(plane_id, *rotation_prop, hw_value); !r) {
       return r;
     }
   }
@@ -751,8 +858,8 @@ drm::expected<void, std::error_code> Renderer::Impl::commit_position(int crtc_x,
     // First legacy install: point the CRTC at our GEM handle.
     // Subsequent moves are cheap drmModeMoveCursor calls.
     if (first_commit_needed) {
-      if (drmModeSetCursor(drm_fd, crtc_id, buffer.handle(), buffer.width(), buffer.height()) !=
-          0) {
+      auto& ab = active_buffer();
+      if (drmModeSetCursor(drm_fd, crtc_id, ab.handle(), ab.width(), ab.height()) != 0) {
         return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
       }
       first_commit_needed = false;
@@ -781,6 +888,15 @@ drm::expected<void, std::error_code> Renderer::Impl::commit_position(int crtc_x,
     return r;
   }
   first_commit_needed = false;
+  // Publish the back buffer: scanout was reading from the (now-old)
+  // active one, which the kernel held a reference to until the flip
+  // landed. Swapping indices makes the buffer we just committed the
+  // one a no-blit position commit will re-emit, while the next blit
+  // will write into the buffer that's now safely off-screen.
+  if (dirty_back) {
+    active_idx ^= 1U;
+    dirty_back = false;
+  }
   return {};
 }
 
@@ -951,7 +1067,7 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
     // both the kernel atomic_check and the renderer's blit path
     // expect — h tracks w throughout.
     (void)impl->probe_acceptable_size(w);
-    if (impl->buffer.empty()) {
+    if (impl->active_buffer().empty()) {
       // Probe + fallback both failed to allocate — only happens on
       // CREATE_DUMB / ADDFB2 errors, which are the same failure modes
       // alloc_buffer would have surfaced before.
@@ -1113,6 +1229,18 @@ drm::expected<bool, std::error_code> Renderer::stage(AtomicRequest& req, int crt
   // plane-enable always requires it regardless of our bookkeeping).
   first_commit = impl_->first_commit_needed;
   impl_->first_commit_needed = false;
+  // Eagerly swap the ping-pong index so a follow-up blit_frame writes
+  // into the buffer the caller's commit is *about* to retire from
+  // scanout, not the one the request just published. The caller owns
+  // the commit, so we can't observe success — if their commit fails,
+  // the kernel still scans the (now-)back buffer and a subsequent
+  // blit there will tear, no worse than the prior single-buffer
+  // behavior. Successful commits — the common case — get the full
+  // tear-free guarantee.
+  if (impl_->dirty_back) {
+    impl_->active_idx ^= 1U;
+    impl_->dirty_back = false;
+  }
   return reblit;
 }
 
@@ -1195,10 +1323,13 @@ drm::expected<void, std::error_code> Renderer::on_session_resumed(int new_fd) {
   // explicitly or leak one VMA per VT switch on long-lived compositors.
   // drm::dumb::Buffer::forget() munmaps locally and drops the GEM/FB
   // handles without issuing ioctls against the dead fd. Snapshot the
-  // dimensions first so we can re-allocate on the new fd.
-  const auto prev_w = impl_->buffer.width();
-  const auto prev_h = impl_->buffer.height();
-  impl_->buffer.forget();
+  // dimensions from the active buffer (both ping-pong buffers share
+  // size) so we can re-allocate on the new fd; both must be forgotten.
+  const auto prev_w = impl_->active_buffer().width();
+  const auto prev_h = impl_->active_buffer().height();
+  for (auto& b : impl_->buffers) {
+    b.forget();
+  }
   impl_->props.clear();
   impl_->drm_fd = new_fd;
 
@@ -1261,13 +1392,19 @@ drm::expected<void, std::error_code> Renderer::set_rotation(Rotation rotation) {
   if (rotation != Rotation::k0 && impl_->path == PlanePath::kLegacy) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
-  impl_->rotation = rotation;
 
-  // If software pre-rotation is in play (either the new or the old
-  // rotation flips through blit_frame), the buffer's current contents
-  // don't match the new orientation — re-blit so the next commit
-  // ships rotated pixels. The check is a cheap property-id probe.
-  if (!impl_->rotation_prop && impl_->last_frame != nullptr) {
+  // Snapshot whether SW pre-rotation was/will be in play across the
+  // change. effective_sw_rotation() reads impl_->rotation, so we have
+  // to sample old before mutating then sample new after. Re-blit
+  // whenever either side does software work — old SW path means the
+  // buffer is pre-rotated for the old angle; new SW path means we
+  // need pixels laid out for the new one. The HW→HW transition (i915
+  // 0↔180 for example) needs no re-blit; the kernel rotates at
+  // scanout from the same source bytes.
+  const Rotation old_eff = impl_->effective_sw_rotation();
+  impl_->rotation = rotation;
+  const Rotation new_eff = impl_->effective_sw_rotation();
+  if ((old_eff != Rotation::k0 || new_eff != Rotation::k0) && impl_->last_frame != nullptr) {
     impl_->blit_frame(*impl_->last_frame);
   }
 
@@ -1289,7 +1426,14 @@ bool Renderer::has_hotspot_properties() const noexcept {
 }
 
 bool Renderer::has_hardware_rotation() const noexcept {
-  return impl_->rotation_prop.has_value();
+  // Per-rotation semantic: true iff the *current* rotation is being
+  // driven by the kernel scanout, not pre-rotated by blit_frame. For
+  // a plane like i915's cursor that only advertises 0/180 in its
+  // bitmask, this returns true at k0/k180 and false at k90/k270 even
+  // though the property itself is present. Matches the diagnostic
+  // contract example callers want ("is HW handling this?") rather
+  // than the static "does the property exist?" reading.
+  return impl_->effective_sw_rotation() == Rotation::k0 && impl_->rotation_prop.has_value();
 }
 
 }  // namespace drm::cursor

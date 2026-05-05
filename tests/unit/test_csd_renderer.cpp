@@ -207,6 +207,84 @@ TEST(CsdRendererDraw, HoverChangesPixelsInButtonRegion) {
   EXPECT_TRUE(any_diff);
 }
 
+// ── decoration_geometry ────────────────────────────────────────
+
+TEST(CsdDecorationGeometry, PanelInsetByShadowExtent) {
+  const auto& theme = drm::csd::glass_default_theme();
+  ASSERT_GT(theme.shadow_extent, 0);
+  const auto g = drm::csd::decoration_geometry(theme, 600, 360);
+  EXPECT_EQ(g.panel_x, theme.shadow_extent);
+  EXPECT_EQ(g.panel_y, theme.shadow_extent);
+  EXPECT_EQ(g.panel_w, 600 - (2 * theme.shadow_extent));
+  EXPECT_EQ(g.panel_h, 360 - (2 * theme.shadow_extent));
+  EXPECT_EQ(g.title_bar_height, theme.title_bar.height);
+}
+
+TEST(CsdDecorationGeometry, MinimalThemeFillsCanvas) {
+  const auto g = drm::csd::decoration_geometry(drm::csd::glass_minimal_theme(), 200, 120);
+  EXPECT_EQ(g.panel_x, 0);
+  EXPECT_EQ(g.panel_y, 0);
+  EXPECT_EQ(g.panel_w, 200);
+  EXPECT_EQ(g.panel_h, 120);
+}
+
+TEST(CsdDecorationGeometry, UndersizedDecorationClampsToZeroPanel) {
+  // shadow_extent = 24, deco 30×30 → would yield negative panel size.
+  // The function must clamp rather than wrap.
+  const auto g = drm::csd::decoration_geometry(drm::csd::glass_default_theme(), 30, 30);
+  EXPECT_EQ(g.panel_w, 0);
+  EXPECT_EQ(g.panel_h, 0);
+}
+
+TEST(CsdDecorationGeometry, ButtonCentersOrderedRightToLeft) {
+  const auto g = drm::csd::decoration_geometry(drm::csd::glass_default_theme(), 600, 360);
+  EXPECT_GT(g.close_cx, g.minimize_cx);
+  EXPECT_GT(g.minimize_cx, g.maximize_cx);
+  // Even spacing — Close/Min step equals Min/Max step.
+  EXPECT_EQ(g.close_cx - g.minimize_cx, g.minimize_cx - g.maximize_cx);
+}
+
+TEST(CsdDecorationGeometry, ButtonsLandInsideTitleBar) {
+  const auto& theme = drm::csd::glass_default_theme();
+  const auto g = drm::csd::decoration_geometry(theme, 600, 360);
+  // Button bbox must be fully contained in [panel_x, panel_x+panel_w)
+  // × [panel_y, panel_y + title_bar_height).
+  for (const int cx : {g.close_cx, g.minimize_cx, g.maximize_cx}) {
+    EXPECT_GE(cx - g.button_radius, g.panel_x);
+    EXPECT_LT(cx + g.button_radius, g.panel_x + g.panel_w);
+  }
+  EXPECT_GE(g.button_cy - g.button_radius, g.panel_y);
+  EXPECT_LT(g.button_cy + g.button_radius, g.panel_y + g.title_bar_height);
+}
+
+TEST(CsdDecorationGeometry, HoverPaintLandsAtCloseButtonCenter) {
+  // The renderer's hover-recolor must hit the exact pixels the geometry
+  // helper advertises. Compare a None vs Close-hover render at the
+  // close center; they must differ.
+  Renderer r;
+  ShadowCache cache;
+  Canvas none(200, 80);
+  Canvas hover(200, 80);
+
+  WindowState ns;
+  ns.focused = true;
+  ns.hover = HoverButton::None;
+  WindowState hs;
+  hs.focused = true;
+  hs.hover = HoverButton::Close;
+
+  auto map_n = none.view();
+  auto map_h = hover.view();
+  ASSERT_TRUE(r.draw(drm::csd::glass_default_theme(), ns, map_n, cache).has_value());
+  ASSERT_TRUE(r.draw(drm::csd::glass_default_theme(), hs, map_h, cache).has_value());
+
+  const auto g =
+      drm::csd::decoration_geometry(drm::csd::glass_default_theme(), none.width, none.height);
+  const auto cx = static_cast<std::uint32_t>(g.close_cx);
+  const auto cy = static_cast<std::uint32_t>(g.button_cy);
+  EXPECT_NE(none.packed_at(cx, cy), hover.packed_at(cx, cy));
+}
+
 TEST(CsdRendererDraw, ShadowCachePopulatedAfterDraw) {
   Renderer r;
   ShadowCache cache;

@@ -56,6 +56,7 @@ if(DRM_CXX_HAS_BLEND2D)
     csd/surface.cpp
     csd/shadow_cache.cpp
     csd/renderer.cpp
+    csd/animator.cpp
     csd/overlay_reservation.cpp
     csd/presenter_plane.cpp)
 endif()
@@ -268,6 +269,7 @@ if(DRM_CXX_HAS_BLEND2D)
       csd/window_state.hpp
       csd/shadow_cache.hpp
       csd/renderer.hpp
+      csd/animator.hpp
       csd/overlay_reservation.hpp
       csd/presenter.hpp
       csd/presenter_plane.hpp

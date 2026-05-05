@@ -60,20 +60,26 @@
 //     CRTCs from multiple threads.
 //
 // Rotation:
-//   - Atomic planes that expose the "rotation" property rotate at
-//     scanout — Renderer writes the current value on every commit
-//     and the kernel handles it for free.
-//   - Atomic planes without the property fall back to software
-//     pre-rotation: blit_frame lays the pixels into the dumb buffer
-//     already rotated, the hotspot math rotates with them, and the
-//     plane itself is a bog-standard k0 commit. Cost is one extra
-//     per-pixel remap inside blit_frame (trivial at cursor sizes)
-//     plus a re-blit on set_rotation() so the buffer matches the
-//     new orientation.
+//   - Atomic planes that expose the "rotation" property *and* list
+//     the requested value in its bitmask rotate at scanout —
+//     Renderer writes the current value on every commit and the
+//     kernel handles it for free.
+//   - Atomic planes without the property, or with the property but
+//     with the requested value missing from its supported bitmask
+//     (i915 cursor: only rotate-0/180 in the enum, so 90/270 EINVAL
+//     atomic_check), fall back to software pre-rotation: blit_frame
+//     lays the pixels into the dumb buffer already rotated, the
+//     hotspot math rotates with them, and the plane commit ships
+//     ROTATE_0. Cost is one extra per-pixel remap inside blit_frame
+//     (trivial at cursor sizes) plus a re-blit on set_rotation() so
+//     the buffer matches the new orientation. The HW↔SW boundary is
+//     re-evaluated per set_rotation(), so a single Renderer can sit
+//     in HW for k0/k180 and SW for k90/k270 on the same i915 plane.
 //   - Legacy drmModeSetCursor has no rotation channel — non-k0 is
 //     rejected by create() and set_rotation() on that path.
-//   - has_hardware_rotation() distinguishes the two atomic modes for
-//     callers that want to report which one is live.
+//   - has_hardware_rotation() reports whether the *current* rotation
+//     is HW-driven, so example/diagnostic callers can label each
+//     value as "hardware" vs "software blit".
 //
 // Virtualized-plane hotspot hinting:
 //   - When the chosen plane exposes the HOTSPOT_X / HOTSPOT_Y
@@ -286,10 +292,15 @@ class Renderer {
   /// next commit after set_cursor() / show() / on_session_resumed().
   [[nodiscard]] drm::expected<void, std::error_code> set_rotation(Rotation rotation);
 
-  /// True when the selected plane rotates in hardware (the "rotation"
-  /// property is present). False means either the legacy path
-  /// (rotation isn't supported at all) or software pre-rotation
-  /// (non-k0 rotates via blit_frame, at a small per-blit CPU cost).
+  /// True when the *current* rotation is being driven by the kernel
+  /// at scanout — i.e. the plane exposes the "rotation" property and
+  /// the current value is in the property's supported bitmask. Returns
+  /// false on the legacy path, on atomic planes without the property,
+  /// and (notably) on planes that expose the property but list only a
+  /// subset of values: i915's cursor plane, for example, advertises
+  /// rotate-0 / rotate-180 only, so this returns true at k0/k180 and
+  /// false at k90/k270 — those run through blit_frame's software
+  /// pre-rotation path. Re-evaluated after every set_rotation().
   [[nodiscard]] bool has_hardware_rotation() const noexcept;
 
   /// True when the selected plane exposes the HOTSPOT_X / HOTSPOT_Y

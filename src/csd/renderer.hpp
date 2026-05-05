@@ -25,11 +25,59 @@
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <system_error>
 
 namespace drm::csd {
+
+// Single source of truth for decoration layout. Both the renderer and
+// any shell that needs to hit-test the painted output read positions
+// from here, so the two never desync. All coordinates are in
+// decoration-local space (origin = decoration's top-left corner).
+//
+// The panel is the opaque glass rect inset by `theme.shadow_extent`
+// inside the decoration's bounding box; the title bar lives at the top
+// of the panel and the three traffic-light buttons are circles centered
+// at (close_cx | minimize_cx | maximize_cx, button_cy) with radius
+// `button_radius`. For hit testing, the conventional axis-aligned
+// bounding box [cx-r, cx+r] × [button_cy-r, button_cy+r] is what the
+// shell uses — at this size it's indistinguishable from a Euclidean
+// distance check and avoids a sqrt per probe.
+struct DecorationGeometry {
+  // Panel rectangle (inside the shadow halo). The renderer fills the
+  // glass background here; the shell's hit-test rejects clicks
+  // outside it as "on the shadow" → not interactive.
+  int panel_x{};
+  int panel_y{};
+  int panel_w{};
+  int panel_h{};
+
+  // Title bar height (zero if the theme disables the title bar). The
+  // bar occupies [panel_y, panel_y + title_bar_height) in y, full
+  // panel width in x.
+  int title_bar_height{};
+
+  // Button hit + visual radius and the y-coordinate shared by all
+  // three button centers.
+  int button_radius{};
+  int button_cy{};
+
+  // Button center x-coordinates, ordered Linux-conventionally:
+  // Close rightmost, then Minimize, then Maximize toward the title
+  // text. Successive centers step left by (2 * button_radius + gap).
+  int close_cx{};
+  int minimize_cx{};
+  int maximize_cx{};
+};
+
+// Compute the layout for a decoration of size `deco_w` × `deco_h`
+// styled by `theme`. Pure function — no allocation, no I/O — safe to
+// call per-frame. Negative-extent / undersized themes clamp panel
+// dimensions to zero rather than producing negative widths.
+[[nodiscard]] DecorationGeometry decoration_geometry(const Theme& theme, std::uint32_t deco_w,
+                                                     std::uint32_t deco_h) noexcept;
 
 struct RendererConfig {
   // Explicit TTF/OTF path. If non-empty and the file loads, that font

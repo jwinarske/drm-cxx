@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include "csd/animator.hpp"
 #include "csd/presenter.hpp"
 #include "csd/renderer.hpp"
 #include "csd/shadow_cache.hpp"
@@ -30,6 +31,7 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -57,6 +59,7 @@ struct Document {
   std::uint32_t height{0};
   drm::csd::WindowState state{};
   drm::csd::Surface deco;
+  drm::csd::WindowAnim anim;
   bool dirty{true};
 };
 
@@ -132,9 +135,22 @@ class Shell {
   /// Left-button release. Ends any active drag.
   void on_pointer_release();
 
-  /// Pointer motion. Only consequential during an active drag (moves
-  /// the focused doc). Returns true if a doc moved.
+  /// Pointer motion. During an active drag this moves the focused
+  /// doc; otherwise it retargets each doc's hover button (used by the
+  /// animator to drive the fill→hover cross-fade). Returns true if a
+  /// doc moved (drag path) so the caller can mark the frame dirty
+  /// for geometry; hover-only changes do not return true — they
+  /// surface through the next `tick_animations()` once the animator
+  /// reports active.
   bool on_pointer_motion(std::int32_t px, std::int32_t py);
+
+  /// Advance every doc's animator by `dt` and mirror progress into the
+  /// per-doc WindowState. Returns true if any animation is still in
+  /// flight (or settled this tick), so the main loop can keep
+  /// frame_dirty set across the tween. The duration comes from the
+  /// active theme's `animation_duration_ms`; non-positive values
+  /// short-circuit (animations effectively disabled).
+  bool tick_animations(std::chrono::milliseconds dt);
 
   /// Build the SurfaceRef list for `PlanePresenter::apply`. Length is
   /// always `plane_budget()`; entries beyond the live doc count are

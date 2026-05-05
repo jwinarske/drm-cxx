@@ -13,6 +13,7 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -426,28 +427,6 @@ drm::expected<ThemeResolution, std::error_code> Theme::resolve(
     start = "default";
   }
 
-  // BFS through the Inherits graph so each theme is visited once in
-  // spec-defined order. The chain doubles as a diagnostic in the
-  // returned ThemeResolution.
-  std::vector<std::string> chain;
-  std::unordered_set<std::string> visited;
-  std::vector<std::string> queue{start};
-  while (!queue.empty()) {
-    auto cur = std::move(queue.front());
-    queue.erase(queue.begin());
-    if (!visited.insert(cur).second) {
-      continue;
-    }
-    const auto it = impl_->by_name.find(cur);
-    chain.push_back(std::move(cur));
-    if (it == impl_->by_name.end()) {
-      continue;
-    }
-    for (const auto& parent : impl_->themes[it->second].inherits) {
-      queue.push_back(parent);
-    }
-  }
-
   // For every theme in the chain, try every alias sibling of the
   // requested cursor name inside every dir that provides the theme.
   // First on-disk hit wins.
@@ -468,24 +447,65 @@ drm::expected<ThemeResolution, std::error_code> Theme::resolve(
     return matched;
   };
 
-  for (const auto& theme : chain) {
-    const auto map_it = impl_->by_name.find(theme);
-    if (map_it == impl_->by_name.end()) {
-      continue;
-    }
-    const auto& record = impl_->themes[map_it->second];
-    std::filesystem::path found;
-    for (const auto& dir : record.dirs) {
-      if (try_cursors_dir(dir / "cursors", found)) {
-        return memoize(ThemeResolution{theme, std::move(found), std::move(chain)});
+  std::vector<std::string> chain;
+  std::unordered_set<std::string> visited;
+
+  // BFS the Inherits graph from a given root, appending every newly-
+  // visited theme to `chain`, and check each one for the cursor as
+  // soon as it's appended. Returns the matched ThemeResolution if any
+  // theme in the expanded chain provides the cursor; nullopt otherwise.
+  // Splitting the walk this way lets the caller chain a second root
+  // (the "default" bridge below) onto the same chain/visited set
+  // without redoing work.
+  auto bfs_and_match =
+      [&](std::string root) -> std::optional<drm::expected<ThemeResolution, std::error_code>> {
+    std::vector<std::string> queue{std::move(root)};
+    while (!queue.empty()) {
+      auto cur = std::move(queue.front());
+      queue.erase(queue.begin());
+      if (!visited.insert(cur).second) {
+        continue;
       }
+      const auto it = impl_->by_name.find(cur);
+      chain.push_back(cur);
+      if (it != impl_->by_name.end()) {
+        for (const auto& parent : impl_->themes[it->second].inherits) {
+          queue.push_back(parent);
+        }
+        const auto& record = impl_->themes[it->second];
+        std::filesystem::path found;
+        for (const auto& dir : record.dirs) {
+          if (try_cursors_dir(dir / "cursors", found)) {
+            return memoize(ThemeResolution{cur, std::move(found), std::move(chain)});
+          }
+        }
+      }
+    }
+    return std::nullopt;
+  };
+
+  if (auto hit = bfs_and_match(start); hit) {
+    return *hit;
+  }
+
+  // "default" bridge — if the user's named theme (and its parents)
+  // didn't carry the cursor, walk the system "default" theme's chain
+  // before the arbitrary discovery-order fallback. On most distros
+  // /usr/share/icons/default symlinks index.theme to the active system
+  // cursor pack (DMZ-White, Yaru, etc.), so this gets the user a
+  // sensible-looking pointer instead of whichever theme happened to
+  // sort first on disk. Skipped when the user's chain already included
+  // "default" (e.g. preferred_theme was empty or literally "default").
+  if (start != "default" && visited.find("default") == visited.end()) {
+    if (auto hit = bfs_and_match("default"); hit) {
+      return *hit;
     }
   }
 
-  // Spec fallback: if the inherits chain struck out, try every other
-  // indexed theme in discovery order (user dirs first, then system).
-  // The chain vector grows as we go so diagnostics reflect every theme
-  // we actually looked in.
+  // Spec fallback: if neither the named chain nor the default bridge
+  // produced a match, try every other indexed theme in discovery order
+  // (user dirs first, then system). The chain vector grows as we go so
+  // diagnostics reflect every theme we actually looked in.
   for (const auto& record : impl_->themes) {
     if (std::find(chain.begin(), chain.end(), record.name) != chain.end()) {
       continue;
