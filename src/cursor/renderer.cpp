@@ -87,6 +87,108 @@ std::uint64_t rotation_to_drm_mask(Rotation r) {
   return DRM_MODE_ROTATE_0;
 }
 
+// Pull a single pixel from the rotated view of a Frame. Coordinates
+// are in the rotated image (rx in [0, rot_w), ry in [0, rot_h)).
+// Inverse rotation formulas — kept aligned with the comments in
+// blit_frame's per-pixel rotation path.
+inline std::uint32_t sample_rotated(const Frame& f, Rotation rot, std::size_t rx,
+                                    std::size_t ry) noexcept {
+  std::size_t sx = 0;
+  std::size_t sy = 0;
+  switch (rot) {
+    case Rotation::k0:
+      sx = rx;
+      sy = ry;
+      break;
+    case Rotation::k90:
+      sx = ry;
+      sy = f.height - 1 - rx;
+      break;
+    case Rotation::k180:
+      sx = f.width - 1 - rx;
+      sy = f.height - 1 - ry;
+      break;
+    case Rotation::k270:
+      sx = f.width - 1 - ry;
+      sy = rx;
+      break;
+  }
+  return f.pixels[(sy * f.width) + sx];
+}
+
+// Area-weighted box-filter downscale of a (rotated) source image into
+// a destination region. ARGB8888 pixels are stored premultiplied (the
+// XCursor convention libxcursor preserves on load), so straight
+// component averaging is correct without any un-premultiply detour.
+//
+// Fixed-point 24.8: scale ratios are computed as src*256/dst so
+// per-pixel coverage is integer-arithmetic only. Each dst pixel
+// reads ⌈ratio⌉² source pixels at most, weighted by the fraction of
+// each source pixel that falls inside the dst pixel's preimage box.
+//
+// Caller guarantees dst_w <= rot_w and dst_h <= rot_h. dst_w == rot_w
+// (resp. dst_h == rot_h) on a single axis is fine — the math
+// degenerates to a 1-pixel-wide preimage on that axis with weight =
+// 256 per source row/column.
+inline void box_downscale_rotated(const Frame& f, Rotation rot, std::uint32_t rot_w,
+                                  std::uint32_t rot_h, std::uint32_t* dst,
+                                  std::size_t dst_stride_px, std::uint32_t dst_w,
+                                  std::uint32_t dst_h) noexcept {
+  const std::uint64_t fx = (static_cast<std::uint64_t>(rot_w) << 8U) / dst_w;
+  const std::uint64_t fy = (static_cast<std::uint64_t>(rot_h) << 8U) / dst_h;
+
+  for (std::uint32_t dy = 0; dy < dst_h; ++dy) {
+    const std::uint64_t y0 = static_cast<std::uint64_t>(dy) * fy;
+    const std::uint64_t y1 = y0 + fy;
+    const std::size_t sy0 = y0 >> 8U;
+    const std::size_t sy1 = (y1 + 0xFFU) >> 8U;  // ceil
+
+    for (std::uint32_t dx = 0; dx < dst_w; ++dx) {
+      const std::uint64_t x0 = static_cast<std::uint64_t>(dx) * fx;
+      const std::uint64_t x1 = x0 + fx;
+      const std::size_t sx0 = x0 >> 8U;
+      const std::size_t sx1 = (x1 + 0xFFU) >> 8U;
+
+      std::uint64_t acc_a = 0;
+      std::uint64_t acc_r = 0;
+      std::uint64_t acc_g = 0;
+      std::uint64_t acc_b = 0;
+      std::uint64_t acc_w = 0;
+
+      for (std::size_t sy = sy0; sy < sy1; ++sy) {
+        const std::uint64_t cell_y0 =
+            std::max<std::uint64_t>(y0, static_cast<std::uint64_t>(sy) << 8U);
+        const std::uint64_t cell_y1 =
+            std::min<std::uint64_t>(y1, static_cast<std::uint64_t>(sy + 1) << 8U);
+        const std::uint64_t wy = cell_y1 - cell_y0;
+        for (std::size_t sx = sx0; sx < sx1; ++sx) {
+          const std::uint64_t cell_x0 =
+              std::max<std::uint64_t>(x0, static_cast<std::uint64_t>(sx) << 8U);
+          const std::uint64_t cell_x1 =
+              std::min<std::uint64_t>(x1, static_cast<std::uint64_t>(sx + 1) << 8U);
+          const std::uint64_t wx = cell_x1 - cell_x0;
+          const std::uint64_t weight = wx * wy;
+
+          const std::uint32_t p = sample_rotated(f, rot, sx, sy);
+          acc_a += weight * ((p >> 24U) & 0xFFU);
+          acc_r += weight * ((p >> 16U) & 0xFFU);
+          acc_g += weight * ((p >> 8U) & 0xFFU);
+          acc_b += weight * (p & 0xFFU);
+          acc_w += weight;
+        }
+      }
+
+      const std::uint64_t half = acc_w / 2U;
+      const auto a = static_cast<std::uint32_t>((acc_a + half) / acc_w);
+      const auto r = static_cast<std::uint32_t>((acc_r + half) / acc_w);
+      const auto g = static_cast<std::uint32_t>((acc_g + half) / acc_w);
+      const auto b = static_cast<std::uint32_t>((acc_b + half) / acc_w);
+      dst[(static_cast<std::size_t>(dy) * dst_stride_px) + dx] =
+          (a << 24U) | (r << 16U) | (g << 8U) | b;
+    }
+  }
+}
+
 }  // namespace
 
 struct Renderer::Impl {
@@ -154,6 +256,16 @@ struct Renderer::Impl {
   drm::Clock::time_point anim_start;
   const Frame* last_frame{nullptr};
 
+  // Pixels actually written into the buffer by the most recent
+  // blit_frame, *after* rotation and (when the rotated frame exceeds
+  // the buffer) box-filter downscale. last_frame's raw dimensions are
+  // not enough on their own: a 72×72 bitmap blit'd into a 64×64
+  // buffer is downscaled to 64×64, and buffer_hotspot needs the
+  // post-scale figure to compute the hotspot in buffer space. Set on
+  // every blit_frame call; consulted by buffer_hotspot.
+  std::uint32_t last_blit_w{0};
+  std::uint32_t last_blit_h{0};
+
   // --- commit / visibility state ------------------------------------
   // first_commit_needed starts true; the first successful commit
   // clears it. on_session_resumed() re-sets it so the post-resume
@@ -189,6 +301,22 @@ struct Renderer::Impl {
   // that property. Called from create() and on_session_resumed()
   // right after props.cache_properties().
   void probe_plane_properties() noexcept;
+
+  // Probe which buffer side length the kernel actually accepts for
+  // this plane. DRM_CAP_CURSOR_WIDTH is an upper bound, not a list of
+  // accepted sizes — i915 only takes 64, amdgpu DC only 64/128/256,
+  // and other drivers each enforce their own table inside
+  // atomic_check. There's no uAPI to enumerate them, so we walk the
+  // common {256, 128, 64} ladder descending from `preferred`,
+  // alloc + DRM_MODE_ATOMIC_TEST_ONLY each candidate, and keep the
+  // first that passes. On all-fail (typically: CRTC not yet armed at
+  // create time, so the test fails for unrelated reasons) we
+  // re-allocate at `preferred` and let the runtime commit surface the
+  // actual error. Caller owns the returned buffer state — on success
+  // `buffer` is the size we settled on; on all-fail it's `preferred`.
+  // Atomic paths only; legacy SetCursor has no TEST equivalent and is
+  // hard-coded at 64 by every driver.
+  std::uint32_t probe_acceptable_size(std::uint32_t preferred);
 
   // Translate a CRTC coordinate to the plane-destination coordinate,
   // accounting for the current frame's hotspot and the centering
@@ -248,6 +376,47 @@ void Renderer::Impl::free_buffer() {
   buffer = drm::dumb::Buffer{};
 }
 
+std::uint32_t Renderer::Impl::probe_acceptable_size(std::uint32_t preferred) {
+  // Common ladder, large-to-small. Anything above the user's stated
+  // preferred is skipped — they asked for a smaller cursor, we won't
+  // upsize it just because the driver could.
+  static constexpr std::uint32_t k_ladder[] = {256U, 128U, 64U};
+
+  for (const std::uint32_t cand : k_ladder) {
+    if (cand > preferred) {
+      continue;
+    }
+    if (auto a = alloc_buffer(cand, cand); !a) {
+      continue;
+    }
+    const drm::Device dev = drm::Device::from_fd(drm_fd);
+    drm::AtomicRequest req(dev);
+    if (!req.valid()) {
+      free_buffer();
+      continue;
+    }
+    // stage_position writes only the cursor plane's properties; HOTSPOT
+    // is skipped because last_frame is still null (no set_cursor yet).
+    if (auto r = stage_position(req, 0, 0); !r) {
+      free_buffer();
+      continue;
+    }
+    if (auto r = req.test(); r) {
+      return cand;
+    }
+    free_buffer();
+  }
+
+  // No candidate passed. Fall back to `preferred` (clamped to the 64
+  // floor) so we still have a buffer to hand to the caller; the first
+  // real commit will surface the kernel's rejection if there is one.
+  // Most likely cause: the caller hasn't done modeset yet, so the
+  // TEST_ONLY commits fail for reasons unrelated to cursor sizing.
+  const std::uint32_t fallback = (preferred >= 64U) ? preferred : 64U;
+  (void)alloc_buffer(fallback, fallback);
+  return fallback;
+}
+
 // ---------------------------------------------------------------------------
 // Impl: rendering
 // ---------------------------------------------------------------------------
@@ -277,17 +446,57 @@ void Renderer::Impl::blit_frame(const Frame& f) {
   const std::uint32_t rot_w = swap_dims ? f.height : f.width;
   const std::uint32_t rot_h = swap_dims ? f.width : f.height;
 
-  const std::uint32_t w = std::min(rot_w, buffer.width());
-  const std::uint32_t h = std::min(rot_h, buffer.height());
-  const std::size_t x_off = (buffer.width() > rot_w) ? (buffer.width() - rot_w) / 2 : 0;
-  const std::size_t y_off = (buffer.height() > rot_h) ? (buffer.height() - rot_h) / 2 : 0;
+  // Decide whether to downscale. libxcursor returns the closest size
+  // available in the theme, not necessarily ≤ requested — Adwaita
+  // ships {24, 30, 36, 48, 72, 96} for example, so a 64-pixel
+  // request hands us a 72-pixel bitmap. A multi-output compositor
+  // sharing one Cursor across heads with different DPIs has the same
+  // pattern from the other direction. Either way: when the rotated
+  // source is bigger than the buffer on either axis, scale it down
+  // (preserving aspect by shrinking each axis independently to its
+  // own buffer dim) so the entire sprite fits and stays centered. When
+  // it already fits, take the existing fast/rotation paths.
+  const bool needs_downscale = (rot_w > buffer.width()) || (rot_h > buffer.height());
 
-  if (rot == Rotation::k0) {
+  std::uint32_t blit_w = std::min(rot_w, buffer.width());
+  std::uint32_t blit_h = std::min(rot_h, buffer.height());
+  if (needs_downscale) {
+    // Aspect ratios in fixed-point (no FP). Pick the more aggressive
+    // shrink ratio to drive both axes so the sprite stays
+    // proportional even if only one axis exceeded the buffer.
+    const std::uint64_t rx = (static_cast<std::uint64_t>(buffer.width()) << 16U) / rot_w;
+    const std::uint64_t ry = (static_cast<std::uint64_t>(buffer.height()) << 16U) / rot_h;
+    const std::uint64_t r = std::min(rx, ry);
+    // Round to nearest (add 0.5 in 16.16 before the shift) so a
+    // 72→64 shrink lands on 64, not 63 — truncation here would leave
+    // one column / row of black around the sprite for free.
+    constexpr std::uint64_t k_half = 1ULL << 15U;
+    blit_w = static_cast<std::uint32_t>(((static_cast<std::uint64_t>(rot_w) * r) + k_half) >> 16U);
+    blit_h = static_cast<std::uint32_t>(((static_cast<std::uint64_t>(rot_h) * r) + k_half) >> 16U);
+    blit_w = std::min(blit_w, buffer.width());
+    blit_h = std::min(blit_h, buffer.height());
+    if (blit_w == 0) {
+      blit_w = 1;
+    }
+    if (blit_h == 0) {
+      blit_h = 1;
+    }
+  }
+
+  const std::size_t x_off = (buffer.width() > blit_w) ? (buffer.width() - blit_w) / 2 : 0;
+  const std::size_t y_off = (buffer.height() > blit_h) ? (buffer.height() - blit_h) / 2 : 0;
+
+  if (needs_downscale) {
+    // Box-filter sampler reads through sample_rotated so rotation +
+    // scale compose without an intermediate buffer.
+    box_downscale_rotated(f, rot, rot_w, rot_h, dst + (y_off * stride_px) + x_off, stride_px,
+                          blit_w, blit_h);
+  } else if (rot == Rotation::k0) {
     // Fast path: full-row memcpy when no pre-rotation is needed.
-    for (std::size_t y = 0; y < h; ++y) {
+    for (std::size_t y = 0; y < blit_h; ++y) {
       const std::size_t src_offset = y * static_cast<std::size_t>(f.width);
       std::memcpy(dst + ((y + y_off) * stride_px) + x_off, f.pixels.data() + src_offset,
-                  static_cast<std::size_t>(w) * 4);
+                  static_cast<std::size_t>(blit_w) * 4);
     }
   } else {
     // Software pre-rotation — per-pixel remap. Each destination pixel
@@ -302,8 +511,8 @@ void Renderer::Impl::blit_frame(const Frame& f) {
     //   k270 fwd (sx,sy) → (sy, W-1-sx); inverse dst(dx,dy) → src(W-1-dy, dx)
     const std::size_t src_w = f.width;
     const std::size_t src_h = f.height;
-    for (std::size_t dy = 0; dy < h; ++dy) {
-      for (std::size_t dx = 0; dx < w; ++dx) {
+    for (std::size_t dy = 0; dy < blit_h; ++dy) {
+      for (std::size_t dx = 0; dx < blit_w; ++dx) {
         std::size_t sx = 0;
         std::size_t sy = 0;
         switch (rot) {
@@ -329,6 +538,8 @@ void Renderer::Impl::blit_frame(const Frame& f) {
   }
 
   last_frame = &f;
+  last_blit_w = blit_w;
+  last_blit_h = blit_h;
 }
 
 bool Renderer::Impl::advance(drm::Clock::time_point now) {
@@ -404,8 +615,23 @@ Renderer::Impl::BufferHotspot Renderer::Impl::buffer_hotspot() const noexcept {
       rh = last_frame->width;
       break;
   }
-  const int x_off = (buffer.width() > rw) ? static_cast<int>((buffer.width() - rw) / 2) : 0;
-  const int y_off = (buffer.height() > rh) ? static_cast<int>((buffer.height() - rh) / 2) : 0;
+
+  // Scale the hotspot the same way blit_frame scaled the pixels.
+  // last_blit_w/h reflect post-rotation, post-downscale dimensions;
+  // when no downscale happened they equal min(rw, buffer.width()).
+  // The integer-divide rounding here is the same one box_downscale
+  // applies to its sampling — in both cases the hotspot tracks where
+  // the visible tip ends up in buffer space.
+  if (last_blit_w != 0 && last_blit_w != rw) {
+    rx = static_cast<int>((static_cast<std::int64_t>(rx) * last_blit_w) / rw);
+  }
+  if (last_blit_h != 0 && last_blit_h != rh) {
+    ry = static_cast<int>((static_cast<std::int64_t>(ry) * last_blit_h) / rh);
+  }
+  const std::uint32_t bw = (last_blit_w != 0) ? last_blit_w : rw;
+  const std::uint32_t bh = (last_blit_h != 0) ? last_blit_h : rh;
+  const int x_off = (buffer.width() > bw) ? static_cast<int>((buffer.width() - bw) / 2) : 0;
+  const int y_off = (buffer.height() > bh) ? static_cast<int>((buffer.height() - bh) / 2) : 0;
   return {rx + x_off, ry + y_off};
 }
 
@@ -699,31 +925,44 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
     }
   }
 
-  if (auto r = impl->alloc_buffer(w, h); !r) {
-    return drm::unexpected<std::error_code>(r.error());
-  }
-
-  // Atomic paths cache plane properties so per-event commits don't
-  // re-walk kernel property ids. Also gives us up-front confirmation
-  // the plane exposes every field we need.
-  if (impl->path != PlanePath::kLegacy) {
+  // Legacy path: alloc immediately, no probe possible (drmModeSetCursor
+  // has no TEST equivalent and is 64×64 on every driver anyway).
+  if (impl->path == PlanePath::kLegacy) {
+    if (auto r = impl->alloc_buffer(w, h); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+    if (cfg.rotation != Rotation::k0) {
+      impl->free_buffer();
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+    }
+  } else {
+    // Atomic paths: cache properties first because the size probe
+    // needs them to build a TEST_ONLY commit, then probe what the
+    // kernel will actually accept. The probe owns the buffer alloc;
+    // we just discover the dimension here for diagnostics.
     if (auto r = impl->props.cache_properties(dev.fd(), impl->plane_id, DRM_MODE_OBJECT_PLANE);
         !r) {
-      impl->free_buffer();
       return drm::unexpected<std::error_code>(r.error());
     }
     impl->probe_plane_properties();
+
+    // The probe walks {256, 128, 64} downward from w. SRC and CRTC
+    // sides match (see stage_position) so a square buffer is what
+    // both the kernel atomic_check and the renderer's blit path
+    // expect — h tracks w throughout.
+    (void)impl->probe_acceptable_size(w);
+    if (impl->buffer.empty()) {
+      // Probe + fallback both failed to allocate — only happens on
+      // CREATE_DUMB / ADDFB2 errors, which are the same failure modes
+      // alloc_buffer would have surfaced before.
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_buffer_space));
+    }
 
     // Rotation: hardware rotation is driven through the cached
     // rotation_prop by stage_position; planes that don't expose it
     // fall back to software pre-rotation inside blit_frame. Either
     // path handles non-k0 on atomic planes, so no up-front rejection
-    // here — only legacy SetCursor, which has no way to apply a
-    // rotation at all, still rejects non-k0 below.
-  } else if (cfg.rotation != Rotation::k0) {
-    // Legacy SetCursor has no rotation knob.
-    impl->free_buffer();
-    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+    // — only legacy SetCursor (handled above) has no rotation knob.
   }
 
   return Renderer(std::move(impl));
