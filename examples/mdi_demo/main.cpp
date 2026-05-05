@@ -64,6 +64,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -601,9 +602,11 @@ int main(int argc, char* argv[]) {
   pfds[1].fd = seat ? seat->poll_fd() : -1;
   pfds[1].events = POLLIN;
 
+  auto last_tick = std::chrono::steady_clock::now();
   while (g_quit == 0 && !shell.quit_requested()) {
     // Wake roughly every ~16 ms even when idle: lets us spot quit
-    // signals and snapshot requests promptly without spinning.
+    // signals and snapshot requests promptly without spinning, and
+    // gives the animator a steady tick cadence.
     constexpr int k_idle_poll_ms = 16;
     if (const int ret = poll(pfds, 2, k_idle_poll_ms); ret < 0) {
       if (errno == EINTR) {
@@ -611,6 +614,16 @@ int main(int argc, char* argv[]) {
       }
       drm::println(stderr, "mdi_demo: poll: {}", std::system_category().message(errno));
       break;
+    }
+    // Advance per-doc animations using the wall clock between
+    // iterations. tick_animations() reports active when at least one
+    // tween is still running, in which case we keep frame_dirty true
+    // so the present loop paints the next frame of the tween.
+    const auto now = std::chrono::steady_clock::now();
+    const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick);
+    last_tick = now;
+    if (shell.tick_animations(dt)) {
+      frame_dirty = true;
     }
     if ((pfds[0].revents & POLLIN) != 0) {
       if (auto r = input_seat.dispatch(); !r) {

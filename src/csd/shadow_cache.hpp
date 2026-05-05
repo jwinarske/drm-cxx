@@ -96,6 +96,17 @@ class ShadowCache {
   // miss-path could not allocate.
   bool blit_into(const ShadowKey& key, const Theme& theme, const ShadowDest& dst);
 
+  // Cross-fade `key_a` and `key_b` (typically Blurred and Focused
+  // elevations of the same size + theme) and SRC_OVER the result onto
+  // `dst`. `t` in [0, 1] selects the weight: 0 paints key_a, 1 paints
+  // key_b, 0.5 a true mid-fade. Endpoints short-circuit to a single
+  // blit_into so the no-animation path stays cheap.
+  //
+  // Both keys must share width / height; mismatched dimensions or any
+  // key failing to render returns false without touching `dst`.
+  bool blit_cross_fade(const ShadowKey& key_a, const ShadowKey& key_b, const Theme& theme,
+                       const ShadowDest& dst, float t);
+
   void clear() noexcept;
   [[nodiscard]] std::size_t size() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;

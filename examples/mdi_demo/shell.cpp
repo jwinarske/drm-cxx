@@ -3,6 +3,7 @@
 
 #include "shell.hpp"
 
+#include "csd/animator.hpp"
 #include "csd/presenter.hpp"
 #include "csd/renderer.hpp"
 #include "csd/surface.hpp"
@@ -14,6 +15,7 @@
 #include <drm-cxx/detail/format.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -27,15 +29,6 @@ namespace mdi_demo {
 
 namespace {
 
-// Layout constants tuned to match csd::Renderer's glass theme. The
-// renderer paints a fixed 32-pixel title bar with three traffic-light
-// buttons in the rightmost ~96 px (button radius ≈ 8 px, spacing
-// 24 px); the layout below mirrors those values so hit testing finds
-// the same pixels the user sees.
-constexpr std::int32_t k_title_bar_height = 32;
-constexpr std::int32_t k_button_radius = 8;
-constexpr std::int32_t k_button_spacing = 24;
-constexpr std::int32_t k_button_right_inset = 16;
 // Default per-doc decoration size. Big enough that the title bar +
 // glass body has visible body area; small enough that two of them
 // fit side-by-side on a 1920×1080 panel without tiling beyond the
@@ -47,25 +40,14 @@ constexpr std::int32_t k_stagger_y = 48;
 constexpr std::int32_t k_first_doc_x = 80;
 constexpr std::int32_t k_first_doc_y = 80;
 
-// Inverse of the renderer's button x-positions. The renderer paints
-// Close at the rightmost slot, then Minimize, then Maximize (Linux
-// convention — Close is the rightmost). Mirror that here so a click
-// on the close glyph hits ButtonClose.
-HitZone classify_button(std::int32_t local_x, std::int32_t deco_w) {
-  const auto cx_close = deco_w - k_button_right_inset;
-  const auto cx_min = cx_close - k_button_spacing;
-  const auto cx_max = cx_min - k_button_spacing;
-  const auto in_button = [&](std::int32_t cx) { return std::abs(local_x - cx) <= k_button_radius; };
-  if (in_button(cx_close)) {
-    return HitZone::ButtonClose;
-  }
-  if (in_button(cx_min)) {
-    return HitZone::ButtonMinimize;
-  }
-  if (in_button(cx_max)) {
-    return HitZone::ButtonMaximize;
-  }
-  return HitZone::TitleBar;
+// True iff (local_x, local_y) lands inside a circle centered at
+// (cx, button_cy) with radius `r`. Axis-aligned bbox check rather
+// than Euclidean distance — at r ≈ 7 px the corner pixels would
+// otherwise need a sqrt per probe and the visual difference is below
+// the cursor-hotspot precision the user sees.
+bool in_button_box(std::int32_t local_x, std::int32_t local_y, std::int32_t cx,
+                   std::int32_t button_cy, std::int32_t r) {
+  return std::abs(local_x - cx) <= r && std::abs(local_y - button_cy) <= r;
 }
 
 }  // namespace
@@ -165,6 +147,7 @@ void Shell::cycle_focus() {
   docs_[front_doc]->state.focused = false;
   docs_[front_doc]->state.dirty = drm::csd::k_dirty_all;
   docs_[front_doc]->dirty = true;
+  docs_[front_doc]->anim.retarget_focus(false);
 }
 
 void Shell::set_theme(const drm::csd::Theme& theme) noexcept {
@@ -197,7 +180,10 @@ drm::expected<void, std::error_code> Shell::redraw_dirty() {
 
 std::optional<HitResult> Shell::hit_test(std::int32_t px, std::int32_t py) const {
   // Walk the stack front-to-back so the visually topmost doc wins
-  // when documents overlap.
+  // when documents overlap. Geometry comes from
+  // drm::csd::decoration_geometry so panel + button positions match
+  // exactly what csd::Renderer paints — anything else here would be
+  // duplicated math that drifts on every theme tweak.
   for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) {
     const auto idx = *it;
     const auto& doc = *docs_[idx];
@@ -207,12 +193,27 @@ std::optional<HitResult> Shell::hit_test(std::int32_t px, std::int32_t py) const
         ly >= static_cast<std::int32_t>(doc.height)) {
       continue;
     }
+    const auto geom = drm::csd::decoration_geometry(*theme_, doc.width, doc.height);
+    // Reject clicks on the soft drop-shadow halo: the panel rect is
+    // the interactive surface; outside it is purely decorative.
+    if (lx < geom.panel_x || ly < geom.panel_y || lx >= geom.panel_x + geom.panel_w ||
+        ly >= geom.panel_y + geom.panel_h) {
+      continue;
+    }
     HitResult r;
     r.doc_index = idx;
     r.local_x = lx;
     r.local_y = ly;
-    if (ly < k_title_bar_height) {
-      r.zone = classify_button(lx, static_cast<std::int32_t>(doc.width));
+    if (ly < geom.panel_y + geom.title_bar_height) {
+      if (in_button_box(lx, ly, geom.close_cx, geom.button_cy, geom.button_radius)) {
+        r.zone = HitZone::ButtonClose;
+      } else if (in_button_box(lx, ly, geom.minimize_cx, geom.button_cy, geom.button_radius)) {
+        r.zone = HitZone::ButtonMinimize;
+      } else if (in_button_box(lx, ly, geom.maximize_cx, geom.button_cy, geom.button_radius)) {
+        r.zone = HitZone::ButtonMaximize;
+      } else {
+        r.zone = HitZone::TitleBar;
+      }
     } else {
       r.zone = HitZone::Body;
     }
@@ -266,15 +267,67 @@ void Shell::on_pointer_release() {
 }
 
 bool Shell::on_pointer_motion(std::int32_t px, std::int32_t py) {
-  if (!dragging_ || drag_doc_idx_ >= docs_.size()) {
+  if (dragging_ && drag_doc_idx_ < docs_.size()) {
+    auto& doc = *docs_[drag_doc_idx_];
+    doc.x = px - drag_offset_x_;
+    doc.y = py - drag_offset_y_;
+    // Move only — no decoration repaint (geometry is a presenter
+    // property, not a renderer input). Skip hover updates while
+    // dragging: the user has committed to one doc and shouldn't
+    // light up other docs' buttons.
+    return true;
+  }
+
+  // Hover wiring: hit-test, then retarget every doc's animator. The
+  // doc currently under the pointer (if any) gets the hovered
+  // button; everyone else gets None. The animator drives the
+  // fill→hover cross-fade; the next tick_animations() will surface
+  // the change as a frame_dirty trigger so we don't have to return
+  // true here for hover-only motion.
+  const auto hit = hit_test(px, py);
+  for (std::size_t i = 0; i < docs_.size(); ++i) {
+    drm::csd::HoverButton target = drm::csd::HoverButton::None;
+    if (hit && hit->doc_index == i) {
+      switch (hit->zone) {
+        case HitZone::ButtonClose:
+          target = drm::csd::HoverButton::Close;
+          break;
+        case HitZone::ButtonMinimize:
+          target = drm::csd::HoverButton::Minimize;
+          break;
+        case HitZone::ButtonMaximize:
+          target = drm::csd::HoverButton::Maximize;
+          break;
+        case HitZone::TitleBar:
+        case HitZone::Body:
+        case HitZone::None:
+          target = drm::csd::HoverButton::None;
+          break;
+      }
+    }
+    docs_[i]->anim.retarget_hover(target);
+  }
+  return false;
+}
+
+bool Shell::tick_animations(std::chrono::milliseconds dt) {
+  if (theme_->animation_duration_ms <= 0) {
     return false;
   }
-  auto& doc = *docs_[drag_doc_idx_];
-  doc.x = px - drag_offset_x_;
-  doc.y = py - drag_offset_y_;
-  // Move only — no decoration repaint (geometry is a presenter
-  // property, not a renderer input).
-  return true;
+  const auto duration = std::chrono::milliseconds(theme_->animation_duration_ms);
+  bool any_active = false;
+  for (auto& doc : docs_) {
+    const bool was_active = doc->anim.active();
+    if (!was_active) {
+      continue;
+    }
+    doc->anim.tick(dt, duration);
+    doc->anim.apply_to(doc->state);
+    doc->state.dirty |= drm::csd::k_dirty_animation;
+    doc->dirty = true;
+    any_active = true;
+  }
+  return any_active;
 }
 
 std::vector<drm::csd::SurfaceRef> Shell::surface_refs() const {
@@ -297,6 +350,7 @@ void Shell::mark_focused(std::size_t doc_index) noexcept {
       docs_[i]->state.focused = is_focused;
       docs_[i]->state.dirty |= drm::csd::k_dirty_focus;
       docs_[i]->dirty = true;
+      docs_[i]->anim.retarget_focus(is_focused);
     }
   }
 }

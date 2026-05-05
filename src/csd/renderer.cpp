@@ -118,30 +118,43 @@ BLRgba32 to_bl(Color c) noexcept {
   return BLRgba32{c.packed_argb()};
 }
 
-// Width of the title-bar button column from the right edge. Three
-// equal 14-px-radius circles plus inter-button gutters.
-constexpr double k_button_radius = 7.0;
-constexpr double k_button_gap = 6.0;
-constexpr double k_button_right_pad = 10.0;
-constexpr int k_button_count = 3;
-
-double button_strip_width() noexcept {
-  return (k_button_count * (2.0 * k_button_radius)) + ((k_button_count - 1) * k_button_gap) +
-         k_button_right_pad;
+float clamp01_or_default(float v, float fallback) noexcept {
+  // Sentinel < 0 means "no animator wired": fall back to the binary
+  // visual derived from state.focused / state.hover so v1 callers
+  // keep their behavior. Real progress values come in clamped.
+  if (v < 0.0F) {
+    return fallback;
+  }
+  return std::clamp(v, 0.0F, 1.0F);
 }
 
-void draw_button(BLContext& ctx, double cx, double cy, BLRgba32 fill, BLRgba32 hover,
-                 bool is_hover) {
+std::uint8_t lerp_u8(std::uint8_t a, std::uint8_t b, float t) noexcept {
+  const auto fa = static_cast<float>(a);
+  const auto fb = static_cast<float>(b);
+  return static_cast<std::uint8_t>(std::clamp(fa + ((fb - fa) * t), 0.0F, 255.0F));
+}
+
+BLRgba32 lerp_color(Color a, Color b, float t) noexcept {
+  return BLRgba32{
+      Color{lerp_u8(a.r, b.r, t), lerp_u8(a.g, b.g, t), lerp_u8(a.b, b.b, t), lerp_u8(a.a, b.a, t)}
+          .packed_argb()};
+}
+
+void draw_button(BLContext& ctx, double cx, double cy, double radius, Color fill_color,
+                 Color hover_color, float hover_weight) {
   // Radial gradient: a touch lighter at the top-left, theme color at
   // the bottom-right. Gives the button a faux-spherical highlight.
-  const BLRgba32 top = is_hover ? hover : fill;
-  BLGradient g(BLRadialGradientValues(cx - 1.5, cy - 1.5, cx, cy, k_button_radius));
+  // The middle stop lerps fill→hover by hover_weight so a fading
+  // button reads as the in-between tint rather than a binary swap.
+  const BLRgba32 fill = to_bl(fill_color);
+  const BLRgba32 top = lerp_color(fill_color, hover_color, hover_weight);
+  BLGradient g(BLRadialGradientValues(cx - 1.5, cy - 1.5, cx, cy, radius));
   g.add_stop(0.0, BLRgba32(0xFFFFFFFFU));
   g.add_stop(0.4, top);
   g.add_stop(1.0, fill);
-  ctx.fill_circle(BLCircle(cx, cy, k_button_radius), g);
+  ctx.fill_circle(BLCircle(cx, cy, radius), g);
   // Thin outer ring for definition against light backgrounds.
-  ctx.stroke_circle(BLCircle(cx, cy, k_button_radius - 0.5), BLRgba32(0x33000000U));
+  ctx.stroke_circle(BLCircle(cx, cy, radius - 0.5), BLRgba32(0x33000000U));
 }
 
 void draw_glass(BLImage& target, const Theme& theme, const WindowState& state, ShadowCache& shadows,
@@ -151,15 +164,22 @@ void draw_glass(BLImage& target, const Theme& theme, const WindowState& state, S
   if (w <= 0 || h <= 0) {
     return;
   }
+  const auto geom =
+      decoration_geometry(theme, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
   const int extent = std::max(0, theme.shadow_extent);
-  const int panel_x = extent;
-  const int panel_y = extent;
-  const int panel_w = std::max(0, w - (2 * extent));
-  const int panel_h = std::max(0, h - (2 * extent));
+  const int panel_x = geom.panel_x;
+  const int panel_y = geom.panel_y;
+  const int panel_w = geom.panel_w;
+  const int panel_h = geom.panel_h;
   const int radius = std::min({theme.corner_radius, panel_w / 2, panel_h / 2});
 
   BLContext ctx(target);
   ctx.clear_all();
+
+  // Continuous focus weight in [0, 1]. Drives the shadow cross-fade,
+  // the rim color lerp, and (indirectly) frames where the renderer
+  // would otherwise have flipped binary values mid-fade.
+  const float fp = clamp01_or_default(state.focus_progress, state.focused ? 1.0F : 0.0F);
 
   // ── Step 2: shadow patch ─────────────────────────────────
   if (panel_w > 0 && panel_h > 0 && extent > 0) {
@@ -170,10 +190,12 @@ void draw_glass(BLImage& target, const Theme& theme, const WindowState& state, S
       dst.stride = static_cast<std::uint32_t>(td.stride);
       dst.width = static_cast<std::uint32_t>(w);
       dst.height = static_cast<std::uint32_t>(h);
-      const Elevation elev = state.focused ? Elevation::Focused : Elevation::Blurred;
-      const ShadowKey k{static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), elev,
-                        theme_id(theme)};
-      shadows.blit_into(k, theme, dst);
+      const std::uint64_t tid = theme_id(theme);
+      const ShadowKey k_blurred{static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
+                                Elevation::Blurred, tid};
+      const ShadowKey k_focused{static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h),
+                                Elevation::Focused, tid};
+      shadows.blit_cross_fade(k_blurred, k_focused, theme, dst, fp);
     }
   }
 
@@ -248,29 +270,31 @@ void draw_glass(BLImage& target, const Theme& theme, const WindowState& state, S
 
   // ── Step 7: buttons (close, minimize, maximize) ──────────
   if (theme.title_bar.height > 0) {
-    const double cy = panel_y + (theme.title_bar.height * 0.5);
-    const double right_edge = panel_x + panel_w - k_button_right_pad;
-    // Linux convention: Close rightmost, then Minimize, then Maximize
-    // toward the title text. cx walks right-to-left so the array's
-    // first entry sits at right_edge and each successive button steps
-    // one diameter+gap to the left.
-    const std::array<std::pair<HoverButton, const Theme::Buttons::Button*>, 3> buttons = {
-        std::make_pair(HoverButton::Close, &theme.buttons.close),
-        std::make_pair(HoverButton::Minimize, &theme.buttons.minimize),
-        std::make_pair(HoverButton::Maximize, &theme.buttons.maximize),
+    // Layout — including the Linux-conventional Close-rightmost order
+    // — comes from decoration_geometry so the shell's hit-test reads
+    // the same numbers we paint with.
+    const auto cy = static_cast<double>(geom.button_cy);
+    const auto button_r = static_cast<double>(geom.button_radius);
+    struct ButtonSpec {
+      HoverButton which;
+      const Theme::Buttons::Button* style;
+      int cx;
     };
-    double cx = right_edge - k_button_radius;
-    for (const auto& [which, btn] : buttons) {
-      draw_button(ctx, cx, cy, to_bl(btn->fill), to_bl(btn->hover), state.hover == which);
-      cx -= (2.0 * k_button_radius) + k_button_gap;
+    const std::array<ButtonSpec, 3> specs = {{
+        {HoverButton::Close, &theme.buttons.close, geom.close_cx},
+        {HoverButton::Minimize, &theme.buttons.minimize, geom.minimize_cx},
+        {HoverButton::Maximize, &theme.buttons.maximize, geom.maximize_cx},
+    }};
+    for (const auto& s : specs) {
+      const float hp =
+          state.hover == s.which ? clamp01_or_default(state.hover_progress, 1.0F) : 0.0F;
+      draw_button(ctx, static_cast<double>(s.cx), cy, button_r, s.style->fill, s.style->hover, hp);
     }
-    (void)button_strip_width;  // currently unused; reserved for hit-test export.
   }
 
   // ── Step 8: rim ──────────────────────────────────────────
   {
-    const BLRgba32 rim =
-        state.focused ? to_bl(theme.colors.rim_focused) : to_bl(theme.colors.rim_blurred);
+    const BLRgba32 rim = lerp_color(theme.colors.rim_blurred, theme.colors.rim_focused, fp);
     ctx.set_stroke_width(1.0);
     // Inner stroke: inset by 0.5 px so the rim sits on the panel
     // pixels rather than straddling them.
@@ -286,6 +310,34 @@ void draw_glass(BLImage& target, const Theme& theme, const WindowState& state, S
 #endif  // DRM_CXX_CSD_HAS_BL2D
 
 }  // namespace
+
+DecorationGeometry decoration_geometry(const Theme& theme, std::uint32_t deco_w,
+                                       std::uint32_t deco_h) noexcept {
+  // Visible button radius and the gutters around it. Tuned to match
+  // the macOS / GNOME traffic-light scale; if these change the
+  // renderer paints them and the shell hit-tests them at the same
+  // values because both go through this struct.
+  constexpr int k_button_radius = 7;
+  constexpr int k_button_gap = 6;
+  constexpr int k_button_right_pad = 10;
+
+  DecorationGeometry g;
+  const int extent = std::max(0, theme.shadow_extent);
+  g.panel_x = extent;
+  g.panel_y = extent;
+  g.panel_w = std::max(0, static_cast<int>(deco_w) - (2 * extent));
+  g.panel_h = std::max(0, static_cast<int>(deco_h) - (2 * extent));
+  g.title_bar_height = std::max(0, theme.title_bar.height);
+
+  g.button_radius = k_button_radius;
+  g.button_cy = g.panel_y + (g.title_bar_height / 2);
+  const int right_edge = g.panel_x + g.panel_w - k_button_right_pad;
+  g.close_cx = right_edge - k_button_radius;
+  const int step = (2 * k_button_radius) + k_button_gap;
+  g.minimize_cx = g.close_cx - step;
+  g.maximize_cx = g.minimize_cx - step;
+  return g;
+}
 
 #ifdef DRM_CXX_CSD_HAS_BL2D
 
