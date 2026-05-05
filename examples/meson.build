@@ -182,6 +182,9 @@ if has_blend2d
     'advanced/csd_smoke/main.cpp',
     dependencies : [drm_cxx_dep],
   )
+
+  # mdi_demo — multi-document desktop showcase for drm::csd Tier 0.
+  subdir('mdi_demo')
 endif
 
 if get_option('vulkan')
