@@ -1386,11 +1386,25 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
   if (seat) {
     seat->set_pause_callback([&] {
       session_active.store(false, std::memory_order_relaxed);
+      // Tell the scene to drop its CPU mappings + cached FB ids before
+      // the kernel revokes the underlying fd; the matching
+      // on_session_resumed call below re-establishes them against the
+      // new fd.
+      scene->on_session_paused();
       if (input_seat) {
         (void)input_seat->suspend();
       }
     });
-    seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
+    // libseat fires resume_cb once per device — the DRM card AND every
+    // libinput fd. A naive `pending_resume_fd = new_fd` would let an
+    // input-device resume overwrite (or race past) the DRM fd we
+    // actually need to swap. Filter on `/dev/dri/` so only card resumes
+    // land in the slot; libinput's privileged opens are reattached
+    // through input_seat->resume() in apply_pending_resume.
+    seat->set_resume_callback([&](std::string_view path, int new_fd) {
+      if (path.substr(0, 9) != "/dev/dri/") {
+        return;
+      }
       pending_resume_fd.store(new_fd, std::memory_order_relaxed);
     });
     attach_seat_source();
