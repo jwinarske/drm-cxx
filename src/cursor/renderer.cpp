@@ -269,6 +269,18 @@ struct Renderer::Impl {
   // can change when the DRM fd is replaced.
   std::optional<std::uint32_t> rotation_prop;
 
+  // Bitmask of DRM_MODE_ROTATE_* values the plane actually accepts.
+  // The "rotation" property being present (rotation_prop set) is not
+  // enough — i915's cursor plane exposes the property but advertises
+  // only ROTATE_0 | ROTATE_180 in its enum, while ROTATE_90/270 fail
+  // atomic_check. We probe the property's enum_blob at create + resume
+  // and consult this mask in effective_sw_rotation() so unsupported
+  // rotations transparently fall back to software pre-rotation in
+  // blit_frame instead of EINVAL'ing on commit. 0 when rotation_prop
+  // is unset (legacy/no-rotation planes); always includes ROTATE_0
+  // when set, since every plane that has the property accepts k0.
+  std::uint64_t rotation_supported_mask{0};
+
   // --- cursor binding + animation -----------------------------------
   // shared_ptr so multi-CRTC compositors can load once and hand the
   // same Cursor to every per-head Renderer. Const-qualified because
@@ -626,12 +638,14 @@ Rotation Renderer::Impl::effective_sw_rotation() const noexcept {
   if (path == PlanePath::kLegacy) {
     return Rotation::k0;
   }
-  // Hardware rotation property present → the kernel handles it at
-  // scanout; blit_frame writes pixels in source orientation.
-  if (rotation_prop) {
+  // Hardware rotation requires both the property and the specific
+  // value to be in the plane's supported bitmask. i915 cursor planes
+  // expose the prop but only list rotate-0/180; rotate-90/270 fall
+  // through to software pre-rotation here. When neither path can run
+  // hardware (no prop) every non-k0 also lands in software.
+  if (rotation_prop && (rotation_supported_mask & rotation_to_drm_mask(rotation)) != 0U) {
     return Rotation::k0;
   }
-  // Atomic plane without the rotation property → pre-rotate in software.
   return rotation;
 }
 
@@ -700,6 +714,7 @@ void Renderer::Impl::probe_plane_properties() noexcept {
   hotspot_x_prop.reset();
   hotspot_y_prop.reset();
   rotation_prop.reset();
+  rotation_supported_mask = 0;
   if (path == PlanePath::kLegacy) {
     return;
   }
@@ -711,6 +726,25 @@ void Renderer::Impl::probe_plane_properties() noexcept {
   }
   if (auto id = props.property_id(plane_id, "rotation")) {
     rotation_prop = *id;
+    // The rotation prop is a BITMASK type: each enum entry's `value`
+    // is the bit *index* (0..63), and a plane advertises support by
+    // listing bits in its enums table. Unlisted bits will EINVAL at
+    // atomic_check. i915's cursor plane is the live offender —
+    // exposes only rotate-0 and rotate-180 — so we have to ask the
+    // kernel rather than trust property-presence alone.
+    if (auto* p = drmModeGetProperty(drm_fd, *id); p != nullptr) {
+      for (int i = 0; i < p->count_enums; ++i) {
+        rotation_supported_mask |= (1ULL << p->enums[i].value);
+      }
+      drmModeFreeProperty(p);
+    }
+    // Defensive floor: every kernel-shipped rotation prop includes
+    // rotate-0. If the enum walk somehow returned nothing (driver bug
+    // or a malformed prop), pretend k0 works so the rest of the code
+    // can rely on the mask being non-zero whenever rotation_prop is.
+    if (rotation_supported_mask == 0) {
+      rotation_supported_mask = DRM_MODE_ROTATE_0;
+    }
   }
 }
 
@@ -775,10 +809,16 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   // rotation — optional (some planes don't expose it). Written on
   // every commit so the value is re-armed on the first post-resume
   // commit (fresh fd lost the prior kernel state) and so set_rotation
-  // doesn't need its own commit path. Validated at create time: a
-  // plane without this property can only run Rotation::k0.
+  // doesn't need its own commit path. When the requested rotation
+  // isn't in the plane's supported mask, we send ROTATE_0 — blit_frame
+  // pre-rotated the pixels in software for that case (see
+  // effective_sw_rotation), so the scanout hardware just sees a k0
+  // sprite.
   if (rotation_prop) {
-    if (auto r = req.add_property(plane_id, *rotation_prop, rotation_to_drm_mask(rotation)); !r) {
+    const std::uint64_t want = rotation_to_drm_mask(rotation);
+    const std::uint64_t hw_value =
+        ((rotation_supported_mask & want) != 0U) ? want : DRM_MODE_ROTATE_0;
+    if (auto r = req.add_property(plane_id, *rotation_prop, hw_value); !r) {
       return r;
     }
   }
@@ -1352,13 +1392,19 @@ drm::expected<void, std::error_code> Renderer::set_rotation(Rotation rotation) {
   if (rotation != Rotation::k0 && impl_->path == PlanePath::kLegacy) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
-  impl_->rotation = rotation;
 
-  // If software pre-rotation is in play (either the new or the old
-  // rotation flips through blit_frame), the buffer's current contents
-  // don't match the new orientation — re-blit so the next commit
-  // ships rotated pixels. The check is a cheap property-id probe.
-  if (!impl_->rotation_prop && impl_->last_frame != nullptr) {
+  // Snapshot whether SW pre-rotation was/will be in play across the
+  // change. effective_sw_rotation() reads impl_->rotation, so we have
+  // to sample old before mutating then sample new after. Re-blit
+  // whenever either side does software work — old SW path means the
+  // buffer is pre-rotated for the old angle; new SW path means we
+  // need pixels laid out for the new one. The HW→HW transition (i915
+  // 0↔180 for example) needs no re-blit; the kernel rotates at
+  // scanout from the same source bytes.
+  const Rotation old_eff = impl_->effective_sw_rotation();
+  impl_->rotation = rotation;
+  const Rotation new_eff = impl_->effective_sw_rotation();
+  if ((old_eff != Rotation::k0 || new_eff != Rotation::k0) && impl_->last_frame != nullptr) {
     impl_->blit_frame(*impl_->last_frame);
   }
 
@@ -1380,7 +1426,14 @@ bool Renderer::has_hotspot_properties() const noexcept {
 }
 
 bool Renderer::has_hardware_rotation() const noexcept {
-  return impl_->rotation_prop.has_value();
+  // Per-rotation semantic: true iff the *current* rotation is being
+  // driven by the kernel scanout, not pre-rotated by blit_frame. For
+  // a plane like i915's cursor that only advertises 0/180 in its
+  // bitmask, this returns true at k0/k180 and false at k90/k270 even
+  // though the property itself is present. Matches the diagnostic
+  // contract example callers want ("is HW handling this?") rather
+  // than the static "does the property exist?" reading.
+  return impl_->effective_sw_rotation() == Rotation::k0 && impl_->rotation_prop.has_value();
 }
 
 }  // namespace drm::cursor
