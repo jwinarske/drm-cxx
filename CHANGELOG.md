@@ -1,6 +1,48 @@
 # Changelog
 
-## v1.3.0 — unreleased: CSD module + keyboard repeat / LED state / keymap reload
+## unreleased — CSD Tier 0 presenter, mdi_demo, cursor hardening
+
+### `drm::csd` — Tier 0 presenter, plane coordinator, focus/hover animations
+
+- **`drm::csd::OverlayReservation`** — startup-time plane picker for decoration surfaces. `reserve(crtc_index, format, count, min_zpos)` returns OVERLAY-typed plane IDs in zpos-ascending order that support the FourCC, sit at or above `min_zpos`, are CRTC-compatible, and aren't already taken on any other CRTC. `release(crtc_index)` is idempotent — relevant on shared-plane hardware (Mali Komeda) where releasing one CRTC's planes makes them available to another; no-op on partitioned hardware (amdgpu DCN, Intel Tigerlake+, i.MX8 DCSS, RK3399 VOP). Shortfall returns `errc::resource_unavailable_try_again` so a presenter can degrade to a software tier per-CRTC.
+- **`drm::csd::Presenter`** — abstract seam between painted decoration surfaces and the path that scans them out. `Renderer` and `ShadowCache` stay tier-agnostic; only the presenter changes between tiers (Plane = desktop / well-provisioned ARM / virtio-gpu, Composite + Fb tiers TBD).
+- **`drm::csd::PlanePresenter`** (Tier 0) — one DRM overlay plane per decoration. Resolves geometry, blend-mode, per-plane alpha, and zpos property ids once at construction; `base_zpos` parameter controls the stacking value the first reserved plane receives (pass `primary_zpos_max+1` on amdgpu where the primary is pinned at zpos 2). `apply(surfaces, req)` adds property writes to a caller-owned request — caller keeps full control of TEST/COMMIT, `ATOMIC_NONBLOCK`, `PAGE_FLIP_EVENT`, and `IN_FENCE_FD`. Pre-multiplied blend + `alpha=0xFFFF` forced every frame so a previous compositor's state can't bleed through. The `compute_writes` helper is a pure function (slots + surfaces → property writes) for unit testing without a live DRM fd.
+- **`drm::csd::WindowAnim`** — value-type per-window animator holding focus + hover progress, eased ease-out-cubic. Shell calls `retarget_focus` / `retarget_hover` on state changes, then `tick(dt)` once per frame. Output mirrors into `WindowState::{focus_progress, hover_progress}`; sentinel `k_progress_unset = -1.0F` keeps callers without an animator visually identical.
+- **`ShadowCache::blit_cross_fade(key_a, key_b, t)`** — tweens between cached shadow patches through real intermediate pixels rather than snapping; endpoints (`t == 0` or `1`) short-circuit to `blit_into` so the no-animation path costs the same as before. Per-row scratch buffer keeps allocation off the hot path.
+- **Renderer cross-fade hooks** — `draw_glass` lerps the rim color and feeds the focus weight to the shadow cross-fade; `draw_button` takes a `hover_weight` in `[0, 1]` and lerps fill ⇄ hover so transitioning buttons read as the in-between tint.
+- **`decoration_geometry(theme, w, h)`** — single source of truth for panel inset, title-bar height, and button center positions. Used by both the renderer's paint path and the mdi_demo shell's hit-tester so paint and click can't desync.
+- **`PlaneRegistry::from_capabilities(std::vector<PlaneCapabilities>)`** — synthetic-source factory for unit tests and replay/snapshot tools that don't have a live device.
+
+### `drm::cursor` — sprite sizing + atomic-path correctness
+
+- **Per-rotation hardware-rotation probe** — i915's cursor advertises the `rotation` property but only enumerates `ROTATE_0` / `ROTATE_180`; the prior property-presence shortcut routed all four values to the kernel and EINVAL'd on 90/270. `probe_plane_properties()` now walks the property's enum table and builds `rotation_supported_mask`; unsupported angles transparently route through `blit_frame`'s software pre-rotation while supported ones still ride kernel scanout. `set_rotation()` re-blits across HW↔SW boundaries so a single Renderer can sit in HW for 0/180 and SW for 90/270 on the same i915 plane. `has_hardware_rotation()` reports the per-rotation answer ("is HW handling *this* angle?") instead of static property-presence.
+- **Ping-pong dumb buffers on the atomic path** — amdgpu DC reads cursor pixels live each vblank, so an in-place `blit_frame` followed by a position commit visibly tears for ~1 vblank. Two ARGB8888 buffers; `blit_frame` writes the back buffer, `stage_position` emits its `FB_ID`, `commit_position` swaps the active index on success. `commit_buffer()` (the buffer the next commit will publish) drives `CRTC_W/H`, `SRC_W/H`, and the hotspot math without callers needing to know which slot is active. Legacy path stays single-buffered (rotation rejected; `drmModeSetCursor` handles uploads).
+- **Oversize sprite handling + accepted-buffer probe** — `box_downscale_rotated` is an area-weighted integer-arithmetic downscaler composed through the rotation sampler; needed because libxcursor returns the theme's closest size, not necessarily ≤ requested (Adwaita ships 24/30/36/48/72/96, so a 64 request hands back 72). `probe_acceptable_size` walks `{256, 128, 64}` via `DRM_MODE_ATOMIC_TEST_ONLY` at create time and keeps the first that passes — `DRM_CAP_CURSOR_WIDTH` is an upper bound, not an enumerated set (i915 accepts only 64; amdgpu DC accepts 64/128/256). `last_blit_w/h` tracked across blits so `buffer_hotspot` scales the hotspot in lockstep with the pixel downscale.
+- **System "default" theme bridge in `Theme::resolve`** — between the user's named theme chain and the discovery-order fallback, BFS the system "default" theme (typically `/usr/share/icons/default` symlinked to the active pack — DMZ-White, Yaru, etc.). Stops resolve from landing on whichever partial pack happened to sort first on disk.
+- **0-size substitution** — `XcursorFilenameLoadImages(..., 0)` falls back to 24 px, well below the 64 px KMS cursor floor (i915 minimum; amdgpu DC accepts 64/128/256). Substitute 64 px when callers pass 0; explicit sizes pass through unchanged.
+
+### Examples
+
+- **`examples/mdi_demo/`** — multi-document desktop showcase exercising csd Tier 0 end-to-end: `PlanePresenter` scheduling, `OverlayReservation` plane coordination, glass theme on multiple decorated surfaces over a shared background. Each `Document` carries its own `WindowAnim`; the main loop ticks via `Shell::tick_animations(dt)` and pointer motion retargets hover even outside an active drag.
+- **`examples/common/cursor_size.hpp`** — shared per-output sizing helper. Derives DPI from the connector's EDID `mmWidth` + active mode resolution, snaps to the conventional 96 / 192 / 288 ladder via `round(dpi / 96)`, and returns separate sprite + buffer sizes — sprite is free to land below 64 (Renderer centers it inside the buffer), buffer must be one of `{64, 128, 256}` for the kernel to accept it.
+- **`examples/advanced/csd_smoke/`** gains `--presenter {scene|plane}`. `scene` (default) keeps the single-LayerScene flow as the smallest reproducer for renderer / surface bugs; `plane` drives bg through LayerScene and arms decoration through `OverlayReservation` + `PlanePresenter` via a second atomic commit. Also picks up GBM probe (production allocator when available, dumb fallback otherwise) and equals-form argv parsing (`--theme=lite`).
+
+### Hardware validation
+
+- `examples/camera/` validated on i915 (UVC + i915 laptop, 2026-05-05). Exercises the per-frame `arm_layer_plane_color_props` path (`COLOR_ENCODING` / `COLOR_RANGE` on overlay planes) that amdgpu DC OVERLAYs don't expose. RPi5 (vc4) and RK3588 (rkisp1) remain untested.
+
+### Scripts
+
+- **`scripts/build-deps.sh`** — from-source builder for the four CI-tracked dependencies (libcamera, blend2d + sibling asmjit clone, libseat/seatd, libyuv). Default install prefix `/usr/local`; `PREFIX`, `WORKDIR`, `JOBS`, `SUDO`, and per-project `*_REF` env vars cover the variations a developer or runner is likely to want. No-arg builds all four; otherwise builds the listed subset. Library-appropriate meson / cmake config per project; one `ldconfig` refresh at the end.
+
+### Tests
+
+- `tests/unit/test_csd_animator.cpp` — target / start / tick / apply_to coverage.
+- `decoration_geometry` tests in `test_csd_renderer.cpp` — panel inset, button ordering, undersized clamp, paint↔geometry agreement at the close-button center.
+- `OverlayReservation` tests — partitioned (3-overlay-per-CRTC) and shared (6-overlay-pool) hardware shapes, shortfall + try-again, hotplug release/reattach, idempotent release, re-reserve replacement, zpos-floor filter, format-mismatch culling, zpos-less plane skip, span stability, `count == 0` trivial path.
+- `PlanePresenter::compute_writes` tests — error paths (`no_buffer_space`, empty slots), disarm path (closed surface emits `FB_ID=0` + `CRTC_ID=0` and skips geometry), armed path (every required write present, SRC dimensions in 16.16, CRTC geometry matches `SurfaceRef`), optional-property gating (blend + alpha emitted only when slot prop ids are non-zero).
+
+## v1.3.0 — 2026-05-04: CSD module + keyboard repeat / LED state / keymap reload
 
 ### `drm::csd` — client-side decorations (gated on Blend2D, `-Dblend2d=enabled` / `DRM_CXX_HAS_BLEND2D`)
 - **`drm::csd::Theme`** — toml++-loaded theme schema. `Color` POD (r/g/b/a), `Theme` carries panel gradient stops, specular, noise amplitude, traffic-light fills + hover variants, shadow color, rim color, title font hints. Built-in themes: `default`, `lite`, `minimal`.
@@ -31,7 +73,7 @@
 - `tests/unit/test_key_repeater.cpp` — config validation, release-disarms-the-timer invariant, repeat-eligibility filtering, synthesized-event ignore path.
 - `tests/unit/test_input.cpp` gains Caps Lock latch + LED snapshot coverage; round-trip `create_from_string` against a serialized "us" RMLVO keymap; bogus buffer fails; `set_leds` drives caps + num lock latches up and down idempotently; `reload` preserves a held Shift across the swap (level switch survives, release after reload still transitions); `reload` preserves the Caps Lock latch; `reload` with bogus RMLVO leaves the existing "us" keymap working.
 
-## v1.2.0 — Scene API + example tree
+## v1.2.0 — 2026-05-03: Scene API + example tree
 
 ### `drm::scene` — high-level layer scene
 - **`drm::scene::LayerScene`** — declarative layer API above `planes::Allocator::apply`. `add_layer` / `remove_layer` / `set_dst_rect` / `set_src_rect` / `set_zpos` / `set_alpha` / `set_source` mutate state; `commit()` runs the allocator, builds the `AtomicRequest`, and returns a `CommitReport` with `layers_assigned` / `layers_composited` / `layers_unassigned` / `properties_written` / `fbs_attached` / `test_commits`.
