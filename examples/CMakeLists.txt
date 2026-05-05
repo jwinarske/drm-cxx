@@ -110,6 +110,9 @@ if(DRM_CXX_HAS_BLEND2D)
   add_executable(csd_smoke advanced/csd_smoke/main.cpp)
   target_link_libraries(csd_smoke PRIVATE drm-cxx::drm-cxx)
   target_include_directories(csd_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # mdi_demo — multi-document desktop showcase for drm::csd Tier 0.
+  add_subdirectory(mdi_demo)
 endif()
 
 if(DRM_CXX_VULKAN)
