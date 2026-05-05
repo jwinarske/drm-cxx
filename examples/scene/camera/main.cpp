@@ -32,6 +32,7 @@
 #include "../../common/open_output.hpp"
 #include "../../common/vt_switch.hpp"
 #include "convert.hpp"
+#include "status_overlay_renderer.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
@@ -808,7 +809,11 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::L
   // Placeholder dst_rect — apply_layout fills it on the next iteration.
   desc.display.dst_rect = {0, 0, target->size.width, target->size.height};
   desc.display.zpos = static_cast<int>(3 + cam_index);  // above bg (zpos=2), staggered per cam
-  desc.content_type = drm::planes::ContentType::Generic;
+  // ContentType::Video so the priority-eviction path keeps the camera
+  // on a real overlay even when an overlay budget is one short — the
+  // status overlay (Generic, update_hint_hz=1) yields its plane to the
+  // canvas-composited fallback in that case.
+  desc.content_type = drm::planes::ContentType::Video;
   desc.update_hint_hz = 30;
   auto handle_r = scene.add_layer(std::move(desc));
   if (!handle_r) {
@@ -1304,6 +1309,69 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     }
   };
 
+  // Status overlay: small bottom-right "fps=N cameras=M" badge. Tagged
+  // Generic + update_hint_hz=1 so the priority allocator yields its
+  // overlay to the camera (Video) layers when the OVERLAY budget is
+  // one short — CompositeCanvas then paints the overlay onto the
+  // canvas plane, while the cameras still ride hardware overlays.
+  // Only wired up when Blend2D is reachable.
+  drm::scene::LayerHandle status_handle{};
+  std::string last_status_text;
+  auto repaint_status = [&](std::uint64_t fps, std::size_t cameras) {
+    if (!status_handle.valid()) {
+      return;
+    }
+    auto text = drm::format("fps={} cameras={}", fps, cameras);
+    if (text == last_status_text) {
+      return;
+    }
+    last_status_text = std::move(text);
+    auto* layer = scene->get_layer(status_handle);
+    if (layer == nullptr) {
+      return;
+    }
+    auto m = layer->source().map(drm::MapAccess::Write);
+    if (!m) {
+      return;
+    }
+    camera::StatusPaint paint;
+    paint.width = m->width();
+    paint.height = m->height();
+    paint.stride_bytes = m->stride();
+    paint.text = last_status_text;
+    camera::paint_status(m->pixels(), paint);
+  };
+#ifdef CAMERA_STATUS_HAS_BLEND2D
+  {
+    constexpr std::uint32_t k_status_w = 320U;
+    constexpr std::uint32_t k_status_h = 56U;
+    constexpr std::uint32_t k_status_pad = 20U;
+    auto status_src =
+        drm::scene::DumbBufferSource::create(dev, k_status_w, k_status_h, DRM_FORMAT_ARGB8888);
+    if (!status_src) {
+      drm::println(stderr, "status overlay DumbBufferSource: {}", status_src.error().message());
+    } else {
+      drm::scene::LayerDesc status_desc;
+      status_desc.source = std::move(*status_src);
+      status_desc.display.src_rect = {0, 0, k_status_w, k_status_h};
+      const auto badge_x = static_cast<std::int32_t>(mode.hdisplay) -
+                           static_cast<std::int32_t>(k_status_w + k_status_pad);
+      const auto badge_y = static_cast<std::int32_t>(mode.vdisplay) -
+                           static_cast<std::int32_t>(k_status_h + k_status_pad);
+      status_desc.display.dst_rect = {badge_x, badge_y, k_status_w, k_status_h};
+      status_desc.display.zpos = 64;  // top of the camera-grid stack
+      status_desc.update_hint_hz = 1;
+      auto status_handle_r = scene->add_layer(std::move(status_desc));
+      if (!status_handle_r) {
+        drm::println(stderr, "add_layer (status overlay): {}", status_handle_r.error().message());
+      } else {
+        status_handle = *status_handle_r;
+        repaint_status(0U, 0U);
+      }
+    }
+  }
+#endif
+
   drm::PageFlip page_flip(dev);
   std::atomic<bool> page_pending{false};
   auto install_page_flip_handler = [&] {
@@ -1437,6 +1505,12 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     }
     attach_input_source();
     repaint_bg();
+    // Force a status repaint: the dumb buffer's mapping was dropped
+    // during pause and on_session_resumed re-allocated it zero-filled,
+    // so the cached "this text is already on screen" optimization
+    // would otherwise leave the badge blank until the next change.
+    last_status_text.clear();
+    repaint_status(0U, 0U);
     // The page-flip event for the pre-pause commit was lost when the
     // fd died; clear the pending flag so we can re-arm.
     page_pending.store(false, std::memory_order_relaxed);
@@ -1566,6 +1640,7 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     const auto now = std::chrono::steady_clock::now();
     if (now - fps_window_start >= std::chrono::seconds(1)) {
       drm::println(stderr, "fps={} cameras={}", commits_landed, slots.size());
+      repaint_status(commits_landed, slots.size());
       commits_landed = 0;
       fps_window_start = now;
     }

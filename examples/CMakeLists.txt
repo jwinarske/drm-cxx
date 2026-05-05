@@ -74,9 +74,17 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
     endif()
     add_executable(camera
       scene/camera/main.cpp
-      scene/camera/convert.cpp)
+      scene/camera/convert.cpp
+      scene/camera/status_overlay_renderer.cpp)
     target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera drm_cxx_libyuv)
     target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    # Status overlay paints a small "fps=N cameras=M" badge via Blend2D
+    # when the umbrella gate is on; without it the TU compiles cleanly
+    # and main.cpp skips adding the overlay layer entirely.
+    if(DRM_CXX_HAS_BLEND2D)
+      target_link_libraries(camera PRIVATE blend2d::blend2d)
+      target_compile_definitions(camera PRIVATE CAMERA_STATUS_HAS_BLEND2D=1)
+    endif()
   else()
     message(STATUS
       "camera: libcamera>=0.3.0 or libyuv not found, skipping "

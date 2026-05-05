@@ -97,10 +97,18 @@ if not camera_feature.disabled()
                                 has_headers : ['libyuv.h'],
                                 required : camera_feature.enabled())
   if libcamera_dep.found() and libyuv_dep.found()
+    camera_deps = [drm_cxx_dep, libcamera_dep, libyuv_dep]
+    camera_args = []
+    if has_blend2d
+      camera_deps += blend2d_dep
+      camera_args += '-DCAMERA_STATUS_HAS_BLEND2D=1'
+    endif
     executable('camera',
       'scene/camera/main.cpp',
       'scene/camera/convert.cpp',
-      dependencies : [drm_cxx_dep, libcamera_dep, libyuv_dep],
+      'scene/camera/status_overlay_renderer.cpp',
+      dependencies : camera_deps,
+      cpp_args : camera_args,
     )
   else
     message('camera: libcamera>=0.3.0 or libyuv not found, skipping (pass -Dcamera=enabled to hard-fail)')
