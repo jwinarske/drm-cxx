@@ -9,6 +9,11 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 
+#include <drm_fourcc.h>
+#include <drm_mode.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+
 #include <array>
 #include <cerrno>
 #include <cstddef>
@@ -88,10 +93,14 @@ constexpr int k_max_ioctl_retries = 8;
   return {};
 }
 
-// Per-CAPTURE-buffer state. RAII-cleaned: the destructor munmaps the
-// per-plane CPU mappings and closes the per-plane DMA-BUF fds the
-// kernel handed back from VIDIOC_EXPBUF. That makes failure mid-way
-// through allocate_capture_buffers() unwind correctly when the local
+// DRM AddFB2 takes up to 4 plane handles/pitches/offsets.
+constexpr std::size_t k_drm_max_planes = 4;
+
+// Per-CAPTURE-buffer state. RAII-cleaned: the destructor releases the
+// per-buffer DRM framebuffer + GEM handles, munmaps the per-plane CPU
+// mappings, and closes the per-plane DMA-BUF fds the kernel handed
+// back from VIDIOC_EXPBUF. That makes failure mid-way through
+// allocate_capture_buffers() unwind correctly when the local
 // std::vector unwinds. Move-only so the vector can grow.
 struct V4l2CaptureBuffer {
   std::array<void*, VIDEO_MAX_PLANES> mapped_ptr{};
@@ -99,8 +108,27 @@ struct V4l2CaptureBuffer {
   std::array<int, VIDEO_MAX_PLANES> dmabuf_fd{};
   std::uint32_t num_planes{0};
 
+  // DRM-side state, populated by import_capture_buffer_to_drm. drm_fd
+  // is borrowed from the caller's drm::Device for the source's
+  // lifetime; the destructor uses it to drop GEM refs cleanly.
+  // Cleared (drm_fd = -1, fb_id = 0, all handles 0) on session pause
+  // so re-import against the new DRM fd happens without double-free.
+  int drm_fd{-1};
+  std::uint32_t fb_id{0};
+  std::array<std::uint32_t, k_drm_max_planes> drm_handles{};
+
   V4l2CaptureBuffer() noexcept { dmabuf_fd.fill(-1); }
   ~V4l2CaptureBuffer() {
+    if (drm_fd >= 0) {
+      if (fb_id != 0) {
+        drmModeRmFB(drm_fd, fb_id);
+      }
+      for (auto h : drm_handles) {
+        if (h != 0) {
+          drmCloseBufferHandle(drm_fd, h);
+        }
+      }
+    }
     for (std::uint32_t p = 0; p < num_planes; ++p) {
       if (mapped_ptr.at(p) != nullptr && mapped_ptr.at(p) != MAP_FAILED) {
         ::munmap(mapped_ptr.at(p), mapped_len.at(p));
@@ -116,13 +144,154 @@ struct V4l2CaptureBuffer {
       : mapped_ptr(o.mapped_ptr),
         mapped_len(o.mapped_len),
         dmabuf_fd(o.dmabuf_fd),
-        num_planes(o.num_planes) {
+        num_planes(o.num_planes),
+        drm_fd(o.drm_fd),
+        fb_id(o.fb_id),
+        drm_handles(o.drm_handles) {
     o.mapped_ptr.fill(nullptr);
     o.dmabuf_fd.fill(-1);
     o.num_planes = 0;
+    o.drm_fd = -1;
+    o.fb_id = 0;
+    o.drm_handles.fill(0);
   }
   V4l2CaptureBuffer& operator=(V4l2CaptureBuffer&&) = delete;
 };
+
+// Per-DRM-plane layout derived from the V4L2 CAPTURE format echo. A
+// single V4L2 buffer sometimes maps to multiple DRM planes (e.g.
+// V4L2_PIX_FMT_NV12 packs Y and UV into one buffer with offset math
+// the caller has to compute), so each DRM plane records which V4L2
+// dmabuf_fd it imports from and where in that fd's address space the
+// plane starts.
+struct DrmPlaneLayout {
+  std::uint32_t num_drm_planes{0};
+  std::array<std::uint32_t, k_drm_max_planes> pitch{};
+  std::array<std::uint32_t, k_drm_max_planes> offset{};
+  std::array<std::uint8_t, k_drm_max_planes> v4l2_plane_idx{};
+};
+
+// Decide how the V4L2 CAPTURE format echo maps onto DRM AddFB2's
+// per-plane handle/pitch/offset arrays.
+//
+// The two shapes that come up in practice with V4L2 stateful decoders:
+//   * Single-V4L2-plane NV12: Y at offset 0, UV at offset
+//     bytesperline * height. Both DRM planes share V4L2 plane 0's
+//     dmabuf fd (the kernel dedups on prime-import).
+//   * MPLANE V4L2 with num_planes matching the DRM fourcc's plane
+//     count: 1:1 mapping, each DRM plane reads its own V4L2 plane.
+//
+// Other shapes (single-V4L2-plane YUV420, MPLANE with mismatched
+// counts, RGB packed in MPLANE-with-1-plane) collapse into the 1:1
+// default. The default is also correct for any single-DRM-plane
+// format (RGB, packed YUYV, etc.).
+[[nodiscard]] std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mplane,
+                                                      std::uint32_t drm_fourcc,
+                                                      DrmPlaneLayout& out) noexcept {
+  // Special case: single-V4L2-plane NV12 -> 2 DRM planes via offset math.
+  if (drm_fourcc == DRM_FORMAT_NV12 && !is_mplane) {
+    std::uint32_t const bpl = cap_fmt.fmt.pix.bytesperline;
+    std::uint32_t const h = cap_fmt.fmt.pix.height;
+    if (bpl == 0 || h == 0) {
+      return std::make_error_code(std::errc::invalid_argument);
+    }
+    out.num_drm_planes = 2;
+    out.pitch.at(0) = bpl;
+    out.pitch.at(1) = bpl;
+    out.offset.at(0) = 0;
+    out.offset.at(1) = bpl * h;
+    out.v4l2_plane_idx.at(0) = 0;
+    out.v4l2_plane_idx.at(1) = 0;
+    return {};
+  }
+
+  // Default: 1 DRM plane per V4L2 plane (1:1). For single-V4L2-plane
+  // formats this collapses to a single-DRM-plane import. For MPLANE
+  // formats we read num_planes / per-plane bytesperline out of pix_mp.
+  if (is_mplane) {
+    std::uint32_t const n = cap_fmt.fmt.pix_mp.num_planes;
+    if (n == 0 || n > k_drm_max_planes) {
+      return std::make_error_code(std::errc::not_supported);
+    }
+    out.num_drm_planes = n;
+    for (std::uint32_t i = 0; i < n; ++i) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+      out.pitch.at(i) = cap_fmt.fmt.pix_mp.plane_fmt[i].bytesperline;
+      out.offset.at(i) = 0;
+      out.v4l2_plane_idx.at(i) = static_cast<std::uint8_t>(i);
+    }
+    return {};
+  }
+
+  out.num_drm_planes = 1;
+  out.pitch.at(0) = cap_fmt.fmt.pix.bytesperline;
+  out.offset.at(0) = 0;
+  out.v4l2_plane_idx.at(0) = 0;
+  return {};
+}
+
+// drmPrimeFDToHandle every DRM plane's source dmabuf into `drm_fd`,
+// then drmModeAddFB2WithModifiers to a stable per-buffer fb_id. The
+// kernel's prime-import GEM dedup means importing the same dmabuf
+// twice (NV12 single-V4L2-plane case) returns the same handle and
+// the second drmCloseBufferHandle decref is correct.
+//
+// On any failure, partial state is rolled back so the caller's
+// V4l2CaptureBuffer dtor doesn't double-free.
+[[nodiscard]] std::error_code import_capture_buffer_to_drm(int drm_fd, std::uint32_t width,
+                                                           std::uint32_t height,
+                                                           std::uint32_t drm_fourcc,
+                                                           const DrmPlaneLayout& layout,
+                                                           V4l2CaptureBuffer& slot) noexcept {
+  std::array<std::uint32_t, k_drm_max_planes> handles{};
+  std::array<std::uint32_t, k_drm_max_planes> pitches{};
+  std::array<std::uint32_t, k_drm_max_planes> offsets{};
+  std::array<std::uint64_t, k_drm_max_planes> modifiers{};
+  for (std::uint32_t p = 0; p < layout.num_drm_planes; ++p) {
+    std::uint8_t const v4l2_idx = layout.v4l2_plane_idx.at(p);
+    if (v4l2_idx >= slot.num_planes || slot.dmabuf_fd.at(v4l2_idx) < 0) {
+      return std::make_error_code(std::errc::invalid_argument);
+    }
+    std::uint32_t handle = 0;
+    if (drmPrimeFDToHandle(drm_fd, slot.dmabuf_fd.at(v4l2_idx), &handle) != 0 || handle == 0) {
+      // Roll back any handles we already imported for this slot. The
+      // dtor would double-close otherwise because we haven't yet
+      // committed the slot's drm_fd.
+      for (std::uint32_t prev = 0; prev < p; ++prev) {
+        if (handles.at(prev) != 0) {
+          drmCloseBufferHandle(drm_fd, handles.at(prev));
+        }
+      }
+      return make_errno(errno != 0 ? errno : EIO);
+    }
+    handles.at(p) = handle;
+    pitches.at(p) = layout.pitch.at(p);
+    offsets.at(p) = layout.offset.at(p);
+    modifiers.at(p) = DRM_FORMAT_MOD_LINEAR;
+  }
+
+  std::uint32_t fb_id = 0;
+  if (drmModeAddFB2WithModifiers(drm_fd, width, height, drm_fourcc, handles.data(), pitches.data(),
+                                 offsets.data(), modifiers.data(), &fb_id,
+                                 DRM_MODE_FB_MODIFIERS) != 0 ||
+      fb_id == 0) {
+    int const saved = errno;
+    for (auto h : handles) {
+      if (h != 0) {
+        drmCloseBufferHandle(drm_fd, h);
+      }
+    }
+    return make_errno(saved != 0 ? saved : EIO);
+  }
+
+  // Commit. Storing drm_fd here arms the dtor's KMS-side cleanup.
+  slot.drm_fd = drm_fd;
+  slot.fb_id = fb_id;
+  for (std::uint32_t p = 0; p < layout.num_drm_planes; ++p) {
+    slot.drm_handles.at(p) = handles.at(p);
+  }
+  return {};
+}
 
 // Issue REQBUFS(count=0) on the CAPTURE queue so the kernel reclaims
 // its bookkeeping. Best-effort on shutdown -- callers must already
@@ -228,10 +397,19 @@ void release_capture_queue(int fd, bool is_mplane) noexcept {
 // follow-ups.
 struct V4l2DecoderSource::Impl {
   int v4l2_fd{-1};
+  // drm_fd is borrowed (not owned) from the caller's drm::Device; we
+  // never close it. Per-buffer fb_id and GEM handles ARE owned and
+  // released in V4l2CaptureBuffer's destructor.
+  int drm_fd{-1};
   V4l2DecoderConfig cfg{};
   bool is_mplane{false};
   std::uint32_t capture_num_planes{0};
   SourceFormat capture_format{};
+  // Cached post-S_FMT echo (bytesperline / sizeimage / per-plane
+  // metadata) is the input on_session_resumed needs to redo
+  // derive_drm_plane_layout against the new drm_fd without another
+  // S_FMT round-trip.
+  v4l2_format capture_format_echo{};
   std::vector<V4l2CaptureBuffer> capture_buffers;
 };
 
@@ -253,10 +431,14 @@ V4l2DecoderSource::~V4l2DecoderSource() {
 }
 
 drm::expected<std::unique_ptr<V4l2DecoderSource>, std::error_code> V4l2DecoderSource::create(
-    const drm::Device& /*dev*/, const char* device_path, const V4l2DecoderConfig& cfg) {
+    const drm::Device& dev, const char* device_path, const V4l2DecoderConfig& cfg) {
   if (auto ec = validate_config(device_path, cfg); ec) {
     return drm::unexpected<std::error_code>(ec);
   }
+  // The DRM fd is checked AFTER V4L2 negotiation so the most-immediate
+  // error surfaces first (a bad path or non-V4L2 device should produce
+  // ENOENT / not_supported, not bad_file_descriptor).
+  int const drm_fd = dev.fd();
 
   // O_NONBLOCK so drive() can drain DQBUF/DQEVENT without stalling the
   // caller's commit thread; CAPTURE EAGAIN is the in-band "no frame
@@ -392,13 +574,41 @@ drm::expected<std::unique_ptr<V4l2DecoderSource>, std::error_code> V4l2DecoderSo
     return fail(std::make_error_code(std::errc::not_enough_memory));
   }
 
+  if (drm_fd < 0) {
+    capture_buffers.clear();
+    release_capture_queue(fd, is_mplane);
+    return fail(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+
+  // drmPrimeFDToHandle + drmModeAddFB2WithModifiers per buffer. Each
+  // V4l2CaptureBuffer arms its own KMS-side dtor on success, so any
+  // failure mid-loop unwinds via std::vector destruction the same way
+  // the V4L2 side does.
+  DrmPlaneLayout layout{};
+  if (auto ec = derive_drm_plane_layout(cap_fmt, is_mplane, cfg.capture_fourcc, layout); ec) {
+    capture_buffers.clear();
+    release_capture_queue(fd, is_mplane);
+    return fail(ec);
+  }
+  for (auto& slot : capture_buffers) {
+    if (auto ec =
+            import_capture_buffer_to_drm(drm_fd, cap_w, cap_h, cfg.capture_fourcc, layout, slot);
+        ec) {
+      capture_buffers.clear();
+      release_capture_queue(fd, is_mplane);
+      return fail(ec);
+    }
+  }
+
   std::unique_ptr<V4l2DecoderSource> src(new V4l2DecoderSource());
   src->impl_->v4l2_fd = fd;
+  src->impl_->drm_fd = drm_fd;
   src->impl_->cfg = cfg;
   src->impl_->is_mplane = is_mplane;
   src->impl_->capture_num_planes = cap_num_planes;
   // V4L2 surfaces in v1 are LINEAR (DRM_FORMAT_MOD_LINEAR == 0).
   src->impl_->capture_format = SourceFormat{cfg.capture_fourcc, 0, cap_w, cap_h};
+  src->impl_->capture_format_echo = cap_fmt;
   src->impl_->capture_buffers = std::move(capture_buffers);
   return src;
 }
@@ -438,14 +648,50 @@ SourceFormat V4l2DecoderSource::format() const noexcept {
 }
 
 void V4l2DecoderSource::on_session_paused() noexcept {
-  // No-op until DRM-side state (FB IDs, GEM handles) is held.
+  if (!impl_) {
+    return;
+  }
+  // The seat is losing master and the DRM fd is about to be revoked.
+  // Drop every fb_id + GEM handle bound to it without ioctls -- those
+  // would race against revocation. The V4L2 dmabuf fds are unaffected
+  // (V4L2 isn't tied to DRM master), so the source's CPU-side buffer
+  // ring stays intact for the next on_session_resumed re-import.
+  for (auto& slot : impl_->capture_buffers) {
+    slot.drm_fd = -1;  // disarm dtor's KMS-side cleanup
+    slot.fb_id = 0;
+    slot.drm_handles.fill(0);
+  }
+  impl_->drm_fd = -1;
 }
 
 drm::expected<void, std::error_code> V4l2DecoderSource::on_session_resumed(
-    const drm::Device& /*new_dev*/) {
+    const drm::Device& new_dev) {
   if (!impl_) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
+  int const new_drm_fd = new_dev.fd();
+  if (new_drm_fd < 0) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+
+  // Re-derive the DRM plane layout against the cached V4L2 format
+  // echo (same fourcc + dimensions; only the importing fd changed).
+  DrmPlaneLayout layout{};
+  if (auto ec = derive_drm_plane_layout(impl_->capture_format_echo, impl_->is_mplane,
+                                        impl_->cfg.capture_fourcc, layout);
+      ec) {
+    return drm::unexpected<std::error_code>(ec);
+  }
+
+  for (auto& slot : impl_->capture_buffers) {
+    if (auto ec = import_capture_buffer_to_drm(new_drm_fd, impl_->capture_format.width,
+                                               impl_->capture_format.height,
+                                               impl_->cfg.capture_fourcc, layout, slot);
+        ec) {
+      return drm::unexpected<std::error_code>(ec);
+    }
+  }
+  impl_->drm_fd = new_drm_fd;
   return {};
 }
 
