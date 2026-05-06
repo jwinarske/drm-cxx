@@ -294,6 +294,13 @@ if has_gstreamer
   )
 endif
 
+test('test_v4l2_decoder_source',
+  executable('test_v4l2_decoder_source',
+    'unit/test_v4l2_decoder_source.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_page_flip',
   executable('test_page_flip',
     'unit/test_page_flip.cpp',
