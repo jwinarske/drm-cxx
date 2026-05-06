@@ -76,36 +76,51 @@ constexpr std::chrono::milliseconds k_drive_poll_interval{20};
 // as its codec format on the OUTPUT (stateful decoder input) side.
 constexpr std::uint32_t k_fwht_fourcc = 0x54485746U;
 
-// V4L2_PIX_FMT_YUV420 = v4l2_fourcc('Y','U','1','2'). vicodec produces
-// this on CAPTURE; it maps 1:1 onto DRM_FORMAT_YUV420. We use 3-plane
-// YUV420 instead of 2-plane NV12 because vicodec's stateful decoder
-// negotiates YUV420 reliably across kernel versions, while NV12
-// support varies.
-constexpr std::uint32_t k_yuv420_fourcc = 0x32315559U;
+// V4L2_PIX_FMT_NV12 = v4l2_fourcc('N','V','1','2'). vicodec advertises
+// NV12 on CAPTURE; the source's derive_drm_plane_layout helper has a
+// dedicated single-V4L2-plane -> 2-DRM-plane path for NV12, so this
+// is the format that exercises the most of the source's plumbing.
+constexpr std::uint32_t k_nv12_fourcc = 0x3231564EU;
 
-// vicodec advertises card names like "vicodec-source" (for the
-// stateful encoder side?), "vicodec" (for the stateful decoder), and
-// "vicodec-stateless" (for the stateless decoder). The naming has
-// shifted across kernel versions; we accept any card containing
-// "vicodec" that's M2M+STREAMING capable, isn't the encoder side
-// (no "enc" / "source"), and isn't the stateless decoder.
-[[nodiscard]] bool is_vicodec_stateful_decoder(const v4l2_capability& cap) noexcept {
+// vicodec exposes three /dev/video* endpoints, all sharing the card
+// name "vicodec": the stateful encoder, the stateful decoder, and
+// the stateless decoder. We can't distinguish them from QUERYCAP
+// alone -- need to enumerate OUTPUT-side formats and check for
+// V4L2_PIX_FMT_FWHT. Only the stateful decoder advertises FWHT as
+// an OUTPUT (input-to-decompression) format; the encoder has FWHT
+// on CAPTURE, and the stateless decoder uses V4L2_PIX_FMT_FWHT_STATELESS
+// (fourcc 'SFWH').
+[[nodiscard]] bool fd_advertises_fwht_output(int fd, bool is_mplane) noexcept {
+  std::uint32_t const type =
+      is_mplane ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE : V4L2_BUF_TYPE_VIDEO_OUTPUT;
+  for (std::uint32_t i = 0; i < 64; ++i) {
+    v4l2_fmtdesc desc{};
+    desc.index = i;
+    desc.type = type;
+    if (::ioctl(fd, VIDIOC_ENUM_FMT, &desc) < 0) {
+      return false;
+    }
+    if (desc.pixelformat == k_fwht_fourcc) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] bool is_vicodec_stateful_decoder(int fd, const v4l2_capability& cap) noexcept {
   std::string const card(reinterpret_cast<const char*>(cap.card));  // NOLINT
   if (card.find("vicodec") == std::string::npos) {
     return false;
   }
-  if (card.find("stateless") != std::string::npos) {
-    return false;
-  }
-  if (card.find("source") != std::string::npos || card.find("enc") != std::string::npos) {
-    return false;
-  }
   std::uint32_t const caps =
       ((cap.capabilities & V4L2_CAP_DEVICE_CAPS) != 0U) ? cap.device_caps : cap.capabilities;
-  bool const m2m =
-      ((caps & V4L2_CAP_VIDEO_M2M) != 0U) || ((caps & V4L2_CAP_VIDEO_M2M_MPLANE) != 0U);
+  bool const is_mplane = (caps & V4L2_CAP_VIDEO_M2M_MPLANE) != 0U;
+  bool const is_single = (caps & V4L2_CAP_VIDEO_M2M) != 0U;
   bool const streaming = (caps & V4L2_CAP_STREAMING) != 0U;
-  return m2m && streaming;
+  if ((!is_mplane && !is_single) || !streaming) {
+    return false;
+  }
+  return fd_advertises_fwht_output(fd, is_mplane);
 }
 
 [[nodiscard]] std::optional<std::string> find_vicodec_decoder() {
@@ -122,11 +137,9 @@ constexpr std::uint32_t k_yuv420_fourcc = 0x32315559U;
     }
     v4l2_capability cap{};
     int const rc = ::ioctl(fd, VIDIOC_QUERYCAP, &cap);
+    bool const matches = (rc == 0) && is_vicodec_stateful_decoder(fd, cap);
     ::close(fd);
-    if (rc < 0) {
-      continue;
-    }
-    if (is_vicodec_stateful_decoder(cap)) {
+    if (matches) {
       return p.string();
     }
   }
@@ -162,7 +175,7 @@ constexpr std::uint32_t k_yuv420_fourcc = 0x32315559U;
 drm::scene::V4l2DecoderConfig vicodec_config() noexcept {
   drm::scene::V4l2DecoderConfig cfg;
   cfg.codec_fourcc = k_fwht_fourcc;
-  cfg.capture_fourcc = k_yuv420_fourcc;
+  cfg.capture_fourcc = k_nv12_fourcc;
   cfg.coded_width = 320;
   cfg.coded_height = 240;
   cfg.output_buffer_count = 4;
@@ -211,7 +224,7 @@ TEST_F(VicodecFixture, CreateNegotiatesFormat) {
 
   EXPECT_GE(src->fd(), 0);
   auto const fmt = src->format();
-  EXPECT_EQ(fmt.drm_fourcc, k_yuv420_fourcc);
+  EXPECT_EQ(fmt.drm_fourcc, k_nv12_fourcc);
   // vicodec rounds dimensions up to its block size; >= the requested
   // dims is the right invariant. Width / height of 0 would mean the
   // S_FMT echo wasn't captured.
