@@ -197,8 +197,15 @@ class Allocator {
   // state from the previously committed plane (old FB, CRTC_ID, zpos),
   // producing spurious EINVAL when migrating a layer between planes on
   // the same CRTC — two active planes, same zpos, same CRTC.
-  bool try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment, uint32_t flags,
-                       uint32_t crtc_index);
+  // Returns `std::error_code{}` on success, the kernel's actual ioctl
+  // error otherwise. Callers that only care pass/fail can rely on the
+  // `error_code`'s implicit bool conversion (`if (auto ec = ...; !ec)`
+  // for "passed"). Preserving the real errno matters specifically for
+  // `apply_previous_allocation`, which propagates EACCES upward so the
+  // caller can soft-pause on master loss instead of seeing every test
+  // failure flattened into EAGAIN.
+  std::error_code try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment,
+                                  uint32_t flags, uint32_t crtc_index);
 
   // Apply layer properties to a plane in the atomic request — full
   // write path, no minimization. Used by try_test_commit (its

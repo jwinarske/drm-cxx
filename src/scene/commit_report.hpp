@@ -56,7 +56,9 @@ struct LayerPlacementEntry {
 /// telemetry. Fields the current phase doesn't populate stay at 0.
 struct CommitReport {
   /// Total layers in the scene at commit time.
-  /// Invariant: `layers_total == layers_assigned + layers_composited + layers_unassigned`.
+  /// Invariant:
+  ///   `layers_total == layers_assigned + layers_composited
+  ///                  + layers_unassigned + layers_skipped_no_frame`.
   std::size_t layers_total{0};
   /// Layers the allocator placed directly on a hardware plane this
   /// commit (not via the composition canvas).
@@ -70,6 +72,14 @@ struct CommitReport {
   /// host the canvas, or the layer's source had no CPU mapping for
   /// the compositor to read from.
   std::size_t layers_unassigned{0};
+  /// Layers whose source returned `errc::resource_unavailable_try_again`
+  /// (EAGAIN) from `acquire()` and were skipped for this commit. EAGAIN
+  /// is flow control, not a failure: a live source has no frame to
+  /// contribute this vblank (typically pre-preroll, or a producer that
+  /// fell behind without a cached frame to re-issue). The next commit
+  /// re-calls `acquire()`. Consumers can graph this as a "frame stall"
+  /// signal per layer.
+  std::size_t layers_skipped_no_frame{0};
   /// Number of composition buckets emitted this frame. 0 or 1 in v1
   /// of Phase 2.3 (single full-screen canvas); multi-canvas pooling
   /// can raise this.

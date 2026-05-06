@@ -130,6 +130,7 @@ if(DRM_CXX_VULKAN)
 endif()
 
 add_subdirectory(scene/signage_player)
+add_subdirectory(scene/video_player)
 add_subdirectory(basics/test_patterns)
 
 # keyboard — interactive keyboard-input + Unicode-entry demo.

@@ -266,6 +266,34 @@ test('test_external_dma_buf_source',
   ),
 )
 
+# GstAppsinkSource validation test — runs in both build modes; the
+# real build adds gstreamer + gstreamer-app at link time + the
+# DRM_CXX_HAS_GSTREAMER=1 define so the test fixture compiles.
+gst_test_deps = test_deps
+gst_test_args = ['-DDRM_CXX_HAS_GSTREAMER=0']
+if has_gstreamer
+  gst_test_deps = test_deps + [gst_dep, gst_app_dep]
+  gst_test_args = ['-DDRM_CXX_HAS_GSTREAMER=1']
+endif
+test('test_gst_appsink_source',
+  executable('test_gst_appsink_source',
+    'unit/test_gst_appsink_source.cpp',
+    dependencies : gst_test_deps,
+    cpp_args : gst_test_args,
+  ),
+)
+
+# Vkms integration test for GstAppsinkSource — only built when the
+# GStreamer gate is on. Self-skips at runtime when vkms isn't loaded.
+if has_gstreamer
+  test('test_gst_appsink_source_vkms',
+    executable('test_gst_appsink_source_vkms',
+      'integration/test_gst_appsink_source_vkms.cpp',
+      dependencies : test_deps + [gst_dep, gst_app_dep],
+    ),
+  )
+endif
+
 test('test_page_flip',
   executable('test_page_flip',
     'unit/test_page_flip.cpp',

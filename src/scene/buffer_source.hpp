@@ -115,6 +115,17 @@ class LayerBufferSource {
   /// `fb_id` (for SceneSubmitsFbId) points at a ready-to-scanout
   /// framebuffer; the scene will pair the result with a subsequent
   /// `release()` once the commit completes.
+  ///
+  /// `errc::resource_unavailable_try_again` (EAGAIN) is a documented
+  /// flow-control return — not an error. It means "I have no frame to
+  /// contribute this vblank." `LayerScene::commit()` skips the layer
+  /// for that commit; the next commit re-calls `acquire()`. Live
+  /// sources should return EAGAIN before their first sample lands and
+  /// any time the producer falls behind without a cached frame to
+  /// re-issue. Sources that always have a valid buffer (DumbBuffer,
+  /// GbmBuffer, ExternalDmaBuf) never need to return EAGAIN. Any
+  /// other error code is treated as a real failure and aborts the
+  /// commit.
   [[nodiscard]] virtual drm::expected<AcquiredBuffer, std::error_code> acquire() = 0;
 
   /// Return the buffer to the source's free pool. Must be infallible.

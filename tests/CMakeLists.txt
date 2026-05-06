@@ -143,6 +143,40 @@ target_link_libraries(test_external_dma_buf_source PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_external_dma_buf_source)
 
+# GstAppsinkSource validation test — exercises the same argument
+# validation in both build modes. Real build also needs gstreamer +
+# gstreamer-app at link time so the fixture can construct an appsink
+# element; stub build runs without any GStreamer libs.
+add_executable(test_gst_appsink_source unit/test_gst_appsink_source.cpp)
+target_link_libraries(test_gst_appsink_source PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+if(DRM_CXX_HAS_GSTREAMER)
+  target_link_libraries(test_gst_appsink_source PRIVATE
+    PkgConfig::gstreamer
+    PkgConfig::gstreamer_app)
+  target_compile_definitions(test_gst_appsink_source PRIVATE DRM_CXX_HAS_GSTREAMER=1)
+else()
+  target_compile_definitions(test_gst_appsink_source PRIVATE DRM_CXX_HAS_GSTREAMER=0)
+endif()
+gtest_discover_tests(test_gst_appsink_source)
+
+# GstAppsinkSource integration test against vkms — only built when
+# the GStreamer gate is on. Self-skips at runtime when vkms isn't
+# loaded so this stays green on hosts that haven't `modprobe vkms`'d.
+if(DRM_CXX_HAS_GSTREAMER)
+  add_executable(test_gst_appsink_source_vkms
+    integration/test_gst_appsink_source_vkms.cpp)
+  target_link_libraries(test_gst_appsink_source_vkms PRIVATE
+    drm-cxx::drm-cxx
+    PkgConfig::gstreamer
+    PkgConfig::gstreamer_app
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_gst_appsink_source_vkms)
+endif()
+
 add_executable(test_page_flip unit/test_page_flip.cpp)
 target_link_libraries(test_page_flip PRIVATE
   drm-cxx::drm-cxx

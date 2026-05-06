@@ -32,6 +32,7 @@ set(DRM_CXX_SOURCES
   scene/dumb_buffer_source.cpp
   scene/external_dma_buf_source.cpp
   scene/gbm_buffer_source.cpp
+  scene/gst_appsink_source.cpp
   scene/layer_scene.cpp
   sync/fence.cpp)
 
@@ -127,6 +128,27 @@ else()
   message(STATUS
     "drm-cxx: libseat not found — drm::session::Seat::open() will return nullopt "
     "at runtime (set DRM_CXX_SESSION=ON to hard-fail)")
+endif()
+
+# GStreamer: same dual-branch pattern as libseat. Headers promoted to
+# -isystem so glib-2.0 / gstreamer warnings stay out of -Werror.
+if(DRM_CXX_HAS_GSTREAMER)
+  foreach(_gst_tgt PkgConfig::gstreamer PkgConfig::gstreamer_app
+                   PkgConfig::gstreamer_alloc PkgConfig::gstreamer_video)
+    get_target_property(_gst_incs ${_gst_tgt} INTERFACE_INCLUDE_DIRECTORIES)
+    if(_gst_incs)
+      set_property(TARGET ${_gst_tgt}
+                   APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_gst_incs})
+    endif()
+  endforeach()
+  target_link_libraries(drm-cxx PRIVATE
+    PkgConfig::gstreamer
+    PkgConfig::gstreamer_app
+    PkgConfig::gstreamer_alloc
+    PkgConfig::gstreamer_video)
+  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_GSTREAMER=1)
+else()
+  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_GSTREAMER=0)
 endif()
 
 # libxcursor: linked PRIVATE and included as -isystem so its public
@@ -302,6 +324,13 @@ install(FILES
     scene/layer_handle.hpp
     scene/layer_scene.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
+
+# GstAppsinkSource header only installs when the gate is on — matches
+# the capture / csd pattern.
+if(DRM_CXX_HAS_GSTREAMER)
+  install(FILES scene/gst_appsink_source.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
+endif()
 
 if(DRM_CXX_VULKAN)
   install(FILES
