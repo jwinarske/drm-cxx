@@ -43,6 +43,13 @@ set(DRM_CXX_BLEND2D "AUTO" CACHE STRING
     "Build drm::capture (and later drm::csd) on top of Blend2D: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_BLEND2D PROPERTY STRINGS AUTO ON OFF)
 
+# Optional drm::scene::GstAppsinkSource. Needs four GStreamer packages:
+# gstreamer-1.0, gstreamer-app-1.0 (appsink pull), gstreamer-allocators-1.0
+# (DMABUF zero-copy path), and gstreamer-video-1.0 (per-plane offsets/strides).
+set(DRM_CXX_GSTREAMER "AUTO" CACHE STRING
+    "Build drm::scene::GstAppsinkSource on top of GStreamer: AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_GSTREAMER PROPERTY STRINGS AUTO ON OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -101,6 +108,35 @@ if(TARGET PkgConfig::libseat)
   set(DRM_CXX_HAS_LIBSEAT 1)
 else()
   set(DRM_CXX_HAS_LIBSEAT 0)
+endif()
+
+# GStreamer probe for drm::scene::GstAppsinkSource. Four packages, all
+# required together: appsink-1.0 for the pull API, allocators-1.0 for
+# the DMABUF zero-copy path, video-1.0 for per-plane offsets/strides
+# via GstVideoMeta. ON = hard-fail if any one is missing; AUTO = silent
+# disable; OFF = skip entirely.
+if(NOT DRM_CXX_GSTREAMER STREQUAL "OFF")
+  if(DRM_CXX_GSTREAMER STREQUAL "ON")
+    pkg_check_modules(gstreamer       REQUIRED IMPORTED_TARGET gstreamer-1.0)
+    pkg_check_modules(gstreamer_app   REQUIRED IMPORTED_TARGET gstreamer-app-1.0)
+    pkg_check_modules(gstreamer_alloc REQUIRED IMPORTED_TARGET gstreamer-allocators-1.0)
+    pkg_check_modules(gstreamer_video REQUIRED IMPORTED_TARGET gstreamer-video-1.0)
+  else()
+    pkg_check_modules(gstreamer       IMPORTED_TARGET gstreamer-1.0)
+    pkg_check_modules(gstreamer_app   IMPORTED_TARGET gstreamer-app-1.0)
+    pkg_check_modules(gstreamer_alloc IMPORTED_TARGET gstreamer-allocators-1.0)
+    pkg_check_modules(gstreamer_video IMPORTED_TARGET gstreamer-video-1.0)
+  endif()
+endif()
+if(TARGET PkgConfig::gstreamer AND TARGET PkgConfig::gstreamer_app
+    AND TARGET PkgConfig::gstreamer_alloc AND TARGET PkgConfig::gstreamer_video)
+  set(DRM_CXX_HAS_GSTREAMER 1)
+else()
+  set(DRM_CXX_HAS_GSTREAMER 0)
+  if(NOT DRM_CXX_GSTREAMER STREQUAL "OFF")
+    message(STATUS
+      "drm-cxx: gstreamer not found — drm::scene::GstAppsinkSource will not be built")
+  endif()
 endif()
 
 # libxcursor probe for drm::cursor.

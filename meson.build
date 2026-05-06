@@ -197,6 +197,41 @@ else
   tomlplusplus_dep = disabler()
 endif
 
+# GStreamer probe for drm::scene::GstAppsinkSource. Four packages:
+#   * gstreamer-1.0           — GstElement, GstSample, GstBuffer
+#   * gstreamer-app-1.0       — appsink pull API
+#   * gstreamer-allocators-1.0 — gst_dmabuf_memory_get_fd (zero-copy path)
+#   * gstreamer-video-1.0     — GstVideoMeta (per-plane offsets/strides)
+# Pulled together because the source treats DMABUF zero-copy as the
+# primary path; without allocators-1.0 we'd silently fall back to memcpy
+# on every embedded SoC.
+gstreamer_feature = get_option('gstreamer')
+if not gstreamer_feature.disabled()
+  gst_dep         = dependency('gstreamer-1.0',
+                               required : gstreamer_feature.enabled(),
+                               include_type : 'system')
+  gst_app_dep     = dependency('gstreamer-app-1.0',
+                               required : gstreamer_feature.enabled(),
+                               include_type : 'system')
+  gst_alloc_dep   = dependency('gstreamer-allocators-1.0',
+                               required : gstreamer_feature.enabled(),
+                               include_type : 'system')
+  gst_video_dep   = dependency('gstreamer-video-1.0',
+                               required : gstreamer_feature.enabled(),
+                               include_type : 'system')
+  has_gstreamer = gst_dep.found() and gst_app_dep.found() \
+                  and gst_alloc_dep.found() and gst_video_dep.found()
+else
+  gst_dep       = disabler()
+  gst_app_dep   = disabler()
+  gst_alloc_dep = disabler()
+  gst_video_dep = disabler()
+  has_gstreamer = false
+endif
+if not has_gstreamer and not gstreamer_feature.disabled()
+  message('drm-cxx: gstreamer not found — drm::scene::GstAppsinkSource will not be built')
+endif
+
 #── Configuration ─────────────────────────────────────────────
 conf = configuration_data()
 conf.set('DRM_CXX_VERSION', meson.project_version())

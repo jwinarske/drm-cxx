@@ -219,7 +219,7 @@ class LayerScene::Impl {
     // already-acquired buffers are handed back to their sources.
     std::vector<AcquisitionSlot> acquisitions;
     acquisitions.reserve(report.layers_total);
-    if (auto r = acquire_all(acquisitions); !r) {
+    if (auto r = acquire_all(acquisitions, report); !r) {
       release_all(acquisitions);
       return drm::unexpected<std::error_code>(r.error());
     }
@@ -362,9 +362,13 @@ class LayerScene::Impl {
     // (no CPU mapping, no free plane, canvas alloc failed).
     compose_unassigned(acquisitions, req, report);
 
-    if (report.layers_total > report.layers_assigned + report.layers_composited) {
-      report.layers_unassigned =
-          report.layers_total - report.layers_assigned - report.layers_composited;
+    // Subtract skipped layers from the residual: they're flow-controlled
+    // (no new frame this vblank), not dropped, and the warning below
+    // would be misleading otherwise.
+    const auto accounted =
+        report.layers_assigned + report.layers_composited + report.layers_skipped_no_frame;
+    if (report.layers_total > accounted) {
+      report.layers_unassigned = report.layers_total - accounted;
       drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
     }
 
@@ -688,15 +692,28 @@ class LayerScene::Impl {
     return &slot;
   }
 
-  drm::expected<void, std::error_code> acquire_all(std::vector<AcquisitionSlot>& out) {
+  drm::expected<void, std::error_code> acquire_all(std::vector<AcquisitionSlot>& out,
+                                                   CommitReport& report) {
     for (auto& slot : slots_) {
       if (!slot.alive || !slot.scene_layer) {
         continue;
       }
       auto acq = slot.scene_layer->source().acquire();
       if (!acq) {
-        drm::log_warn("scene::LayerScene: source acquire() failed for layer {}",
-                      slot.scene_layer->handle().id);
+        // EAGAIN is flow control, not an error: the source has no
+        // frame to contribute this vblank. Typical case is a live
+        // source before its first sample lands (GstAppsinkSource
+        // pre-preroll). Skip the layer for this commit; once the
+        // source produces a frame, subsequent commits pick it up.
+        // Counted in report.layers_skipped_no_frame so the
+        // unassigned math doesn't mistake the skip for a drop. Any
+        // other error code is a real failure and propagates.
+        if (acq.error() == std::make_error_code(std::errc::resource_unavailable_try_again)) {
+          ++report.layers_skipped_no_frame;
+          continue;
+        }
+        drm::log_warn("scene::LayerScene: source acquire() failed for layer {}: {}",
+                      slot.scene_layer->handle().id, acq.error().message());
         return drm::unexpected<std::error_code>(acq.error());
       }
       out.push_back({slot.scene_layer.get(), slot.planes_layer, *acq});

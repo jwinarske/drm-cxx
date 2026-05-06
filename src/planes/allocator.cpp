@@ -745,15 +745,25 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
     return false;
   }
 
-  if (const auto fmt = layer.format(); fmt) {
-    // Honor the layer's modifier — AFBC, DCC, and vendor tilings only land
-    // on planes whose IN_FORMATS blob explicitly advertises the
-    // (format, modifier) pair. Layers that don't tag a modifier fall
-    // through the LINEAR/INVALID equivalence path inside
-    // supports_format_modifier.
-    if (!plane.supports_format_modifier(*fmt, layer.modifier())) {
-      return false;
-    }
+  const auto fmt = layer.format();
+  if (!fmt) {
+    // No format means the layer has no buffer this commit — typically a
+    // LayerScene EAGAIN-skip where lower_layer() was never called. The
+    // permissive interpretation ("no format = compatible with everything")
+    // would phantom-place such a layer on a plane: it'd be counted in
+    // *assigned but apply_layer_to_plane_real walks an empty property
+    // map, so no kernel state changes. The accounting then reports a
+    // layer as both assigned and skipped_no_frame, breaking the
+    // CommitReport invariant.
+    return false;
+  }
+  // Honor the layer's modifier — AFBC, DCC, and vendor tilings only land
+  // on planes whose IN_FORMATS blob explicitly advertises the
+  // (format, modifier) pair. Layers that don't tag a modifier fall
+  // through the LINEAR/INVALID equivalence path inside
+  // supports_format_modifier.
+  if (!plane.supports_format_modifier(*fmt, layer.modifier())) {
+    return false;
   }
 
   if (layer.rotation() != 0 && !plane.supports_rotation) {

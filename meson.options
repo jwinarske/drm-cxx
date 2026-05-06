@@ -8,3 +8,4 @@ option('cursor',  type : 'feature', value : 'auto', description : 'Build drm::cu
 option('blend2d', type : 'feature', value : 'auto', description : 'Build drm::capture and drm::csd on top of Blend2D (CMake-config dep, no pkg-config upstream)')
 option('camera',  type : 'feature', value : 'auto', description : 'Build the camera example (needs libcamera>=0.3.0 and libyuv)')
 option('keyboard', type : 'feature', value : 'disabled', description : 'Build the keyboard demo (downloads Noto Sans at configure time; disable for sandboxed/offline builds)')
+option('gstreamer', type : 'feature', value : 'auto', description : 'Build drm::scene::GstAppsinkSource on top of GStreamer (needs gstreamer-1.0, gstreamer-app-1.0, gstreamer-allocators-1.0, gstreamer-video-1.0)')

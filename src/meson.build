@@ -31,6 +31,7 @@ drm_cxx_sources = files(
   'scene/dumb_buffer_source.cpp',
   'scene/external_dma_buf_source.cpp',
   'scene/gbm_buffer_source.cpp',
+  'scene/gst_appsink_source.cpp',
   'scene/layer_scene.cpp',
   'sync/fence.cpp',
 )
@@ -75,6 +76,16 @@ session_cpp_args = has_libseat \
   : ['-DDRM_CXX_HAS_LIBSEAT=0']
 if has_libseat
   drm_cxx_deps += libseat_dep
+endif
+
+# GStreamer dep + define — same dual-branch pattern as libseat. The
+# public header (scene/gst_appsink_source.hpp) is GStreamer-free; the
+# .cpp branches on DRM_CXX_HAS_GSTREAMER.
+gstreamer_cpp_args = has_gstreamer \
+  ? ['-DDRM_CXX_HAS_GSTREAMER=1'] \
+  : ['-DDRM_CXX_HAS_GSTREAMER=0']
+if has_gstreamer
+  drm_cxx_deps += [gst_dep, gst_app_dep, gst_alloc_dep, gst_video_dep]
 endif
 
 # drm::cursor is a feature: the .cpp files only compile when libxcursor
@@ -123,7 +134,7 @@ drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
-  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args,
+  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args + gstreamer_cpp_args,
   install : true,
 )
 
@@ -261,6 +272,15 @@ install_headers(
   'scene/layer_scene.hpp',
   subdir : 'drm-cxx/scene',
 )
+
+# GstAppsinkSource header only installs when the gate is on — matches
+# the cursor / capture / csd pattern.
+if has_gstreamer
+  install_headers(
+    'scene/gst_appsink_source.hpp',
+    subdir : 'drm-cxx/scene',
+  )
+endif
 
 if get_option('vulkan')
   install_headers(
