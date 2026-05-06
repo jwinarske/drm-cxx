@@ -209,15 +209,29 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
 
   // Fast path: nothing changed since last frame
   if (!output.any_layer_dirty() && previous_allocation_valid_ && !has_new_layer) {
-    return apply_previous_allocation(output, req, commit_flags, crtc_index);
+    auto result = apply_previous_allocation(output, req, commit_flags, crtc_index);
+    if (result.has_value() || result.error() == std::errc::permission_denied) {
+      // Success or master loss: return directly. EACCES has to short-
+      // circuit here — every TEST that follows would also fail on the
+      // dead master, and full_search's silent-failure semantics would
+      // hide that from the caller (eventual req.commit() does surface
+      // it, but only after a string of doomed test commits and a
+      // composition pass).
+      return result;
+    }
+    // Other test failures fall through to full_search, just like the
+    // warm-start path below.
   }
 
   // Warm-start: try previous allocation first (one test commit). Skipped
   // when a new layer is present — see has_new_layer comment above.
   if (previous_allocation_valid_ && !has_new_layer) {
-    if (const auto result = apply_previous_allocation(output, req, commit_flags, crtc_index);
-        result.has_value()) {
+    auto result = apply_previous_allocation(output, req, commit_flags, crtc_index);
+    if (result.has_value()) {
       output.mark_clean();
+      return result;
+    }
+    if (result.error() == std::errc::permission_denied) {
       return result;
     }
   }
@@ -266,7 +280,16 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
         std::make_error_code(std::errc::resource_unavailable_try_again));
   }
 
-  if (!try_test_commit(previous_allocation_, flags, crtc_index)) {
+  if (auto ec = try_test_commit(previous_allocation_, flags, crtc_index); ec) {
+    // EACCES means the kernel revoked our master (libseat pause_cb may
+    // not have arrived yet — drmIsMaster lags). Propagate it up so the
+    // caller can soft-pause; flattening it to EAGAIN here would hide
+    // the real signal. Other failures stay flattened to EAGAIN, which
+    // is the established "warm-start didn't fit, fall through to a
+    // fresh search" signal at higher layers.
+    if (ec == std::errc::permission_denied) {
+      return drm::unexpected<std::error_code>(ec);
+    }
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::resource_unavailable_try_again));
   }
@@ -579,7 +602,7 @@ std::unordered_map<uint32_t, Layer*> Allocator::place_group(
       std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", pid, static_cast<const void*>(lay));
     }
   }
-  const bool preseed_ok = try_test_commit(assignment, flags, crtc_index);
+  const bool preseed_ok = !try_test_commit(assignment, flags, crtc_index);
   if (alloc_debug()) {
     std::fprintf(stderr, "[drm-cxx] TEST preseed → %s\n", preseed_ok ? "PASS" : "FAIL");
   }
@@ -616,7 +639,7 @@ std::unordered_map<uint32_t, Layer*> Allocator::place_group(
       std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", pid, static_cast<const void*>(lay));
     }
   }
-  const bool greedy_ok = try_test_commit(assignment, flags, crtc_index);
+  const bool greedy_ok = !try_test_commit(assignment, flags, crtc_index);
   if (alloc_debug()) {
     std::fprintf(stderr, "[drm-cxx] TEST greedy → %s\n", greedy_ok ? "PASS" : "FAIL");
   }
@@ -633,7 +656,7 @@ std::unordered_map<uint32_t, Layer*> Allocator::place_group(
 
   for (auto& [fst, snd] : assigned_vec) {
     assignment.erase(fst);
-    if (try_test_commit(assignment, flags, crtc_index)) {
+    if (auto ec = try_test_commit(assignment, flags, crtc_index); !ec) {
       break;
     }
     if (test_commits_this_frame_ >= max_test_commits_) {
@@ -873,10 +896,10 @@ std::vector<std::vector<Layer*>> Allocator::split_independent_groups(std::vector
 
 // ── Test commit helpers ───────────────────────────────────────
 
-bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment,
-                                const uint32_t flags, const uint32_t crtc_index) {
+std::error_code Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment,
+                                           const uint32_t flags, const uint32_t crtc_index) {
   if (test_commits_this_frame_ >= max_test_commits_) {
-    return false;
+    return std::make_error_code(std::errc::resource_unavailable_try_again);
   }
 
   // Build a fresh atomic request for this TEST. Using a local request
@@ -895,7 +918,7 @@ bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assi
         std::fprintf(stderr, "[drm-cxx] test_preparer FAIL: %s (errno=%d)\n",
                      r.error().message().c_str(), r.error().value());
       }
-      return false;
+      return r.error();
     }
   }
 
@@ -916,7 +939,7 @@ bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assi
                      plane_id, static_cast<const void*>(layer), result.error().message().c_str(),
                      result.error().value());
       }
-      return false;
+      return result.error();
     }
   }
 
@@ -938,7 +961,10 @@ bool Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assi
     failure_cache_.record(plane_id, layer->property_hash(), result.has_value());
   }
 
-  return result.has_value();
+  if (!result.has_value()) {
+    return result.error();
+  }
+  return {};
 }
 
 void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_index,
