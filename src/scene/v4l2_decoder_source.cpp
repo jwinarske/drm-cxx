@@ -934,22 +934,130 @@ drm::expected<void, std::error_code> V4l2DecoderSource::drive() noexcept {
 }
 
 drm::expected<void, std::error_code> V4l2DecoderSource::submit_bitstream(
-    drm::span<const std::uint8_t> coded, std::uint64_t /*timestamp_ns*/) {
+    drm::span<const std::uint8_t> coded, std::uint64_t timestamp_ns) {
   if (!impl_ || coded.empty()) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
-  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::function_not_supported));
+  if (impl_->source_change_seen) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::operation_canceled));
+  }
+  if (impl_->output_free.empty()) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+
+  // Pop a free slot, copy the bitstream in, QBUF. We restore the
+  // slot to output_free on any failure path so the next call has the
+  // same number of usable slots.
+  std::uint32_t const idx = impl_->output_free.back();
+  impl_->output_free.pop_back();
+  if (idx >= impl_->output_buffers.size()) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  auto& slot = impl_->output_buffers.at(idx);
+  if (slot.num_planes == 0 || slot.mapped_ptr.at(0) == nullptr) {
+    impl_->output_free.push_back(idx);
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  if (coded.size() > slot.mapped_len.at(0)) {
+    impl_->output_free.push_back(idx);
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::message_size));
+  }
+  std::memcpy(slot.mapped_ptr.at(0), coded.data(), coded.size());
+
+  v4l2_buffer buf{};
+  std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
+  buf.type = output_buf_type(impl_->is_mplane);
+  buf.memory = V4L2_MEMORY_MMAP;
+  buf.index = idx;
+  // V4L2 propagates timestamp from the OUTPUT buffer to the matching
+  // CAPTURE buffer, so callers tracking PTS use it as a frame ID.
+  // Split timestamp_ns into the timeval the kernel UAPI expects.
+  buf.timestamp.tv_sec = static_cast<long>(timestamp_ns / 1'000'000'000ULL);
+  buf.timestamp.tv_usec = static_cast<long>((timestamp_ns % 1'000'000'000ULL) / 1000ULL);
+  if (impl_->is_mplane) {
+    buf.length = slot.num_planes;
+    buf.m.planes = planes.data();
+    planes.at(0).bytesused = static_cast<std::uint32_t>(coded.size());
+  } else {
+    buf.bytesused = static_cast<std::uint32_t>(coded.size());
+  }
+  if (int const e = xioctl(impl_->v4l2_fd, VIDIOC_QBUF, &buf); e != 0) {
+    impl_->output_free.push_back(idx);
+    return drm::unexpected<std::error_code>(make_errno(e));
+  }
+
+  // Lazy STREAMON OUTPUT now that at least one buffer is queued. We
+  // can't easily un-QBUF the slot if STREAMON fails, so the slot
+  // stays with the kernel; subsequent calls would either dequeue it
+  // (drive()) or fail similarly.
+  if (!impl_->output_streaming) {
+    if (auto ec = streamon(impl_->v4l2_fd, output_buf_type(impl_->is_mplane)); ec) {
+      return drm::unexpected<std::error_code>(ec);
+    }
+    impl_->output_streaming = true;
+  }
+  return {};
 }
 
 drm::expected<AcquiredBuffer, std::error_code> V4l2DecoderSource::acquire() {
   if (!impl_) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
-  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::function_not_supported));
+  if (impl_->source_change_seen) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::operation_canceled));
+  }
+  if (impl_->capture_acquired_idx >= 0) {
+    // The contract is "valid until matched by release()" -- a second
+    // acquire without intervening release would hand back the same
+    // slot and break the scene's pair-up bookkeeping. Surface as
+    // device_or_resource_busy so callers can spot the misuse.
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::device_or_resource_busy));
+  }
+  if (impl_->capture_ready_idx < 0) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+
+  auto const idx = static_cast<std::uint32_t>(impl_->capture_ready_idx);
+  if (idx >= impl_->capture_buffers.size()) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  std::uint32_t const fb_id = impl_->capture_buffers.at(idx).fb_id;
+  if (fb_id == 0) {
+    // fb_id is cleared during on_session_paused; the source can't
+    // hand a real KMS framebuffer back until on_session_resumed
+    // re-imports the buffer ring. Treat as "no frame ready right now"
+    // so the scene's flow-control path retries cleanly.
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+
+  impl_->capture_acquired_idx = impl_->capture_ready_idx;
+  impl_->capture_ready_idx = -1;
+  AcquiredBuffer acq;
+  acq.fb_id = fb_id;
+  acq.acquire_fence_fd = -1;
+  acq.opaque = nullptr;  // capture_acquired_idx is the source-side bookkeeping
+  return acq;
 }
 
 void V4l2DecoderSource::release(AcquiredBuffer /*acquired*/) noexcept {
-  // No-op until the V4L2 CAPTURE re-queue path lands.
+  if (!impl_ || impl_->capture_acquired_idx < 0) {
+    return;
+  }
+  auto const idx = static_cast<std::uint32_t>(impl_->capture_acquired_idx);
+  impl_->capture_acquired_idx = -1;
+  // Best-effort re-QBUF. release() must be infallible per the
+  // LayerBufferSource contract; if the kernel rejects the QBUF
+  // (degraded queue state), the slot stays unqueued and the source
+  // is down one buffer for the rest of its lifetime. drive() can't
+  // re-introduce it because it was never with the kernel after we
+  // dequeued it.
+  auto const requeue_ec =
+      queue_capture_buffer(impl_->v4l2_fd, impl_->is_mplane, idx, impl_->capture_num_planes);
+  (void)requeue_ec;
 }
 
 SourceFormat V4l2DecoderSource::format() const noexcept {
