@@ -293,18 +293,143 @@ struct DrmPlaneLayout {
   return {};
 }
 
-// Issue REQBUFS(count=0) on the CAPTURE queue so the kernel reclaims
+// Issue REQBUFS(count=0) on the named queue so the kernel reclaims
 // its bookkeeping. Best-effort on shutdown -- callers must already
 // have munmap'd / closed every plane.
-void release_capture_queue(int fd, bool is_mplane) noexcept {
+void release_queue(int fd, std::uint32_t type) noexcept {
   if (fd < 0) {
     return;
   }
   v4l2_requestbuffers req{};
   req.count = 0;
-  req.type = is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  req.type = type;
   req.memory = V4L2_MEMORY_MMAP;
   (void)xioctl(fd, VIDIOC_REQBUFS, &req);
+}
+
+[[nodiscard]] std::uint32_t output_buf_type(bool is_mplane) noexcept {
+  return is_mplane ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE : V4L2_BUF_TYPE_VIDEO_OUTPUT;
+}
+[[nodiscard]] std::uint32_t capture_buf_type(bool is_mplane) noexcept {
+  return is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+}
+
+// VIDIOC_STREAMON / STREAMOFF wrappers. The kernel takes the buffer
+// type by pointer-to-int.
+[[nodiscard]] std::error_code streamon(int fd, std::uint32_t type) noexcept {
+  int t = static_cast<int>(type);
+  if (int const e = xioctl(fd, VIDIOC_STREAMON, &t); e != 0) {
+    return make_errno(e);
+  }
+  return {};
+}
+void streamoff(int fd, std::uint32_t type) noexcept {
+  if (fd < 0) {
+    return;
+  }
+  int t = static_cast<int>(type);
+  (void)xioctl(fd, VIDIOC_STREAMOFF, &t);
+}
+
+// VIDIOC_QBUF a CAPTURE buffer back to the kernel so it can write the
+// next decoded frame into it. Used both in create() (initial bulk
+// queue) and after release() (re-queue once the consumer is done).
+[[nodiscard]] std::error_code queue_capture_buffer(int fd, bool is_mplane, std::uint32_t index,
+                                                   std::uint32_t num_planes) noexcept {
+  v4l2_buffer buf{};
+  std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
+  buf.type = capture_buf_type(is_mplane);
+  buf.memory = V4L2_MEMORY_MMAP;
+  buf.index = index;
+  if (is_mplane) {
+    buf.length = num_planes;
+    buf.m.planes = planes.data();
+  }
+  if (int const e = xioctl(fd, VIDIOC_QBUF, &buf); e != 0) {
+    return make_errno(e);
+  }
+  return {};
+}
+
+// Per-OUTPUT-buffer state. Lighter than V4l2CaptureBuffer because
+// OUTPUT buffers are bitstream input -- caller memcpys into the
+// mmap, kernel reads, no DMA-BUF export, no DRM import.
+struct V4l2OutputBuffer {
+  std::array<void*, VIDEO_MAX_PLANES> mapped_ptr{};
+  std::array<std::size_t, VIDEO_MAX_PLANES> mapped_len{};
+  std::uint32_t num_planes{0};
+
+  V4l2OutputBuffer() = default;
+  ~V4l2OutputBuffer() {
+    for (std::uint32_t p = 0; p < num_planes; ++p) {
+      if (mapped_ptr.at(p) != nullptr && mapped_ptr.at(p) != MAP_FAILED) {
+        ::munmap(mapped_ptr.at(p), mapped_len.at(p));
+      }
+    }
+  }
+  V4l2OutputBuffer(const V4l2OutputBuffer&) = delete;
+  V4l2OutputBuffer& operator=(const V4l2OutputBuffer&) = delete;
+  V4l2OutputBuffer(V4l2OutputBuffer&& o) noexcept
+      : mapped_ptr(o.mapped_ptr), mapped_len(o.mapped_len), num_planes(o.num_planes) {
+    o.mapped_ptr.fill(nullptr);
+    o.num_planes = 0;
+  }
+  V4l2OutputBuffer& operator=(V4l2OutputBuffer&&) = delete;
+};
+
+// REQBUFS + per-buffer QUERYBUF + per-plane MMAP for the OUTPUT queue.
+// No EXPBUF -- OUTPUT is bitstream input, never displayed. Same
+// failure-unwinds-via-vector pattern as allocate_capture_buffers.
+[[nodiscard]] std::error_code allocate_output_buffers(int fd, bool is_mplane,
+                                                      std::uint32_t requested_count,
+                                                      std::vector<V4l2OutputBuffer>& out) {
+  v4l2_requestbuffers req{};
+  req.count = requested_count;
+  req.type = output_buf_type(is_mplane);
+  req.memory = V4L2_MEMORY_MMAP;
+  if (int const e = xioctl(fd, VIDIOC_REQBUFS, &req); e != 0) {
+    return make_errno(e);
+  }
+  if (req.count == 0) {
+    return std::make_error_code(std::errc::not_enough_memory);
+  }
+
+  out.reserve(req.count);
+  for (std::uint32_t i = 0; i < req.count; ++i) {
+    V4l2OutputBuffer slot;
+    v4l2_buffer buf{};
+    std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
+    buf.type = req.type;
+    buf.memory = V4L2_MEMORY_MMAP;
+    buf.index = i;
+    if (is_mplane) {
+      buf.length = VIDEO_MAX_PLANES;
+      buf.m.planes = planes.data();
+    }
+    if (int const e = xioctl(fd, VIDIOC_QUERYBUF, &buf); e != 0) {
+      return make_errno(e);
+    }
+
+    std::uint32_t const fmt_num_planes = is_mplane ? buf.length : 1;
+    if (fmt_num_planes == 0 || fmt_num_planes > VIDEO_MAX_PLANES) {
+      return std::make_error_code(std::errc::not_supported);
+    }
+    slot.num_planes = fmt_num_planes;
+    for (std::uint32_t p = 0; p < fmt_num_planes; ++p) {
+      std::size_t const length = is_mplane ? planes.at(p).length : buf.length;
+      std::uint32_t const offset = is_mplane ? planes.at(p).m.mem_offset : buf.m.offset;
+      void* const mapped = ::mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+      if (mapped == MAP_FAILED) {
+        slot.num_planes = p;
+        out.push_back(std::move(slot));
+        return make_errno(errno);
+      }
+      slot.mapped_ptr.at(p) = mapped;
+      slot.mapped_len.at(p) = length;
+    }
+    out.push_back(std::move(slot));
+  }
+  return {};
 }
 
 // Allocate `requested_count` CAPTURE buffers via REQBUFS + per-buffer
@@ -411,6 +536,32 @@ struct V4l2DecoderSource::Impl {
   // S_FMT round-trip.
   v4l2_format capture_format_echo{};
   std::vector<V4l2CaptureBuffer> capture_buffers;
+
+  // OUTPUT side. submit_bitstream pulls a slot index off output_free,
+  // memcpys the coded chunk into the corresponding mmap, QBUFs to the
+  // kernel; drive() pushes completed slots back onto output_free as
+  // it dequeues them. STREAMON OUTPUT happens lazily on the first
+  // submit_bitstream call so the kernel always sees a queued buffer
+  // when it transitions into the streaming state.
+  std::vector<V4l2OutputBuffer> output_buffers;
+  std::vector<std::uint32_t> output_free;
+  bool output_streaming{false};
+  bool capture_streaming{false};
+
+  // CAPTURE-side latest-frame-wins state. capture_ready_idx is the
+  // most-recently-decoded slot waiting for acquire(); -1 sentinel
+  // means no frame is ready. capture_acquired_idx is held by the
+  // consumer between acquire() and release().
+  int capture_ready_idx{-1};
+  int capture_acquired_idx{-1};
+
+  // Sticky decoder-state flags surfaced by drive() and queried by
+  // acquire(). source_change_seen disables the source permanently
+  // (caller must destroy + recreate per the design contract);
+  // eos_seen is informational for callers that care about end-of-
+  // stream.
+  bool source_change_seen{false};
+  bool eos_seen{false};
 };
 
 V4l2DecoderSource::V4l2DecoderSource() : impl_(std::make_unique<Impl>()) {}
@@ -419,11 +570,22 @@ V4l2DecoderSource::~V4l2DecoderSource() {
   if (!impl_) {
     return;
   }
-  // Order matters: every plane's mmap + dmabuf-fd must be released
-  // before REQBUFS(count=0) so the kernel can reclaim the underlying
-  // pages without the "still mapped" guard tripping.
+  // STREAMOFF first so the kernel returns any queued buffers and
+  // stops touching the mappings; then per-buffer cleanup (mmaps +
+  // dmabuf fds + DRM state) before REQBUFS(count=0) per queue, since
+  // the kernel rejects REQBUFS=0 while pages are still mapped.
+  if (impl_->capture_streaming) {
+    streamoff(impl_->v4l2_fd, capture_buf_type(impl_->is_mplane));
+    impl_->capture_streaming = false;
+  }
+  if (impl_->output_streaming) {
+    streamoff(impl_->v4l2_fd, output_buf_type(impl_->is_mplane));
+    impl_->output_streaming = false;
+  }
   impl_->capture_buffers.clear();
-  release_capture_queue(impl_->v4l2_fd, impl_->is_mplane);
+  release_queue(impl_->v4l2_fd, capture_buf_type(impl_->is_mplane));
+  impl_->output_buffers.clear();
+  release_queue(impl_->v4l2_fd, output_buf_type(impl_->is_mplane));
   if (impl_->v4l2_fd >= 0) {
     ::close(impl_->v4l2_fd);
     impl_->v4l2_fd = -1;
@@ -565,18 +727,18 @@ drm::expected<std::unique_ptr<V4l2DecoderSource>, std::error_code> V4l2DecoderSo
                                          capture_buffers);
       ec) {
     capture_buffers.clear();
-    release_capture_queue(fd, is_mplane);
+    release_queue(fd, capture_buf_type(is_mplane));
     return fail(ec);
   }
   if (capture_buffers.size() < k_min_buffers) {
     capture_buffers.clear();
-    release_capture_queue(fd, is_mplane);
+    release_queue(fd, capture_buf_type(is_mplane));
     return fail(std::make_error_code(std::errc::not_enough_memory));
   }
 
   if (drm_fd < 0) {
     capture_buffers.clear();
-    release_capture_queue(fd, is_mplane);
+    release_queue(fd, capture_buf_type(is_mplane));
     return fail(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
@@ -587,7 +749,7 @@ drm::expected<std::unique_ptr<V4l2DecoderSource>, std::error_code> V4l2DecoderSo
   DrmPlaneLayout layout{};
   if (auto ec = derive_drm_plane_layout(cap_fmt, is_mplane, cfg.capture_fourcc, layout); ec) {
     capture_buffers.clear();
-    release_capture_queue(fd, is_mplane);
+    release_queue(fd, capture_buf_type(is_mplane));
     return fail(ec);
   }
   for (auto& slot : capture_buffers) {
@@ -595,9 +757,60 @@ drm::expected<std::unique_ptr<V4l2DecoderSource>, std::error_code> V4l2DecoderSo
             import_capture_buffer_to_drm(drm_fd, cap_w, cap_h, cfg.capture_fourcc, layout, slot);
         ec) {
       capture_buffers.clear();
-      release_capture_queue(fd, is_mplane);
+      release_queue(fd, capture_buf_type(is_mplane));
       return fail(ec);
     }
+  }
+
+  // OUTPUT-side allocation (REQBUFS + MMAP, no EXPBUF). Failure unwinds
+  // CAPTURE alongside since both queues must be torn down together.
+  std::vector<V4l2OutputBuffer> output_buffers;
+  if (auto ec = allocate_output_buffers(fd, is_mplane, cfg.output_buffer_count, output_buffers);
+      ec) {
+    output_buffers.clear();
+    release_queue(fd, output_buf_type(is_mplane));
+    capture_buffers.clear();
+    release_queue(fd, capture_buf_type(is_mplane));
+    return fail(ec);
+  }
+  if (output_buffers.size() < k_min_buffers) {
+    output_buffers.clear();
+    release_queue(fd, output_buf_type(is_mplane));
+    capture_buffers.clear();
+    release_queue(fd, capture_buf_type(is_mplane));
+    return fail(std::make_error_code(std::errc::not_enough_memory));
+  }
+
+  // QBUF every CAPTURE buffer so the kernel has destinations for the
+  // first decoded frames, then STREAMON CAPTURE. Failure mid-loop
+  // would have left some buffers queued; STREAMOFF on cleanup
+  // (destructor path) returns them to userspace.
+  for (std::uint32_t i = 0; i < capture_buffers.size(); ++i) {
+    if (auto ec = queue_capture_buffer(fd, is_mplane, i, cap_num_planes); ec) {
+      output_buffers.clear();
+      release_queue(fd, output_buf_type(is_mplane));
+      capture_buffers.clear();
+      release_queue(fd, capture_buf_type(is_mplane));
+      return fail(ec);
+    }
+  }
+  if (auto ec = streamon(fd, capture_buf_type(is_mplane)); ec) {
+    output_buffers.clear();
+    release_queue(fd, output_buf_type(is_mplane));
+    capture_buffers.clear();
+    release_queue(fd, capture_buf_type(is_mplane));
+    return fail(ec);
+  }
+
+  // OUTPUT slot indices populate the free list in REQBUFS order so
+  // submit_bitstream's first calls reuse the cache-warm low-index
+  // buffers; STREAMON OUTPUT is deferred until submit_bitstream has
+  // a buffer ready to QBUF (some drivers reject STREAMON on an empty
+  // queue).
+  std::vector<std::uint32_t> output_free;
+  output_free.reserve(output_buffers.size());
+  for (std::uint32_t i = 0; i < output_buffers.size(); ++i) {
+    output_free.push_back(i);
   }
 
   std::unique_ptr<V4l2DecoderSource> src(new V4l2DecoderSource());
@@ -610,6 +823,9 @@ drm::expected<std::unique_ptr<V4l2DecoderSource>, std::error_code> V4l2DecoderSo
   src->impl_->capture_format = SourceFormat{cfg.capture_fourcc, 0, cap_w, cap_h};
   src->impl_->capture_format_echo = cap_fmt;
   src->impl_->capture_buffers = std::move(capture_buffers);
+  src->impl_->output_buffers = std::move(output_buffers);
+  src->impl_->output_free = std::move(output_free);
+  src->impl_->capture_streaming = true;
   return src;
 }
 
@@ -621,7 +837,100 @@ drm::expected<void, std::error_code> V4l2DecoderSource::drive() noexcept {
   if (!impl_) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
-  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::function_not_supported));
+
+  // Sticky once seen: a SOURCE_CHANGE event means the bitstream's
+  // resolution doesn't match what create() negotiated, and the
+  // contract is that the caller destroys + recreates with the new
+  // dimensions. Keep returning operation_canceled so a polling loop
+  // stops trying to feed the decoder.
+  if (impl_->source_change_seen) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::operation_canceled));
+  }
+
+  int const fd = impl_->v4l2_fd;
+
+  // Drain queued events. EAGAIN-equivalent (errno set by ioctl)
+  // breaks the loop -- there's no portable "no more events" return,
+  // so we rely on the kernel returning ENOENT once the queue is
+  // empty. Treat any other error as transient and stop draining for
+  // this drive() call.
+  for (;;) {
+    v4l2_event ev{};
+    if (int const e = xioctl(fd, VIDIOC_DQEVENT, &ev); e != 0) {
+      if (e == ENOENT || e == EAGAIN) {
+        break;
+      }
+      return drm::unexpected<std::error_code>(make_errno(e));
+    }
+    if (ev.type == V4L2_EVENT_SOURCE_CHANGE) {
+      impl_->source_change_seen = true;
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::operation_canceled));
+    }
+    if (ev.type == V4L2_EVENT_EOS) {
+      impl_->eos_seen = true;
+    }
+  }
+
+  // Drain completed OUTPUT buffers back to the free list. The
+  // decoder copies bitstream out of these as it consumes them, so
+  // dequeueing with EAGAIN simply means "kernel hasn't finished any
+  // more this tick".
+  while (true) {
+    v4l2_buffer buf{};
+    std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
+    buf.type = output_buf_type(impl_->is_mplane);
+    buf.memory = V4L2_MEMORY_MMAP;
+    if (impl_->is_mplane) {
+      buf.length = VIDEO_MAX_PLANES;
+      buf.m.planes = planes.data();
+    }
+    if (int const e = xioctl(fd, VIDIOC_DQBUF, &buf); e != 0) {
+      if (e == EAGAIN) {
+        break;
+      }
+      return drm::unexpected<std::error_code>(make_errno(e));
+    }
+    if (buf.index < impl_->output_buffers.size()) {
+      impl_->output_free.push_back(buf.index);
+    }
+  }
+
+  // Drain newly-decoded CAPTURE buffers. Latest-frame-wins: if a
+  // prior buffer was already pending in capture_ready_idx, re-queue
+  // it to the kernel so it can be reused for the next decode (the
+  // consumer only ever sees the freshest frame).
+  while (true) {
+    v4l2_buffer buf{};
+    std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
+    buf.type = capture_buf_type(impl_->is_mplane);
+    buf.memory = V4L2_MEMORY_MMAP;
+    if (impl_->is_mplane) {
+      buf.length = VIDEO_MAX_PLANES;
+      buf.m.planes = planes.data();
+    }
+    if (int const e = xioctl(fd, VIDIOC_DQBUF, &buf); e != 0) {
+      if (e == EAGAIN) {
+        break;
+      }
+      return drm::unexpected<std::error_code>(make_errno(e));
+    }
+    if (buf.index >= impl_->capture_buffers.size()) {
+      continue;  // defensive -- index out of range shouldn't happen
+    }
+    if (impl_->capture_ready_idx >= 0) {
+      // Drop the prior pending frame back to the kernel. If the
+      // re-queue fails (rare; would mean the queue is in a degraded
+      // state) the slot stays unaccounted-for for this call; future
+      // drive() invocations will try again on subsequent dequeues.
+      auto const requeue_ec = queue_capture_buffer(
+          fd, impl_->is_mplane, static_cast<std::uint32_t>(impl_->capture_ready_idx),
+          impl_->capture_num_planes);
+      (void)requeue_ec;
+    }
+    impl_->capture_ready_idx = static_cast<int>(buf.index);
+  }
+
+  return {};
 }
 
 drm::expected<void, std::error_code> V4l2DecoderSource::submit_bitstream(
