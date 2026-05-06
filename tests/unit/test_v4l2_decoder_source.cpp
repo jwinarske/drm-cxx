@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: MIT
 //
 // Unit tests for drm::scene::V4l2DecoderSource. This TU covers the
-// argument-validation portion of the contract — every test runs
-// against `Device::from_fd(-1)` so nothing actually opens a V4L2
-// device or hits the kernel.
+// argument-validation portion of the contract plus the open+QUERYCAP
+// failure paths (path doesn't exist, fd isn't a V4L2 device).
 //
-// The full V4L2 round-trip (open + format negotiation + REQBUFS +
-// MMAP + EXPBUF + drmPrimeFDToHandle + drmModeAddFB2 + acquire/release
-// + submit_bitstream) is integration-test territory and lives in a
-// follow-up against vivid (V4L2 virtual decoder) once the source's
-// runtime path lands.
+// The full V4L2 round-trip (REQBUFS + MMAP + EXPBUF +
+// drmPrimeFDToHandle + drmModeAddFB2 + acquire/release +
+// submit_bitstream) is integration-test territory and lives in a
+// follow-up against vicodec (the kernel's V4L2 virtual codec driver)
+// once the source's buffer path lands.
 
 #include "core/device.hpp"
 
@@ -124,13 +123,26 @@ TEST(SceneV4l2DecoderSource, RejectsTooManyCaptureBuffers) {
   EXPECT_EQ(r.error(), std::make_error_code(std::errc::invalid_argument));
 }
 
-// With every field valid, the runtime path is still stubbed — create()
-// returns function_not_supported once it reaches the V4L2 open. This
-// test pins that contract until the runtime path lands; flip to
-// has_value() / device_path-not-found expectations on the follow-up.
-TEST(SceneV4l2DecoderSource, ValidConfigReachesRuntimeStub) {
+// Path that is guaranteed not to resolve (the parent directory does
+// not exist on any sane system), so create() reaches ::open and gets
+// ENOENT. Pins the "valid args, real failure surfaces verbatim"
+// contract without depending on whether /dev/video* nodes happen to be
+// present on the host running tests.
+TEST(SceneV4l2DecoderSource, ValidConfigPropagatesOpenFailure) {
   auto dev = drm::Device::from_fd(-1);
-  auto r = drm::scene::V4l2DecoderSource::create(dev, "/dev/video10", good_config());
+  auto r = drm::scene::V4l2DecoderSource::create(dev, "/dev/drm-cxx/no-such-v4l2-device-for-test",
+                                                 good_config());
   ASSERT_FALSE(r.has_value());
-  EXPECT_EQ(r.error(), std::make_error_code(std::errc::function_not_supported));
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::no_such_file_or_directory));
+}
+
+// /dev/null opens successfully but isn't a V4L2 device, so VIDIOC_QUERYCAP
+// returns ENOTTY. The source translates that to errc::not_supported so
+// callers can distinguish "wrong path" (ENOENT above) from "right path,
+// wrong device".
+TEST(SceneV4l2DecoderSource, NonV4l2DeviceSurfacesAsNotSupported) {
+  auto dev = drm::Device::from_fd(-1);
+  auto r = drm::scene::V4l2DecoderSource::create(dev, "/dev/null", good_config());
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::not_supported));
 }
