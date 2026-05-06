@@ -49,7 +49,6 @@
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/scene/gst_appsink_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
-#include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 #include <drm-cxx/session/seat.hpp>
 
