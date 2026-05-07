@@ -1,8 +1,9 @@
 # cluster_sim — automotive instrument-cluster showcase
 
-Status: **skeleton stage**. A single full-screen Blend2D-painted
-backdrop with the standard libseat session + libinput keyboard + VT-
-switch boilerplate. Subsequent commits add the actual cluster layers.
+Status: **dials added**. A Blend2D-painted backdrop plus animated
+speedometer + tachometer dials, each repainted per frame at scanout
+cadence. Center info, warning indicators, and the optional rear-view
+video layer land in subsequent commits.
 
 ## Planned shape
 
@@ -37,7 +38,7 @@ real automotive clusters use:
 ## Status by step
 
 - [x] Step 1 — skeleton + build wiring.
-- [ ] Step 2 — animated speedometer + tach dials.
+- [x] Step 2 — animated speedometer + tach dials.
 - [ ] Step 3 — center info + warning indicators.
 - [ ] Step 4 (stretch) — `V4l2DecoderSource` rear-view layer.
 - [ ] Step 5 — README screenshots from a hw run.
