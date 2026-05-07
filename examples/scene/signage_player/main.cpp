@@ -340,11 +340,14 @@ std::string format_now(const std::string& fmt) noexcept {
 int main(int argc, char** argv) {
   const char* toml_path = nullptr;
   bool hotplug_follow = false;
+  char* device_path = nullptr;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--playlist") == 0 && i + 1 < argc) {
       toml_path = argv[++i];
     } else if (std::strcmp(argv[i], "--hotplug-follow") == 0) {
       hotplug_follow = true;
+    } else if (device_path == nullptr) {
+      device_path = argv[i];
     }
   }
   if (toml_path == nullptr) {
@@ -362,7 +365,12 @@ int main(int argc, char** argv) {
                playlist->overlay().has_value() ? "yes" : "no",
                playlist->ticker().has_value() ? "yes" : "no");
 
-  auto output = drm::examples::open_and_pick_output(argc, argv);
+  // open_and_pick_output reads argv[1] as the device path. Repack a
+  // shim argv so the device path lands there regardless of where the
+  // caller wrote it in the actual command line.
+  char* shim_argv[3] = {argv[0], device_path, nullptr};
+  int const shim_argc = device_path != nullptr ? 2 : 1;
+  auto output = drm::examples::open_and_pick_output(shim_argc, shim_argv);
   if (!output) {
     return EXIT_FAILURE;
   }
