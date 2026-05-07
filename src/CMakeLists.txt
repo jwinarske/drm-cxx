@@ -20,6 +20,7 @@ set(DRM_CXX_SOURCES
   input/key_repeater.cpp
   input/pointer.cpp
   input/event_dispatcher.cpp
+  display/connector_capabilities.cpp
   display/edid.cpp
   display/hotplug_monitor.cpp
   session/seat.cpp
@@ -259,6 +260,7 @@ install(FILES
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/input)
 
 install(FILES
+    display/connector_capabilities.hpp
     display/connector_info.hpp
     display/edid.hpp
     display/hotplug_monitor.hpp

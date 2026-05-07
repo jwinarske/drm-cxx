@@ -97,6 +97,13 @@ test('test_display',
   ),
 )
 
+test('test_connector_capabilities',
+  executable('test_connector_capabilities',
+    'unit/test_connector_capabilities.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_gbm',
   executable('test_gbm',
     'unit/test_gbm.cpp',
@@ -219,7 +226,7 @@ if has_blend2d
   )
 endif
 
-# LayerScene Phase 2.2 property-minimization tests against VKMS.
+# LayerScene property-minimization tests against VKMS.
 # CommitReport diagnostics, not capture::snapshot — independent of the
 # blend2d gate.
 test('test_layer_scene_minimization_vkms',
@@ -229,7 +236,7 @@ test('test_layer_scene_minimization_vkms',
   ),
 )
 
-# LayerScene Phase 2.4 rebind tests against VKMS.
+# LayerScene rebind tests against VKMS.
 test('test_layer_scene_rebind_vkms',
   executable('test_layer_scene_rebind_vkms',
     'integration/test_layer_scene_rebind_vkms.cpp',

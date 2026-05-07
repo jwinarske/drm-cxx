@@ -19,6 +19,7 @@ drm_cxx_sources = files(
   'input/key_repeater.cpp',
   'input/pointer.cpp',
   'input/event_dispatcher.cpp',
+  'display/connector_capabilities.cpp',
   'display/edid.cpp',
   'display/hotplug_monitor.cpp',
   'session/seat.cpp',
@@ -195,6 +196,7 @@ install_headers(
 )
 
 install_headers(
+  'display/connector_capabilities.hpp',
   'display/connector_info.hpp',
   'display/edid.hpp',
   'display/hotplug_monitor.hpp',

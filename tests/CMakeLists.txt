@@ -30,6 +30,7 @@ set(DRM_CXX_TESTS
   test_key_repeater
   test_mode
   test_display
+  test_connector_capabilities
   test_gbm
   test_dumb_buffer
   test_buffer_mapping
@@ -85,7 +86,7 @@ if(DRM_CXX_HAS_BLEND2D)
   gtest_discover_tests(test_layer_scene_composition_vkms)
 endif()
 
-# LayerScene Phase 2.2 property-minimization tests against VKMS. No
+# LayerScene property-minimization tests against VKMS. No
 # Blend2D dependency — diagnostics readback is via CommitReport, not
 # capture::snapshot — so this stays out of the DRM_CXX_HAS_BLEND2D
 # block above.
@@ -97,7 +98,7 @@ target_link_libraries(test_layer_scene_minimization_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_minimization_vkms)
 
-# LayerScene Phase 2.4 rebind tests against VKMS. Same rationale as
+# LayerScene rebind tests against VKMS. Same rationale as
 # the minimization suite — pure scene API, no capture dependency.
 add_executable(test_layer_scene_rebind_vkms
   integration/test_layer_scene_rebind_vkms.cpp)
