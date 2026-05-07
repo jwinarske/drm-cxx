@@ -1,10 +1,15 @@
 # cluster_sim — automotive instrument-cluster showcase
 
-Status: **rear-view layer added**. A Blend2D-painted backdrop,
-animated speedometer + tachometer dials, a digital speed readout
-between them, a four-cell warning-indicator strip below, and an
-optional rear-view camera layer driven by `V4l2DecoderSource`
-against vicodec (toggled with `R`).
+Status: **rear-view layer added** with three-tier fallback. A
+Blend2D-painted backdrop, animated speedometer + tachometer dials, a
+digital speed readout between them, a four-cell warning-indicator
+strip below, and a rear-view layer whose source is picked at startup:
+a real UVC webcam (YUY2 → XRGB via libyuv into a `DumbBufferSource`)
+when one is attached, otherwise a vicodec-driven FWHT clip through
+`V4l2DecoderSource` (probed at startup; activated only on drivers
+that accept foreign PRIME imports), otherwise a synthetic Blend2D
+scan-pattern in a `DumbBufferSource` so the toggle always has visible
+content. Toggled with `R`.
 
 ## What this exercises
 
@@ -23,10 +28,12 @@ against vicodec (toggled with `R`).
 ## Key bindings
 
 - `Esc` / `q` / `Ctrl-C` — quit.
-- `R` — toggle the rear-view camera layer. Requires the `vicodec`
-  kernel module (`modprobe vicodec`); without it, cluster_sim emits
-  a one-shot startup log line explaining the skip and the toggle is
-  a no-op.
+- `R` — toggle the rear-view camera layer. Source pickup at startup:
+  prefers a UVC webcam (any `/dev/video*` advertising YUYV
+  CAPTURE-only) and converts each frame to XRGB via libyuv; falls
+  back to a vicodec-encoded FWHT test clip via `V4l2DecoderSource`
+  when no camera is found. With neither source available, cluster_sim
+  emits a startup log line and the toggle is a no-op.
 - `Ctrl+Alt+F<n>` — VT switch (forwarded to libseat).
 
 ## Building
@@ -67,11 +74,20 @@ What to look for:
   4 s); the speed readout follows the speedometer phase; the
   four warning cells blink on independent periods.
 - **`R` toggle** brings up a 320×240 rear-view layer in the
-  top-right corner. The startup log line tells you whether the
-  rear-view is wired (`rear-view: ready (...) press R to toggle`)
-  or skipped (`rear-view: vicodec not loaded ...`). With vicodec
-  loaded, pressing `R` while running should add the layer; press
-  `R` again to remove it.
+  top-right corner. The startup log line tells you which source
+  cluster_sim picked: `rear-view: ready (UVC at /dev/video0, ...)`
+  for a real webcam, or `rear-view: ready (... frames encoded via
+  /dev/video2, decoder /dev/video3 ...)` for the vicodec fallback.
+  Pressing `R` adds the layer (gauges keep sweeping; UVC is
+  pre-armed at startup so STREAMON's USB negotiation doesn't stall
+  the input handler); press `R` again to remove it. On amdgpu DC
+  the vicodec fallback fails -- amdgpu has rejected FB creation
+  from any non-amdgpu-sourced PRIME-imported dmabuf since 2017
+  (commit `3e339465a836`); the provenance check fires regardless of
+  the V4L2 driver's allocation strategy. cluster_sim emits a single
+  diagnostic line and disables the toggle. Attach a UVC camera to
+  exercise the rear-view on amdgpu (the UVC tier copies through an
+  amdgpu-owned dumb buffer).
 - **`Ctrl+Alt+F<n>`** switches VT — the scene drops on pause and
   re-imports against the new fd on resume; needles continue
   sweeping with the elapsed-time clock so the post-resume frame
