@@ -30,6 +30,7 @@
 
 #include "../../common/format_probe.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/session_pump.hpp"
 #include "../../common/vt_switch.hpp"
 #include "convert.hpp"
 #include "status_overlay_renderer.hpp"
@@ -1441,57 +1442,25 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
   };
   attach_input_source();
 
-  // Session integration. On VT switch-out we mark `session_active`
-  // false so the loop stops committing. On switch-back libseat hands
-  // us a fresh fd; we record it under `pending_resume_fd` and let the
-  // main loop perform the actual rebuild on its next iteration. We
-  // can't tear down PageFlip from inside the resume callback because
-  // that callback fires from inside `seat->dispatch()`, which runs
-  // from inside `page_flip.dispatch()` — destroying the PageFlip
-  // mid-dispatch is undefined behavior.
-  std::atomic<bool> session_active{true};
-  std::atomic<int> pending_resume_fd{-1};
+  // Session integration. wire_session_callbacks installs the standard
+  // pause (drop scene FBs + suspend libinput + clear flip_pending) and
+  // resume (capture new fd into pending_resume_fd after the /dev/dri/
+  // filter + resume libinput) handlers; the main-loop apply step below
+  // does the example-specific resume tail (rebuild PageFlip, repaint
+  // bg + status, reset page_pending). session_state.paused gates the
+  // commit path; session_state.flip_pending isn't used here because
+  // camera tracks its own page_pending against page_flip.add_source.
+  drm::examples::SessionPumpState session_state;
   if (seat) {
-    seat->set_pause_callback([&] {
-      session_active.store(false, std::memory_order_relaxed);
-      // Tell the scene to drop its CPU mappings + cached FB ids before
-      // the kernel revokes the underlying fd; the matching
-      // on_session_resumed call below re-establishes them against the
-      // new fd.
-      scene->on_session_paused();
-      if (input_seat) {
-        (void)input_seat->suspend();
-      }
-    });
-    // libseat fires resume_cb once per device — the DRM card AND every
-    // libinput fd. A naive `pending_resume_fd = new_fd` would let an
-    // input-device resume overwrite (or race past) the DRM fd we
-    // actually need to swap. Filter on `/dev/dri/` so only card resumes
-    // land in the slot; libinput's privileged opens are reattached
-    // through input_seat->resume() in apply_pending_resume.
-    seat->set_resume_callback([&](std::string_view path, int new_fd) {
-      if (path.substr(0, 9) != "/dev/dri/") {
-        return;
-      }
-      pending_resume_fd.store(new_fd, std::memory_order_relaxed);
-    });
+    drm::examples::wire_session_callbacks(*seat, *scene, session_state,
+                                          input_seat ? &*input_seat : nullptr);
     attach_seat_source();
   }
 
   auto apply_pending_resume = [&]() {
-    const int new_fd = pending_resume_fd.exchange(-1, std::memory_order_relaxed);
-    if (new_fd < 0) {
+    auto resumed = drm::examples::apply_pending_resume(session_state, dev, *scene);
+    if (!resumed || !*resumed) {
       return;
-    }
-    dev = drm::Device::from_fd(new_fd);
-    if (auto r = dev.enable_universal_planes(); !r) {
-      drm::println(stderr, "resume: enable_universal_planes: {}", r.error().message());
-    }
-    if (auto r = dev.enable_atomic(); !r) {
-      drm::println(stderr, "resume: enable_atomic: {}", r.error().message());
-    }
-    if (auto r = scene->on_session_resumed(dev); !r) {
-      drm::println(stderr, "resume: scene->on_session_resumed: {}", r.error().message());
     }
     // PageFlip captured the dead fd at construction; rebuild it
     // against the new device. Move-assign destroys the old PageFlip
@@ -1500,9 +1469,6 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     page_flip = drm::PageFlip(dev);
     install_page_flip_handler();
     attach_seat_source();
-    if (input_seat) {
-      (void)input_seat->resume();
-    }
     attach_input_source();
     repaint_bg();
     // Force a status repaint: the dumb buffer's mapping was dropped
@@ -1514,7 +1480,6 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     // The page-flip event for the pre-pause commit was lost when the
     // fd died; clear the pending flag so we can re-arm.
     page_pending.store(false, std::memory_order_relaxed);
-    session_active.store(true, std::memory_order_relaxed);
   };
 
   std::signal(SIGINT, on_sigint);
@@ -1592,7 +1557,7 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
 
   while (g_running.load(std::memory_order_relaxed)) {
     apply_pending_resume();
-    if (session_active.load(std::memory_order_relaxed)) {
+    if (!session_state.paused) {
       bool changed = drain_hotplug_events(dev, *scene, *pending_hotplug, slots, display_formats,
                                           mode.hdisplay, mode.vdisplay);
 
