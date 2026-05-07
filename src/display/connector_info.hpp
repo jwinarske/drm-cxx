@@ -3,31 +3,67 @@
 
 #pragma once
 
-#include <cstdint>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace drm::display {
 
-struct ColorimetryInfo {
-  struct {
-    float x, y;
-  } red, green, blue, white;
+/// CIE 1931 2-degree observer chromaticity coordinates.
+struct Chromaticity {
+  float x{};
+  float y{};
 };
 
+/// Display color primaries and default white point, derived from EDID.
+/// Coordinates are display-referred CIE xy. Values may be all-zero
+/// when the display doesn't publish primaries (most monochrome / very-
+/// low-end panels).
+struct ColorimetryInfo {
+  Chromaticity red{};
+  Chromaticity green{};
+  Chromaticity blue{};
+  Chromaticity white{};
+  bool has_primaries{false};
+  bool has_default_white{false};
+};
+
+/// HDR static metadata data block contents per ANSI/CTA-861-H §7.5.13.
+/// Describes what HDR signaling the *display* accepts (capability),
+/// not what the source emits — the source-side equivalent is the
+/// HDR_OUTPUT_METADATA blob.
 struct HdrStaticMetadata {
-  float max_luminance{};
-  float min_luminance{};
-  float max_cll{};
-  float max_fall{};
+  /// Desired content max luminance, cd/m². Zero when unset.
+  float desired_content_max_luminance{};
+  /// Desired content max frame-average luminance, cd/m². Zero when unset.
+  float desired_content_max_frame_avg_luminance{};
+  /// Desired content min luminance, cd/m². Zero when unset.
+  float desired_content_min_luminance{};
+
+  /// Static Metadata Type 1 (CTA-861.3 §6.9.1) is supported.
+  bool type1{false};
+
+  /// Supported EOTFs:
+  bool traditional_sdr{false};
+  bool traditional_hdr{false};
+  bool pq{false};   // SMPTE ST 2084 — HDR10 / HDR10+
+  bool hlg{false};  // BT.2100 — HLG
+};
+
+/// Wide-gamut signal colorimetry encodings the display accepts beyond
+/// the default RGB colorimetry (which `ColorimetryInfo` describes).
+struct SupportedColorimetry {
+  bool bt2020_cycc{false};  // BT.2020 constant-luminance YCbCr
+  bool bt2020_ycc{false};   // BT.2020 non-constant-luminance YCbCr
+  bool bt2020_rgb{false};
+  bool st2113_rgb{false};  // SMPTE ST 2113 — P3D65 + P3DCI
+  bool ictcp{false};       // BT.2100 ICtCp HDR (with PQ and/or HLG)
 };
 
 struct ConnectorInfo {
   std::string name;
   std::optional<ColorimetryInfo> colorimetry;
   std::optional<HdrStaticMetadata> hdr;
-  std::vector<uint32_t> supported_eotfs;
+  std::optional<SupportedColorimetry> wide_gamut;
 };
 
 }  // namespace drm::display

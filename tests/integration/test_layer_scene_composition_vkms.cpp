@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 //
-// Integration test for LayerScene's Phase 2.3 composition fallback,
+// Integration test for LayerScene's composition fallback,
 // against the kernel's virtual KMS driver (VKMS).
 //
 // What it proves:
@@ -254,11 +254,11 @@ TEST(LayerSceneCompositionVkms, ForceCompositedLayerLandsOnCanvas) {
   const std::uint32_t inside_x = static_cast<std::uint32_t>(overlay_x) + (overlay_w / 2U);
   const std::uint32_t inside_y = static_cast<std::uint32_t>(overlay_y) + (overlay_h / 2U);
   EXPECT_EQ(at(inside_x, inside_y), 0xFF00FF00U)
-      << "centre of overlay rect should be the composited green pixel";
+      << "center of overlay rect should be the composited green pixel";
 
   // Outside the overlay's dst_rect: red (background plane only). Sample
   // the four extreme corners of the framebuffer — every corner is well
-  // outside the centred quarter-screen overlay.
+  // outside the centerd quarter-screen overlay.
   EXPECT_EQ(at(0, 0), 0xFFFF0000U) << "top-left should be background red";
   EXPECT_EQ(at(fb_w - 1U, 0), 0xFFFF0000U) << "top-right should be background red";
   EXPECT_EQ(at(0, fb_h - 1U), 0xFFFF0000U) << "bottom-left should be background red";

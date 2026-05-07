@@ -197,7 +197,6 @@ install_headers(
 install_headers(
   'display/connector_info.hpp',
   'display/edid.hpp',
-  'display/hdr_metadata.hpp',
   'display/hotplug_monitor.hpp',
   subdir : 'drm-cxx/display',
 )

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 #
-# Examples are organised into four buckets matching docs/scene.md:
+# Examples are organized into four buckets matching docs/scene.md:
 #
 #   basics/    — minimal LayerScene introductions and small one-feature demos.
 #   scene/     — substantial LayerScene workloads (the "sales deck" tier).
@@ -67,7 +67,7 @@ executable('layered_demo',
   dependencies : [drm_cxx_dep],
 )
 
-# video_grid — N×N grid of synthesised "video" cells. Stresses the
+# video_grid — N×N grid of synthesized "video" cells. Stresses the
 # allocator + composition fallback when cell count exceeds the plane
 # budget; the runtime layout switch (1/2/3) walks add/remove churn.
 executable('video_grid',

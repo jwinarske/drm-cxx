@@ -36,7 +36,7 @@
 //
 // Threading: `acquire()` polls via `gst_app_sink_try_pull_sample` from
 // whatever thread the scene drives commits on; GStreamer's appsink
-// internally serialises against its streaming thread, so no mutex is
+// internally serializes against its streaming thread, so no mutex is
 // needed in this TU. No GLib main loop is required either — the source
 // neither connects nor dispatches signals. Bus messages (errors, EOS)
 // are pumped via `drive()` from the caller's loop.

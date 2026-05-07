@@ -45,12 +45,13 @@ xkb_dep     = dependency('xkbcommon', include_type : 'system', required : true)
 rt_dep      = cpp.find_library('rt',  required : true)
 dl_dep      = cpp.find_library('dl',  required : true)
 
-di_dep = dependency('libdisplay-info', required : false)
-if not di_dep.found()
-  di_proj = subproject('libdisplay-info',
-    default_options : ['default_library=static'])
-  di_dep = di_proj.get_variable('di_dep')
-endif
+# 0.2.0 added the HDR static metadata, color primaries, and supported-
+# signal-colorimetry APIs that src/display/edid.cpp consumes. Distros
+# that ship only 0.1.x (e.g. ubuntu-noble) need to install a newer
+# version side-by-side and point pkg-config at it; CI builds 0.2.0
+# from source. We do not vendor or fetch libdisplay-info.
+di_dep = dependency('libdisplay-info', version : '>=0.2.0',
+                    include_type : 'system', required : true)
 
 # C++17-compatible polyfills for C++23 std::expected and C++20 std::span.
 # The drm-cxx/detail/{expected,span}.hpp adapter headers pick the std

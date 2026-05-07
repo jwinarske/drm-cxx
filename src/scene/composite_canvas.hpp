@@ -4,7 +4,7 @@
 // composite_canvas.hpp — software composition target for layers the
 // allocator could not place on a hardware plane.
 //
-// Phase 2.3 implementation: a single full-screen ARGB8888 dumb buffer
+// implementation: a single full-screen ARGB8888 dumb buffer
 // owned by the scene. When `LayerScene::do_commit` finds that the
 // allocator left one or more layers unassigned, it clears the canvas,
 // CPU-blends each unassigned layer's source pixels into it (in zpos
@@ -18,7 +18,7 @@
 // new fd.
 //
 // Single-canvas v1: the entire composition bucket is one full-screen
-// surface. Multi-canvas pooling (Phase 2.3 follow-up) would be needed
+// surface. Multi-canvas pooling would be needed
 // only if a scene wants to keep multiple non-contiguous z-runs on
 // distinct planes — the current shape handles every test_patterns /
 // signage_player / thorvg_janitor configuration.
@@ -44,7 +44,7 @@ namespace drm::scene {
 
 struct CompositeCanvasConfig {
   /// How many ARGB8888 dumb buffers the canvas pool may allocate.
-  /// V1 honours up to 1; reserved for Phase 2.3 follow-up that
+  /// V1 honors up to 1; reserved for follow-up that
   /// supports multiple non-contiguous z-runs on distinct planes.
   std::uint32_t max_canvases{1};
 
@@ -100,7 +100,7 @@ class CompositeCanvas {
  public:
   /// Allocate a pair of ARGB8888 dumb buffers at the requested size.
   /// Width / height come from `cfg.canvas_width / canvas_height`;
-  /// `max_canvases` is honoured up to 1 for v1 (controls how many
+  /// `max_canvases` is honored up to 1 for v1 (controls how many
   /// distinct canvas surfaces, not the per-canvas buffer count — the
   /// double-buffering above is unconditional).
   [[nodiscard]] static drm::expected<std::unique_ptr<CompositeCanvas>, std::error_code> create(
@@ -136,7 +136,7 @@ class CompositeCanvas {
   /// which matches the kernel's default `pixel blend mode` of
   /// "Pre-multiplied" and the output convention of Blend2D / thorvg /
   /// Cairo / Skia. Straight-alpha sources will produce visibly wrong
-  /// colours (rgb saturates instead of mixing); convert before passing
+  /// colors (rgb saturates instead of mixing); convert before passing
   /// in. XRGB8888 sources have their alpha byte forced to 0xFF (fully
   /// opaque) before blending. Both spans must be 4-byte-aligned;
   /// unaligned pointers cause the blend to bail without writes.

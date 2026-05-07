@@ -47,8 +47,39 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
+          # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
+          packages: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev hwdata ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
           version: 1.0
+
+      # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
+      # 0.1.1). Build the 0.2.0 tag from source and cache the install prefix
+      # so subsequent CI runs skip the rebuild. We deliberately don't vendor
+      # or wrap it: the floor stays system-provided once a distro ships a
+      # new enough package.
+      - name: Cache libdisplay-info install
+        id: cache-libdisplay-info
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/libdisplay-info-install
+          key: libdisplay-info-0.2.0-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.version }}
+
+      - name: Build libdisplay-info from source
+        if: steps.cache-libdisplay-info.outputs.cache-hit != 'true'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          git clone --depth 1 --branch 0.2.0 https://gitlab.freedesktop.org/emersion/libdisplay-info.git libdisplay-info-src
+          meson setup libdisplay-info-src/build libdisplay-info-src \
+            --prefix="$GITHUB_WORKSPACE/libdisplay-info-install" \
+            --buildtype=release \
+            -Ddefault_library=shared
+          meson install -C libdisplay-info-src/build
+
+      - name: Export third-party environment
+        run: |
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/libdisplay-info-install/lib/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/libdisplay-info-install/lib:$GITHUB_WORKSPACE/libdisplay-info-install/lib64:$GITHUB_WORKSPACE/libdisplay-info-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
@@ -93,9 +124,32 @@ jobs:
           # libyuv-dev satisfies examples/scene/camera's libyuv pkg-config probe.
           # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps
           # (yaml/jinja2/ply drive its source-generators; libyaml-dev is the
-          # runtime config parser).
-          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libyaml-dev python3-yaml python3-jinja2 python3-ply ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
+          # runtime config parser). hwdata supplies the pnp.ids file
+          # libdisplay-info reads at build time.
+          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
           version: 1.0
+
+      # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
+      # 0.1.1). Build the 0.2.0 tag from source and cache the install prefix.
+      - name: Cache libdisplay-info install
+        id: cache-libdisplay-info
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/libdisplay-info-install
+          key: libdisplay-info-0.2.0-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.version }}
+
+      - name: Build libdisplay-info from source
+        if: steps.cache-libdisplay-info.outputs.cache-hit != 'true'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          git clone --depth 1 --branch 0.2.0 https://gitlab.freedesktop.org/emersion/libdisplay-info.git libdisplay-info-src
+          meson setup libdisplay-info-src/build libdisplay-info-src \
+            --prefix="$GITHUB_WORKSPACE/libdisplay-info-install" \
+            --buildtype=release \
+            -Ddefault_library=shared
+          meson install -C libdisplay-info-src/build
 
       # ThorVG 1.0.4 isn't packaged on ubuntu-24.04; build from source and cache
       # the install prefix so subsequent CI runs skip the rebuild.
@@ -191,12 +245,13 @@ jobs:
 
       # libseat replaces the old sdbus-c++-from-source dance: it's packaged
       # on Ubuntu 24.04 as libseat-dev and pulled in via apt above. thorvg,
-      # blend2d, and libcamera still need their install prefixes exported.
+      # blend2d, libcamera, and libdisplay-info still need their install
+      # prefixes exported.
       - name: Export third-party environment
         run: |
-          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/thorvg-install/lib/pkgconfig:$GITHUB_WORKSPACE/thorvg-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
-          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$GITHUB_WORKSPACE/blend2d-install:$GITHUB_WORKSPACE/libcamera-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib:$GITHUB_WORKSPACE/libcamera-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/thorvg-install/lib/pkgconfig:$GITHUB_WORKSPACE/thorvg-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/thorvg-install:$GITHUB_WORKSPACE/blend2d-install:$GITHUB_WORKSPACE/libcamera-install:$GITHUB_WORKSPACE/libdisplay-info-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/thorvg-install/lib:$GITHUB_WORKSPACE/thorvg-install/lib64:$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib:$GITHUB_WORKSPACE/libcamera-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu:$GITHUB_WORKSPACE/libdisplay-info-install/lib:$GITHUB_WORKSPACE/libdisplay-info-install/lib64:$GITHUB_WORKSPACE/libdisplay-info-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:
@@ -289,8 +344,34 @@ jobs:
           # video_player/main.cpp with default flags and reports bogus
           # "<gst/gst.h> not found" / "<memory> unused" lints.
           # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps.
-          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libdisplay-info-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-dev python3-yaml python3-jinja2 python3-ply clang-19 clang-tidy-19 clang-format-19
+          # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
+          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata clang-19 clang-tidy-19 clang-format-19
           version: 1.0
+
+      # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
+      # 0.1.1). Without it, src/display/edid.cpp drops out of
+      # compile_commands.json entirely and clang-tidy's find-walk falls back
+      # to default flags, spuriously flagging include / init issues on the
+      # partial parse.
+      - name: Cache libdisplay-info install
+        id: cache-libdisplay-info
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/libdisplay-info-install
+          key: libdisplay-info-0.2.0-${{ runner.os }}-clang-19
+
+      - name: Build libdisplay-info from source
+        if: steps.cache-libdisplay-info.outputs.cache-hit != 'true'
+        env:
+          CC: clang-19
+          CXX: clang++-19
+        run: |
+          git clone --depth 1 --branch 0.2.0 https://gitlab.freedesktop.org/emersion/libdisplay-info.git libdisplay-info-src
+          meson setup libdisplay-info-src/build libdisplay-info-src \
+            --prefix="$GITHUB_WORKSPACE/libdisplay-info-install" \
+            --buildtype=release \
+            -Ddefault_library=shared
+          meson install -C libdisplay-info-src/build
 
       # Blend2D isn't packaged on ubuntu-24.04 (upstream ships no stable
       # releases, only git master). Build + cache the install prefix so
@@ -360,9 +441,9 @@ jobs:
 
       - name: Export third-party environment
         run: |
-          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/libcamera-install/lib/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
-          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/blend2d-install:$GITHUB_WORKSPACE/libcamera-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib:$GITHUB_WORKSPACE/libcamera-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/libcamera-install/lib/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/blend2d-install:$GITHUB_WORKSPACE/libcamera-install:$GITHUB_WORKSPACE/libdisplay-info-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/blend2d-install/lib:$GITHUB_WORKSPACE/blend2d-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib:$GITHUB_WORKSPACE/libcamera-install/lib64:$GITHUB_WORKSPACE/libcamera-install/lib/x86_64-linux-gnu:$GITHUB_WORKSPACE/libdisplay-info-install/lib:$GITHUB_WORKSPACE/libdisplay-info-install/lib64:$GITHUB_WORKSPACE/libdisplay-info-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Configure
         env:

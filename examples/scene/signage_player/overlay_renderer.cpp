@@ -272,7 +272,7 @@ void draw_ticker_blend2d(drm::span<std::uint8_t> pixels, const TickerPaint& p) n
     return;
   }
 
-  // Vertically centre the inked-glyph box, baseline-anchor as in the
+  // Vertically center the inked-glyph box, baseline-anchor as in the
   // overlay renderer.
   const auto total_h = static_cast<double>(fm.ascent + fm.descent);
   const double y = ((static_cast<double>(p.height) - total_h) * 0.5) + fm.ascent;

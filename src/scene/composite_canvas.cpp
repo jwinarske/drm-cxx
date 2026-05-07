@@ -147,7 +147,7 @@ std::uint32_t map_src_index(std::uint32_t dst_idx, std::uint32_t dst_visible,
   if (dst_visible <= 1U) {
     return 0U;
   }
-  // Centre-aligned NN: pixel k of dst lands at (k + 0.5) * src/dst.
+  // Center-aligned NN: pixel k of dst lands at (k + 0.5) * src/dst.
   return (dst_idx * src_span) / dst_visible;
 }
 

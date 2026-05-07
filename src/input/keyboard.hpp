@@ -64,9 +64,9 @@ class Keyboard {
   drm::expected<void, std::error_code> reload(KeymapOptions opts);
 
   // Drive the xkb-tracked Caps/Num/Scroll Lock latch to match `desired`
-  // by synthesising press+release for each lock key whose state needs
+  // by synthesizing press+release for each lock key whose state needs
   // to flip. Used internally by reload(); also exposed for callers
-  // that want to honour an externally-provided lock-state hint (e.g.
+  // that want to honor an externally-provided lock-state hint (e.g.
   // a logind "Caps Lock was on at session start" signal). Does not
   // emit KeyboardEvents and does not touch the held-key set.
   //

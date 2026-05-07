@@ -29,7 +29,7 @@ struct OverlayPaint {
   std::string_view text;
 };
 
-/// Paint `p.bg_argb` over the entire buffer, then centre `p.text` on
+/// Paint `p.bg_argb` over the entire buffer, then center `p.text` on
 /// top in `p.fg_argb`. No-op for the text portion when Blend2D is
 /// unavailable, the text is empty, or no system font could be located.
 void paint_overlay(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexcept;
@@ -38,7 +38,7 @@ void paint_overlay(drm::span<std::uint8_t> pixels, const OverlayPaint& p) noexce
 ///  supplies the scroll position so this function stays stateless;
 /// each call repaints the whole buffer (background + repeated text
 /// copies). Designed to be called every frame — the dirty-every-frame
-/// workload is what makes this layer useful as a Phase 2.2 testbed.
+/// workload is what makes this layer useful as a testbed.
 struct TickerPaint {
   std::uint32_t width{};
   std::uint32_t height{};

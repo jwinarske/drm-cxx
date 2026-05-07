@@ -112,7 +112,7 @@ int main(int argc, char* argv[]) {
 
   // ── Layer sources ──────────────────────────────────────────────────
   // bg  — full-screen XRGB8888, dark gray.
-  // ind — 400×200 ARGB8888 panel near the centre, semi-transparent.
+  // ind — 400×200 ARGB8888 panel near the center, semi-transparent.
   // hud — 200×60 ARGB8888 badge, the only thing that moves.
   auto bg_src = drm::scene::DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
   if (!bg_src) {
@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // ind centred. zpos=3 to clear amdgpu's PRIMARY=2 (memory:
+  // ind centerd. zpos=3 to clear amdgpu's PRIMARY=2 (memory:
   // reference_amdgpu_primary_zpos_pin).
   drm::scene::LayerDesc ind_desc;
   ind_desc.source = std::move(*ind_src);

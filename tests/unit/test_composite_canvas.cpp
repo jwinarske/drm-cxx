@@ -60,7 +60,7 @@ struct DstBuffer {
   }
 };
 
-// Tightly-packed source buffer of a uniform colour.
+// Tightly-packed source buffer of a uniform color.
 struct UniformSrc {
   std::uint32_t width{0};
   std::uint32_t height{0};
@@ -198,7 +198,7 @@ TEST(CompositeCanvasBlend, HalfAlphaMixesEvenly) {
 
 TEST(CompositeCanvasBlend, XRGBSourceForcedOpaque) {
   // XRGB sources have undefined alpha bytes; the blender must treat
-  // them as fully opaque so SRC_OVER writes the full source colour.
+  // them as fully opaque so SRC_OVER writes the full source color.
   DstBuffer dst(4, 4);
   for (std::uint32_t y = 0; y < 4; ++y) {
     for (std::uint32_t x = 0; x < 4; ++x) {
@@ -276,7 +276,7 @@ TEST(CompositeCanvasBlend, RejectsUnalignedDst) {
 
 TEST(CompositeCanvasBlend, NoScaleFastPathMatchesScaledPath) {
   // The src/dst-equal-size fast path must produce identical results to
-  // the general nearest-neighbour mapping. Render a recognisable
+  // the general nearest-neighbour mapping. Render a recognizable
   // gradient through both code paths and compare every pixel.
   constexpr std::uint32_t W = 8;
   constexpr std::uint32_t H = 8;

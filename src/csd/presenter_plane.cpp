@@ -109,7 +109,7 @@ drm::expected<std::vector<PropertyWrite>, std::error_code> compute_writes(
     // Optional properties — skipped silently when the plane doesn't
     // expose them. Writing absent enums is rejected by the kernel
     // with -EINVAL, so the prop_id-zero gate is load-bearing, not
-    // just an optimisation.
+    // just an optimization.
     if (slot.blend_mode_prop != 0U) {
       add(slot.plane_id, slot.blend_mode_prop, slot.blend_mode_value);
     }

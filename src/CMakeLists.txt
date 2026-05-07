@@ -261,7 +261,6 @@ install(FILES
 install(FILES
     display/connector_info.hpp
     display/edid.hpp
-    display/hdr_metadata.hpp
     display/hotplug_monitor.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/display)
 

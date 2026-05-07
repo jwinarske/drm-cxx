@@ -4,9 +4,9 @@
 // video_grid — N×N grid of synthesized "video" cells laid out across a
 // single output. Each cell owns its own DumbBufferSource and is
 // repainted every frame with a diagonal sweeping bar over a flat base
-// colour, simulating per-cell motion. The grid stresses the allocator
+// color, simulating per-cell motion. The grid stresses the allocator
 // (16 layers when 4×4) on hardware whose plane budget is much smaller
-// than the cell count, forcing the composition fallback (Phase 2.3) to
+// than the cell count, forcing the composition fallback to
 // rescue the cells the allocator can't place natively. Cells alternate
 // between XRGB8888 and ARGB8888 so the format-cascade path also gets
 // exercised.

@@ -3,7 +3,7 @@
 //
 // layered_demo — interactive pedagogical example exercising the
 // LayerScene mutation API. A static gradient background is always
-// present; up to eight coloured tiles can be added, removed, moved,
+// present; up to eight colored tiles can be added, removed, moved,
 // re-stacked, and re-shaded at runtime. Each user input results in a
 // scene mutation followed by a single commit, so the example doubles
 // as a tour of which API call drives which kind of property write.

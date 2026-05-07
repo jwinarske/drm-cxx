@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 #
-# Examples are organised into four buckets matching docs/scene.md:
+# Examples are organized into four buckets matching docs/scene.md:
 #
 #   basics/    — minimal LayerScene introductions and small one-feature demos.
 #   scene/     — substantial LayerScene workloads (the "sales deck" tier).
@@ -48,6 +48,7 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
   else()
     pkg_check_modules(libcamera IMPORTED_TARGET libcamera>=0.3.0)
   endif()
+  _drm_cxx_promote_system_includes(PkgConfig::libcamera)
 
   # libyuv is detected manually rather than via pkg-config: Fedora's
   # libyuv-devel ships a libyuv.pc but Ubuntu/Debian's libyuv-dev does
@@ -67,11 +68,6 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
   endif()
 
   if(TARGET PkgConfig::libcamera AND TARGET drm_cxx_libyuv)
-    get_target_property(_incs PkgConfig::libcamera INTERFACE_INCLUDE_DIRECTORIES)
-    if(_incs)
-      set_property(TARGET PkgConfig::libcamera
-                   APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_incs})
-    endif()
     add_executable(camera
       scene/camera/main.cpp
       scene/camera/convert.cpp
@@ -164,6 +160,7 @@ if(NOT DRM_CXX_BUILD_THORVG_JANITOR STREQUAL "OFF")
   else()
     pkg_check_modules(thorvg IMPORTED_TARGET thorvg-1>=1.0.4)
   endif()
+  _drm_cxx_promote_system_includes(PkgConfig::thorvg)
   if(TARGET PkgConfig::thorvg)
     add_subdirectory(scene/thorvg_janitor)
   else()

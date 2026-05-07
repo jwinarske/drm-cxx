@@ -17,7 +17,7 @@
 // Pattern under test: a 4-quadrant 0xFFRRGGBB pattern (red / green /
 // blue / white) is written into a dumb framebuffer, pinned as the
 // primary plane via drmModeSetCrtc, and snapshot() is expected to
-// return an Image whose quadrant centres match the source colours
+// return an Image whose quadrant centers match the source colors
 // byte-for-byte.
 
 #include <drm-cxx/capture/snapshot.hpp>

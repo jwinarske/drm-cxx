@@ -451,7 +451,7 @@ drm::expected<std::unique_ptr<GstAppsinkSource>, std::error_code> GstAppsinkSour
   }
 
   // gst_init is idempotent and safe to call after another caller has
-  // already initialised GStreamer; passing nullptr argv is the
+  // already initialized GStreamer; passing nullptr argv is the
   // documented "I'm not a main()" shape.
   if (gst_is_initialized() == 0) {
     gst_init(nullptr, nullptr);

@@ -8,7 +8,7 @@
 // On startup the example finds the first connected connector with
 // modes, brings up a LayerScene against that connector's preferred
 // mode, and renders a four-quadrant test pattern + a small "clock
-// badge" overlay (a coloured square whose hue advances each frame so
+// badge" overlay (a colored square whose hue advances each frame so
 // you can see the example is alive).
 //
 // HotplugMonitor watches udev. Each event triggers a scan for the

@@ -355,7 +355,7 @@ class LayerScene::Impl {
     arm_layer_plane_blend_defaults(acquisitions, req, report);
     arm_layer_plane_color_props(acquisitions, req, report);
 
-    // Phase 2.3: rescue unassigned layers via CPU composition before
+    // rescue unassigned layers via CPU composition before
     // counting them as dropped. compose_unassigned() updates
     // report.layers_composited and report.composition_buckets; the
     // dropped tally below is the residual that wasn't rescued
@@ -542,7 +542,7 @@ class LayerScene::Impl {
     return {};
   }
 
-  // ── Phase 2.4: rebind to a new CRTC / connector / mode ────────────
+  // ── rebind to a new CRTC / connector / mode ────────────
   drm::expected<CompatibilityReport, std::error_code> rebind(std::uint32_t new_crtc_id,
                                                              std::uint32_t new_connector_id,
                                                              drmModeModeInfo new_mode) {
@@ -798,7 +798,7 @@ class LayerScene::Impl {
     }
   }
 
-  // ── Composition fallback (Phase 2.3) ───────────────────────────────
+  // ── Composition fallback ───────────────────────────────
   //
   // After allocator.apply() runs, layers it couldn't place report
   // needs_composition() == true. compose_unassigned() walks them, blends
@@ -985,7 +985,7 @@ class LayerScene::Impl {
 
     // Preferred path: the do_commit pre-reservation already pinned a
     // plane by setting `last_canvas_plane_id_`, and the allocator
-    // honoured the reservation by leaving it out of best_assignment.
+    // honored the reservation by leaving it out of best_assignment.
     // Try to reuse it before falling through to the generic scan —
     // sticky plane choice across frames lets the per-plane property
     // snapshot keep working between commits.
@@ -1593,7 +1593,8 @@ class LayerScene::Impl {
   // cheaper than widening Allocator's contract.
   std::optional<drm::planes::Allocator> allocator_;
 
-  // Placeholder composition layer until Phase 2.3 lands the canvas.
+  // Placeholder composition layer that compose_unassigned arms when
+  // unassigned layers fall back to the canvas.
   // Disabled at rest — the Output's allocator-apply path skips it, so
   // having it present but unused costs nothing.
   drm::planes::Layer composition_planes_layer_;
