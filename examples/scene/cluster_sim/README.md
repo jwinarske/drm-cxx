@@ -1,9 +1,10 @@
 # cluster_sim — automotive instrument-cluster showcase
 
-Status: **dials + center info + warnings added**. A Blend2D-painted
-backdrop, animated speedometer + tachometer dials, a digital speed
-readout between them, and a four-cell warning-indicator strip below.
-The optional `V4l2DecoderSource` rear-view layer lands in a follow-up.
+Status: **rear-view layer added**. A Blend2D-painted backdrop,
+animated speedometer + tachometer dials, a digital speed readout
+between them, a four-cell warning-indicator strip below, and an
+optional rear-view camera layer driven by `V4l2DecoderSource`
+against vicodec (toggled with `R`).
 
 ## What this exercises
 
@@ -22,10 +23,11 @@ The optional `V4l2DecoderSource` rear-view layer lands in a follow-up.
 ## Key bindings
 
 - `Esc` / `q` / `Ctrl-C` — quit.
+- `R` — toggle the rear-view camera layer. Requires the `vicodec`
+  kernel module (`modprobe vicodec`); without it, cluster_sim emits
+  a one-shot startup log line explaining the skip and the toggle is
+  a no-op.
 - `Ctrl+Alt+F<n>` — VT switch (forwarded to libseat).
-
-Subsequent steps add bindings for toggling the rear-view layer,
-forcing a warning-indicator state, etc.
 
 ## Building
 
