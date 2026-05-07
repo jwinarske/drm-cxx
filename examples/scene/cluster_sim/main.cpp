@@ -38,6 +38,13 @@
 //   R                — toggle the rear-view camera layer (no-op when
 //                      vicodec isn't loaded; cluster_sim emits a one-
 //                      shot log line at startup explaining the skip).
+//   P                — write a PNG snapshot of the current scene to
+//                      cluster_sim_NNN.png in the working directory.
+//                      Goes through drm::capture::snapshot, which skips
+//                      tiled / YUV / unreadable planes with a warning;
+//                      the bg, dial, info, warning, UVC, and synthetic
+//                      rear-view layers all capture cleanly. The vicodec
+//                      rear-view (NV12) is intentionally omitted.
 //   Ctrl+Alt+F<n>    — VT switch (forwarded to libseat).
 //
 // The rear-view layer demonstrates V4l2DecoderSource end to end. At
@@ -54,6 +61,8 @@
 #include "../../common/vt_switch.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
+#include <drm-cxx/capture/png.hpp>
+#include <drm-cxx/capture/snapshot.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
@@ -1663,6 +1672,10 @@ int main(int argc, char** argv) {
   }
   auto& input_seat = *input_seat_r;
   bool quit = false;
+  // Monotonic snapshot index; bumped on every successful PNG write so
+  // repeated P presses produce cluster_sim_001.png, _002.png, ... in
+  // the working directory.
+  int snapshot_index = 0;
   drm::examples::VtChordTracker vt_chord;
   input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
     const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event);
@@ -1690,6 +1703,20 @@ int main(int argc, char** argv) {
           drm::println("rear-view: on");
         }
       }
+    }
+    if (ke->pressed && ke->key == KEY_P) {
+      auto img = drm::capture::snapshot(dev, ctx.crtc_id);
+      if (!img) {
+        drm::println(stderr, "snapshot: {}", img.error().message());
+        return;
+      }
+      std::string const path = drm::format("cluster_sim_{:03}.png", snapshot_index + 1);
+      if (auto w = drm::capture::write_png(*img, path); !w) {
+        drm::println(stderr, "snapshot: write_png({}): {}", path, w.error().message());
+        return;
+      }
+      ++snapshot_index;
+      drm::println("snapshot: wrote {} ({}x{})", path, img->width(), img->height());
     }
   });
 
