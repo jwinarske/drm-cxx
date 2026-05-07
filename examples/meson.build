@@ -117,6 +117,7 @@ endif
 
 subdir('scene/signage_player')
 subdir('scene/video_player')
+subdir('scene/cluster_sim')
 
 # ThorVG Janitor example — scaffold only (see scene/thorvg_janitor/README.md).
 # Upstream ThorVG is auto-detected; set -Dthorvg_janitor=disabled to skip the
