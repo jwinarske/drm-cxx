@@ -201,6 +201,16 @@ existing reference: it imports libcamera DMA-BUFs through
 `ExternalDmaBufSource`, which is the prototype for the
 `DmabufImportSource` direction.
 
+The hardware-video-decoder slice of the producer ecosystem shipped
+2026-05-06: `drm::scene::GstAppsinkSource` (PR #48) bridges a
+caller-owned GStreamer `appsink` element into the
+`LayerBufferSource` contract with both DMABUF zero-copy and
+sysmem-memcpy import paths, and `drm::scene::V4l2DecoderSource`
+(PR #49) drives stateful V4L2 decoders directly without a
+GStreamer dependency. V4L2 cameras and accel/NPU outputs remain
+future work; the buffer-source contract has held up across both
+shipped sources without change.
+
 ### Multi-CRTC orchestration
 
 Spanning a logical scene across two physical CRTCs (dashboards,

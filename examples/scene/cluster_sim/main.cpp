@@ -68,6 +68,13 @@
 #include <drm-cxx/scene/v4l2_decoder_source.hpp>
 #include <drm-cxx/session/seat.hpp>
 
+#if CLUSTER_SIM_HAS_LIBYUV
+// libyuv ships its umbrella header at <libyuv.h>; the convert_argb
+// component is what we need for YUY2->ARGB8888 (== DRM_FORMAT_XRGB8888
+// byte-for-byte; the alpha lane is ignored at scanout).
+#include <libyuv/convert_argb.h>  // NOLINT(misc-include-cleaner)
+#endif
+
 // Blend2D ships its umbrella header at <blend2d/blend2d.h> on the
 // upstream source install + Fedora; older Debian/Ubuntu packages put
 // it at <blend2d.h>. Cover both via __has_include, mirroring the
@@ -176,17 +183,55 @@ constexpr std::uint32_t k_warn_dim_argb = 0xFF14181FU;  // unlit cell fill
 constexpr std::uint32_t k_warn_glyph_dim_argb = 0xFF38404CU;
 constexpr std::uint32_t k_warn_cell_radius = 12U;
 
-// Rear-view layer dimensions. 320x240 keeps the encoded clip small
-// (a few KB per frame) and the layer doesn't need to be larger to
-// read as a thumbnail at the corner of the screen.
+// Rear-view layer dimensions. 320x240 keeps the layer reading as a
+// thumbnail in the corner of the screen.
 constexpr std::uint32_t k_rear_w = 320U;
 constexpr std::uint32_t k_rear_h = 240U;
+
+// Coded dimensions handed to vicodec (encoder + decoder). Decoupled
+// from the on-screen rect because vicodec has a 640x360 minimum and
+// snaps the requested dimensions up. NV12 capture buffers come back
+// with bytesperline == width, and amdgpu DC requires LINEAR FB pitch
+// to be 256-aligned -- 640 % 256 == 128, so 640-wide vicodec output
+// fails drmModeAddFB2 on amdgpu. 768 is the smallest width vicodec
+// honors that produces a 256-aligned NV12 pitch (768 % 256 == 0).
+// The plane scales the 768x432 buffer down to k_rear_w x k_rear_h on
+// screen via src_rect / dst_rect, so this only affects buffer size,
+// not the visible thumbnail.
+constexpr std::uint32_t k_rear_coded_w = 768U;
+constexpr std::uint32_t k_rear_coded_h = 432U;
+
 constexpr std::size_t k_rear_clip_frames = 8;
 constexpr std::uint32_t k_rear_codec_fourcc = 0x54485746U;    // V4L2_PIX_FMT_FWHT
 constexpr std::uint32_t k_rear_capture_fourcc = 0x3231564EU;  // V4L2_PIX_FMT_NV12
 constexpr int k_rear_zpos = 5;                                // above warning strip
 constexpr std::uint32_t k_rear_buffer_count = 4U;
-constexpr std::uint32_t k_rear_output_buffer_size = 256U * 1024U;  // ample for FWHT @ 320x240
+constexpr std::uint32_t k_rear_output_buffer_size = 512U * 1024U;  // ample for FWHT @ 768x432
+
+// UVC source pixel format. YUYV (V4L2_PIX_FMT_YUYV / 'YUYV') is the
+// universal UVC fallback: every UVC class device must expose at least
+// one YUYV resolution. libyuv::YUY2ToARGB then converts each captured
+// frame into the rear-view DumbBufferSource (XRGB8888) on the CPU --
+// sidesteps amdgpu DC's refusal to scan out PRIME-imports whose
+// dma_buf->ops aren't amdgpu_dmabuf_ops (a provenance check that
+// rejects ALL foreign V4L2 dmabufs regardless of backing storage,
+// in place since kernel commit 3e339465a836 in 2017).
+constexpr std::uint32_t k_uvc_capture_fourcc = 0x56595559U;  // V4L2_PIX_FMT_YUYV
+constexpr std::uint32_t k_uvc_buffer_count = 4U;
+
+// Synthetic rear-view tier. Used when neither a UVC camera nor a
+// viable vicodec V4l2DecoderSource path is available -- specifically,
+// the no-camera case on amdgpu where the kernel rejects foreign
+// PRIME-imported dmabufs as FBs (see comment above k_uvc_capture_fourcc).
+// We paint a moving Blend2D pattern into a DumbBufferSource (XRGB8888)
+// each frame so R-toggle still demonstrates a layer-add path.
+constexpr std::uint32_t k_rear_synth_bg_argb = 0xFF0A1018U;     // dark slate
+constexpr std::uint32_t k_rear_synth_bar_argb = 0xFF1F4D80U;    // muted blue scan
+constexpr std::uint32_t k_rear_synth_label_argb = 0xFFE6E8EEU;  // off-white
+constexpr std::uint32_t k_rear_synth_subtle_argb = 0xFF38404CU;
+constexpr float k_rear_synth_label_font_px = 22.0F;
+constexpr float k_rear_synth_sublabel_font_px = 14.0F;
+constexpr double k_rear_synth_period_s = 2.4;
 
 // EINTR retry budget for ad-hoc V4L2 ioctls in the encoder driver
 // below. Same idiom as V4l2DecoderSource's xioctl, just inline here
@@ -463,6 +508,66 @@ void paint_warning_indicators(drm::BufferMapping& mapping,
   }
   ctx.end();
 }
+
+// Synthetic rear-view paint used when neither UVC nor a viable
+// vicodec V4l2DecoderSource path is available. Draws into a 320x240
+// XRGB8888 dumb buffer: dark slate background, a horizontal scan bar
+// sweeping vertically with a sine-decoupled phase, and a centered
+// "REAR-VIEW (SIM)" label so the demo always has visible content on
+// R press even when amdgpu's foreign-dmabuf rejection blocks both
+// V4L2 paths.
+void paint_rearview_synthetic(drm::BufferMapping& mapping, double elapsed_s,
+                              const BLFontFace& font_face) noexcept {
+  drm::span<std::uint8_t> const pixels = mapping.pixels();
+  std::uint32_t const stride = mapping.stride();
+  if (pixels.size() < static_cast<std::size_t>(k_rear_h) * stride) {
+    return;
+  }
+  BLImage canvas;
+  if (canvas.create_from_data(static_cast<int>(k_rear_w), static_cast<int>(k_rear_h),
+                              BL_FORMAT_XRGB32, pixels.data(), static_cast<intptr_t>(stride),
+                              BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
+    return;
+  }
+  BLContext ctx(canvas);
+  ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
+  ctx.fill_all(BLRgba32(k_rear_synth_bg_argb));
+  ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
+
+  // Vertical scan bar -- a soft horizontal band whose y-position
+  // sweeps via (1 - cos)/2 over k_rear_synth_period_s. The bar bleeds
+  // beyond the canvas at the endpoints to avoid edge-case artefacting.
+  double const phase = std::fmod(elapsed_s, k_rear_synth_period_s) / k_rear_synth_period_s;
+  double const sweep = (1.0 - std::cos(phase * 2.0 * k_pi)) * 0.5;
+  double const bar_h = static_cast<double>(k_rear_h) * 0.18;
+  double const bar_cy = sweep * static_cast<double>(k_rear_h);
+  ctx.fill_rect(BLRect(0.0, bar_cy - (bar_h * 0.5), static_cast<double>(k_rear_w), bar_h),
+                BLRgba32(k_rear_synth_bar_argb));
+
+  // Subtle horizontal tick marks at quarter heights so the layer reads
+  // as "scanning" rather than just a moving block.
+  for (int i = 1; i < 4; ++i) {
+    double const y = (static_cast<double>(i) * static_cast<double>(k_rear_h)) / 4.0;
+    ctx.fill_rect(BLRect(0.0, y - 0.5, static_cast<double>(k_rear_w), 1.0),
+                  BLRgba32(k_rear_synth_subtle_argb));
+  }
+
+  // Centered "REAR-VIEW (SIM)" label so the user can tell at a glance
+  // that this is the synthetic fallback, not a stalled real feed.
+  if (font_face.is_valid()) {
+    BLFont label_font;
+    if (label_font.create_from_face(font_face, k_rear_synth_label_font_px) == BL_SUCCESS) {
+      paint_centered_text(ctx, label_font, "REAR-VIEW", static_cast<double>(k_rear_w) * 0.5,
+                          static_cast<double>(k_rear_h) * 0.45, k_rear_synth_label_argb);
+    }
+    BLFont sub_font;
+    if (sub_font.create_from_face(font_face, k_rear_synth_sublabel_font_px) == BL_SUCCESS) {
+      paint_centered_text(ctx, sub_font, "(SIM)", static_cast<double>(k_rear_w) * 0.5,
+                          static_cast<double>(k_rear_h) * 0.6, k_rear_synth_subtle_argb);
+    }
+  }
+  ctx.end();
+}
 // NOLINTEND(misc-include-cleaner)
 
 // EINTR-retrying ioctl wrapper. Returns 0 on success, the errno on
@@ -542,6 +647,175 @@ void paint_warning_indicators(drm::BufferMapping& mapping,
   return std::nullopt;
 }
 
+#if CLUSTER_SIM_HAS_LIBYUV
+// UVC capture state. Lives for as long as the rear-view layer is
+// engaged: open the /dev/video node, S_FMT YUYV at the negotiated
+// dimensions, REQBUFS+QUERYBUF+MMAP a small ring of CPU-mappable
+// buffers, then dequeue/libyuv-convert/queue per frame from the main
+// loop. The buffers are V4L2_MEMORY_MMAP so the conversion source is
+// the kernel's own page-aligned mapping; we never PRIME-import the
+// dmabuf and so dodge amdgpu DC's foreign-vmalloc rejection entirely.
+struct UvcCapture {
+  int fd{-1};
+  std::array<void*, k_uvc_buffer_count> mapped{};
+  std::array<std::size_t, k_uvc_buffer_count> mapped_len{};
+  std::uint32_t bytesperline{0};
+  std::uint32_t width{0};
+  std::uint32_t height{0};
+  bool streaming{false};
+};
+
+// Walk /dev/video* for a single-plane CAPTURE-only device that
+// advertises YUYV. Skip M2M / OUTPUT-only devices (vicodec) and
+// metadata / radio / SDR nodes. The first match wins; that's
+// good enough for the cluster_sim demo where there's typically
+// at most one camera attached.
+[[nodiscard]] std::optional<std::string> find_uvc_endpoint() {
+  std::error_code ec;
+  for (auto const& entry : std::filesystem::directory_iterator("/dev", ec)) {
+    auto const& p = entry.path();
+    std::string const name = p.filename().string();
+    if (name.rfind("video", 0) != 0) {
+      continue;
+    }
+    int const fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) {
+      continue;
+    }
+    v4l2_capability cap{};
+    if (xioctl(fd, VIDIOC_QUERYCAP, &cap) != 0) {
+      ::close(fd);
+      continue;
+    }
+    std::uint32_t const caps =
+        ((cap.capabilities & V4L2_CAP_DEVICE_CAPS) != 0U) ? cap.device_caps : cap.capabilities;
+    bool const is_capture = (caps & V4L2_CAP_VIDEO_CAPTURE) != 0U;
+    bool const is_m2m = (caps & (V4L2_CAP_VIDEO_M2M | V4L2_CAP_VIDEO_M2M_MPLANE)) != 0U;
+    if (!is_capture || is_m2m || (caps & V4L2_CAP_STREAMING) == 0U) {
+      ::close(fd);
+      continue;
+    }
+    bool advertises_yuyv = false;
+    for (std::uint32_t i = 0; i < 64; ++i) {
+      v4l2_fmtdesc desc{};
+      desc.index = i;
+      desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      if (xioctl(fd, VIDIOC_ENUM_FMT, &desc) != 0) {
+        break;
+      }
+      if (desc.pixelformat == k_uvc_capture_fourcc) {
+        advertises_yuyv = true;
+        break;
+      }
+    }
+    ::close(fd);
+    if (advertises_yuyv) {
+      return p.string();
+    }
+  }
+  return std::nullopt;
+}
+
+// REQBUFS=0 + munmap whatever's mapped + close the fd. Idempotent so
+// the failure path in setup_uvc_capture and the toggle-off path can
+// share it.
+void teardown_uvc_capture(UvcCapture& uvc) noexcept {
+  if (uvc.fd >= 0 && uvc.streaming) {
+    int t = static_cast<int>(V4L2_BUF_TYPE_VIDEO_CAPTURE);
+    (void)xioctl(uvc.fd, VIDIOC_STREAMOFF, &t);
+    uvc.streaming = false;
+  }
+  for (std::size_t i = 0; i < k_uvc_buffer_count; ++i) {
+    if (uvc.mapped.at(i) != nullptr) {
+      ::munmap(uvc.mapped.at(i), uvc.mapped_len.at(i));
+      uvc.mapped.at(i) = nullptr;
+      uvc.mapped_len.at(i) = 0;
+    }
+  }
+  if (uvc.fd >= 0) {
+    v4l2_requestbuffers zero{};
+    zero.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    zero.memory = V4L2_MEMORY_MMAP;
+    (void)xioctl(uvc.fd, VIDIOC_REQBUFS, &zero);
+    ::close(uvc.fd);
+    uvc.fd = -1;
+  }
+  uvc.bytesperline = 0;
+  uvc.width = 0;
+  uvc.height = 0;
+}
+
+// Open the named UVC node, request YUYV at `want_w x want_h`, allocate
+// + mmap the buffer ring, queue every buffer, and STREAMON. The kernel
+// may snap requested dimensions; whatever it gives us is recorded in
+// `uvc.width / uvc.height / uvc.bytesperline`. Returns true on
+// success; on failure the partial state is torn down and `uvc.fd`
+// is restored to -1.
+[[nodiscard]] bool setup_uvc_capture(UvcCapture& uvc, const std::string& path, std::uint32_t want_w,
+                                     std::uint32_t want_h) {
+  uvc.fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
+  if (uvc.fd < 0) {
+    return false;
+  }
+  v4l2_format fmt{};
+  fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  fmt.fmt.pix.pixelformat = k_uvc_capture_fourcc;
+  fmt.fmt.pix.width = want_w;
+  fmt.fmt.pix.height = want_h;
+  fmt.fmt.pix.field = V4L2_FIELD_ANY;
+  if (xioctl(uvc.fd, VIDIOC_S_FMT, &fmt) != 0) {
+    teardown_uvc_capture(uvc);
+    return false;
+  }
+  if (fmt.fmt.pix.pixelformat != k_uvc_capture_fourcc) {
+    teardown_uvc_capture(uvc);
+    return false;
+  }
+  uvc.width = fmt.fmt.pix.width;
+  uvc.height = fmt.fmt.pix.height;
+  uvc.bytesperline = fmt.fmt.pix.bytesperline;
+
+  v4l2_requestbuffers req{};
+  req.count = k_uvc_buffer_count;
+  req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  req.memory = V4L2_MEMORY_MMAP;
+  if (xioctl(uvc.fd, VIDIOC_REQBUFS, &req) != 0 || req.count == 0) {
+    teardown_uvc_capture(uvc);
+    return false;
+  }
+  std::uint32_t const granted = std::min<std::uint32_t>(req.count, k_uvc_buffer_count);
+  for (std::uint32_t i = 0; i < granted; ++i) {
+    v4l2_buffer qb{};
+    qb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    qb.memory = V4L2_MEMORY_MMAP;
+    qb.index = i;
+    if (xioctl(uvc.fd, VIDIOC_QUERYBUF, &qb) != 0) {
+      teardown_uvc_capture(uvc);
+      return false;
+    }
+    void* const m =
+        ::mmap(nullptr, qb.length, PROT_READ | PROT_WRITE, MAP_SHARED, uvc.fd, qb.m.offset);
+    if (m == MAP_FAILED) {
+      teardown_uvc_capture(uvc);
+      return false;
+    }
+    uvc.mapped.at(i) = m;
+    uvc.mapped_len.at(i) = qb.length;
+    if (xioctl(uvc.fd, VIDIOC_QBUF, &qb) != 0) {
+      teardown_uvc_capture(uvc);
+      return false;
+    }
+  }
+  int t = static_cast<int>(V4L2_BUF_TYPE_VIDEO_CAPTURE);
+  if (xioctl(uvc.fd, VIDIOC_STREAMON, &t) != 0) {
+    teardown_uvc_capture(uvc);
+    return false;
+  }
+  uvc.streaming = true;
+  return true;
+}
+#endif  // CLUSTER_SIM_HAS_LIBYUV
+
 // Paint a moving NV12 test pattern into a single-plane buffer. Used
 // as the encoder's input each frame. The pattern is a simple gradient
 // shifted by `frame_idx` columns so the encoded clip shows visible
@@ -603,13 +877,13 @@ void paint_test_pattern_nv12(std::uint8_t* nv12, std::uint32_t w, std::uint32_t 
   src_fmt.type = out_type;
   if (is_mplane) {
     src_fmt.fmt.pix_mp.pixelformat = k_rear_capture_fourcc;
-    src_fmt.fmt.pix_mp.width = k_rear_w;
-    src_fmt.fmt.pix_mp.height = k_rear_h;
+    src_fmt.fmt.pix_mp.width = k_rear_coded_w;
+    src_fmt.fmt.pix_mp.height = k_rear_coded_h;
     src_fmt.fmt.pix_mp.num_planes = 1;
   } else {
     src_fmt.fmt.pix.pixelformat = k_rear_capture_fourcc;
-    src_fmt.fmt.pix.width = k_rear_w;
-    src_fmt.fmt.pix.height = k_rear_h;
+    src_fmt.fmt.pix.width = k_rear_coded_w;
+    src_fmt.fmt.pix.height = k_rear_coded_h;
   }
   if (xioctl(fd, VIDIOC_S_FMT, &src_fmt) != 0) {
     ::close(fd);
@@ -621,12 +895,12 @@ void paint_test_pattern_nv12(std::uint8_t* nv12, std::uint32_t w, std::uint32_t 
   coded_fmt.type = cap_type;
   if (is_mplane) {
     coded_fmt.fmt.pix_mp.pixelformat = k_rear_codec_fourcc;
-    coded_fmt.fmt.pix_mp.width = k_rear_w;
-    coded_fmt.fmt.pix_mp.height = k_rear_h;
+    coded_fmt.fmt.pix_mp.width = k_rear_coded_w;
+    coded_fmt.fmt.pix_mp.height = k_rear_coded_h;
   } else {
     coded_fmt.fmt.pix.pixelformat = k_rear_codec_fourcc;
-    coded_fmt.fmt.pix.width = k_rear_w;
-    coded_fmt.fmt.pix.height = k_rear_h;
+    coded_fmt.fmt.pix.width = k_rear_coded_w;
+    coded_fmt.fmt.pix.height = k_rear_coded_h;
   }
   if (xioctl(fd, VIDIOC_S_FMT, &coded_fmt) != 0) {
     ::close(fd);
@@ -728,13 +1002,13 @@ void paint_test_pattern_nv12(std::uint8_t* nv12, std::uint32_t w, std::uint32_t 
     return result;
   }
 
-  std::size_t const nv12_size = static_cast<std::size_t>(k_rear_w) * k_rear_h * 3U / 2U;
+  std::size_t const nv12_size = static_cast<std::size_t>(k_rear_coded_w) * k_rear_coded_h * 3U / 2U;
   result.reserve(k_rear_clip_frames);
   for (std::size_t i = 0; i < k_rear_clip_frames; ++i) {
     if (out_len < nv12_size) {
       break;
     }
-    paint_test_pattern_nv12(static_cast<std::uint8_t*>(out_ptr), k_rear_w, k_rear_h, i);
+    paint_test_pattern_nv12(static_cast<std::uint8_t*>(out_ptr), k_rear_coded_w, k_rear_coded_h, i);
 
     v4l2_buffer qb{};
     std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
@@ -813,33 +1087,180 @@ void paint_test_pattern_nv12(std::uint8_t* nv12, std::uint32_t w, std::uint32_t 
   return result;
 }
 
-// State for the optional rear-view layer. When `clip` is non-empty
-// the toggle is supported; the layer is held by the LayerScene while
-// `layer` is engaged.
+// State for the optional rear-view layer. Three source tiers are
+// supported and the startup probe picks the highest viable one:
+//
+//   1. UVC (preferred when libyuv is built in and a UVC camera is
+//      attached): YUYV capture from /dev/video* is libyuv-converted
+//      to XRGB8888 into a CPU-allocated DumbBufferSource each frame.
+//      Works on amdgpu DC (no foreign-dmabuf import involved).
+//   2. vicodec (when no UVC but vicodec works on this driver): an
+//      FWHT clip encoded once at startup is replayed through
+//      V4l2DecoderSource as zero-copy NV12. Works on drivers that
+//      accept foreign PRIME imports (vkms / most embedded SoCs);
+//      rejected by amdgpu DC, in which case the startup probe
+//      tears it down and we fall through to tier 3.
+//   3. Synthetic Blend2D (last resort): a moving scan-bar pattern
+//      painted into a DumbBufferSource each frame. Always works,
+//      ensures the R toggle has visible content even on amdgpu
+//      with no camera.
+//
+// `layer` is engaged whichever tier is active; `uvc.fd >= 0`
+// discriminates UVC; `synthetic_armed` distinguishes synthetic from
+// vicodec in the toggle dispatcher (vicodec uses `clip`).
 struct RearViewState {
+  // vicodec tier state
   std::vector<std::vector<std::uint8_t>> clip;
   std::string decoder_path;
-  std::optional<drm::scene::LayerHandle> layer;
   drm::scene::V4l2DecoderSource* source{nullptr};
   std::size_t next_frame{0};
+
+#if CLUSTER_SIM_HAS_LIBYUV
+  // UVC tier state
+  std::string uvc_path;
+  UvcCapture uvc;
+  drm::scene::DumbBufferSource* dumb_source{nullptr};
+#endif
+
+  // Synthetic-pattern tier state. Populated when neither UVC nor
+  // vicodec are viable. `synthetic_source` is non-null while the
+  // synthetic layer is engaged so the per-frame paint cycle knows
+  // to repaint into it.
+  bool synthetic_armed{false};
+  drm::scene::DumbBufferSource* synthetic_source{nullptr};
+
+  std::optional<drm::scene::LayerHandle> layer;
 };
 
-// Toggle on: build a V4l2DecoderSource against the cached decoder
-// path, hand it to the scene, then submit the first clip frame so
-// the decoder has input to chew on. Layer position is provided by
-// the caller (typically top-right) so the cluster_sim layout
-// concerns aren't smeared into this helper.
-[[nodiscard]] bool toggle_rearview_on(RearViewState& rv, drm::Device& dev,
-                                      drm::scene::LayerScene& scene, std::int32_t x,
-                                      std::int32_t y) {
-  if (rv.layer.has_value() || rv.clip.empty()) {
+#if CLUSTER_SIM_HAS_LIBYUV
+// Toggle-on path for the UVC source. UVC streaming was already armed
+// at startup (STREAMON over USB negotiates ~100-300 ms of bandwidth
+// alloc; doing it here would visibly stall the dial-paint loop), so
+// this just allocates the destination dumb buffer and adds the layer.
+[[nodiscard]] bool toggle_rearview_on_uvc(RearViewState& rv, drm::Device& dev,
+                                          drm::scene::LayerScene& scene, std::int32_t x,
+                                          std::int32_t y) {
+  if (rv.uvc.fd < 0) {
+    return false;
+  }
+  // Match the dumb buffer to the camera's negotiated dimensions so
+  // libyuv writes one row per camera row -- avoids a separate scale
+  // step. The plane scales the dumb buffer down to k_rear_w x k_rear_h
+  // on screen via src_rect / dst_rect just like the vicodec path.
+  auto dumb_r =
+      drm::scene::DumbBufferSource::create(dev, rv.uvc.width, rv.uvc.height, DRM_FORMAT_XRGB8888);
+  if (!dumb_r) {
+    drm::println(stderr, "rear-view: DumbBufferSource::create failed: {}",
+                 dumb_r.error().message());
+    return false;
+  }
+  auto dumb_holder = std::move(*dumb_r);
+  auto* dumb_raw = dumb_holder.get();
+
+  drm::scene::LayerDesc desc;
+  desc.source = std::move(dumb_holder);
+  desc.display.src_rect = drm::scene::Rect{0, 0, rv.uvc.width, rv.uvc.height};
+  desc.display.dst_rect = drm::scene::Rect{x, y, k_rear_w, k_rear_h};
+  desc.display.zpos = k_rear_zpos;
+  desc.content_type = drm::planes::ContentType::Video;
+  auto layer_r = scene.add_layer(std::move(desc));
+  if (!layer_r) {
+    drm::println(stderr, "rear-view: add_layer failed: {}", layer_r.error().message());
+    return false;
+  }
+  rv.layer = *layer_r;
+  rv.dumb_source = dumb_raw;
+  return true;
+}
+
+// Per-frame pump for the UVC path: dequeue one YUYV frame, libyuv-
+// convert it to XRGB8888 inside the dumb buffer's mapping, queue the
+// V4L2 buffer back. Caller invokes from the main loop only when the
+// UVC fd has POLLIN; EAGAIN here would simply mean the kernel beat
+// our poll() to the punch. Any failure (bad ioctl, libyuv error) is
+// silently dropped -- the previous frame stays scanned out.
+void drive_rearview_uvc(RearViewState& rv) noexcept {
+  if (rv.dumb_source == nullptr || rv.uvc.fd < 0) {
+    return;
+  }
+  v4l2_buffer dq{};
+  dq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  dq.memory = V4L2_MEMORY_MMAP;
+  if (xioctl(rv.uvc.fd, VIDIOC_DQBUF, &dq) != 0) {
+    return;
+  }
+  if (dq.index >= k_uvc_buffer_count || rv.uvc.mapped.at(dq.index) == nullptr) {
+    return;
+  }
+  auto const* src = static_cast<const std::uint8_t*>(rv.uvc.mapped.at(dq.index));
+  auto map_r = rv.dumb_source->map(drm::MapAccess::Write);
+  if (map_r) {
+    auto& mapping = *map_r;
+    auto pixels = mapping.pixels();
+    if (pixels.data() != nullptr && mapping.stride() != 0U) {
+      (void)libyuv::YUY2ToARGB(src, static_cast<int>(rv.uvc.bytesperline), pixels.data(),
+                               static_cast<int>(mapping.stride()), static_cast<int>(rv.uvc.width),
+                               static_cast<int>(rv.uvc.height));
+    }
+  }
+  v4l2_buffer qb{};
+  qb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  qb.memory = V4L2_MEMORY_MMAP;
+  qb.index = dq.index;
+  (void)xioctl(rv.uvc.fd, VIDIOC_QBUF, &qb);
+}
+#endif  // CLUSTER_SIM_HAS_LIBYUV
+
+// Toggle-on path for the synthetic-pattern tier. Allocates a single
+// XRGB8888 dumb buffer at the on-screen rear-view dimensions and adds
+// the layer; the per-frame Blend2D paint runs from the main loop.
+[[nodiscard]] bool toggle_rearview_on_synthetic(RearViewState& rv, drm::Device& dev,
+                                                drm::scene::LayerScene& scene, std::int32_t x,
+                                                std::int32_t y) {
+  auto dumb_r = drm::scene::DumbBufferSource::create(dev, k_rear_w, k_rear_h, DRM_FORMAT_XRGB8888);
+  if (!dumb_r) {
+    drm::println(stderr, "rear-view: synthetic DumbBufferSource::create failed: {}",
+                 dumb_r.error().message());
+    return false;
+  }
+  auto dumb_holder = std::move(*dumb_r);
+  auto* dumb_raw = dumb_holder.get();
+
+  drm::scene::LayerDesc desc;
+  desc.source = std::move(dumb_holder);
+  desc.display.src_rect = drm::scene::Rect{0, 0, k_rear_w, k_rear_h};
+  desc.display.dst_rect = drm::scene::Rect{x, y, k_rear_w, k_rear_h};
+  desc.display.zpos = k_rear_zpos;
+  // Synthetic isn't a video stream; default content type is fine and
+  // doesn't bias the allocator toward YUV-capable planes.
+  auto layer_r = scene.add_layer(std::move(desc));
+  if (!layer_r) {
+    drm::println(stderr, "rear-view: add_layer failed: {}", layer_r.error().message());
+    return false;
+  }
+  rv.layer = *layer_r;
+  rv.synthetic_source = dumb_raw;
+  return true;
+}
+
+// Toggle-on path for the vicodec tier. Builds a V4l2DecoderSource
+// against the cached decoder path, hands it to the scene, then submits
+// the first clip frame so the decoder has input to chew on. The
+// startup probe already verified V4l2DecoderSource::create succeeds on
+// this driver, so failure here is unexpected (still handled, but
+// treated as a one-shot not a tier-disabling event since the probe
+// proved the tier viable).
+[[nodiscard]] bool toggle_rearview_on_vicodec(RearViewState& rv, drm::Device& dev,
+                                              drm::scene::LayerScene& scene, std::int32_t x,
+                                              std::int32_t y) {
+  if (rv.clip.empty()) {
     return false;
   }
   drm::scene::V4l2DecoderConfig cfg;
   cfg.codec_fourcc = k_rear_codec_fourcc;
   cfg.capture_fourcc = k_rear_capture_fourcc;
-  cfg.coded_width = k_rear_w;
-  cfg.coded_height = k_rear_h;
+  cfg.coded_width = k_rear_coded_w;
+  cfg.coded_height = k_rear_coded_h;
   cfg.output_buffer_count = k_rear_buffer_count;
   cfg.capture_buffer_count = k_rear_buffer_count;
   cfg.output_buffer_size = k_rear_output_buffer_size;
@@ -880,6 +1301,28 @@ struct RearViewState {
   return true;
 }
 
+// Public toggle-on dispatcher: pick the highest-priority tier whose
+// state was armed by the startup probe. UVC > vicodec > synthetic.
+[[nodiscard]] bool toggle_rearview_on(RearViewState& rv, drm::Device& dev,
+                                      drm::scene::LayerScene& scene, std::int32_t x,
+                                      std::int32_t y) {
+  if (rv.layer.has_value()) {
+    return false;
+  }
+#if CLUSTER_SIM_HAS_LIBYUV
+  if (!rv.uvc_path.empty()) {
+    return toggle_rearview_on_uvc(rv, dev, scene, x, y);
+  }
+#endif
+  if (!rv.clip.empty()) {
+    return toggle_rearview_on_vicodec(rv, dev, scene, x, y);
+  }
+  if (rv.synthetic_armed) {
+    return toggle_rearview_on_synthetic(rv, dev, scene, x, y);
+  }
+  return false;
+}
+
 void toggle_rearview_off(RearViewState& rv, drm::scene::LayerScene& scene) noexcept {
   if (!rv.layer.has_value()) {
     return;
@@ -888,13 +1331,26 @@ void toggle_rearview_off(RearViewState& rv, drm::scene::LayerScene& scene) noexc
   rv.layer.reset();
   rv.source = nullptr;
   rv.next_frame = 0;
+  // The synthetic and UVC dumb-source pointers were owned by the
+  // layer whose remove_layer just dropped them; clear our raw
+  // copies so per-frame paint / drain code stops touching freed
+  // memory.
+  rv.synthetic_source = nullptr;
+#if CLUSTER_SIM_HAS_LIBYUV
+  // UVC stays streaming across toggles so the next R press is cheap
+  // (no STREAMON / USB renegotiation). Frames pile up in the V4L2
+  // ring while the layer is detached; the kernel back-pressures the
+  // camera once the ring is full, no leak.
+  rv.dumb_source = nullptr;
+#endif
 }
 
 // Called from the main loop each iteration when the rear-view is
 // active: drain the decoder's events + completed buffers, and submit
 // the next clip frame when an OUTPUT slot is free. EAGAIN from
 // submit_bitstream just means "no free OUTPUT buffer yet" -- we'll
-// retry on the next tick.
+// retry on the next tick. UVC source has its own per-poll path;
+// drive_rearview() is a no-op there.
 void drive_rearview(RearViewState& rv) noexcept {
   if (rv.source == nullptr || rv.clip.empty()) {
     return;
@@ -1097,32 +1553,86 @@ int main(int argc, char** argv) {
   RearViewState rear_view;
   auto const rear_x = static_cast<std::int32_t>(fb_w) - static_cast<std::int32_t>(k_rear_w) - 32;
   auto const rear_y = static_cast<std::int32_t>(32);
-  if (auto enc_path = find_vicodec_endpoint(/*want_encoder=*/true); enc_path.has_value()) {
-    auto dec_path = find_vicodec_endpoint(/*want_encoder=*/false);
-    if (dec_path.has_value()) {
-      rear_view.clip = encode_fwht_clip(*enc_path);
-      if (!rear_view.clip.empty()) {
-        rear_view.decoder_path = *dec_path;
-        drm::println(
-            "rear-view: ready ({} frames encoded via {}, decoder {}); "
-            "press R to toggle",
-            rear_view.clip.size(), *enc_path, rear_view.decoder_path);
+
+  // Source pickup order: UVC first (when libyuv is built in and a UVC
+  // camera is attached) because a real camera reads more authentically
+  // as a rear-view than an FWHT test pattern, and the libyuv path
+  // bypasses amdgpu DC's refusal to PRIME-import foreign vmalloc
+  // dmabufs. Fall back to the vicodec encoder/decoder pair driving
+  // V4l2DecoderSource zero-copy if no UVC camera is found.
+  bool rear_view_armed = false;
+#if CLUSTER_SIM_HAS_LIBYUV
+  if (auto uvc_path = find_uvc_endpoint(); uvc_path.has_value()) {
+    // STREAMON is the slow step (USB-bandwidth negotiation can take
+    // 100-300 ms on a UVC class device); do it once at startup so the
+    // R toggle stays cheap and doesn't visibly stall dial animation.
+    if (setup_uvc_capture(rear_view.uvc, *uvc_path, k_rear_w, k_rear_h)) {
+      rear_view.uvc_path = *uvc_path;
+      drm::println("rear-view: ready (UVC at {}, YUY2->XRGB via libyuv); press R to toggle",
+                   rear_view.uvc_path);
+      rear_view_armed = true;
+    } else {
+      drm::println(stderr, "rear-view: UVC setup failed at {}; falling back to vicodec", *uvc_path);
+    }
+  }
+#endif
+  if (!rear_view_armed) {
+    if (auto enc_path = find_vicodec_endpoint(/*want_encoder=*/true); enc_path.has_value()) {
+      auto dec_path = find_vicodec_endpoint(/*want_encoder=*/false);
+      if (dec_path.has_value()) {
+        rear_view.clip = encode_fwht_clip(*enc_path);
+        if (!rear_view.clip.empty()) {
+          rear_view.decoder_path = *dec_path;
+          // Probe vicodec viability against the actual DRM device
+          // before announcing the tier ready: V4l2DecoderSource::create
+          // does the AddFB2 dance internally, which is exactly what
+          // amdgpu DC's foreign-dmabuf provenance check rejects.
+          // Constructing once and immediately destroying is cheap and
+          // catches the rejection before the user presses R.
+          drm::scene::V4l2DecoderConfig probe_cfg;
+          probe_cfg.codec_fourcc = k_rear_codec_fourcc;
+          probe_cfg.capture_fourcc = k_rear_capture_fourcc;
+          probe_cfg.coded_width = k_rear_coded_w;
+          probe_cfg.coded_height = k_rear_coded_h;
+          probe_cfg.output_buffer_count = k_rear_buffer_count;
+          probe_cfg.capture_buffer_count = k_rear_buffer_count;
+          probe_cfg.output_buffer_size = k_rear_output_buffer_size;
+          auto probe = drm::scene::V4l2DecoderSource::create(dev, dec_path->c_str(), probe_cfg);
+          if (probe) {
+            // probe destroyed at end of scope; clip stays for the
+            // toggle to rebuild a fresh source on R press.
+            drm::println(
+                "rear-view: ready ({} frames encoded via {}, decoder {}); "
+                "press R to toggle",
+                rear_view.clip.size(), *enc_path, rear_view.decoder_path);
+            rear_view_armed = true;
+          } else {
+            drm::println(stderr,
+                         "rear-view: vicodec import probe failed: {} "
+                         "(driver rejects foreign-source PRIME imports as FBs); "
+                         "falling back to synthetic Blend2D pattern",
+                         probe.error().message());
+            rear_view.clip.clear();
+            rear_view.decoder_path.clear();
+          }
+        } else {
+          drm::println(stderr,
+                       "rear-view: encoder probe at {} produced no frames; "
+                       "falling back to synthetic Blend2D pattern",
+                       *enc_path);
+        }
       } else {
         drm::println(stderr,
-                     "rear-view: encoder probe at {} produced no frames; "
-                     "rear-view will be disabled",
+                     "rear-view: vicodec encoder found at {} but no stateful "
+                     "decoder; falling back to synthetic Blend2D pattern",
                      *enc_path);
       }
-    } else {
-      drm::println(stderr,
-                   "rear-view: vicodec encoder found at {} but no stateful "
-                   "decoder; rear-view will be disabled",
-                   *enc_path);
     }
-  } else {
-    drm::println(stderr,
-                 "rear-view: vicodec not loaded "
-                 "(modprobe vicodec to enable the rear-view toggle)");
+  }
+
+  if (!rear_view_armed) {
+    rear_view.synthetic_armed = true;
+    drm::println("rear-view: ready (synthetic Blend2D test pattern); press R to toggle");
   }
 
   bool flip_pending = false;
@@ -1167,10 +1677,15 @@ int main(int argc, char** argv) {
       return;
     }
     if (ke->pressed && ke->key == KEY_R) {
+      bool const have_source =
+#if CLUSTER_SIM_HAS_LIBYUV
+          !rear_view.uvc_path.empty() ||
+#endif
+          !rear_view.clip.empty() || rear_view.synthetic_armed;
       if (rear_view.layer.has_value()) {
         toggle_rearview_off(rear_view, *scene);
         drm::println("rear-view: off");
-      } else if (!rear_view.clip.empty()) {
+      } else if (have_source) {
         if (toggle_rearview_on(rear_view, dev, *scene, rear_x, rear_y)) {
           drm::println("rear-view: on");
         }
@@ -1210,17 +1725,26 @@ int main(int argc, char** argv) {
   auto const start_time = std::chrono::steady_clock::now();
   drm::println("cluster_sim: {}x{} — Esc / Q to quit", fb_w, fb_h);
 
-  pollfd pfds[3]{};
+  // pfds[0..2] are stable; pfds[3] tracks the optional UVC fd, set to
+  // -1 when the rear-view is off so poll() ignores it.
+  pollfd pfds[4]{};
   pfds[0].fd = input_seat.fd();
   pfds[0].events = POLLIN;
   pfds[1].fd = dev.fd();
   pfds[1].events = POLLIN;
   pfds[2].fd = seat ? seat->poll_fd() : -1;
   pfds[2].events = POLLIN;
+  pfds[3].fd = -1;
+  pfds[3].events = POLLIN;
 
   while (!quit) {
+#if CLUSTER_SIM_HAS_LIBYUV
+    // Slot the UVC fd into the poll set whenever a UVC rear-view is
+    // engaged; clear it when toggled off (or never enabled).
+    pfds[3].fd = (rear_view.layer.has_value() && rear_view.uvc.fd >= 0) ? rear_view.uvc.fd : -1;
+#endif
     int const timeout = flip_pending ? 16 : -1;
-    if (int const ret = poll(pfds, 3, timeout); ret < 0) {
+    if (int const ret = poll(pfds, 4, timeout); ret < 0) {
       if (errno == EINTR) {
         continue;
       }
@@ -1236,6 +1760,11 @@ int main(int argc, char** argv) {
     if ((pfds[2].revents & POLLIN) != 0 && seat) {
       seat->dispatch();
     }
+#if CLUSTER_SIM_HAS_LIBYUV
+    if ((pfds[3].revents & POLLIN) != 0) {
+      drive_rearview_uvc(rear_view);
+    }
+#endif
 
     if (pending_resume_fd != -1) {
       int const new_fd = pending_resume_fd;
@@ -1304,8 +1833,15 @@ int main(int argc, char** argv) {
         warn_phases.at(static_cast<std::size_t>(i)) = std::fmod(elapsed / period, 1.0);
       }
       repaint_layers(speedo_norm, tach_norm, speed_kmh, warn_phases);
-      // Rear-view is decoder-driven; nothing to repaint, just keep
-      // the V4L2 pipeline fed and drained.
+      // Rear-view is decoder-driven (vicodec) or pump-driven (UVC) so
+      // those tiers don't repaint here. The synthetic tier is the
+      // exception: its content lives in a dumb buffer we own and we
+      // refresh the scan-bar pattern each frame to keep it animated.
+      if (rear_view.synthetic_source != nullptr) {
+        if (auto m = rear_view.synthetic_source->map(drm::MapAccess::Write); m) {
+          paint_rearview_synthetic(*m, elapsed, font_face);
+        }
+      }
       drive_rearview(rear_view);
       auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
       if (!r) {
@@ -1323,6 +1859,12 @@ int main(int argc, char** argv) {
       flip_pending = true;
     }
   }
+
+#if CLUSTER_SIM_HAS_LIBYUV
+  // Tear down the always-on UVC stream cleanly. teardown is idempotent
+  // and a no-op when no UVC was armed at startup.
+  teardown_uvc_capture(rear_view.uvc);
+#endif
 
   return EXIT_SUCCESS;
 }
