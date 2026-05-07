@@ -177,6 +177,23 @@ if(DRM_CXX_HAS_GSTREAMER)
   gtest_discover_tests(test_gst_appsink_source_vkms)
 endif()
 
+add_executable(test_v4l2_decoder_source unit/test_v4l2_decoder_source.cpp)
+target_link_libraries(test_v4l2_decoder_source PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_v4l2_decoder_source)
+
+# V4l2DecoderSource integration test against vicodec + vkms. Self-skips
+# at runtime when either kernel module isn't loaded.
+add_executable(test_v4l2_decoder_source_vicodec
+  integration/test_v4l2_decoder_source_vicodec.cpp)
+target_link_libraries(test_v4l2_decoder_source_vicodec PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_v4l2_decoder_source_vicodec)
+
 add_executable(test_page_flip unit/test_page_flip.cpp)
 target_link_libraries(test_page_flip PRIVATE
   drm-cxx::drm-cxx

@@ -294,6 +294,22 @@ if has_gstreamer
   )
 endif
 
+test('test_v4l2_decoder_source',
+  executable('test_v4l2_decoder_source',
+    'unit/test_v4l2_decoder_source.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# V4l2DecoderSource integration test against vicodec + vkms. Self-skips
+# at runtime when either kernel module isn't loaded.
+test('test_v4l2_decoder_source_vicodec',
+  executable('test_v4l2_decoder_source_vicodec',
+    'integration/test_v4l2_decoder_source_vicodec.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_page_flip',
   executable('test_page_flip',
     'unit/test_page_flip.cpp',
