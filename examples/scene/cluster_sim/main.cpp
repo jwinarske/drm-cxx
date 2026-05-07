@@ -4,8 +4,9 @@
 // cluster_sim — automotive instrument-cluster showcase. Currently:
 // a Blend2D-painted radial-gradient backdrop plus animated speedometer
 // and tachometer dial layers, a digital speed readout between them,
-// and a row of warning indicators below. An optional V4l2DecoderSource
-// rear-view layer lands in a follow-up.
+// a row of warning indicators below, and an optional rear-view camera
+// layer driven by drm::scene::V4l2DecoderSource against vicodec
+// (toggled with R).
 //
 // Layer stack (bottom up):
 //   * Bg: full-screen XRGB8888 dumb buffer, painted once at startup
@@ -34,7 +35,20 @@
 //
 // Key bindings:
 //   Esc / q / Ctrl-C — quit.
+//   R                — toggle the rear-view camera layer (no-op when
+//                      vicodec isn't loaded; cluster_sim emits a one-
+//                      shot log line at startup explaining the skip).
 //   Ctrl+Alt+F<n>    — VT switch (forwarded to libseat).
+//
+// The rear-view layer demonstrates V4l2DecoderSource end to end. At
+// startup, cluster_sim probes /dev/video* for a vicodec encoder +
+// stateful decoder pair; if both are present, it drives the encoder
+// once to compress a short looping FWHT clip of an animated test
+// pattern, holds the encoded bytes in memory, and feeds them through
+// V4l2DecoderSource each time the rear-view is toggled on. This
+// avoids bundling a binary FWHT asset in the repo while still
+// exercising the full V4L2 stateful-decoder + KMS prime + addFB2
+// path against a real /dev/video device.
 
 #include "../../common/open_output.hpp"
 #include "../../common/vt_switch.hpp"
@@ -46,9 +60,12 @@
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/input/seat.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
+#include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
+#include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
+#include <drm-cxx/scene/v4l2_decoder_source.hpp>
 #include <drm-cxx/session/seat.hpp>
 
 // Blend2D ships its umbrella header at <blend2d/blend2d.h> on the
@@ -73,12 +90,22 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <filesystem>
+#include <linux/input-event-codes.h>
+#include <linux/videodev2.h>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/poll.h>
 #include <system_error>
+#include <unistd.h>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -148,6 +175,23 @@ constexpr std::array<WarningSpec, k_warn_count> k_warn_specs{{
 constexpr std::uint32_t k_warn_dim_argb = 0xFF14181FU;  // unlit cell fill
 constexpr std::uint32_t k_warn_glyph_dim_argb = 0xFF38404CU;
 constexpr std::uint32_t k_warn_cell_radius = 12U;
+
+// Rear-view layer dimensions. 320x240 keeps the encoded clip small
+// (a few KB per frame) and the layer doesn't need to be larger to
+// read as a thumbnail at the corner of the screen.
+constexpr std::uint32_t k_rear_w = 320U;
+constexpr std::uint32_t k_rear_h = 240U;
+constexpr std::size_t k_rear_clip_frames = 8;
+constexpr std::uint32_t k_rear_codec_fourcc = 0x54485746U;    // V4L2_PIX_FMT_FWHT
+constexpr std::uint32_t k_rear_capture_fourcc = 0x3231564EU;  // V4L2_PIX_FMT_NV12
+constexpr int k_rear_zpos = 5;                                // above warning strip
+constexpr std::uint32_t k_rear_buffer_count = 4U;
+constexpr std::uint32_t k_rear_output_buffer_size = 256U * 1024U;  // ample for FWHT @ 320x240
+
+// EINTR retry budget for ad-hoc V4L2 ioctls in the encoder driver
+// below. Same idiom as V4l2DecoderSource's xioctl, just inline here
+// so the cluster_sim example doesn't reach into library internals.
+constexpr int k_max_ioctl_retries = 8;
 
 // Convert an idle-animation phase in [0, 1] to a needle-position
 // norm in [0, 1] via a (1 - cos)/2 sweep. Smooth at the endpoints,
@@ -421,6 +465,454 @@ void paint_warning_indicators(drm::BufferMapping& mapping,
 }
 // NOLINTEND(misc-include-cleaner)
 
+// EINTR-retrying ioctl wrapper. Returns 0 on success, the errno on
+// failure. Mirrors V4l2DecoderSource's internal helper; kept inline
+// here so the example doesn't reach into library internals.
+[[nodiscard]] int xioctl(int fd, unsigned long request, void* arg) noexcept {
+  for (int attempt = 0; attempt < k_max_ioctl_retries; ++attempt) {
+    int const r = ::ioctl(fd, request, arg);
+    if (r >= 0) {
+      return 0;
+    }
+    if (errno != EINTR) {
+      return errno;
+    }
+  }
+  return EINTR;
+}
+
+// Walk /dev/video* and find a vicodec endpoint that advertises FWHT on
+// the requested side: OUTPUT for the stateful decoder (FWHT in,
+// raw out), CAPTURE for the encoder (raw in, FWHT out). Same probe
+// shape as tests/integration/test_v4l2_decoder_source_vicodec.cpp.
+[[nodiscard]] std::optional<std::string> find_vicodec_endpoint(bool want_encoder) {
+  std::error_code ec;
+  for (auto const& entry : std::filesystem::directory_iterator("/dev", ec)) {
+    auto const& p = entry.path();
+    std::string const name = p.filename().string();
+    if (name.rfind("video", 0) != 0) {
+      continue;
+    }
+    int const fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) {
+      continue;
+    }
+    v4l2_capability cap{};
+    if (xioctl(fd, VIDIOC_QUERYCAP, &cap) != 0) {
+      ::close(fd);
+      continue;
+    }
+    std::string const card(reinterpret_cast<const char*>(cap.card));  // NOLINT
+    if (card.find("vicodec") == std::string::npos) {
+      ::close(fd);
+      continue;
+    }
+    std::uint32_t const caps =
+        ((cap.capabilities & V4L2_CAP_DEVICE_CAPS) != 0U) ? cap.device_caps : cap.capabilities;
+    bool const is_mplane = (caps & V4L2_CAP_VIDEO_M2M_MPLANE) != 0U;
+    bool const is_single = (caps & V4L2_CAP_VIDEO_M2M) != 0U;
+    if (!is_mplane && !is_single) {
+      ::close(fd);
+      continue;
+    }
+    std::uint32_t probe_type = 0;
+    if (want_encoder) {
+      probe_type = is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    } else {
+      probe_type = is_mplane ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE : V4L2_BUF_TYPE_VIDEO_OUTPUT;
+    }
+    bool advertises_fwht = false;
+    for (std::uint32_t i = 0; i < 64; ++i) {
+      v4l2_fmtdesc desc{};
+      desc.index = i;
+      desc.type = probe_type;
+      if (xioctl(fd, VIDIOC_ENUM_FMT, &desc) != 0) {
+        break;
+      }
+      if (desc.pixelformat == k_rear_codec_fourcc) {
+        advertises_fwht = true;
+        break;
+      }
+    }
+    ::close(fd);
+    if (advertises_fwht) {
+      return p.string();
+    }
+  }
+  return std::nullopt;
+}
+
+// Paint a moving NV12 test pattern into a single-plane buffer. Used
+// as the encoder's input each frame. The pattern is a simple gradient
+// shifted by `frame_idx` columns so the encoded clip shows visible
+// motion when looped.
+void paint_test_pattern_nv12(std::uint8_t* nv12, std::uint32_t w, std::uint32_t h,
+                             std::size_t frame_idx) noexcept {
+  // Y plane: vertical gradient horizontally shifted by frame.
+  auto const shift = static_cast<std::uint32_t>(frame_idx) * 16U;
+  auto const w_sz = static_cast<std::size_t>(w);
+  auto const h_sz = static_cast<std::size_t>(h);
+  for (std::uint32_t y = 0; y < h; ++y) {
+    auto* row = nv12 + (static_cast<std::size_t>(y) * w_sz);
+    for (std::uint32_t x = 0; x < w; ++x) {
+      std::uint32_t const v = (x + shift) ^ y;
+      row[x] = static_cast<std::uint8_t>(0x40U + (v & 0x7FU));
+    }
+  }
+  // UV plane (interleaved Cb,Cr): mid-gray (128, 128) gives a near-
+  // monochrome image -- chroma motion isn't necessary for the demo.
+  std::uint8_t* uv = nv12 + (w_sz * h_sz);
+  std::memset(uv, 0x80, w_sz * (h_sz / 2U));
+}
+
+// Drive vicodec's encoder once at startup to produce
+// `k_rear_clip_frames` frames of FWHT-encoded bitstream. Returns the
+// per-frame encoded byte vectors; an empty result signals "encoder
+// path didn't yield a usable clip" and the caller should disable the
+// rear-view feature.
+//
+// The flow mirrors the V4L2 stateful M2M state machine but inverted:
+// raw NV12 frames go in on OUTPUT, FWHT bytes come out on CAPTURE.
+// All ioctls are ad-hoc here because cluster_sim only encodes once
+// at startup -- no need to factor the encoder side into a library
+// module.
+[[nodiscard]] std::vector<std::vector<std::uint8_t>> encode_fwht_clip(
+    const std::string& encoder_path) {
+  std::vector<std::vector<std::uint8_t>> result;
+
+  int const fd = ::open(encoder_path.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
+  if (fd < 0) {
+    return result;
+  }
+
+  v4l2_capability cap{};
+  if (xioctl(fd, VIDIOC_QUERYCAP, &cap) != 0) {
+    ::close(fd);
+    return result;
+  }
+  std::uint32_t const dev_caps =
+      ((cap.capabilities & V4L2_CAP_DEVICE_CAPS) != 0U) ? cap.device_caps : cap.capabilities;
+  bool const is_mplane = (dev_caps & V4L2_CAP_VIDEO_M2M_MPLANE) != 0U;
+  std::uint32_t const out_type =
+      is_mplane ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE : V4L2_BUF_TYPE_VIDEO_OUTPUT;
+  std::uint32_t const cap_type =
+      is_mplane ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+  // Source format on OUTPUT (raw NV12 input to the encoder).
+  v4l2_format src_fmt{};
+  src_fmt.type = out_type;
+  if (is_mplane) {
+    src_fmt.fmt.pix_mp.pixelformat = k_rear_capture_fourcc;
+    src_fmt.fmt.pix_mp.width = k_rear_w;
+    src_fmt.fmt.pix_mp.height = k_rear_h;
+    src_fmt.fmt.pix_mp.num_planes = 1;
+  } else {
+    src_fmt.fmt.pix.pixelformat = k_rear_capture_fourcc;
+    src_fmt.fmt.pix.width = k_rear_w;
+    src_fmt.fmt.pix.height = k_rear_h;
+  }
+  if (xioctl(fd, VIDIOC_S_FMT, &src_fmt) != 0) {
+    ::close(fd);
+    return result;
+  }
+
+  // Coded format on CAPTURE (FWHT output).
+  v4l2_format coded_fmt{};
+  coded_fmt.type = cap_type;
+  if (is_mplane) {
+    coded_fmt.fmt.pix_mp.pixelformat = k_rear_codec_fourcc;
+    coded_fmt.fmt.pix_mp.width = k_rear_w;
+    coded_fmt.fmt.pix_mp.height = k_rear_h;
+  } else {
+    coded_fmt.fmt.pix.pixelformat = k_rear_codec_fourcc;
+    coded_fmt.fmt.pix.width = k_rear_w;
+    coded_fmt.fmt.pix.height = k_rear_h;
+  }
+  if (xioctl(fd, VIDIOC_S_FMT, &coded_fmt) != 0) {
+    ::close(fd);
+    return result;
+  }
+
+  auto cleanup_queues = [&]() {
+    int t = static_cast<int>(out_type);
+    (void)xioctl(fd, VIDIOC_STREAMOFF, &t);
+    t = static_cast<int>(cap_type);
+    (void)xioctl(fd, VIDIOC_STREAMOFF, &t);
+    v4l2_requestbuffers zero{};
+    zero.type = out_type;
+    zero.memory = V4L2_MEMORY_MMAP;
+    (void)xioctl(fd, VIDIOC_REQBUFS, &zero);
+    zero.type = cap_type;
+    (void)xioctl(fd, VIDIOC_REQBUFS, &zero);
+  };
+
+  // REQBUFS + MMAP both queues. Single buffer per side is enough --
+  // we synchronously feed one frame at a time.
+  v4l2_requestbuffers req{};
+  req.count = 1;
+  req.type = out_type;
+  req.memory = V4L2_MEMORY_MMAP;
+  if (xioctl(fd, VIDIOC_REQBUFS, &req) != 0 || req.count == 0) {
+    cleanup_queues();
+    ::close(fd);
+    return result;
+  }
+  req = {};
+  req.count = 1;
+  req.type = cap_type;
+  req.memory = V4L2_MEMORY_MMAP;
+  if (xioctl(fd, VIDIOC_REQBUFS, &req) != 0 || req.count == 0) {
+    cleanup_queues();
+    ::close(fd);
+    return result;
+  }
+
+  auto query_and_map = [&](std::uint32_t type, std::size_t& out_len, void*& out_ptr) -> bool {
+    v4l2_buffer qb{};
+    std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
+    qb.type = type;
+    qb.memory = V4L2_MEMORY_MMAP;
+    qb.index = 0;
+    if (is_mplane) {
+      qb.length = VIDEO_MAX_PLANES;
+      qb.m.planes = planes.data();
+    }
+    if (xioctl(fd, VIDIOC_QUERYBUF, &qb) != 0) {
+      return false;
+    }
+    std::size_t const length = is_mplane ? planes.at(0).length : qb.length;
+    std::uint32_t const offset = is_mplane ? planes.at(0).m.mem_offset : qb.m.offset;
+    void* const mapped = ::mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+    if (mapped == MAP_FAILED) {
+      return false;
+    }
+    out_len = length;
+    out_ptr = mapped;
+    return true;
+  };
+
+  std::size_t out_len = 0;
+  void* out_ptr = nullptr;
+  std::size_t cap_len = 0;
+  void* cap_ptr = nullptr;
+  if (!query_and_map(out_type, out_len, out_ptr) || !query_and_map(cap_type, cap_len, cap_ptr)) {
+    if (out_ptr != nullptr) {
+      ::munmap(out_ptr, out_len);
+    }
+    cleanup_queues();
+    ::close(fd);
+    return result;
+  }
+
+  auto release = [&]() {
+    if (out_ptr != nullptr) {
+      ::munmap(out_ptr, out_len);
+    }
+    if (cap_ptr != nullptr) {
+      ::munmap(cap_ptr, cap_len);
+    }
+    cleanup_queues();
+    ::close(fd);
+  };
+
+  // STREAMON both queues so the encoder is ready to consume the
+  // first OUTPUT QBUF as soon as it lands.
+  int t = static_cast<int>(out_type);
+  if (xioctl(fd, VIDIOC_STREAMON, &t) != 0) {
+    release();
+    return result;
+  }
+  t = static_cast<int>(cap_type);
+  if (xioctl(fd, VIDIOC_STREAMON, &t) != 0) {
+    release();
+    return result;
+  }
+
+  std::size_t const nv12_size = static_cast<std::size_t>(k_rear_w) * k_rear_h * 3U / 2U;
+  result.reserve(k_rear_clip_frames);
+  for (std::size_t i = 0; i < k_rear_clip_frames; ++i) {
+    if (out_len < nv12_size) {
+      break;
+    }
+    paint_test_pattern_nv12(static_cast<std::uint8_t*>(out_ptr), k_rear_w, k_rear_h, i);
+
+    v4l2_buffer qb{};
+    std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
+    qb.type = out_type;
+    qb.memory = V4L2_MEMORY_MMAP;
+    qb.index = 0;
+    if (is_mplane) {
+      qb.length = 1;
+      qb.m.planes = planes.data();
+      planes.at(0).bytesused = static_cast<std::uint32_t>(nv12_size);
+    } else {
+      qb.bytesused = static_cast<std::uint32_t>(nv12_size);
+    }
+    if (xioctl(fd, VIDIOC_QBUF, &qb) != 0) {
+      break;
+    }
+
+    // QBUF a CAPTURE buffer so the encoder has somewhere to write.
+    v4l2_buffer qbc{};
+    std::array<v4l2_plane, VIDEO_MAX_PLANES> planes_c{};
+    qbc.type = cap_type;
+    qbc.memory = V4L2_MEMORY_MMAP;
+    qbc.index = 0;
+    if (is_mplane) {
+      qbc.length = 1;
+      qbc.m.planes = planes_c.data();
+    }
+    if (xioctl(fd, VIDIOC_QBUF, &qbc) != 0) {
+      break;
+    }
+
+    // Poll until both queues complete. vicodec is fast so a short
+    // bounded poll is sufficient.
+    pollfd pfd{};
+    pfd.fd = fd;
+    pfd.events = POLLIN | POLLOUT;
+    if (::poll(&pfd, 1, 1000) <= 0) {
+      break;
+    }
+
+    // DQBUF OUTPUT (encoder consumed our input).
+    v4l2_buffer dqo{};
+    std::array<v4l2_plane, VIDEO_MAX_PLANES> dqo_planes{};
+    dqo.type = out_type;
+    dqo.memory = V4L2_MEMORY_MMAP;
+    if (is_mplane) {
+      dqo.length = VIDEO_MAX_PLANES;
+      dqo.m.planes = dqo_planes.data();
+    }
+    if (xioctl(fd, VIDIOC_DQBUF, &dqo) != 0) {
+      break;
+    }
+
+    // DQBUF CAPTURE (encoder produced FWHT bytes).
+    v4l2_buffer dqc{};
+    std::array<v4l2_plane, VIDEO_MAX_PLANES> dqc_planes{};
+    dqc.type = cap_type;
+    dqc.memory = V4L2_MEMORY_MMAP;
+    if (is_mplane) {
+      dqc.length = VIDEO_MAX_PLANES;
+      dqc.m.planes = dqc_planes.data();
+    }
+    if (xioctl(fd, VIDIOC_DQBUF, &dqc) != 0) {
+      break;
+    }
+    std::uint32_t const bytesused = is_mplane ? dqc_planes.at(0).bytesused : dqc.bytesused;
+    if (bytesused == 0 || bytesused > cap_len) {
+      break;
+    }
+    std::vector<std::uint8_t> frame(bytesused);
+    std::memcpy(frame.data(), cap_ptr, bytesused);
+    result.push_back(std::move(frame));
+  }
+
+  release();
+  return result;
+}
+
+// State for the optional rear-view layer. When `clip` is non-empty
+// the toggle is supported; the layer is held by the LayerScene while
+// `layer` is engaged.
+struct RearViewState {
+  std::vector<std::vector<std::uint8_t>> clip;
+  std::string decoder_path;
+  std::optional<drm::scene::LayerHandle> layer;
+  drm::scene::V4l2DecoderSource* source{nullptr};
+  std::size_t next_frame{0};
+};
+
+// Toggle on: build a V4l2DecoderSource against the cached decoder
+// path, hand it to the scene, then submit the first clip frame so
+// the decoder has input to chew on. Layer position is provided by
+// the caller (typically top-right) so the cluster_sim layout
+// concerns aren't smeared into this helper.
+[[nodiscard]] bool toggle_rearview_on(RearViewState& rv, drm::Device& dev,
+                                      drm::scene::LayerScene& scene, std::int32_t x,
+                                      std::int32_t y) {
+  if (rv.layer.has_value() || rv.clip.empty()) {
+    return false;
+  }
+  drm::scene::V4l2DecoderConfig cfg;
+  cfg.codec_fourcc = k_rear_codec_fourcc;
+  cfg.capture_fourcc = k_rear_capture_fourcc;
+  cfg.coded_width = k_rear_w;
+  cfg.coded_height = k_rear_h;
+  cfg.output_buffer_count = k_rear_buffer_count;
+  cfg.capture_buffer_count = k_rear_buffer_count;
+  cfg.output_buffer_size = k_rear_output_buffer_size;
+  auto src_r = drm::scene::V4l2DecoderSource::create(dev, rv.decoder_path.c_str(), cfg);
+  if (!src_r) {
+    drm::println(stderr, "rear-view: V4l2DecoderSource::create failed: {}",
+                 src_r.error().message());
+    return false;
+  }
+  auto src_holder = std::move(*src_r);
+  auto* src_raw = src_holder.get();
+
+  drm::scene::LayerDesc desc;
+  desc.source = std::move(src_holder);
+  auto const fmt = src_raw->format();
+  desc.display.src_rect = drm::scene::Rect{0, 0, fmt.width, fmt.height};
+  desc.display.dst_rect = drm::scene::Rect{x, y, k_rear_w, k_rear_h};
+  desc.display.zpos = k_rear_zpos;
+  desc.content_type = drm::planes::ContentType::Video;
+  auto layer_r = scene.add_layer(std::move(desc));
+  if (!layer_r) {
+    drm::println(stderr, "rear-view: add_layer failed: {}", layer_r.error().message());
+    return false;
+  }
+  rv.layer = *layer_r;
+  rv.source = src_raw;
+  rv.next_frame = 0;
+
+  // Feed the first frame so the decoder has something queued before
+  // the scene's next commit hits acquire(). Subsequent frames flow
+  // through drive_rearview() each main-loop tick.
+  auto const& bytes = rv.clip.at(rv.next_frame);
+  if (auto r =
+          rv.source->submit_bitstream(drm::span<const std::uint8_t>(bytes.data(), bytes.size()), 0);
+      r) {
+    rv.next_frame = (rv.next_frame + 1) % rv.clip.size();
+  }
+  return true;
+}
+
+void toggle_rearview_off(RearViewState& rv, drm::scene::LayerScene& scene) noexcept {
+  if (!rv.layer.has_value()) {
+    return;
+  }
+  scene.remove_layer(*rv.layer);
+  rv.layer.reset();
+  rv.source = nullptr;
+  rv.next_frame = 0;
+}
+
+// Called from the main loop each iteration when the rear-view is
+// active: drain the decoder's events + completed buffers, and submit
+// the next clip frame when an OUTPUT slot is free. EAGAIN from
+// submit_bitstream just means "no free OUTPUT buffer yet" -- we'll
+// retry on the next tick.
+void drive_rearview(RearViewState& rv) noexcept {
+  if (rv.source == nullptr || rv.clip.empty()) {
+    return;
+  }
+  if (auto r = rv.source->drive(); !r) {
+    // SOURCE_CHANGE / EOS / fatal -- detach the source so the next
+    // toggle on rebuilds it from scratch. The layer stays in the
+    // scene; it'll just stop advancing until toggled off+on.
+    return;
+  }
+  auto const& bytes = rv.clip.at(rv.next_frame);
+  if (auto r =
+          rv.source->submit_bitstream(drm::span<const std::uint8_t>(bytes.data(), bytes.size()), 0);
+      r) {
+    rv.next_frame = (rv.next_frame + 1) % rv.clip.size();
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -597,6 +1089,42 @@ int main(int argc, char** argv) {
   std::array<double, k_warn_count> const initial_warn_phases{0.0, 0.0, 0.0, 0.0};
   repaint_layers(0.0, 0.0, 0U, initial_warn_phases);
 
+  // Optional rear-view layer setup. Probe for the vicodec encoder +
+  // stateful decoder pair; if both are present, drive the encoder
+  // once at startup to produce the looping FWHT clip the rear-view
+  // toggle will replay through V4l2DecoderSource. Failing to find
+  // either endpoint disables the toggle but doesn't fail startup.
+  RearViewState rear_view;
+  auto const rear_x = static_cast<std::int32_t>(fb_w) - static_cast<std::int32_t>(k_rear_w) - 32;
+  auto const rear_y = static_cast<std::int32_t>(32);
+  if (auto enc_path = find_vicodec_endpoint(/*want_encoder=*/true); enc_path.has_value()) {
+    auto dec_path = find_vicodec_endpoint(/*want_encoder=*/false);
+    if (dec_path.has_value()) {
+      rear_view.clip = encode_fwht_clip(*enc_path);
+      if (!rear_view.clip.empty()) {
+        rear_view.decoder_path = *dec_path;
+        drm::println(
+            "rear-view: ready ({} frames encoded via {}, decoder {}); "
+            "press R to toggle",
+            rear_view.clip.size(), *enc_path, rear_view.decoder_path);
+      } else {
+        drm::println(stderr,
+                     "rear-view: encoder probe at {} produced no frames; "
+                     "rear-view will be disabled",
+                     *enc_path);
+      }
+    } else {
+      drm::println(stderr,
+                   "rear-view: vicodec encoder found at {} but no stateful "
+                   "decoder; rear-view will be disabled",
+                   *enc_path);
+    }
+  } else {
+    drm::println(stderr,
+                 "rear-view: vicodec not loaded "
+                 "(modprobe vicodec to enable the rear-view toggle)");
+  }
+
   bool flip_pending = false;
   // need_repaint drives the per-frame dial-paint cycle. Set true on
   // every page-flip-event landing so the next loop iteration repaints
@@ -636,6 +1164,17 @@ int main(int argc, char** argv) {
     }
     if (vt_chord.is_quit_key(*ke)) {
       quit = true;
+      return;
+    }
+    if (ke->pressed && ke->key == KEY_R) {
+      if (rear_view.layer.has_value()) {
+        toggle_rearview_off(rear_view, *scene);
+        drm::println("rear-view: off");
+      } else if (!rear_view.clip.empty()) {
+        if (toggle_rearview_on(rear_view, dev, *scene, rear_x, rear_y)) {
+          drm::println("rear-view: on");
+        }
+      }
     }
   });
 
@@ -765,6 +1304,9 @@ int main(int argc, char** argv) {
         warn_phases.at(static_cast<std::size_t>(i)) = std::fmod(elapsed / period, 1.0);
       }
       repaint_layers(speedo_norm, tach_norm, speed_kmh, warn_phases);
+      // Rear-view is decoder-driven; nothing to repaint, just keep
+      // the V4L2 pipeline fed and drained.
+      drive_rearview(rear_view);
       auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
       if (!r) {
         if (r.error() == std::errc::permission_denied) {
