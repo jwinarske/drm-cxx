@@ -1,5 +1,10 @@
 # cluster_sim — automotive instrument-cluster showcase
 
+Status: **dials added**. A Blend2D-painted backdrop plus animated
+speedometer + tachometer dials, each repainted per frame at scanout
+cadence. Center info, warning indicators, and the optional rear-view
+video layer land in subsequent commits.
+
 ## What this exercises
 
 - **Multi-layer scene composition** with mixed formats (ARGB on top
