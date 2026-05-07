@@ -24,8 +24,10 @@
 //   F1             — print the current scene state + last commit report
 //   Esc / q        — quit
 
+#include "../../common/event_loop.hpp"
 #include "../../common/format_probe.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/session_pump.hpp"
 #include "../../common/vt_switch.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
@@ -52,14 +54,11 @@
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <linux/input-event-codes.h>
 #include <optional>
-#include <string_view>
-#include <sys/poll.h>
 #include <system_error>
 #include <utility>
 #include <variant>
@@ -292,14 +291,13 @@ int main(int argc, char** argv) {
   std::size_t selection = 0;
   drm::scene::CommitReport last_report{};
 
-  bool session_paused = false;
-  bool flip_pending = false;
-  int pending_resume_fd = -1;
+  drm::examples::SessionPumpState session_state;
   bool dirty = false;
 
   drm::PageFlip page_flip(dev);
-  page_flip.set_handler(
-      [&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) { flip_pending = false; });
+  page_flip.set_handler([&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
+    session_state.flip_pending = false;
+  });
 
   drm::input::InputDeviceOpener libinput_opener;
   if (seat) {
@@ -513,17 +511,8 @@ int main(int argc, char** argv) {
   repeater.set_handler(handle_key_action);
 
   if (seat) {
-    seat->set_pause_callback([&]() {
-      session_paused = true;
-      flip_pending = false;
-      repeater.cancel();
-      (void)input_seat.suspend();
-    });
-    seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
-      pending_resume_fd = new_fd;
-      session_paused = false;
-      (void)input_seat.resume();
-    });
+    drm::examples::wire_session_callbacks(*seat, *scene, session_state, &input_seat,
+                                          [&] { repeater.cancel(); });
   }
 
   auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip);
@@ -532,67 +521,35 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   last_report = *r;
-  flip_pending = true;
+  session_state.flip_pending = true;
   drm::println(
       "Running — 1..8 toggle, Tab cycle, arrows move, z/x zpos, [/] alpha, r reset, "
       "F1 stats, Esc/q quit.");
 
-  pollfd pfds[4]{};
-  pfds[0].fd = input_seat.fd();
-  pfds[0].events = POLLIN;
-  pfds[1].fd = dev.fd();
-  pfds[1].events = POLLIN;
-  pfds[2].fd = seat ? seat->poll_fd() : -1;
-  pfds[2].events = POLLIN;
-  pfds[3].fd = repeater.fd();
-  pfds[3].events = POLLIN;
-
-  while (!quit) {
-    int timeout = -1;
-    if (flip_pending) {
-      timeout = 16;
-    }
-    if (const int ret = poll(pfds, 4, timeout); ret < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      drm::println(stderr, "poll: {}", std::system_category().message(errno));
-      break;
-    }
-    if ((pfds[0].revents & POLLIN) != 0) {
-      (void)input_seat.dispatch();
-    }
-    if ((pfds[1].revents & POLLIN) != 0) {
-      (void)page_flip.dispatch(0);
-    }
-    if ((pfds[2].revents & POLLIN) != 0 && seat) {
+  drm::examples::EventLoop loop;
+  (void)loop.add_slot(input_seat.fd(), [&] { (void)input_seat.dispatch(); });
+  int const drm_slot = loop.add_slot(dev.fd(), [&] { (void)page_flip.dispatch(0); });
+  (void)loop.add_slot(seat ? seat->poll_fd() : -1, [&] {
+    if (seat) {
       seat->dispatch();
     }
-    if ((pfds[3].revents & POLLIN) != 0) {
-      repeater.dispatch();
+  });
+  (void)loop.add_slot(repeater.fd(), [&] { repeater.dispatch(); });
+
+  while (!quit) {
+    if (!loop.tick(session_state.flip_pending ? 16 : -1)) {
+      break;
     }
 
-    if (pending_resume_fd != -1) {
-      const int new_fd = pending_resume_fd;
-      pending_resume_fd = -1;
-      scene->on_session_paused();
-      output->device = drm::Device::from_fd(new_fd);
-      pfds[1].fd = dev.fd();
-      if (auto r = dev.enable_universal_planes(); !r) {
-        drm::println(stderr, "resume: enable_universal_planes failed");
-        break;
-      }
-      if (auto r = dev.enable_atomic(); !r) {
-        drm::println(stderr, "resume: enable_atomic failed");
-        break;
-      }
-      if (auto r = scene->on_session_resumed(dev); !r) {
-        drm::println(stderr, "resume: on_session_resumed failed: {}", r.error().message());
-        break;
-      }
+    auto resumed = drm::examples::apply_pending_resume(session_state, dev, *scene);
+    if (!resumed) {
+      break;
+    }
+    if (*resumed) {
+      loop.set_fd(drm_slot, dev.fd());
       page_flip = drm::PageFlip(dev);
       page_flip.set_handler(
-          [&](std::uint32_t, std::uint64_t, std::uint64_t) { flip_pending = false; });
+          [&](std::uint32_t, std::uint64_t, std::uint64_t) { session_state.flip_pending = false; });
       // Buffer mappings were torn down on pause; repaint the bg and
       // every active tile against the fresh mappings before committing.
       if (auto m = bg->map(drm::MapAccess::Write); m) {
@@ -611,7 +568,7 @@ int main(int argc, char** argv) {
       dirty = true;
     }
 
-    if (flip_pending || session_paused) {
+    if (session_state.flip_pending || session_state.paused) {
       continue;
     }
 
@@ -623,15 +580,15 @@ int main(int argc, char** argv) {
     auto report = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
     if (!report) {
       if (report.error() == std::errc::permission_denied) {
-        session_paused = true;
-        flip_pending = false;
+        session_state.paused = true;
+        session_state.flip_pending = false;
         continue;
       }
       drm::println(stderr, "commit failed: {}", report.error().message());
       break;
     }
     last_report = *report;
-    flip_pending = true;
+    session_state.flip_pending = true;
   }
 
   return EXIT_SUCCESS;

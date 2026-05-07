@@ -39,7 +39,9 @@
 // (Meson). The example is gated on the same flag, so a build without
 // GStreamer simply doesn't build this binary.
 
+#include "../../common/event_loop.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/session_pump.hpp"
 #include "../../common/vt_switch.hpp"
 
 #include <drm-cxx/core/device.hpp>
@@ -55,7 +57,6 @@
 #include <drm_mode.h>
 
 #include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -67,7 +68,6 @@
 #include <gst/gstparse.h>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <sys/poll.h>
 #include <system_error>
 #include <utility>
@@ -261,36 +261,19 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  // Session pause/resume bookkeeping. Both flags are touched from the
-  // main thread only — the libseat callbacks fire from inside
-  // seat->dispatch(), which we call from the main loop. We can't tear
-  // down PageFlip / GstElement state from inside the resume callback
-  // because it'd run mid-dispatch; record `pending_resume_fd` and let
-  // the loop apply it on its next iteration.
-  bool session_paused = false;
-  int pending_resume_fd = -1;
+  // Session pause/resume bookkeeping. wire_session_callbacks installs
+  // the standard pause (drop scene FBs + suspend libinput + clear
+  // session_state.flip_pending) and resume (capture new fd into
+  // pending_resume_fd after the /dev/dri/ filter) handlers; the
+  // gst pipeline pause hook below runs at the end of the pause cb,
+  // before the kernel revokes the fd. PAUSED keeps the negotiated
+  // caps + element state so the resume transition back to PLAYING
+  // is fast. The fd swap + on_session_resumed land later in
+  // apply_pending_resume.
+  drm::examples::SessionPumpState session_state;
   if (seat) {
-    seat->set_pause_callback([&]() {
-      session_paused = true;
-      // Drop FB ids and GEM handles bound to the dying drm fd before
-      // the kernel revokes it.
-      scene->on_session_paused();
-      // Stop decode while we're invisible. PAUSED keeps the negotiated
-      // caps + element state so the resume transition back to PLAYING
-      // is fast.
+    drm::examples::wire_session_callbacks(*seat, *scene, session_state, &input_seat, [&] {
       gst_element_set_state(pipeline, GST_STATE_PAUSED);
-      (void)input_seat.suspend();
-    });
-    // libseat fires resume_cb once per device — DRM card AND every
-    // libinput fd. Filter on `/dev/dri/` so an input-device resume
-    // can't overwrite (or race past) the card fd we actually need to
-    // swap in. libinput's privileged opens are reattached through
-    // input_seat.resume() in the main-loop apply step.
-    seat->set_resume_callback([&](std::string_view path, int new_fd) {
-      if (path.substr(0, 9) != "/dev/dri/") {
-        return;
-      }
-      pending_resume_fd = new_fd;
     });
   }
 
@@ -354,15 +337,14 @@ int main(int argc, char* argv[]) {
 
   // Page-flip dispatch: the scene's commit path uses
   // DRM_MODE_PAGE_FLIP_EVENT, which fires once the kernel has scanned
-  // out the committed FB. flip_pending gates the next commit. The
-  // PageFlip object captures the device fd at construction; on
-  // session resume it must be rebuilt against the new fd, hence the
+  // out the committed FB. session_state.flip_pending gates the next
+  // commit. The PageFlip object captures the device fd at construction;
+  // on session resume it must be rebuilt against the new fd, hence the
   // factory lambda.
-  bool flip_pending = false;
   auto make_page_flip = [&]() {
     drm::PageFlip pf(dev);
     pf.set_handler([&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
-      flip_pending = false;
+      session_state.flip_pending = false;
     });
     return pf;
   };
@@ -373,17 +355,18 @@ int main(int argc, char* argv[]) {
     gst_element_set_state(pipeline, GST_STATE_NULL);
     return EXIT_FAILURE;
   }
-  flip_pending = true;
+  session_state.flip_pending = true;
 
   drm::println("Playing — Esc/Q/Ctrl-C to quit.");
 
-  pollfd pfds[3]{};
-  pfds[0].fd = input_seat.fd();
-  pfds[0].events = POLLIN;
-  pfds[1].fd = dev.fd();
-  pfds[1].events = POLLIN;
-  pfds[2].fd = seat ? seat->poll_fd() : -1;
-  pfds[2].events = POLLIN;
+  drm::examples::EventLoop loop;
+  (void)loop.add_slot(input_seat.fd(), [&] { (void)input_seat.dispatch(); });
+  int const drm_slot = loop.add_slot(dev.fd(), [&] { (void)page_flip.dispatch(0); });
+  (void)loop.add_slot(seat ? seat->poll_fd() : -1, [&] {
+    if (seat) {
+      seat->dispatch();
+    }
+  });
 
   // Becomes true on a genuine error (commit, drive, poll, resume-step
   // failure). Stays false for the clean exits (user quit, EOS, signal),
@@ -394,7 +377,7 @@ int main(int argc, char* argv[]) {
     // wastes a vblank. Skipped while paused — the pipeline is in
     // PAUSED, the appsink isn't producing, and the bus pop is a
     // no-op anyway.
-    if (!session_paused) {
+    if (!session_state.paused) {
       if (auto r = video_source->drive(); !r) {
         const auto ec = r.error();
         if (ec == std::make_error_code(std::errc::no_message_available)) {
@@ -411,61 +394,33 @@ int main(int argc, char* argv[]) {
     // wakes us with a resume. Otherwise, 16ms ≈ one 60Hz frame so we
     // don't busy-loop when no new sample is ready.
     int timeout_ms = 0;
-    if (session_paused) {
+    if (session_state.paused) {
       timeout_ms = -1;
-    } else if (flip_pending) {
+    } else if (session_state.flip_pending) {
       timeout_ms = 16;
     }
-    if (const int n = ::poll(pfds, 3, timeout_ms); n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      drm::println(stderr, "poll: {}", std::system_category().message(errno));
+    if (!loop.tick(timeout_ms)) {
       error_exit = true;
       break;
     }
-    if ((pfds[0].revents & POLLIN) != 0) {
-      (void)input_seat.dispatch();
-    }
-    if ((pfds[1].revents & POLLIN) != 0) {
-      (void)page_flip.dispatch(0);
-    }
-    if ((pfds[2].revents & POLLIN) != 0 && seat) {
-      seat->dispatch();
-    }
 
-    if (pending_resume_fd != -1) {
-      const int new_fd = pending_resume_fd;
-      pending_resume_fd = -1;
-      output.device = drm::Device::from_fd(new_fd);
-      pfds[1].fd = dev.fd();
-      if (auto r = dev.enable_universal_planes(); !r) {
-        drm::println(stderr, "resume: enable_universal_planes: {}", r.error().message());
-        error_exit = true;
-        break;
-      }
-      if (auto r = dev.enable_atomic(); !r) {
-        drm::println(stderr, "resume: enable_atomic: {}", r.error().message());
-        error_exit = true;
-        break;
-      }
-      if (auto r = scene->on_session_resumed(dev); !r) {
-        drm::println(stderr, "resume: on_session_resumed: {}", r.error().message());
-        error_exit = true;
-        break;
-      }
+    auto resumed = drm::examples::apply_pending_resume(session_state, dev, *scene);
+    if (!resumed) {
+      error_exit = true;
+      break;
+    }
+    if (*resumed) {
+      loop.set_fd(drm_slot, dev.fd());
       // PageFlip captured the dead fd at construction; rebuild against
       // the new device. Move-assign destroys the old PageFlip (its
       // userspace epfd closes; the dead drm fd was already handled by
       // Device's owns_fd contract above).
       page_flip = make_page_flip();
-      (void)input_seat.resume();
       gst_element_set_state(pipeline, GST_STATE_PLAYING);
-      flip_pending = false;
-      session_paused = false;
+      session_state.flip_pending = false;
     }
 
-    if (flip_pending || session_paused) {
+    if (session_state.flip_pending || session_state.paused) {
       continue;
     }
 
@@ -476,8 +431,8 @@ int main(int argc, char* argv[]) {
       // actual revocation). Treat it as a soft pause and wait for the
       // explicit resume to land in pending_resume_fd.
       if (r.error() == std::errc::permission_denied) {
-        session_paused = true;
-        flip_pending = false;
+        session_state.paused = true;
+        session_state.flip_pending = false;
         continue;
       }
       // EAGAIN from the allocator's warm-start TEST_ONLY commit: the
@@ -485,14 +440,14 @@ int main(int argc, char* argv[]) {
       // flip state and let the next iteration go through full search.
       // Not a soft-pause — there's no resume_cb coming to clear it.
       if (r.error() == std::errc::resource_unavailable_try_again) {
-        flip_pending = false;
+        session_state.flip_pending = false;
         continue;
       }
       drm::println(stderr, "commit: {}", r.error().message());
       error_exit = true;
       break;
     }
-    flip_pending = true;
+    session_state.flip_pending = true;
   }
 
   gst_element_set_state(pipeline, GST_STATE_NULL);

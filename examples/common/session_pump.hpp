@@ -30,8 +30,10 @@
 #include <drm-cxx/scene/layer_scene.hpp>
 #include <drm-cxx/session/seat.hpp>
 
+#include <functional>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace drm::examples {
 
@@ -63,26 +65,46 @@ struct SessionPumpState {
 /// fd. A naive `pending_resume_fd = new_fd` assignment would let an
 /// input-device resume overwrite the card fd we actually need to swap;
 /// the input::Seat handles its own input-device fds via input->resume().
+///
+/// `on_pause_extra` runs at the end of the pause callback — after the
+/// scene has dropped its FBs and libinput has been suspended. Use it
+/// for example-specific pause work that must complete synchronously
+/// before the kernel revokes the fd: pausing a gstreamer pipeline,
+/// stopping a key-repeat timer, flipping an "active" flag that other
+/// threads consult.
+///
+/// `on_resume_extra` runs at the end of the resume callback — after
+/// `pending_resume_fd` has been latched and libinput has been resumed.
+/// The fd swap itself happens later, in `apply_pending_resume`.
 inline void wire_session_callbacks(drm::session::Seat& seat, drm::scene::LayerScene& scene,
-                                   SessionPumpState& state, drm::input::Seat* input = nullptr) {
-  seat.set_pause_callback([&scene, &state, input]() {
+                                   SessionPumpState& state, drm::input::Seat* input = nullptr,
+                                   std::function<void()> on_pause_extra = {},
+                                   std::function<void()> on_resume_extra = {}) {
+  seat.set_pause_callback([&scene, &state, input, on_pause = std::move(on_pause_extra)]() {
     state.paused = true;
     state.flip_pending = false;
     scene.on_session_paused();
     if (input != nullptr) {
       (void)input->suspend();
     }
-  });
-  seat.set_resume_callback([&state, input](std::string_view path, int new_fd) {
-    if (path.substr(0, 9) != "/dev/dri/") {
-      return;
-    }
-    state.pending_resume_fd = new_fd;
-    state.paused = false;
-    if (input != nullptr) {
-      (void)input->resume();
+    if (on_pause) {
+      on_pause();
     }
   });
+  seat.set_resume_callback(
+      [&state, input, on_resume = std::move(on_resume_extra)](std::string_view path, int new_fd) {
+        if (path.substr(0, 9) != "/dev/dri/") {
+          return;
+        }
+        state.pending_resume_fd = new_fd;
+        state.paused = false;
+        if (input != nullptr) {
+          (void)input->resume();
+        }
+        if (on_resume) {
+          on_resume();
+        }
+      });
 }
 
 /// If `state.pending_resume_fd` is set: replace `device`'s fd in place,

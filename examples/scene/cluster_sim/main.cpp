@@ -57,7 +57,10 @@
 // exercising the full V4L2 stateful-decoder + KMS prime + addFB2
 // path against a real /dev/video device.
 
+#include "../../common/event_loop.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/session_pump.hpp"
+#include "../../common/uvc_capture.hpp"
 #include "../../common/vt_switch.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
@@ -495,7 +498,7 @@ void paint_warning_indicators(drm::BufferMapping& mapping,
   bool const have_font = font_face.is_valid() &&
                          glyph_font.create_from_face(font_face, k_warn_glyph_font_px) == BL_SUCCESS;
 
-  double const cell_w = static_cast<double>(k_warn_w) / static_cast<double>(k_warn_count);
+  constexpr double cell_w = static_cast<double>(k_warn_w) / static_cast<double>(k_warn_count);
   double const inner_pad = 6.0;
   for (int i = 0; i < k_warn_count; ++i) {
     bool const lit = phases.at(static_cast<std::size_t>(i)) < 0.5;
@@ -564,13 +567,13 @@ void paint_rearview_synthetic(drm::BufferMapping& mapping, double elapsed_s,
   // Centered "REAR-VIEW (SIM)" label so the user can tell at a glance
   // that this is the synthetic fallback, not a stalled real feed.
   if (font_face.is_valid()) {
-    BLFont label_font;
-    if (label_font.create_from_face(font_face, k_rear_synth_label_font_px) == BL_SUCCESS) {
+    if (BLFont label_font;
+        label_font.create_from_face(font_face, k_rear_synth_label_font_px) == BL_SUCCESS) {
       paint_centered_text(ctx, label_font, "REAR-VIEW", static_cast<double>(k_rear_w) * 0.5,
                           static_cast<double>(k_rear_h) * 0.45, k_rear_synth_label_argb);
     }
-    BLFont sub_font;
-    if (sub_font.create_from_face(font_face, k_rear_synth_sublabel_font_px) == BL_SUCCESS) {
+    if (BLFont sub_font;
+        sub_font.create_from_face(font_face, k_rear_synth_sublabel_font_px) == BL_SUCCESS) {
       paint_centered_text(ctx, sub_font, "(SIM)", static_cast<double>(k_rear_w) * 0.5,
                           static_cast<double>(k_rear_h) * 0.6, k_rear_synth_subtle_argb);
     }
@@ -655,175 +658,6 @@ void paint_rearview_synthetic(drm::BufferMapping& mapping, double elapsed_s,
   }
   return std::nullopt;
 }
-
-#if CLUSTER_SIM_HAS_LIBYUV
-// UVC capture state. Lives for as long as the rear-view layer is
-// engaged: open the /dev/video node, S_FMT YUYV at the negotiated
-// dimensions, REQBUFS+QUERYBUF+MMAP a small ring of CPU-mappable
-// buffers, then dequeue/libyuv-convert/queue per frame from the main
-// loop. The buffers are V4L2_MEMORY_MMAP so the conversion source is
-// the kernel's own page-aligned mapping; we never PRIME-import the
-// dmabuf and so dodge amdgpu DC's foreign-vmalloc rejection entirely.
-struct UvcCapture {
-  int fd{-1};
-  std::array<void*, k_uvc_buffer_count> mapped{};
-  std::array<std::size_t, k_uvc_buffer_count> mapped_len{};
-  std::uint32_t bytesperline{0};
-  std::uint32_t width{0};
-  std::uint32_t height{0};
-  bool streaming{false};
-};
-
-// Walk /dev/video* for a single-plane CAPTURE-only device that
-// advertises YUYV. Skip M2M / OUTPUT-only devices (vicodec) and
-// metadata / radio / SDR nodes. The first match wins; that's
-// good enough for the cluster_sim demo where there's typically
-// at most one camera attached.
-[[nodiscard]] std::optional<std::string> find_uvc_endpoint() {
-  std::error_code ec;
-  for (auto const& entry : std::filesystem::directory_iterator("/dev", ec)) {
-    auto const& p = entry.path();
-    std::string const name = p.filename().string();
-    if (name.rfind("video", 0) != 0) {
-      continue;
-    }
-    int const fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
-    if (fd < 0) {
-      continue;
-    }
-    v4l2_capability cap{};
-    if (xioctl(fd, VIDIOC_QUERYCAP, &cap) != 0) {
-      ::close(fd);
-      continue;
-    }
-    std::uint32_t const caps =
-        ((cap.capabilities & V4L2_CAP_DEVICE_CAPS) != 0U) ? cap.device_caps : cap.capabilities;
-    bool const is_capture = (caps & V4L2_CAP_VIDEO_CAPTURE) != 0U;
-    bool const is_m2m = (caps & (V4L2_CAP_VIDEO_M2M | V4L2_CAP_VIDEO_M2M_MPLANE)) != 0U;
-    if (!is_capture || is_m2m || (caps & V4L2_CAP_STREAMING) == 0U) {
-      ::close(fd);
-      continue;
-    }
-    bool advertises_yuyv = false;
-    for (std::uint32_t i = 0; i < 64; ++i) {
-      v4l2_fmtdesc desc{};
-      desc.index = i;
-      desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      if (xioctl(fd, VIDIOC_ENUM_FMT, &desc) != 0) {
-        break;
-      }
-      if (desc.pixelformat == k_uvc_capture_fourcc) {
-        advertises_yuyv = true;
-        break;
-      }
-    }
-    ::close(fd);
-    if (advertises_yuyv) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
-
-// REQBUFS=0 + munmap whatever's mapped + close the fd. Idempotent so
-// the failure path in setup_uvc_capture and the toggle-off path can
-// share it.
-void teardown_uvc_capture(UvcCapture& uvc) noexcept {
-  if (uvc.fd >= 0 && uvc.streaming) {
-    int t = static_cast<int>(V4L2_BUF_TYPE_VIDEO_CAPTURE);
-    (void)xioctl(uvc.fd, VIDIOC_STREAMOFF, &t);
-    uvc.streaming = false;
-  }
-  for (std::size_t i = 0; i < k_uvc_buffer_count; ++i) {
-    if (uvc.mapped.at(i) != nullptr) {
-      ::munmap(uvc.mapped.at(i), uvc.mapped_len.at(i));
-      uvc.mapped.at(i) = nullptr;
-      uvc.mapped_len.at(i) = 0;
-    }
-  }
-  if (uvc.fd >= 0) {
-    v4l2_requestbuffers zero{};
-    zero.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    zero.memory = V4L2_MEMORY_MMAP;
-    (void)xioctl(uvc.fd, VIDIOC_REQBUFS, &zero);
-    ::close(uvc.fd);
-    uvc.fd = -1;
-  }
-  uvc.bytesperline = 0;
-  uvc.width = 0;
-  uvc.height = 0;
-}
-
-// Open the named UVC node, request YUYV at `want_w x want_h`, allocate
-// + mmap the buffer ring, queue every buffer, and STREAMON. The kernel
-// may snap requested dimensions; whatever it gives us is recorded in
-// `uvc.width / uvc.height / uvc.bytesperline`. Returns true on
-// success; on failure the partial state is torn down and `uvc.fd`
-// is restored to -1.
-[[nodiscard]] bool setup_uvc_capture(UvcCapture& uvc, const std::string& path, std::uint32_t want_w,
-                                     std::uint32_t want_h) {
-  uvc.fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
-  if (uvc.fd < 0) {
-    return false;
-  }
-  v4l2_format fmt{};
-  fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  fmt.fmt.pix.pixelformat = k_uvc_capture_fourcc;
-  fmt.fmt.pix.width = want_w;
-  fmt.fmt.pix.height = want_h;
-  fmt.fmt.pix.field = V4L2_FIELD_ANY;
-  if (xioctl(uvc.fd, VIDIOC_S_FMT, &fmt) != 0) {
-    teardown_uvc_capture(uvc);
-    return false;
-  }
-  if (fmt.fmt.pix.pixelformat != k_uvc_capture_fourcc) {
-    teardown_uvc_capture(uvc);
-    return false;
-  }
-  uvc.width = fmt.fmt.pix.width;
-  uvc.height = fmt.fmt.pix.height;
-  uvc.bytesperline = fmt.fmt.pix.bytesperline;
-
-  v4l2_requestbuffers req{};
-  req.count = k_uvc_buffer_count;
-  req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  req.memory = V4L2_MEMORY_MMAP;
-  if (xioctl(uvc.fd, VIDIOC_REQBUFS, &req) != 0 || req.count == 0) {
-    teardown_uvc_capture(uvc);
-    return false;
-  }
-  std::uint32_t const granted = std::min<std::uint32_t>(req.count, k_uvc_buffer_count);
-  for (std::uint32_t i = 0; i < granted; ++i) {
-    v4l2_buffer qb{};
-    qb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    qb.memory = V4L2_MEMORY_MMAP;
-    qb.index = i;
-    if (xioctl(uvc.fd, VIDIOC_QUERYBUF, &qb) != 0) {
-      teardown_uvc_capture(uvc);
-      return false;
-    }
-    void* const m =
-        ::mmap(nullptr, qb.length, PROT_READ | PROT_WRITE, MAP_SHARED, uvc.fd, qb.m.offset);
-    if (m == MAP_FAILED) {
-      teardown_uvc_capture(uvc);
-      return false;
-    }
-    uvc.mapped.at(i) = m;
-    uvc.mapped_len.at(i) = qb.length;
-    if (xioctl(uvc.fd, VIDIOC_QBUF, &qb) != 0) {
-      teardown_uvc_capture(uvc);
-      return false;
-    }
-  }
-  int t = static_cast<int>(V4L2_BUF_TYPE_VIDEO_CAPTURE);
-  if (xioctl(uvc.fd, VIDIOC_STREAMON, &t) != 0) {
-    teardown_uvc_capture(uvc);
-    return false;
-  }
-  uvc.streaming = true;
-  return true;
-}
-#endif  // CLUSTER_SIM_HAS_LIBYUV
 
 // Paint a moving NV12 test pattern into a single-plane buffer. Used
 // as the encoder's input each frame. The pattern is a simple gradient
@@ -1125,9 +959,12 @@ struct RearViewState {
   std::size_t next_frame{0};
 
 #if CLUSTER_SIM_HAS_LIBYUV
-  // UVC tier state
-  std::string uvc_path;
-  UvcCapture uvc;
+  // UVC tier state. uvc_capture is non-empty when the YUYV streaming
+  // endpoint was opened at startup; it stays alive across R-toggle
+  // off/on so the next R press doesn't pay STREAMON's USB-bandwidth
+  // negotiation again. dumb_source is the layer's current XRGB
+  // destination, owned by the LayerScene; cleared on toggle-off.
+  std::optional<drm::examples::UvcCapture> uvc_capture;
   drm::scene::DumbBufferSource* dumb_source{nullptr};
 #endif
 
@@ -1149,15 +986,16 @@ struct RearViewState {
 [[nodiscard]] bool toggle_rearview_on_uvc(RearViewState& rv, drm::Device& dev,
                                           drm::scene::LayerScene& scene, std::int32_t x,
                                           std::int32_t y) {
-  if (rv.uvc.fd < 0) {
+  if (!rv.uvc_capture.has_value()) {
     return false;
   }
+  auto const cam_w = rv.uvc_capture->width();
+  auto const cam_h = rv.uvc_capture->height();
   // Match the dumb buffer to the camera's negotiated dimensions so
   // libyuv writes one row per camera row -- avoids a separate scale
   // step. The plane scales the dumb buffer down to k_rear_w x k_rear_h
   // on screen via src_rect / dst_rect just like the vicodec path.
-  auto dumb_r =
-      drm::scene::DumbBufferSource::create(dev, rv.uvc.width, rv.uvc.height, DRM_FORMAT_XRGB8888);
+  auto dumb_r = drm::scene::DumbBufferSource::create(dev, cam_w, cam_h, DRM_FORMAT_XRGB8888);
   if (!dumb_r) {
     drm::println(stderr, "rear-view: DumbBufferSource::create failed: {}",
                  dumb_r.error().message());
@@ -1168,7 +1006,7 @@ struct RearViewState {
 
   drm::scene::LayerDesc desc;
   desc.source = std::move(dumb_holder);
-  desc.display.src_rect = drm::scene::Rect{0, 0, rv.uvc.width, rv.uvc.height};
+  desc.display.src_rect = drm::scene::Rect{0, 0, cam_w, cam_h};
   desc.display.dst_rect = drm::scene::Rect{x, y, k_rear_w, k_rear_h};
   desc.display.zpos = k_rear_zpos;
   desc.content_type = drm::planes::ContentType::Video;
@@ -1182,41 +1020,30 @@ struct RearViewState {
   return true;
 }
 
-// Per-frame pump for the UVC path: dequeue one YUYV frame, libyuv-
-// convert it to XRGB8888 inside the dumb buffer's mapping, queue the
-// V4L2 buffer back. Caller invokes from the main loop only when the
-// UVC fd has POLLIN; EAGAIN here would simply mean the kernel beat
-// our poll() to the punch. Any failure (bad ioctl, libyuv error) is
+// Per-frame pump for the UVC path: dequeue one YUYV frame from the
+// shared UvcCapture helper, libyuv-convert it to XRGB8888 inside the
+// dumb buffer's mapping, requeue. Caller invokes from the main loop
+// only when the UVC fd has POLLIN; nullopt here means EAGAIN (the
+// kernel beat our poll() to the punch). Any conversion failure is
 // silently dropped -- the previous frame stays scanned out.
 void drive_rearview_uvc(RearViewState& rv) noexcept {
-  if (rv.dumb_source == nullptr || rv.uvc.fd < 0) {
+  if (rv.dumb_source == nullptr || !rv.uvc_capture.has_value()) {
     return;
   }
-  v4l2_buffer dq{};
-  dq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  dq.memory = V4L2_MEMORY_MMAP;
-  if (xioctl(rv.uvc.fd, VIDIOC_DQBUF, &dq) != 0) {
+  auto frame = rv.uvc_capture->try_acquire_frame();
+  if (!frame) {
     return;
   }
-  if (dq.index >= k_uvc_buffer_count || rv.uvc.mapped.at(dq.index) == nullptr) {
-    return;
-  }
-  auto const* src = static_cast<const std::uint8_t*>(rv.uvc.mapped.at(dq.index));
-  auto map_r = rv.dumb_source->map(drm::MapAccess::Write);
-  if (map_r) {
+  if (auto map_r = rv.dumb_source->map(drm::MapAccess::Write); map_r) {
     auto& mapping = *map_r;
     auto pixels = mapping.pixels();
     if (pixels.data() != nullptr && mapping.stride() != 0U) {
-      (void)libyuv::YUY2ToARGB(src, static_cast<int>(rv.uvc.bytesperline), pixels.data(),
-                               static_cast<int>(mapping.stride()), static_cast<int>(rv.uvc.width),
-                               static_cast<int>(rv.uvc.height));
+      (void)libyuv::YUY2ToARGB(frame->data, static_cast<int>(frame->bytesperline), pixels.data(),
+                               static_cast<int>(mapping.stride()), static_cast<int>(frame->width),
+                               static_cast<int>(frame->height));
     }
   }
-  v4l2_buffer qb{};
-  qb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  qb.memory = V4L2_MEMORY_MMAP;
-  qb.index = dq.index;
-  (void)xioctl(rv.uvc.fd, VIDIOC_QBUF, &qb);
+  rv.uvc_capture->release_frame(frame->buffer_index);
 }
 #endif  // CLUSTER_SIM_HAS_LIBYUV
 
@@ -1319,7 +1146,7 @@ void drive_rearview_uvc(RearViewState& rv) noexcept {
     return false;
   }
 #if CLUSTER_SIM_HAS_LIBYUV
-  if (!rv.uvc_path.empty()) {
+  if (rv.uvc_capture.has_value()) {
     return toggle_rearview_on_uvc(rv, dev, scene, x, y);
   }
 #endif
@@ -1570,17 +1397,21 @@ int main(int argc, char** argv) {
   // V4l2DecoderSource zero-copy if no UVC camera is found.
   bool rear_view_armed = false;
 #if CLUSTER_SIM_HAS_LIBYUV
-  if (auto uvc_path = find_uvc_endpoint(); uvc_path.has_value()) {
+  if (auto uvc_path = drm::examples::UvcCapture::find_endpoint(k_uvc_capture_fourcc);
+      uvc_path.has_value()) {
     // STREAMON is the slow step (USB-bandwidth negotiation can take
     // 100-300 ms on a UVC class device); do it once at startup so the
     // R toggle stays cheap and doesn't visibly stall dial animation.
-    if (setup_uvc_capture(rear_view.uvc, *uvc_path, k_rear_w, k_rear_h)) {
-      rear_view.uvc_path = *uvc_path;
+    auto cap_r = drm::examples::UvcCapture::create(*uvc_path, k_uvc_capture_fourcc, k_rear_w,
+                                                   k_rear_h, k_uvc_buffer_count);
+    if (cap_r) {
+      rear_view.uvc_capture = std::move(*cap_r);
       drm::println("rear-view: ready (UVC at {}, YUY2->XRGB via libyuv); press R to toggle",
-                   rear_view.uvc_path);
+                   *uvc_path);
       rear_view_armed = true;
     } else {
-      drm::println(stderr, "rear-view: UVC setup failed at {}; falling back to vicodec", *uvc_path);
+      drm::println(stderr, "rear-view: UVC setup failed at {}: {}; falling back to vicodec",
+                   *uvc_path, cap_r.error().message());
     }
   }
 #endif
@@ -1643,15 +1474,17 @@ int main(int argc, char** argv) {
     drm::println("rear-view: ready (synthetic Blend2D test pattern); press R to toggle");
   }
 
-  bool flip_pending = false;
-  // need_repaint drives the per-frame dial-paint cycle. Set true on
-  // every page-flip-event landing so the next loop iteration repaints
-  // and commits, giving us a flip-driven ~vsync-locked animation
+  // SessionPumpState tracks paused / flip_pending / pending_resume_fd
+  // across libseat callbacks, the resume apply step, and the per-frame
+  // commit gate. need_repaint drives the per-frame dial-paint cycle:
+  // set true on every page-flip-event landing so the next loop iteration
+  // repaints and commits, giving us a flip-driven ~vsync-locked animation
   // cadence without a wall-clock timer.
+  drm::examples::SessionPumpState session_state;
   bool need_repaint = false;
   drm::PageFlip page_flip(dev);
   page_flip.set_handler([&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
-    flip_pending = false;
+    session_state.flip_pending = false;
     need_repaint = true;
   });
 
@@ -1691,7 +1524,7 @@ int main(int argc, char** argv) {
     if (ke->pressed && ke->key == KEY_R) {
       bool const have_source =
 #if CLUSTER_SIM_HAS_LIBYUV
-          !rear_view.uvc_path.empty() ||
+          rear_view.uvc_capture.has_value() ||
 #endif
           !rear_view.clip.empty() || rear_view.synthetic_armed;
       if (rear_view.layer.has_value()) {
@@ -1719,99 +1552,57 @@ int main(int argc, char** argv) {
     }
   });
 
-  // Session pause/resume bookkeeping. Both flags are touched from the
-  // main thread only — libseat callbacks fire from inside
-  // seat->dispatch(), which runs in the main loop. Defer the actual
-  // device-fd swap until the loop's next iteration so we don't tear
-  // down PageFlip mid-dispatch.
-  bool session_paused = false;
-  int pending_resume_fd = -1;
+  // Session pause/resume callbacks. wire_session_callbacks installs
+  // the standard pause (drop scene FBs + suspend libinput + clear
+  // session_state.flip_pending) and resume (capture new fd into
+  // pending_resume_fd after the /dev/dri/ filter + resume libinput)
+  // handlers; the main-loop tail below applies the resume.
   if (seat) {
-    seat->set_pause_callback([&]() {
-      session_paused = true;
-      flip_pending = false;
-      scene->on_session_paused();
-      (void)input_seat.suspend();
-    });
-    seat->set_resume_callback([&](std::string_view path, int new_fd) {
-      if (path.substr(0, 9) != "/dev/dri/") {
-        return;
-      }
-      pending_resume_fd = new_fd;
-      session_paused = false;
-      (void)input_seat.resume();
-    });
+    drm::examples::wire_session_callbacks(*seat, *scene, session_state, &input_seat);
   }
 
   if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip); !r) {
     drm::println(stderr, "first commit failed: {}", r.error().message());
     return EXIT_FAILURE;
   }
-  flip_pending = true;
+  session_state.flip_pending = true;
   auto const start_time = std::chrono::steady_clock::now();
   drm::println("cluster_sim: {}x{} — Esc / Q to quit", fb_w, fb_h);
 
-  // pfds[0..2] are stable; pfds[3] tracks the optional UVC fd, set to
-  // -1 when the rear-view is off so poll() ignores it.
-  pollfd pfds[4]{};
-  pfds[0].fd = input_seat.fd();
-  pfds[0].events = POLLIN;
-  pfds[1].fd = dev.fd();
-  pfds[1].events = POLLIN;
-  pfds[2].fd = seat ? seat->poll_fd() : -1;
-  pfds[2].events = POLLIN;
-  pfds[3].fd = -1;
-  pfds[3].events = POLLIN;
+  // EventLoop slots: input / drm / seat are stable; the optional UVC
+  // slot tracks the camera fd whenever a UVC rear-view is engaged
+  // (set to -1 when the rear-view is off so poll() ignores it).
+  drm::examples::EventLoop loop;
+  (void)loop.add_slot(input_seat.fd(), [&] { (void)input_seat.dispatch(); });
+  int const drm_slot = loop.add_slot(dev.fd(), [&] { (void)page_flip.dispatch(0); });
+  (void)loop.add_slot(seat ? seat->poll_fd() : -1, [&] {
+    if (seat) {
+      seat->dispatch();
+    }
+  });
+#if CLUSTER_SIM_HAS_LIBYUV
+  int const uvc_slot = loop.add_slot(-1, [&] { drive_rearview_uvc(rear_view); });
+#endif
 
   while (!quit) {
 #if CLUSTER_SIM_HAS_LIBYUV
-    // Slot the UVC fd into the poll set whenever a UVC rear-view is
-    // engaged; clear it when toggled off (or never enabled).
-    pfds[3].fd = (rear_view.layer.has_value() && rear_view.uvc.fd >= 0) ? rear_view.uvc.fd : -1;
+    loop.set_fd(uvc_slot, (rear_view.layer.has_value() && rear_view.uvc_capture.has_value())
+                              ? rear_view.uvc_capture->fd()
+                              : -1);
 #endif
-    int const timeout = flip_pending ? 16 : -1;
-    if (int const ret = poll(pfds, 4, timeout); ret < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      drm::println(stderr, "poll: {}", std::system_category().message(errno));
+    if (!loop.tick(session_state.flip_pending ? 16 : -1)) {
       break;
     }
-    if ((pfds[0].revents & POLLIN) != 0) {
-      (void)input_seat.dispatch();
-    }
-    if ((pfds[1].revents & POLLIN) != 0) {
-      (void)page_flip.dispatch(0);
-    }
-    if ((pfds[2].revents & POLLIN) != 0 && seat) {
-      seat->dispatch();
-    }
-#if CLUSTER_SIM_HAS_LIBYUV
-    if ((pfds[3].revents & POLLIN) != 0) {
-      drive_rearview_uvc(rear_view);
-    }
-#endif
 
-    if (pending_resume_fd != -1) {
-      int const new_fd = pending_resume_fd;
-      pending_resume_fd = -1;
-      ctx.device = drm::Device::from_fd(new_fd);
-      pfds[1].fd = dev.fd();
-      if (auto r = dev.enable_universal_planes(); !r) {
-        drm::println(stderr, "resume: enable_universal_planes failed");
-        break;
-      }
-      if (auto r = dev.enable_atomic(); !r) {
-        drm::println(stderr, "resume: enable_atomic failed");
-        break;
-      }
-      if (auto r = scene->on_session_resumed(dev); !r) {
-        drm::println(stderr, "resume: on_session_resumed: {}", r.error().message());
-        break;
-      }
+    auto resumed = drm::examples::apply_pending_resume(session_state, dev, *scene);
+    if (!resumed) {
+      break;
+    }
+    if (*resumed) {
+      loop.set_fd(drm_slot, dev.fd());
       page_flip = drm::PageFlip(dev);
       page_flip.set_handler([&](std::uint32_t, std::uint64_t, std::uint64_t) {
-        flip_pending = false;
+        session_state.flip_pending = false;
         need_repaint = true;
       });
       // Buffer mappings were torn down on pause; repaint the bg + both
@@ -1837,7 +1628,7 @@ int main(int argc, char** argv) {
         drm::println(stderr, "resume commit failed: {}", r.error().message());
         break;
       }
-      flip_pending = true;
+      session_state.flip_pending = true;
     }
 
     // Per-frame paint cycle: only when the prior flip has landed and
@@ -1845,7 +1636,7 @@ int main(int argc, char** argv) {
     // animation phase, then commit -- the kernel queues the flip for
     // the next vblank, the page-flip handler clears flip_pending and
     // sets need_repaint again, and the loop ticks at scanout cadence.
-    if (need_repaint && !flip_pending && !session_paused) {
+    if (need_repaint && !session_state.flip_pending && !session_state.paused) {
       need_repaint = false;
       double const elapsed =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
@@ -1875,22 +1666,18 @@ int main(int argc, char** argv) {
           // Master got revoked between the flip event and the next
           // commit (libseat hasn't fired pause_cb yet). Treat as a
           // soft pause and let the resume path put us back together.
-          session_paused = true;
-          flip_pending = false;
+          session_state.paused = true;
+          session_state.flip_pending = false;
           continue;
         }
         drm::println(stderr, "commit failed: {}", r.error().message());
         break;
       }
-      flip_pending = true;
+      session_state.flip_pending = true;
     }
   }
 
-#if CLUSTER_SIM_HAS_LIBYUV
-  // Tear down the always-on UVC stream cleanly. teardown is idempotent
-  // and a no-op when no UVC was armed at startup.
-  teardown_uvc_capture(rear_view.uvc);
-#endif
-
+  // UvcCapture's destructor STREAMOFF + REQBUFS=0 + munmap + close, so
+  // no explicit teardown call is needed at exit.
   return EXIT_SUCCESS;
 }

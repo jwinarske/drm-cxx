@@ -14,8 +14,10 @@
 // the per-layer dirty surface that Phase 2.2 will eventually minimize
 // property/FB writes against.
 
+#include "../../common/event_loop.hpp"
 #include "../../common/format_probe.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/session_pump.hpp"
 #include "../../common/vt_switch.hpp"
 #include "signage_player/overlay_renderer.hpp"
 #include "signage_player/playlist.hpp"
@@ -44,7 +46,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -53,7 +54,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <sys/poll.h>
 #include <system_error>
 #include <utility>
 #include <variant>
@@ -379,9 +379,7 @@ int main(int argc, char** argv) {
   drm::examples::warn_compat(drm::examples::probe_output(dev, crtc_id),
                              {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
 
-  bool session_paused = false;
-  bool flip_pending = false;
-  int pending_resume_fd = -1;
+  drm::examples::SessionPumpState session_state;
 
   // Layer count is whatever the playlist asks for. LayerScene's Phase 2.3
   // composition fallback CPU-blends any layers the allocator can't fit
@@ -547,8 +545,9 @@ int main(int argc, char** argv) {
   paint_slide(0);
 
   drm::PageFlip page_flip(dev);
-  page_flip.set_handler(
-      [&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) { flip_pending = false; });
+  page_flip.set_handler([&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
+    session_state.flip_pending = false;
+  });
 
   drm::input::InputDeviceOpener libinput_opener;
   if (seat) {
@@ -574,23 +573,14 @@ int main(int argc, char** argv) {
   });
 
   if (seat) {
-    seat->set_pause_callback([&]() {
-      session_paused = true;
-      flip_pending = false;
-      (void)input_seat.suspend();
-    });
-    seat->set_resume_callback([&](std::string_view /*path*/, int new_fd) {
-      pending_resume_fd = new_fd;
-      session_paused = false;
-      (void)input_seat.resume();
-    });
+    drm::examples::wire_session_callbacks(*seat, *scene, session_state, &input_seat);
   }
 
   if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip); !r) {
     drm::println(stderr, "first commit failed: {}", r.error().message());
     return EXIT_FAILURE;
   }
-  flip_pending = true;
+  session_state.flip_pending = true;
 
   // Optional hotplug-follow plumbing. The library's HotplugMonitor
   // exposes a netlink fd we add to the poll set; on every event we
@@ -638,22 +628,26 @@ int main(int argc, char** argv) {
       current_mode = fresh->mode;
       // Force the next loop iteration to commit so the rebound CRTC
       // gets its modeset + first frame promptly.
-      flip_pending = false;
+      session_state.flip_pending = false;
     });
     drm::println("Hotplug-follow enabled.");
   }
 
   drm::println("Running — Escape to quit.");
 
-  pollfd pfds[4]{};
-  pfds[0].fd = input_seat.fd();
-  pfds[0].events = POLLIN;
-  pfds[1].fd = dev.fd();
-  pfds[1].events = POLLIN;
-  pfds[2].fd = seat ? seat->poll_fd() : -1;
-  pfds[2].events = POLLIN;
-  pfds[3].fd = hotplug_monitor ? hotplug_monitor->fd() : -1;
-  pfds[3].events = POLLIN;
+  drm::examples::EventLoop loop;
+  (void)loop.add_slot(input_seat.fd(), [&] { (void)input_seat.dispatch(); });
+  int const drm_slot = loop.add_slot(dev.fd(), [&] { (void)page_flip.dispatch(0); });
+  (void)loop.add_slot(seat ? seat->poll_fd() : -1, [&] {
+    if (seat) {
+      seat->dispatch();
+    }
+  });
+  (void)loop.add_slot(hotplug_monitor ? hotplug_monitor->fd() : -1, [&] {
+    if (hotplug_monitor) {
+      (void)hotplug_monitor->dispatch();
+    }
+  });
 
   using clock = std::chrono::steady_clock;
   auto slide_started = clock::now();
@@ -662,55 +656,27 @@ int main(int argc, char** argv) {
   while (!quit) {
     // When paused, we block indefinitely, so the CPU is idle until the
     // session resumes or a libinput event wakes us. Otherwise, poll
-    // with a short timeout, so slide timing stays responsive even when
+    // with a short timeout so slide timing stays responsive even when
     // no input/seat events arrive.
     int timeout = 0;
-    if (session_paused) {
+    if (session_state.paused) {
       timeout = -1;
-    } else if (flip_pending) {
+    } else if (session_state.flip_pending) {
       timeout = 16;
     }
-    if (const int ret = poll(pfds, 4, timeout); ret < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      drm::println(stderr, "poll: {}", std::system_category().message(errno));
+    if (!loop.tick(timeout)) {
       break;
     }
-    if ((pfds[0].revents & POLLIN) != 0) {
-      (void)input_seat.dispatch();
-    }
-    if ((pfds[1].revents & POLLIN) != 0) {
-      (void)page_flip.dispatch(0);
-    }
-    if ((pfds[2].revents & POLLIN) != 0 && seat) {
-      seat->dispatch();
-    }
-    if ((pfds[3].revents & POLLIN) != 0 && hotplug_monitor) {
-      (void)hotplug_monitor->dispatch();
-    }
 
-    if (pending_resume_fd != -1) {
-      const int new_fd = pending_resume_fd;
-      pending_resume_fd = -1;
-      scene->on_session_paused();
-      output->device = drm::Device::from_fd(new_fd);
-      pfds[1].fd = dev.fd();
-      if (auto r = dev.enable_universal_planes(); !r) {
-        drm::println(stderr, "resume: enable_universal_planes failed");
-        break;
-      }
-      if (auto r = dev.enable_atomic(); !r) {
-        drm::println(stderr, "resume: enable_atomic failed");
-        break;
-      }
-      if (auto r = scene->on_session_resumed(dev); !r) {
-        drm::println(stderr, "resume: on_session_resumed failed: {}", r.error().message());
-        break;
-      }
+    auto resumed = drm::examples::apply_pending_resume(session_state, dev, *scene);
+    if (!resumed) {
+      break;
+    }
+    if (*resumed) {
+      loop.set_fd(drm_slot, dev.fd());
       page_flip = drm::PageFlip(dev);
       page_flip.set_handler(
-          [&](std::uint32_t, std::uint64_t, std::uint64_t) { flip_pending = false; });
+          [&](std::uint32_t, std::uint64_t, std::uint64_t) { session_state.flip_pending = false; });
       // Re-paint every layer against the fresh mappings. Each helper
       // takes its own short-lived map() guard, so there is no per-buffer
       // stride to refresh up here — the per-frame helpers below pick it
@@ -738,7 +704,7 @@ int main(int argc, char** argv) {
       }
     }
 
-    if (flip_pending || session_paused) {
+    if (session_state.flip_pending || session_state.paused) {
       continue;
     }
 
@@ -758,14 +724,14 @@ int main(int argc, char** argv) {
     if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
         !r) {
       if (r.error() == std::errc::permission_denied) {
-        session_paused = true;
-        flip_pending = false;
+        session_state.paused = true;
+        session_state.flip_pending = false;
         continue;
       }
       drm::println(stderr, "commit failed: {}", r.error().message());
       break;
     }
-    flip_pending = true;
+    session_state.flip_pending = true;
   }
 
   return EXIT_SUCCESS;
