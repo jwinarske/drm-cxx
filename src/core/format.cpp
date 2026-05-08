@@ -102,10 +102,26 @@ std::string_view format_name(uint32_t format) {
       return "NV12";
     case DRM_FORMAT_NV21:
       return "NV21";
+    case DRM_FORMAT_NV15:
+      return "NV15";
     case DRM_FORMAT_NV16:
       return "NV16";
+    case DRM_FORMAT_NV20:
+      return "NV20";
     case DRM_FORMAT_NV61:
       return "NV61";
+    case DRM_FORMAT_P010:
+      return "P010";
+    case DRM_FORMAT_P012:
+      return "P012";
+    case DRM_FORMAT_P016:
+      return "P016";
+    case DRM_FORMAT_Y210:
+      return "Y210";
+    case DRM_FORMAT_Y212:
+      return "Y212";
+    case DRM_FORMAT_Y216:
+      return "Y216";
     case DRM_FORMAT_YUV410:
       return "YUV410";
     case DRM_FORMAT_YVU410:
@@ -181,6 +197,19 @@ uint32_t format_bpp(uint32_t format) {
     case DRM_FORMAT_ARGB16161616F:
     case DRM_FORMAT_ABGR16161616F:
       return 64;
+    // Packed YUV 4:2:2 with u16 samples — each macropixel covers
+    // 2 luma pixels in 4 u16 components (Y0 Cb0 Y1 Cr0), giving
+    // 64 bits per 2 pixels = 32 bpp regardless of the bit-depth
+    // sub-component (10/12/16). The unused bits in Y210 / Y212
+    // sit in the low end of each u16 per CTA-861 conventions.
+    case DRM_FORMAT_Y210:
+    case DRM_FORMAT_Y212:
+    case DRM_FORMAT_Y216:
+      return 32;
+    // Planar (NV*-family + P010/P012/P016) report 0 here — the
+    // per-plane bpp varies (Y plane vs UV plane), so a single
+    // image-level scalar is misleading. Per-plane callers should
+    // use libdrm's `drm_get_format_info` instead.
     default:
       return 0;
   }
