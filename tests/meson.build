@@ -97,6 +97,13 @@ test('test_display',
   ),
 )
 
+test('test_color_pipeline_curves',
+  executable('test_color_pipeline_curves',
+    'unit/test_color_pipeline_curves.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_connector_capabilities',
   executable('test_connector_capabilities',
     'unit/test_connector_capabilities.cpp',
@@ -253,6 +260,14 @@ endif
 test('test_layer_scene_minimization_vkms',
   executable('test_layer_scene_minimization_vkms',
     'integration/test_layer_scene_minimization_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# CRTC color-pipeline integration against vkms.
+test('test_crtc_color_pipeline_vkms',
+  executable('test_crtc_color_pipeline_vkms',
+    'integration/test_crtc_color_pipeline_vkms.cpp',
     dependencies : test_deps,
   ),
 )

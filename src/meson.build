@@ -19,7 +19,10 @@ drm_cxx_sources = files(
   'input/key_repeater.cpp',
   'input/pointer.cpp',
   'input/event_dispatcher.cpp',
+  'display/color_pipeline_curves.cpp',
   'display/connector_capabilities.cpp',
+  'display/crtc_capabilities.cpp',
+  'display/crtc_color_pipeline.cpp',
   'display/edid.cpp',
   'display/hdr_metadata.cpp',
   'display/hdr_metadata_cache.cpp',
@@ -199,8 +202,11 @@ install_headers(
 )
 
 install_headers(
+  'display/color_pipeline_curves.hpp',
   'display/connector_capabilities.hpp',
   'display/connector_info.hpp',
+  'display/crtc_capabilities.hpp',
+  'display/crtc_color_pipeline.hpp',
   'display/edid.hpp',
   'display/hdr_metadata.hpp',
   'display/hdr_metadata_cache.hpp',

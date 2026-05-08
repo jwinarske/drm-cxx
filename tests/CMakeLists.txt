@@ -30,6 +30,7 @@ set(DRM_CXX_TESTS
   test_key_repeater
   test_mode
   test_display
+  test_color_pipeline_curves
   test_connector_capabilities
   test_hdr_metadata
   test_hdr_metadata_cache
@@ -110,6 +111,18 @@ target_link_libraries(test_layer_scene_rebind_vkms PRIVATE
   GTest::gtest
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_rebind_vkms)
+
+# CRTC color-pipeline integration test against VKMS.
+# vkms only exposes GAMMA_LUT (not DEGAMMA / CTM), so the test
+# exercises the gamma half + the apply path; full DEGAMMA / CTM
+# coverage needs amdgpu / i915 hardware.
+add_executable(test_crtc_color_pipeline_vkms
+  integration/test_crtc_color_pipeline_vkms.cpp)
+target_link_libraries(test_crtc_color_pipeline_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_crtc_color_pipeline_vkms)
 
 # Buffer::create_planar(P010) round-trip against VKMS.
 # Same shape as the other vkms tests; verifies multi-plane AddFB2 +
