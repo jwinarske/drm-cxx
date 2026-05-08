@@ -125,6 +125,12 @@ void HdrMetadataBlob::reset() noexcept {
   content_hash_ = 0;
 }
 
+HdrMetadataBlob HdrMetadataBlob::synthesize_for_test(std::uint32_t synthetic_blob_id,
+                                                     std::uint64_t hash) noexcept {
+  // fd_ == -1 keeps `reset()` from calling drmModeDestroyPropertyBlob.
+  return {-1, synthetic_blob_id, hash};
+}
+
 drm::expected<HdrMetadataBlob, std::error_code> HdrMetadataBlob::create(
     const drm::Device& dev, const HdrSourceMetadata& src) {
   const auto bytes = serialize_hdr_metadata(src);

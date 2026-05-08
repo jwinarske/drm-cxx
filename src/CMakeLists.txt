@@ -23,6 +23,7 @@ set(DRM_CXX_SOURCES
   display/connector_capabilities.cpp
   display/edid.cpp
   display/hdr_metadata.cpp
+  display/hdr_metadata_cache.cpp
   display/hotplug_monitor.cpp
   session/seat.cpp
   time/clock.cpp
@@ -265,6 +266,7 @@ install(FILES
     display/connector_info.hpp
     display/edid.hpp
     display/hdr_metadata.hpp
+    display/hdr_metadata_cache.hpp
     display/hotplug_monitor.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/display)
 

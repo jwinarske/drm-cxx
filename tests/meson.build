@@ -111,6 +111,13 @@ test('test_hdr_metadata',
   ),
 )
 
+test('test_hdr_metadata_cache',
+  executable('test_hdr_metadata_cache',
+    'unit/test_hdr_metadata_cache.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_gbm',
   executable('test_gbm',
     'unit/test_gbm.cpp',

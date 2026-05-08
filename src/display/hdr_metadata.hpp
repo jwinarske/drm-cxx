@@ -119,6 +119,15 @@ class HdrMetadataBlob {
   /// True when the wrapper owns a live kernel blob.
   [[nodiscard]] explicit operator bool() const noexcept { return blob_id_ != 0; }
 
+  /// Test-only: build a wrapper around a synthetic blob id without
+  /// calling libdrm. The returned wrapper's destructor is a no-op
+  /// (`fd_ == -1`), so the kernel is never invoked. Use only in unit
+  /// tests for higher-level helpers (e.g. `HdrMetadataCache`) that
+  /// need a `HdrMetadataBlob` value but shouldn't depend on a real
+  /// DRM fd.
+  [[nodiscard]] static HdrMetadataBlob synthesize_for_test(std::uint32_t synthetic_blob_id,
+                                                           std::uint64_t hash) noexcept;
+
  private:
   HdrMetadataBlob(int fd, std::uint32_t blob_id, std::uint64_t hash) noexcept;
   void reset() noexcept;
