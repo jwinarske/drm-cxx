@@ -59,6 +59,24 @@ class Buffer {
   [[nodiscard]] static drm::expected<Buffer, std::error_code> create(const drm::Device& dev,
                                                                      const Config& cfg);
 
+  /// Allocate a dumb buffer for a recognized semi-planar YUV format
+  /// (NV12 / NV21 / P010 / P012 / P016 — the 4:2:0 subset for now).
+  /// The kernel allocates one linear region; the wrapper arranges
+  /// `drmModeAddFB2` to point Y + interleaved-UV planes at distinct
+  /// byte offsets within that region. Caller passes the *image*
+  /// dimensions; the over-allocation for the half-height UV plane
+  /// and the bit-depth (8 vs 16 bits per sample for P0xx) are
+  /// derived internally.
+  ///
+  /// `errc::not_supported` for fourccs not in the recognized set —
+  /// callers can fall back to plain `create()` for single-plane
+  /// formats.
+  ///
+  /// `height` should be even; the UV plane half-height computation
+  /// uses integer division and odd inputs round down.
+  [[nodiscard]] static drm::expected<Buffer, std::error_code> create_planar(
+      const drm::Device& dev, std::uint32_t drm_format, std::uint32_t width, std::uint32_t height);
+
   Buffer() noexcept = default;
   ~Buffer();
 

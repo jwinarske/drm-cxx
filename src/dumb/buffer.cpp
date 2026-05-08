@@ -9,13 +9,16 @@
 #include <drm-cxx/detail/expected.hpp>
 
 #include <drm.h>
+#include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>  // NOLINT(misc-include-cleaner) — canonical home of off_t
@@ -27,6 +30,91 @@ namespace {
 
 std::error_code last_errno() noexcept {
   return {errno, std::system_category()};
+}
+
+// Result of CREATE_DUMB + MAP_DUMB + mmap. AddFB2 is the caller's
+// responsibility (different per single- vs multi-plane FB layout).
+struct CreateMapped {
+  std::uint32_t gem_handle{0};
+  std::uint32_t stride{0};
+  std::size_t size_bytes{0};
+  std::uint8_t* mapped{nullptr};
+};
+
+[[nodiscard]] drm::expected<CreateMapped, std::error_code> create_and_map_dumb(int fd,
+                                                                               std::uint32_t width,
+                                                                               std::uint32_t height,
+                                                                               std::uint32_t bpp) {
+  drm_mode_create_dumb create{};
+  create.width = width;
+  create.height = height;
+  create.bpp = bpp;
+  if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) {
+    return drm::unexpected<std::error_code>(last_errno());
+  }
+  CreateMapped out{};
+  out.gem_handle = create.handle;
+  out.stride = create.pitch;
+  out.size_bytes = create.size;
+
+  drm_mode_map_dumb map_req{};
+  map_req.handle = out.gem_handle;
+  if (ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map_req) < 0) {
+    const auto ec = last_errno();
+    drm_mode_destroy_dumb destroy{};
+    destroy.handle = out.gem_handle;
+    ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+    return drm::unexpected<std::error_code>(ec);
+  }
+
+  // NOLINTBEGIN(misc-include-cleaner) — off_t arrives via <sys/types.h>
+  void* ptr = mmap(nullptr, out.size_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+                   static_cast<off_t>(map_req.offset));
+  // NOLINTEND(misc-include-cleaner)
+  if (ptr == MAP_FAILED) {
+    const auto ec = last_errno();
+    drm_mode_destroy_dumb destroy{};
+    destroy.handle = out.gem_handle;
+    ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+    return drm::unexpected<std::error_code>(ec);
+  }
+  out.mapped = static_cast<std::uint8_t*>(ptr);
+  std::memset(out.mapped, 0, out.size_bytes);
+  return out;
+}
+
+// Geometry table for the semi-planar YUV formats `create_planar`
+// recognizes. `bpp` is what `DRM_IOCTL_MODE_CREATE_DUMB` wants for
+// the Y plane (the kernel computes pitch from this); `extra_rows_*`
+// describe the UV plane's height as a fraction of the image height,
+// so 4:2:0 (NV12 / P0xx) gives extra_num=1 / extra_den=2 (UV plane
+// is half height) and 4:2:2 (NV16 / NV61) gives 1/1 (full height,
+// not currently in the table — see deferred list).
+struct PlanarGeometry {
+  std::uint32_t bpp;
+  std::uint32_t extra_rows_num;
+  std::uint32_t extra_rows_den;
+};
+
+[[nodiscard]] std::optional<PlanarGeometry> planar_geometry(std::uint32_t drm_format) noexcept {
+  switch (drm_format) {
+    case DRM_FORMAT_NV12:
+    case DRM_FORMAT_NV21:
+      // 8-bit semi-planar 4:2:0. Y row = width bytes; UV row =
+      // width bytes (Cb/Cr interleaved at half horizontal,
+      // covering the same byte count); UV plane is height/2 rows.
+      return PlanarGeometry{8, 1, 2};
+    case DRM_FORMAT_P010:
+    case DRM_FORMAT_P012:
+    case DRM_FORMAT_P016:
+      // 16-bit semi-planar 4:2:0. Same row arrangement as NV12 but
+      // with u16 samples — the bpp difference is what the kernel
+      // uses to size the pitch; the UV-plane height ratio is
+      // unchanged.
+      return PlanarGeometry{16, 1, 2};
+    default:
+      return std::nullopt;
+  }
 }
 
 }  // namespace
@@ -153,59 +241,85 @@ drm::expected<Buffer, std::error_code> Buffer::create(const drm::Device& dev, co
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
-  drm_mode_create_dumb create{};
-  create.width = cfg.width;
-  create.height = cfg.height;
-  create.bpp = cfg.bpp;
-  if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) < 0) {
-    return drm::unexpected<std::error_code>(last_errno());
+  auto cm = create_and_map_dumb(fd, cfg.width, cfg.height, cfg.bpp);
+  if (!cm) {
+    return drm::unexpected<std::error_code>(cm.error());
   }
-
-  const std::uint32_t gem_handle = create.handle;
-  const std::uint32_t stride = create.pitch;
-  const std::size_t size_bytes = create.size;
-
-  drm_mode_map_dumb map_req{};
-  map_req.handle = gem_handle;
-  if (ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map_req) < 0) {
-    const auto ec = last_errno();
-    drm_mode_destroy_dumb destroy{};
-    destroy.handle = gem_handle;
-    ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
-    return drm::unexpected<std::error_code>(ec);
-  }
-
-  // NOLINTBEGIN(misc-include-cleaner) — off_t arrives via <sys/types.h>
-  void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
-                   static_cast<off_t>(map_req.offset));
-  // NOLINTEND(misc-include-cleaner)
-  if (ptr == MAP_FAILED) {
-    const auto ec = last_errno();
-    drm_mode_destroy_dumb destroy{};
-    destroy.handle = gem_handle;
-    ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
-    return drm::unexpected<std::error_code>(ec);
-  }
-  auto* mapped = static_cast<std::uint8_t*>(ptr);
-  std::memset(mapped, 0, size_bytes);
 
   std::uint32_t fb_id = 0;
   if (cfg.add_fb) {
-    std::uint32_t handles[4] = {gem_handle};
-    std::uint32_t strides[4] = {stride};
-    std::uint32_t offsets[4] = {0};
-    if (drmModeAddFB2(fd, cfg.width, cfg.height, cfg.drm_format, handles, strides, offsets, &fb_id,
-                      0) != 0) {
+    std::array<std::uint32_t, 4> handles{cm->gem_handle, 0, 0, 0};
+    std::array<std::uint32_t, 4> strides{cm->stride, 0, 0, 0};
+    std::array<std::uint32_t, 4> offsets{};
+    if (drmModeAddFB2(fd, cfg.width, cfg.height, cfg.drm_format, handles.data(), strides.data(),
+                      offsets.data(), &fb_id, 0) != 0) {
       const auto ec = last_errno();
-      munmap(mapped, size_bytes);
+      munmap(cm->mapped, cm->size_bytes);
       drm_mode_destroy_dumb destroy{};
-      destroy.handle = gem_handle;
+      destroy.handle = cm->gem_handle;
       ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
       return drm::unexpected<std::error_code>(ec);
     }
   }
 
-  return Buffer{fd, gem_handle, fb_id, mapped, size_bytes, cfg.width, cfg.height, stride};
+  return Buffer{fd,        cm->gem_handle, fb_id,     cm->mapped, cm->size_bytes,
+                cfg.width, cfg.height,     cm->stride};
+}
+
+drm::expected<Buffer, std::error_code> Buffer::create_planar(const drm::Device& dev,
+                                                             std::uint32_t drm_format,
+                                                             std::uint32_t width,
+                                                             std::uint32_t height) {
+  if (width == 0 || height == 0 || drm_format == 0) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  const auto geom = planar_geometry(drm_format);
+  if (!geom) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+  }
+  const int fd = dev.fd();
+  if (fd < 0) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+
+  // Over-allocate so the UV plane fits in the same linear region.
+  // The kernel's CREATE_DUMB sees one tall buffer; AddFB2 below
+  // points the chroma plane at the second half via per-plane offset.
+  const std::uint32_t total_rows = height + (height * geom->extra_rows_num / geom->extra_rows_den);
+
+  auto cm = create_and_map_dumb(fd, width, total_rows, geom->bpp);
+  if (!cm) {
+    return drm::unexpected<std::error_code>(cm.error());
+  }
+
+  // Multi-plane AddFB2: same gem handle reused for every plane;
+  // per-plane pitches identical (both Y and UV rows are
+  // `stride` bytes wide for semi-planar 4:2:0); UV plane offset is
+  // `stride * height` bytes (the Y plane's footprint, computed
+  // against the kernel-reported stride to honor any alignment
+  // padding the driver added — amdgpu DC's 256-byte rule applies
+  // here, and using the kernel stride means we don't have to know
+  // about it).
+  const std::uint32_t stride = cm->stride;
+  std::array<std::uint32_t, 4> handles{cm->gem_handle, cm->gem_handle, 0, 0};
+  std::array<std::uint32_t, 4> pitches{stride, stride, 0, 0};
+  std::array<std::uint32_t, 4> offsets{0, stride * height, 0, 0};
+
+  std::uint32_t fb_id = 0;
+  if (drmModeAddFB2(fd, width, height, drm_format, handles.data(), pitches.data(), offsets.data(),
+                    &fb_id, 0) != 0) {
+    const auto ec = last_errno();
+    munmap(cm->mapped, cm->size_bytes);
+    drm_mode_destroy_dumb destroy{};
+    destroy.handle = cm->gem_handle;
+    ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+    return drm::unexpected<std::error_code>(ec);
+  }
+
+  // The Buffer's `width` / `height` track the *image* dimensions,
+  // not the over-allocated `total_rows` — consumers reading
+  // `height()` see the visible image, matching the AddFB2 framing.
+  return Buffer{fd, cm->gem_handle, fb_id, cm->mapped, cm->size_bytes, width, height, cm->stride};
 }
 
 }  // namespace drm::dumb
