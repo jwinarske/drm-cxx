@@ -35,13 +35,23 @@
 namespace drm::scene {
 
 /// What the scene wants to declare on the output connector for a
-/// given frame's set of layers. Both fields are optional: nullopt
-/// `colorspace` means "leave the connector property at its current
-/// value" (typically the driver's default SDR signaling); nullopt
+/// given frame's set of layers. Both `colorspace` / `hdr_metadata`
+/// optionals follow the usual contract: nullopt `colorspace` means
+/// "leave the connector property at its current value"; nullopt
 /// `hdr_metadata` means "no HDR signaling" (clear via blob_id 0).
+///
+/// `hdr_downgraded` flips true when the layers' EOTFs called for HDR
+/// signaling but the connector can't carry it (no
+/// HDR_OUTPUT_METADATA property exposed, or `max_bpc` capped below
+/// 10) — `hdr_metadata` is nullopt in that case (the signaling has
+/// been dropped to SDR) and the caller can read the flag to know HDR
+/// was attempted. Constraint checking only happens when
+/// `derive_output_signaling` is called with a non-null
+/// `ConnectorCapabilities`.
 struct OutputSignalling {
   std::optional<drm::display::Colorspace> colorspace;
   std::optional<drm::display::HdrSourceMetadata> hdr_metadata;
+  bool hdr_downgraded{false};
 };
 
 /// Canonical CIE 1931 chromaticity coordinates for a `ColorPrimaries`
@@ -91,7 +101,20 @@ struct OutputSignalling {
 ///     scene's manual `set_output_metadata` overrides this entire
 ///     struct when set, so callers with mastering data feed it
 ///     through that path.
+///   * When `caps` is non-null and the auto-derive would produce
+///     `hdr_metadata` but the connector can't carry HDR
+///     (no `HDR_OUTPUT_METADATA` exposed, or `max_bpc_max < 10`),
+///     `hdr_metadata` is dropped and `hdr_downgraded` is set true.
+///     Without 10-bit depth at the sink, HDR PQ is
+///     8-bit-tone-mapped-with-a-PQ-flag — the sink accepts the
+///     metadata but doesn't display the content as HDR; the design's
+///     "no silent banding" rule applies.
+///
+/// `caps == nullptr` skips the constraint check entirely; useful in
+/// tests and from callers that already gated up front via
+/// `probe_connector_capabilities`.
 [[nodiscard]] OutputSignalling derive_output_signaling(
-    drm::span<const DisplayParams* const> layers) noexcept;
+    drm::span<const DisplayParams* const> layers,
+    const drm::display::ConnectorCapabilities* caps = nullptr) noexcept;
 
 }  // namespace drm::scene

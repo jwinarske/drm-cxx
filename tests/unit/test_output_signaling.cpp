@@ -297,6 +297,106 @@ TEST(OutputSignallingTest, DeriveHdrLayerWithoutPrimariesDefaultsToBt2020Masteri
   EXPECT_FLOAT_EQ(sig.hdr_metadata.value().display_primaries.red.x, 0.708F);  // BT.2020 red x
 }
 
+// ── connector constraint check ────────────────────────────
+
+drm::display::ConnectorCapabilities full_hdr_caps() {
+  drm::display::ConnectorCapabilities caps;
+  caps.connector_id = 1;
+  caps.has_hdr_output_metadata = true;
+  caps.has_max_bpc = true;
+  caps.max_bpc_min = 6;
+  caps.max_bpc_max = 12;
+  return caps;
+}
+
+TEST(OutputSignallingTest, DeriveWithCapsHdrCapableLeavesMetadata) {
+  const auto a = with_primaries_and_eotf(ColorPrimaries::Bt2020,
+                                         drm::display::TransferFunction::SmpteSt2084Pq);
+  const std::array<const DisplayParams*, 1> layers{&a};
+  const drm::span<const DisplayParams* const> span{layers.data(), layers.size()};
+  const auto caps = full_hdr_caps();
+  const auto sig = drm::scene::derive_output_signaling(span, &caps);
+  EXPECT_TRUE(sig.hdr_metadata.has_value());
+  EXPECT_FALSE(sig.hdr_downgraded);
+}
+
+TEST(OutputSignallingTest, DeriveWithCapsLackingHdrBlobDowngrades) {
+  // Connector has max_bpc=12 but no HDR_OUTPUT_METADATA blob.
+  drm::display::ConnectorCapabilities caps;
+  caps.has_hdr_output_metadata = false;
+  caps.has_max_bpc = true;
+  caps.max_bpc_max = 12;
+  ASSERT_FALSE(caps.can_signal_hdr());
+
+  const auto a = with_eotf(drm::display::TransferFunction::SmpteSt2084Pq);
+  const std::array<const DisplayParams*, 1> layers{&a};
+  const drm::span<const DisplayParams* const> span{layers.data(), layers.size()};
+  const auto sig = drm::scene::derive_output_signaling(span, &caps);
+  EXPECT_FALSE(sig.hdr_metadata.has_value()) << "HDR must downgrade when no blob property";
+  EXPECT_TRUE(sig.hdr_downgraded);
+}
+
+TEST(OutputSignallingTest, DeriveWithCapsMaxBpcCappedAt8Downgrades) {
+  // HDMI 1.4 sink with 8-bit ceiling. HDR is impossible without
+  // 10-bit depth at the sink.
+  drm::display::ConnectorCapabilities caps;
+  caps.has_hdr_output_metadata = true;
+  caps.has_max_bpc = true;
+  caps.max_bpc_min = 6;
+  caps.max_bpc_max = 8;
+  ASSERT_FALSE(caps.can_signal_hdr());
+
+  const auto a = with_eotf(drm::display::TransferFunction::SmpteSt2084Pq);
+  const std::array<const DisplayParams*, 1> layers{&a};
+  const drm::span<const DisplayParams* const> span{layers.data(), layers.size()};
+  const auto sig = drm::scene::derive_output_signaling(span, &caps);
+  EXPECT_FALSE(sig.hdr_metadata.has_value()) << "HDR must downgrade when max_bpc < 10";
+  EXPECT_TRUE(sig.hdr_downgraded);
+}
+
+TEST(OutputSignallingTest, DeriveWithCapsAt10BitCeilingAcceptsHdr) {
+  // 10-bit ceiling is the minimum the design calls out as HDR-capable.
+  drm::display::ConnectorCapabilities caps;
+  caps.has_hdr_output_metadata = true;
+  caps.has_max_bpc = true;
+  caps.max_bpc_min = 6;
+  caps.max_bpc_max = 10;
+  ASSERT_TRUE(caps.can_signal_hdr());
+
+  const auto a = with_eotf(drm::display::TransferFunction::SmpteSt2084Pq);
+  const std::array<const DisplayParams*, 1> layers{&a};
+  const drm::span<const DisplayParams* const> span{layers.data(), layers.size()};
+  const auto sig = drm::scene::derive_output_signaling(span, &caps);
+  EXPECT_TRUE(sig.hdr_metadata.has_value());
+  EXPECT_FALSE(sig.hdr_downgraded);
+}
+
+TEST(OutputSignallingTest, DeriveWithCapsSdrLayerNeverDowngrades) {
+  // Even on an HDR-incapable connector, an all-SDR scene should
+  // never set the downgrade flag — the auto-derive didn't try to
+  // signal HDR in the first place.
+  const drm::display::ConnectorCapabilities caps;  // empty, can_signal_hdr() == false
+  ASSERT_FALSE(caps.can_signal_hdr());
+
+  const DisplayParams sdr;
+  const std::array<const DisplayParams*, 1> layers{&sdr};
+  const drm::span<const DisplayParams* const> span{layers.data(), layers.size()};
+  const auto sig = drm::scene::derive_output_signaling(span, &caps);
+  EXPECT_FALSE(sig.hdr_metadata.has_value());
+  EXPECT_FALSE(sig.hdr_downgraded);
+}
+
+TEST(OutputSignallingTest, DeriveWithoutCapsSkipsConstraintCheck) {
+  // nullptr caps == "constraint check disabled". Useful in tests
+  // and in callers that already gated up front.
+  const auto a = with_eotf(drm::display::TransferFunction::SmpteSt2084Pq);
+  const std::array<const DisplayParams*, 1> layers{&a};
+  const drm::span<const DisplayParams* const> span{layers.data(), layers.size()};
+  const auto sig = drm::scene::derive_output_signaling(span, /*caps=*/nullptr);
+  EXPECT_TRUE(sig.hdr_metadata.has_value());
+  EXPECT_FALSE(sig.hdr_downgraded);
+}
+
 TEST(OutputSignallingTest, DeriveTraditionalGammaHdrIsNotTreatedAsHdr) {
   // TraditionalGammaHdr is the rare "HDR10 over a BT.1886 path"
   // case the design documents but doesn't auto-trigger HDR

@@ -117,8 +117,8 @@ bool is_hdr(drm::display::TransferFunction tf) noexcept {
 
 }  // namespace
 
-OutputSignalling derive_output_signaling(
-    const drm::span<const DisplayParams* const> layers) noexcept {
+OutputSignalling derive_output_signaling(const drm::span<const DisplayParams* const> layers,
+                                         const drm::display::ConnectorCapabilities* caps) noexcept {
   OutputSignalling out;
 
   // Widest-gamut layer drives both the connector Colorspace and
@@ -152,6 +152,14 @@ OutputSignalling derive_output_signaling(
     // specifies its own.
     md.display_primaries = color_primaries_to_colorimetry(widest.value_or(ColorPrimaries::Bt2020));
     out.hdr_metadata = md;
+  }
+
+  // connector constraint check. Drop the HDR signaling
+  // when the connector can't carry it; flag the downgrade so callers
+  // know the auto-derive wanted HDR but couldn't have it.
+  if (caps != nullptr && out.hdr_metadata.has_value() && !caps->can_signal_hdr()) {
+    out.hdr_metadata.reset();
+    out.hdr_downgraded = true;
   }
 
   return out;

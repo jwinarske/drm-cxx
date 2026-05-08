@@ -10,7 +10,7 @@
 //
 // Every counter is a non-negative integer — no "not applicable"
 // sentinels. Fields the current phase doesn't populate yet stay at 0;
-// Phase 2.2 (property minimization), 2.3 (composition fallback), and
+// (property minimization), 2.3 (composition fallback), and
 // 2.4 (rebind) each fill in more.
 
 #pragma once
@@ -81,13 +81,13 @@ struct CommitReport {
   /// signal per layer.
   std::size_t layers_skipped_no_frame{0};
   /// Number of composition buckets emitted this frame. 0 or 1 in v1
-  /// of Phase 2.3 (single full-screen canvas); multi-canvas pooling
+  /// of (single full-screen canvas); multi-canvas pooling
   /// can raise this.
   std::size_t composition_buckets{0};
 
   /// Total properties enqueued on the AtomicRequest this commit —
   /// includes plane state, CRTC state, and connector state. Useful as
-  /// a regression signal for property-minimization work (Phase 2.2):
+  /// a regression signal for property-minimization work:
   /// the count should drop meaningfully on unchanged-layer commits.
   std::size_t properties_written{0};
   /// Subset of `properties_written` that are FB_ID attachments. One
@@ -101,6 +101,18 @@ struct CommitReport {
   /// whole budget (default 16); warm-start commits should normally
   /// be 0.
   std::size_t test_commits_issued{0};
+
+  /// true when the scene's auto-derive built an
+  /// `HdrSourceMetadata` from a layer's `source_eotf` but the
+  /// connector can't signal HDR (no `HDR_OUTPUT_METADATA` exposed,
+  /// or `max_bpc` capped below 10) and the scene degraded to SDR
+  /// for this commit. Without 10-bit depth at the sink, HDR PQ is
+  /// 8-bit-tone-mapped-with-a-PQ-flag, which the sink accepts but
+  /// doesn't display as HDR — the design's "no silent banding"
+  /// invariant. Always false for a manual `set_output_metadata`
+  /// override (the manual path bypasses the auto-derive's
+  /// constraint check).
+  bool hdr_downgraded_no_max_bpc{false};
 
   /// One entry per layer the scene attempted to place this commit, in
   /// the scene's layer-iteration order. Empty when the scene had no

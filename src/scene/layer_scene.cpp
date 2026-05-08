@@ -406,10 +406,16 @@ class LayerScene::Impl {
         scratch_layer_params_.push_back(&acq.scene_layer->display());
       }
     }
-    const auto signaling =
-        drm::scene::derive_output_signaling(drm::span<const drm::scene::DisplayParams* const>(
-            scratch_layer_params_.data(), scratch_layer_params_.size()));
+    const auto signaling = drm::scene::derive_output_signaling(
+        drm::span<const drm::scene::DisplayParams* const>(scratch_layer_params_.data(),
+                                                          scratch_layer_params_.size()),
+        &connector_caps_);
     const auto& effective_hdr = hdr_user_set_ ? desired_hdr_ : signaling.hdr_metadata;
+    // surface the auto-derive's downgrade in the report
+    // so callers can see when their HDR layers got silently dropped
+    // to SDR. Manual override bypasses the constraint check, so the
+    // flag stays false on that path.
+    report.hdr_downgraded_no_max_bpc = signaling.hdr_downgraded;
 
     // Colorspace first (modeset-needy properties on the same
     // connector should batch into one ALLOW_MODESET commit).
