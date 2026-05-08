@@ -33,6 +33,7 @@ set(DRM_CXX_TESTS
   test_connector_capabilities
   test_hdr_metadata
   test_hdr_metadata_cache
+  test_output_signaling
   test_gbm
   test_dumb_buffer
   test_buffer_mapping

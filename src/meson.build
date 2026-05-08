@@ -36,6 +36,7 @@ drm_cxx_sources = files(
   'scene/gbm_buffer_source.cpp',
   'scene/gst_appsink_source.cpp',
   'scene/layer_scene.cpp',
+  'scene/output_signaling.cpp',
   'scene/v4l2_decoder_source.cpp',
   'sync/fence.cpp',
 )
@@ -276,6 +277,7 @@ install_headers(
   'scene/layer_desc.hpp',
   'scene/layer_handle.hpp',
   'scene/layer_scene.hpp',
+  'scene/output_signaling.hpp',
   'scene/v4l2_decoder_source.hpp',
   subdir : 'drm-cxx/scene',
 )

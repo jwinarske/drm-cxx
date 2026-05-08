@@ -118,6 +118,13 @@ test('test_hdr_metadata_cache',
   ),
 )
 
+test('test_output_signaling',
+  executable('test_output_signaling',
+    'unit/test_output_signaling.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_gbm',
   executable('test_gbm',
     'unit/test_gbm.cpp',
