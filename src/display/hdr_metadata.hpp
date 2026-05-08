@@ -128,6 +128,15 @@ class HdrMetadataBlob {
   [[nodiscard]] static HdrMetadataBlob synthesize_for_test(std::uint32_t synthetic_blob_id,
                                                            std::uint64_t hash) noexcept;
 
+  /// Drop ownership without calling `drmModeDestroyPropertyBlob`.
+  /// After this call the wrapper is empty (`bool(*this) == false`).
+  /// The kernel reclaims property blobs implicitly when the
+  /// originating DRM fd closes, so a session-loss path that
+  /// abandons the fd should `forget()` outstanding blobs rather
+  /// than destroying them — destruction would issue ioctls against
+  /// an already-closed fd.
+  void forget() noexcept;
+
  private:
   HdrMetadataBlob(int fd, std::uint32_t blob_id, std::uint64_t hash) noexcept;
   void reset() noexcept;

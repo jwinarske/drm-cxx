@@ -3,19 +3,17 @@
 //
 // layer_scene.hpp — top-level scene façade.
 //
-// Phase 2.1 scope per docs/implementation_plan.md:
+// scope per docs/implementation_plan.md:
 //   - Construct from (Device, CRTC/connector/mode).
 //   - add/remove/get layers by handle, monotonic + generation.
 //   - Single test() / commit() path that runs the existing
 //     drm::planes::Allocator against a fresh AtomicRequest.
 //   - Diagnostic CommitReport.
 //
-// Not in Phase 2.1 (shipped in later phases):
-//   - Property minimization (Phase 2.2).
-//   - Composition fallback for unassigned layers (Phase 2.3).
-//   - rebind() for CRTC/connector/mode changes (Phase 2.4 config-change
-//     half; the fd-swap half ships here via on_session_paused /
-//     on_session_resumed, which the Janitor VT-switch path needs).
+// Not in (shipped in later phases):
+//   - Property minimization.
+//   - Composition fallback for unassigned layers.
+//   - rebind() for CRTC/connector/mode changes.
 //   - Page-flip async completion handling / buffer release after scanout.
 //
 // The pimpl keeps drm::planes::Output, drm::planes::Allocator, and
@@ -39,11 +37,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <system_error>
 
 namespace drm {
 class Device;
 }  // namespace drm
+
+namespace drm::display {
+struct HdrSourceMetadata;
+}  // namespace drm::display
 
 namespace drm::scene {
 
@@ -58,7 +61,7 @@ class LayerScene {
   /// Build a LayerScene bound to the given CRTC + connector + mode.
   /// Enumerates the device's plane registry and caches the connector's
   /// and CRTC's atomic properties up front — neither lookup runs again
-  /// for the scene's lifetime (Phase 2.4's rebind() will re-enumerate).
+  /// for the scene's lifetime will re-enumerate).
   [[nodiscard]] static drm::expected<std::unique_ptr<LayerScene>, std::error_code> create(
       drm::Device& dev, const Config& cfg);
 
@@ -107,8 +110,27 @@ class LayerScene {
   [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(std::uint32_t flags = 0,
                                                                     void* user_data = nullptr);
 
+  /// Set or clear the HDR static metadata signaled on this scene's
+  /// connector. Wires the per-CRTC `HdrMetadataCache` so the next
+  /// `commit()` writes the connector's `HDR_OUTPUT_METADATA`
+  /// property to the corresponding blob id (or 0 to clear).
+  ///
+  /// `nullopt` clears HDR signaling. The connector returns to SDR
+  /// (the kernel emits no HDR Static Metadata InfoFrame).
+  ///
+  /// Connectors that don't expose `HDR_OUTPUT_METADATA` (older
+  /// kernels, non-HDR sinks) silently swallow the call: no kernel
+  /// state changes, no error. Use
+  /// `drm::display::probe_connector_capabilities` if you want to
+  /// gate up front.
+  ///
+  /// Calling with the same metadata on consecutive commits is a
+  /// no-op at the kernel level — the cache hashes content and
+  /// returns the existing blob id.
+  void set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src);
+
   /// Driver-quirk opt-out: when true, every layer property is
-  /// re-emitted on every commit, bypassing the Phase 2.2 per-plane
+  /// re-emitted on every commit, bypassing the per-plane
   /// snapshot diff. Default false. Toggle on for drivers that refuse
   /// to inherit unwritten state across commits — empirically rare
   /// (we have no confirmed instance) but kept as a documented escape

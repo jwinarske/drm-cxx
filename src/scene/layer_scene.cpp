@@ -15,6 +15,8 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/property_store.hpp>
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/display/hdr_metadata.hpp>
+#include <drm-cxx/display/hdr_metadata_cache.hpp>
 #include <drm-cxx/log.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
 #include <drm-cxx/planes/allocator.hpp>
@@ -379,6 +381,22 @@ class LayerScene::Impl {
     // test() must not mutate observable layer state.
     populate_report_placements(acquisitions, report);
 
+    // Connector-side HDR signaling. inject_hdr_output_metadata
+    // hashes the desired metadata, dedups against the per-CRTC cache,
+    // and adds the HDR_OUTPUT_METADATA property write to `req`. No-op
+    // when set_output_metadata has never been called or when the
+    // connector doesn't expose the property. Returns true when the
+    // blob id changed (kernel requires ALLOW_MODESET on amdgpu /
+    // i915 to validate HDR_OUTPUT_METADATA transitions).
+    auto hdr_needs_modeset = inject_hdr_output_metadata(req);
+    if (!hdr_needs_modeset) {
+      release_all(acquisitions);
+      return drm::unexpected<std::error_code>(hdr_needs_modeset.error());
+    }
+    if (*hdr_needs_modeset) {
+      effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+    }
+
     // Apply or validate.
     if (test_only) {
       if (auto r = req.test(); !r) {
@@ -393,6 +411,10 @@ class LayerScene::Impl {
         release_all(acquisitions);
         return drm::unexpected<std::error_code>(r.error());
       }
+      // Commit succeeded: the connector property has switched to the
+      // new HDR blob, so prior blobs in the cache's pending-destruction
+      // queue are safe to release.
+      hdr_cache_.acknowledge_committed();
       // Only real commits flip the scene past first-commit; tests don't.
       first_commit_ = false;
       // Mark dirty layers clean for a successful commit, and record the
@@ -416,6 +438,11 @@ class LayerScene::Impl {
   // re-propagate it after the allocator is rebuilt against the new
   // fd; consumers expect "I asked for force-full once, it stays on
   // across pause/resume" semantics.
+  void set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src) {
+    desired_hdr_ = src;
+    hdr_user_set_ = true;
+  }
+
   void set_force_full_property_writes(bool force) noexcept {
     force_full_writes_ = force;
     if (allocator_.has_value()) {
@@ -473,6 +500,15 @@ class LayerScene::Impl {
     mode_blob_id_ = 0;
     props_.clear();
     primary_zpos_hint_.reset();
+
+    // Old fd is dead; the kernel reclaimed every property blob it
+    // owned. Forget our HDR cache entries WITHOUT calling
+    // drmModeDestroyPropertyBlob — the destroy ioctls would target
+    // an already-closed fd, or worse, hit the new fd and free a
+    // different blob that happens to share an id. The next
+    // commit() rebuilds whatever the caller still wants signaled.
+    hdr_cache_.clear_for_session_loss();
+    last_written_hdr_blob_id_ = 0;
 
     dev_ = &new_dev;
 
@@ -560,6 +596,13 @@ class LayerScene::Impl {
     // still valid (planes don't change with CRTC rebinds, only the
     // CRTCs their `possible_crtcs` mask covers does).
     props_.clear();
+
+    // Drop HDR cache entries: they were keyed on the old crtc_id
+    // and would leak under the new one. fd is unchanged here, so
+    // destroy the kernel handles eagerly (matches destroy_mode_blob
+    // above) rather than waiting for fd close.
+    hdr_cache_.flush();
+    last_written_hdr_blob_id_ = 0;
 
     crtc_id_ = new_crtc_id;
     connector_id_ = new_connector_id;
@@ -1557,6 +1600,37 @@ class LayerScene::Impl {
   // Write CRTC.MODE_ID + CRTC.ACTIVE + CONN.CRTC_ID to a request — the
   // minimum set that brings a cold CRTC up. Used for both the caller's
   // real request and the allocator's internal test requests.
+  // write the connector's HDR_OUTPUT_METADATA property
+  // when the caller has set HDR signaling at least once. The cache
+  // dedups by content hash, so unchanged metadata returns the same
+  // blob id without any kernel work. Returns true when the property
+  // value differs from the previous commit and the kernel will
+  // therefore require ALLOW_MODESET to validate the change (amdgpu
+  // / i915 both reject HDR_OUTPUT_METADATA changes without it).
+  drm::expected<bool, std::error_code> inject_hdr_output_metadata(drm::AtomicRequest& req) {
+    if (!hdr_user_set_) {
+      return false;
+    }
+    const auto prop = props_.property_id(connector_id_, "HDR_OUTPUT_METADATA");
+    if (!prop) {
+      // Connector doesn't expose HDR_OUTPUT_METADATA (older kernel,
+      // non-HDR sink). Silently swallow per the public API
+      // contract — caller can probe connector capabilities up
+      // front if it wants to gate.
+      return false;
+    }
+    auto blob_id = hdr_cache_.set(*dev_, crtc_id_, desired_hdr_);
+    if (!blob_id) {
+      return drm::unexpected<std::error_code>(blob_id.error());
+    }
+    if (auto r = req.add_property(connector_id_, *prop, *blob_id); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+    const bool needs_modeset = *blob_id != last_written_hdr_blob_id_;
+    last_written_hdr_blob_id_ = *blob_id;
+    return needs_modeset;
+  }
+
   drm::expected<void, std::error_code> inject_modeset_state(drm::AtomicRequest& req) {
     auto add = [&](std::uint32_t obj, std::string_view name,
                    std::uint64_t value) -> drm::expected<void, std::error_code> {
@@ -1643,6 +1717,21 @@ class LayerScene::Impl {
   // across frames; clear() preserves it.
   std::vector<AcquisitionSlot*> scratch_composited_;
   std::vector<std::uint32_t> scratch_in_use_;
+
+  // HDR output metadata signaling. `desired_hdr_` carries the
+  // most-recent set_output_metadata input (`nullopt` == "clear");
+  // `hdr_user_set_` flips true on the first call so connectors that
+  // never had HDR signaled don't accumulate redundant property
+  // writes. The cache owns the kernel blobs; commit() pushes
+  // pending destruction through `acknowledge_committed()` after a
+  // successful real commit.
+  drm::display::HdrMetadataCache hdr_cache_;
+  std::optional<drm::display::HdrSourceMetadata> desired_hdr_;
+  bool hdr_user_set_{false};
+  // Last HDR blob id we wrote to the connector property. Used to
+  // detect changes that require ALLOW_MODESET. Cleared on session
+  // loss / rebind alongside the cache.
+  std::uint32_t last_written_hdr_blob_id_{0};
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1706,6 +1795,10 @@ drm::expected<CommitReport, std::error_code> LayerScene::test() {
 drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t flags,
                                                                 void* user_data) {
   return impl_->do_commit(flags, /*test_only=*/false, user_data);
+}
+
+void LayerScene::set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src) {
+  impl_->set_output_metadata(src);
 }
 
 void LayerScene::set_force_full_property_writes(bool force) noexcept {

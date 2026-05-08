@@ -76,6 +76,21 @@ class HdrMetadataCache {
   /// from any prior blob ids, so destroying them is safe.
   void acknowledge_committed() noexcept;
 
+  /// Forget all cached and pending-destruction blobs without calling
+  /// `drmModeDestroyPropertyBlob`. Use on session loss (libseat
+  /// pause / fd revocation): the kernel reclaimed every blob when
+  /// the originating fd closed, so destroying them through the new
+  /// fd would either fail or, worse, free a different blob that
+  /// happens to share an id on the new fd.
+  void clear_for_session_loss() noexcept;
+
+  /// Destroy every cached and pending-destruction blob through the
+  /// originating fd. Use when rebinding to a new CRTC / connector on
+  /// the same fd: the old blobs are no longer referenced by any
+  /// active connector property, so destroying them eagerly avoids
+  /// leaking the user-handles until fd close.
+  void flush() noexcept;
+
   /// Number of blobs queued for post-commit destruction.
   [[nodiscard]] std::size_t pending_destruction_count() const noexcept;
 

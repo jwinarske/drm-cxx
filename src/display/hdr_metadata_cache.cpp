@@ -63,6 +63,25 @@ void HdrMetadataCache::acknowledge_committed() noexcept {
   pending_destruction_.clear();
 }
 
+void HdrMetadataCache::clear_for_session_loss() noexcept {
+  for (auto& [_, entry] : active_) {
+    entry.blob.forget();
+  }
+  active_.clear();
+  for (auto& blob : pending_destruction_) {
+    blob.forget();
+  }
+  pending_destruction_.clear();
+}
+
+void HdrMetadataCache::flush() noexcept {
+  for (auto& [_, entry] : active_) {
+    pending_destruction_.push_back(std::move(entry.blob));
+  }
+  active_.clear();
+  pending_destruction_.clear();
+}
+
 std::size_t HdrMetadataCache::pending_destruction_count() const noexcept {
   return pending_destruction_.size();
 }

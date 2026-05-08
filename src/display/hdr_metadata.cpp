@@ -131,6 +131,12 @@ HdrMetadataBlob HdrMetadataBlob::synthesize_for_test(std::uint32_t synthetic_blo
   return {-1, synthetic_blob_id, hash};
 }
 
+void HdrMetadataBlob::forget() noexcept {
+  fd_ = -1;
+  blob_id_ = 0;
+  content_hash_ = 0;
+}
+
 drm::expected<HdrMetadataBlob, std::error_code> HdrMetadataBlob::create(
     const drm::Device& dev, const HdrSourceMetadata& src) {
   const auto bytes = serialize_hdr_metadata(src);
