@@ -104,6 +104,13 @@ test('test_connector_capabilities',
   ),
 )
 
+test('test_hdr_metadata',
+  executable('test_hdr_metadata',
+    'unit/test_hdr_metadata.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_gbm',
   executable('test_gbm',
     'unit/test_gbm.cpp',

@@ -31,6 +31,7 @@ set(DRM_CXX_TESTS
   test_mode
   test_display
   test_connector_capabilities
+  test_hdr_metadata
   test_gbm
   test_dumb_buffer
   test_buffer_mapping
