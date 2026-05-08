@@ -257,6 +257,16 @@ test('test_layer_scene_minimization_vkms',
   ),
 )
 
+# Buffer::create_planar(P010) round-trip against vkms.
+# Self-skips when vkms isn't loaded. No capture::snapshot dependency
+# (we verify the commit chain, not pixels).
+test('test_dumb_buffer_p010_vkms',
+  executable('test_dumb_buffer_p010_vkms',
+    'integration/test_dumb_buffer_p010_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # LayerScene rebind tests against VKMS.
 test('test_layer_scene_rebind_vkms',
   executable('test_layer_scene_rebind_vkms',

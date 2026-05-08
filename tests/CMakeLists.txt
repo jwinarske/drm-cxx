@@ -111,6 +111,17 @@ target_link_libraries(test_layer_scene_rebind_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_rebind_vkms)
 
+# Buffer::create_planar(P010) round-trip against VKMS.
+# Same shape as the other vkms tests; verifies multi-plane AddFB2 +
+# atomic primary-plane scanout end to end. No capture dependency.
+add_executable(test_dumb_buffer_p010_vkms
+  integration/test_dumb_buffer_p010_vkms.cpp)
+target_link_libraries(test_dumb_buffer_p010_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_dumb_buffer_p010_vkms)
+
 # Buffer-side coverage against the kernel's virtual GEM driver (VGEM).
 # Self-skips when vgem isn't loaded, so this stays green on hosts that
 # haven't `modprobe vgem`'d. Validates the *buffer* path (dumb::Buffer
