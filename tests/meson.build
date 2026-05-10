@@ -132,6 +132,13 @@ test('test_output_signaling',
   ),
 )
 
+test('test_tone_mapper',
+  executable('test_tone_mapper',
+    'unit/test_tone_mapper.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_gbm',
   executable('test_gbm',
     'unit/test_gbm.cpp',

@@ -35,31 +35,6 @@ constexpr double k_hlg_a = 0.17883277;
 constexpr double k_hlg_b = 0.28466892;
 constexpr double k_hlg_c = 0.55991073;
 
-[[nodiscard]] double pq_eotf(double encoded) noexcept {
-  encoded = std::clamp(encoded, 0.0, 1.0);
-  const double n = std::pow(encoded, 1.0 / k_pq_m2);
-  const double num = std::max(n - k_pq_c1, 0.0);
-  const double den = k_pq_c2 - (k_pq_c3 * n);
-  if (den <= 0.0) {
-    return 0.0;
-  }
-  return std::pow(num / den, 1.0 / k_pq_m1);
-}
-
-[[nodiscard]] double pq_oetf(double linear) noexcept {
-  linear = std::clamp(linear, 0.0, 1.0);
-  const double n = std::pow(linear, k_pq_m1);
-  return std::pow((k_pq_c1 + (k_pq_c2 * n)) / (1.0 + (k_pq_c3 * n)), k_pq_m2);
-}
-
-[[nodiscard]] double hlg_oetf_inverse(double encoded) noexcept {
-  encoded = std::clamp(encoded, 0.0, 1.0);
-  if (encoded <= 0.5) {
-    return (encoded * encoded) / 3.0;
-  }
-  return (std::exp((encoded - k_hlg_c) / k_hlg_a) + k_hlg_b) / 12.0;
-}
-
 // Fill the LUT in `out` with `f(i / (N - 1))` per entry. `f` is
 // invoked many times so it's taken by value; templating is what
 // keeps the per-call indirection inlinable.
@@ -123,6 +98,59 @@ std::uint16_t quantize_lut_value(double normalized) noexcept {
     return 0xFFFFU;
   }
   return static_cast<std::uint16_t>(std::round(normalized * 65535.0));
+}
+
+double pq_eotf(double encoded) noexcept {
+  encoded = std::clamp(encoded, 0.0, 1.0);
+  const double n = std::pow(encoded, 1.0 / k_pq_m2);
+  const double num = std::max(n - k_pq_c1, 0.0);
+  const double den = k_pq_c2 - (k_pq_c3 * n);
+  if (den <= 0.0) {
+    return 0.0;
+  }
+  return std::pow(num / den, 1.0 / k_pq_m1);
+}
+
+double pq_oetf(double linear) noexcept {
+  linear = std::clamp(linear, 0.0, 1.0);
+  const double n = std::pow(linear, k_pq_m1);
+  return std::pow((k_pq_c1 + (k_pq_c2 * n)) / (1.0 + (k_pq_c3 * n)), k_pq_m2);
+}
+
+double hlg_oetf_inverse(double encoded) noexcept {
+  encoded = std::clamp(encoded, 0.0, 1.0);
+  if (encoded <= 0.5) {
+    return (encoded * encoded) / 3.0;
+  }
+  return (std::exp((encoded - k_hlg_c) / k_hlg_a) + k_hlg_b) / 12.0;
+}
+
+// IEC 61966-2-1 sRGB EOTF (encoded → linear). Two-segment piecewise:
+// linear segment for the low end (where the gamma curve has zero
+// slope) and gamma-2.4-ish above the breakpoint. Used as the SDR
+// source curve when input content is BT.709 / sRGB.
+double srgb_eotf(double encoded) noexcept {
+  encoded = std::clamp(encoded, 0.0, 1.0);
+  if (encoded <= 0.04045) {
+    return encoded / 12.92;
+  }
+  return std::pow((encoded + 0.055) / 1.055, 2.4);
+}
+
+double srgb_oetf(double linear) noexcept {
+  linear = std::clamp(linear, 0.0, 1.0);
+  if (linear <= 0.0031308) {
+    return 12.92 * linear;
+  }
+  return (1.055 * std::pow(linear, 1.0 / 2.4)) - 0.055;
+}
+
+// ITU-R BT.1886 OETF — fixed gamma 2.4. Black-level offset is
+// omitted; most displays handle it themselves and the offset
+// matters only for true 0-nit blacks which scanout typically
+// can't hit anyway.
+double bt1886_oetf(double linear) noexcept {
+  return std::pow(std::max(linear, 0.0), 1.0 / 2.4);
 }
 
 void build_identity_lut(drm::span<drm_color_lut> out) noexcept {

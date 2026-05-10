@@ -26,6 +26,7 @@ set(DRM_CXX_SOURCES
   display/crtc_color_pipeline.cpp
   display/edid.cpp
   display/hdr_metadata.cpp
+  display/tone_mapper.cpp
   display/hdr_metadata_cache.cpp
   display/hotplug_monitor.cpp
   session/seat.cpp
@@ -275,6 +276,7 @@ install(FILES
     display/hdr_metadata.hpp
     display/hdr_metadata_cache.hpp
     display/hotplug_monitor.hpp
+    display/tone_mapper.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/display)
 
 install(FILES

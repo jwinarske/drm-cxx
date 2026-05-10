@@ -51,6 +51,33 @@ namespace drm::display {
 /// clamp; rounding is half-up.
 [[nodiscard]] std::uint16_t quantize_lut_value(double normalized) noexcept;
 
+// ── Float-domain transfer functions ─────────────────────────────────
+//
+// Per-channel curves used by both the LUT builders below and the
+// CPU tone-mapper. All operate on normalized values in
+// `[0, 1]` and clamp out-of-range inputs.
+
+/// SMPTE ST 2084 (PQ) EOTF — encoded → linear. Output `1.0` represents
+/// the PQ peak (10 000 cd/m²).
+[[nodiscard]] double pq_eotf(double encoded) noexcept;
+
+/// SMPTE ST 2084 (PQ) OETF — linear → encoded. Inverse of `pq_eotf`.
+[[nodiscard]] double pq_oetf(double linear) noexcept;
+
+/// ITU-R BT.2100 HLG OETF^-1 — encoded → scene-linear (no OOTF).
+[[nodiscard]] double hlg_oetf_inverse(double encoded) noexcept;
+
+/// IEC 61966-2-1 sRGB EOTF — encoded → linear. Used for SDR sources.
+[[nodiscard]] double srgb_eotf(double encoded) noexcept;
+
+/// IEC 61966-2-1 sRGB OETF — linear → encoded.
+[[nodiscard]] double srgb_oetf(double linear) noexcept;
+
+/// ITU-R BT.1886 OETF — linear → encoded with a fixed gamma of 2.4.
+/// Use as the SDR output curve when the display is broadcast-style
+/// (gamma 2.4); use `srgb_oetf` for desktop / mobile sRGB displays.
+[[nodiscard]] double bt1886_oetf(double linear) noexcept;
+
 // ── LUT builders ────────────────────────────────────────────────────
 //
 // All builders fill `out` (size `out.size()` controls quantization

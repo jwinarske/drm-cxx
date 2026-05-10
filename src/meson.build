@@ -25,6 +25,7 @@ drm_cxx_sources = files(
   'display/crtc_color_pipeline.cpp',
   'display/edid.cpp',
   'display/hdr_metadata.cpp',
+  'display/tone_mapper.cpp',
   'display/hdr_metadata_cache.cpp',
   'display/hotplug_monitor.cpp',
   'session/seat.cpp',
@@ -211,6 +212,7 @@ install_headers(
   'display/hdr_metadata.hpp',
   'display/hdr_metadata_cache.hpp',
   'display/hotplug_monitor.hpp',
+  'display/tone_mapper.hpp',
   subdir : 'drm-cxx/display',
 )
 
