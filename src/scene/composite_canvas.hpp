@@ -40,6 +40,10 @@ namespace drm {
 class Device;
 }  // namespace drm
 
+namespace drm::display {
+class ToneMapper;
+}  // namespace drm::display
+
 namespace drm::scene {
 
 struct CompositeCanvasConfig {
@@ -79,6 +83,14 @@ struct CompositeSrc {
   /// landed on a hardware plane or fell through to composition.
   /// Default 0xFFFF (no modulation).
   std::uint16_t plane_alpha{0xFFFF};
+
+  /// optional CPU tone-map applied per pixel before
+  /// SRC_OVER blend. When set and the source's `drm_fourcc` is
+  /// ARGB8888 / XRGB8888, each pixel is expanded to 16-bit-per-
+  /// channel, run through the mapper, downconverted, and blended.
+  /// nullptr leaves the source pixels untouched (the existing
+  /// fast path).
+  const drm::display::ToneMapper* tone_mapper{nullptr};
 };
 
 /// Rectangles passed to blend(). Both are signed because dst_rect can
