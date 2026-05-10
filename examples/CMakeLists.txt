@@ -128,6 +128,7 @@ endif()
 add_subdirectory(scene/signage_player)
 add_subdirectory(scene/video_player)
 add_subdirectory(scene/cluster_sim)
+add_subdirectory(scene/hdr_demo)
 add_subdirectory(basics/test_patterns)
 
 # keyboard — interactive keyboard-input + Unicode-entry demo.
