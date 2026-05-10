@@ -22,6 +22,8 @@
 
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace drm::display {
@@ -79,6 +81,19 @@ class ToneMapper {
   /// Apply the configured transform to one pixel.
   [[nodiscard]] std::uint64_t operator()(std::uint64_t input_pixel) const noexcept;
 
+  /// Apply the configured transform across `count` pixels, reading
+  /// from `src` and writing to `dst`. Equivalent to a `for (i=0;
+  /// i<count; ++i) dst[i] = (*this)(src[i])` loop, but the
+  /// direction switch is hoisted outside the inner loop so the
+  /// compiler can vectorize per direction. `src` and `dst` may
+  /// alias.
+  void apply(const std::uint64_t* src, std::uint64_t* dst, std::size_t count) const noexcept;
+
+  /// LUT entry count used by the fast-path tables. Exposed as a
+  /// public constant so benchmarks / consumers can reason about
+  /// memory layout. 1024 + 1 sentinel for linear interpolation.
+  static constexpr std::uint32_t k_lut_size = 1025;
+
   // Diagnostics
   [[nodiscard]] Direction direction() const noexcept { return direction_; }
   [[nodiscard]] ToneMapCurve curve() const noexcept { return curve_; }
@@ -88,10 +103,25 @@ class ToneMapper {
  private:
   ToneMapper(Direction direction, float sdr_white, float target_max, ToneMapCurve curve) noexcept;
 
+  void build_luts() noexcept;
+
   Direction direction_;
   ToneMapCurve curve_;
   float sdr_white_nits_;
   float target_max_nits_;
+
+  /// Per-channel input curve LUT (encoded → linear-light). Lookup
+  /// indexes the top 10 bits of the u16 channel value; the bottom
+  /// 6 bits drive linear interpolation between consecutive entries.
+  /// The `+1` sentinel lets `lut[idx + 1]` read without a branch
+  /// on the last entry. Float (not double) so the per-pixel inner
+  /// loop's matrix + LUT math fits AVX2 4-wide / NEON 4-wide SIMD
+  /// when the compiler vectorizes.
+  std::array<float, k_lut_size> input_lut_{};
+
+  /// Per-channel output curve LUT (linear-light → encoded). Same
+  /// shape; index = linear * 1024 (clamped to [0, 1024]).
+  std::array<float, k_lut_size> output_lut_{};
 };
 
 }  // namespace drm::display
