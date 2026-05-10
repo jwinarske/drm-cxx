@@ -107,6 +107,27 @@ struct PlaneCapabilities {
   /// the plane lacks that specific entry.
   std::optional<uint64_t> color_range_limited;
   std::optional<uint64_t> color_range_full;
+  /// per-plane color pipeline (pre-blending CMS) on
+  /// hardware that exposes it (amdgpu RDNA3+ via kernel 6.5+,
+  /// Intel Battlemage / DG2). When all three are true the plane
+  /// can apply per-layer EOTF inversion, gamut conversion, and an
+  /// SDR-luminance multiplier *before* the kernel blends layers in
+  /// linear-light, which is the only correct way to mix HDR + SDR
+  /// layers on a single CRTC. Drivers that lack one or more of
+  /// these properties (e.g. RDNA2, vkms, older i915) leave the
+  /// corresponding flag false; LayerScene falls back to either the
+  /// CRTC-side pipeline or pre-composition.
+  bool has_plane_degamma_lut{false};
+  bool has_plane_ctm{false};
+  /// True when the plane exposes the `"PLANE_HDR_MULT"` u32
+  /// property — a 16.16 fixed-point scalar multiplied with the
+  /// post-DEGAMMA linear values. Used to lift SDR layers'
+  /// luminance into the HDR blend space (e.g.
+  /// `sdr_white_nits / 10000.0` on a PQ pipeline).
+  bool has_plane_hdr_mult{false};
+  /// Number of `drm_color_lut` entries `PLANE_DEGAMMA_LUT` expects.
+  /// Zero when `has_plane_degamma_lut` is false.
+  uint32_t plane_degamma_lut_size{};
   uint32_t cursor_max_w{};
   uint32_t cursor_max_h{};
 
