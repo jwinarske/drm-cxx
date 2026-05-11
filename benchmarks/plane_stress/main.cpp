@@ -5,7 +5,7 @@
 //
 // Drives a scene through a configurable workload (layer count, format
 // pool, tile size, churn mode and rate) and emits one CSV row per
-// committed frame plus a final summary. The numbers feed Phase 4
+// committed frame plus a final summary. The numbers feed
 // outreach: blog posts, READMEs, and the project's "what does the
 // allocator actually do under load?" answer.
 //
@@ -229,7 +229,7 @@ std::vector<std::uint32_t> parse_format_list(std::string_view s) {
 }
 
 // Argv-style flag parser. Stops at the first positional argv we don't
-// recognise so the caller can still pass [device] through to
+// recognize so the caller can still pass [device] through to
 // open_and_pick_output.
 bool parse_args(int argc, char** argv, Options& opt, int& consumed) {
   consumed = 1;  // skip program name
@@ -556,7 +556,7 @@ int main(int argc, char** argv) {
         break;
       }
       case ChurnMode::Reshade: {
-        // Bump the lower 24 bits of the fill colour each tick so the
+        // Bump the lower 24 bits of the fill color each tick so the
         // CPU repaint dirties the FB and forces an FB_ID re-emit.
         t.shade = (t.shade & 0xFF000000U) | ((t.shade + 0x010205U) & 0x00FFFFFFU);
         if (auto m = t.src->map(drm::MapAccess::Write); m) {

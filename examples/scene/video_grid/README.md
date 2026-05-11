@@ -1,6 +1,6 @@
 # video_grid
 
-An N×N grid of synthesised "video" cells laid out across a single
+An N×N grid of synthesized "video" cells laid out across a single
 output. Each cell owns its own `DumbBufferSource` and is repainted
 every frame with a diagonal sweeping bar over a flat base color,
 simulating per-cell motion. Cells alternate between XRGB8888 and

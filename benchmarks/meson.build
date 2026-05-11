@@ -17,3 +17,8 @@ executable('allocator_torture',
   include_directories : benchmarks_inc,
   dependencies : [drm_cxx_dep],
 )
+
+executable('tone_mapper_bench',
+  'tone_mapper_bench/main.cpp',
+  dependencies : [drm_cxx_dep],
+)

@@ -5,7 +5,7 @@
 // painters. Pixel-perfect golden-image tests would couple this file to
 // rounding choices that should remain easy to retune; the assertions
 // below exercise the entry points and check a handful of invariants
-// (column-0 colour, tile boundaries, gradient endpoints) instead.
+// (column-0 color, tile boundaries, gradient endpoints) instead.
 
 #include "test_patterns/patterns.hpp"
 
@@ -94,13 +94,13 @@ TEST(TestPatterns, CheckerboardTilesDiffer) {
   // Two-tile-wide buffer (128 px) so we can sample inside both tiles.
   TestBuffer buf(128, 128);
   drm::examples::test_patterns::paint(PatternKind::Checkerboard, buf.target());
-  // (0, 0) and (64, 0) lie in adjacent tiles; their fill colours must
-  // differ. Don't assert the exact colours — kCheckerTile could be
+  // (0, 0) and (64, 0) lie in adjacent tiles; their fill colors must
+  // differ. Don't assert the exact colors — kCheckerTile could be
   // retuned and we'd rather the test survive that.
   EXPECT_NE(buf.at(0, 0) & 0x00FFFFFFU, buf.at(64, 0) & 0x00FFFFFFU);
   // (0, 0) and (0, 64) are in vertically adjacent tiles — also differ.
   EXPECT_NE(buf.at(0, 0) & 0x00FFFFFFU, buf.at(0, 64) & 0x00FFFFFFU);
-  // (0, 0) and (64, 64) are diagonally adjacent — the same colour.
+  // (0, 0) and (64, 64) are diagonally adjacent — the same color.
   EXPECT_EQ(buf.at(0, 0) & 0x00FFFFFFU, buf.at(64, 64) & 0x00FFFFFFU);
 }
 

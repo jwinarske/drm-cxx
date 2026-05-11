@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <drm-cxx/display/connector_info.hpp>
+#include <drm-cxx/display/hdr_metadata.hpp>
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
 
@@ -19,6 +21,21 @@
 #include <optional>
 
 namespace drm::scene {
+
+/// Container colorimetry of a layer's pixel data. Drives the connector
+/// `Colorspace` enum at scene-lowering time and seeds the mastering
+/// display primaries on `HDR_OUTPUT_METADATA` when the layer is HDR.
+/// Distinct from `drm::display::Colorspace` which is the kernel-side
+/// enum the driver advertises on a connector — `ColorPrimaries` is
+/// the friendly producer-side description; the scene picks the
+/// connector enum that best matches the widest-gamut layer at commit
+/// time (see `output_signaling.hpp`).
+enum class ColorPrimaries : std::uint8_t {
+  Bt709,     // BT.709 / sRGB. SDR default.
+  Bt2020,    // BT.2020 / Rec.2100. HDR + wide-gamut SDR.
+  DciP3,     // DCI-P3 D65 (display-referred consumer P3).
+  AdobeRgb,  // SMPTE Adobe RGB (1998).
+};
 
 /// Geometry primitive for src/dst rectangles. Aliased onto
 /// `drm::planes::Rect` so scene → `planes::Layer` lowering is a
@@ -56,6 +73,20 @@ struct DisplayParams {
   /// LayerScene write its default" (limited, matching most camera /
   /// broadcast YCbCr).
   std::optional<drm::planes::ColorRange> color_range;
+
+  /// Container colorimetry of this layer's pixel data. Drives the
+  /// scene's choice of connector `Colorspace` (BT.2020 wins over
+  /// DCI-P3 wins over Adobe RGB wins over BT.709). nullopt means
+  /// "scene picks BT.709 SDR default."
+  std::optional<ColorPrimaries> color_primaries;
+
+  /// Source electro-optical transfer function. PQ + HLG are the HDR
+  /// cases; TraditionalGammaHdr is rare (HDR10 over a BT.1886 path);
+  /// the default in nullopt is the SDR transfer (BT.1886 / sRGB).
+  /// When *any* layer in a scene reports an HDR EOTF the scene
+  /// declares HDR signaling on the connector via
+  /// `HDR_OUTPUT_METADATA`.
+  std::optional<drm::display::TransferFunction> source_eotf;
 
   [[nodiscard]] constexpr bool needs_scaling() const noexcept {
     return src_rect.w != dst_rect.w || src_rect.h != dst_rect.h;

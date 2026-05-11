@@ -45,7 +45,7 @@
 namespace drm {
 
 /// Intent of a CPU mapping. Backends that distinguish read-only vs
-/// read-write traffic (GBM via `gbm_bo_map`'s transfer flags) honour
+/// read-write traffic (GBM via `gbm_bo_map`'s transfer flags) honor
 /// this; backends that don't (dumb buffers) ignore it. Picking the
 /// narrowest mode that fits is always correct: a Read mapping is
 /// cheaper to set up on tiled / cached buffers than a ReadWrite one,
@@ -159,7 +159,7 @@ class BufferMapping {
   [[nodiscard]] drm::span<std::uint8_t> pixels() const noexcept { return {pixels_, size_bytes_}; }
 
   /// Bytes per row. The kernel / GBM allocator may pad this above
-  /// `width * bytes_per_pixel`; honour it instead of recomputing.
+  /// `width * bytes_per_pixel`; honor it instead of recomputing.
   [[nodiscard]] std::uint32_t stride() const noexcept { return stride_; }
 
   /// Buffer width in pixels.

@@ -14,15 +14,19 @@ TEST(ConnectorInfoTest, DefaultConstruction) {
   EXPECT_TRUE(info.name.empty());
   EXPECT_FALSE(info.colorimetry.has_value());
   EXPECT_FALSE(info.hdr.has_value());
-  EXPECT_TRUE(info.supported_eotfs.empty());
+  EXPECT_FALSE(info.wide_gamut.has_value());
 }
 
 TEST(HdrStaticMetadataTest, DefaultValues) {
   drm::display::HdrStaticMetadata const md{};
-  EXPECT_FLOAT_EQ(md.max_luminance, 0.0F);
-  EXPECT_FLOAT_EQ(md.min_luminance, 0.0F);
-  EXPECT_FLOAT_EQ(md.max_cll, 0.0F);
-  EXPECT_FLOAT_EQ(md.max_fall, 0.0F);
+  EXPECT_FLOAT_EQ(md.desired_content_max_luminance, 0.0F);
+  EXPECT_FLOAT_EQ(md.desired_content_max_frame_avg_luminance, 0.0F);
+  EXPECT_FLOAT_EQ(md.desired_content_min_luminance, 0.0F);
+  EXPECT_FALSE(md.type1);
+  EXPECT_FALSE(md.traditional_sdr);
+  EXPECT_FALSE(md.traditional_hdr);
+  EXPECT_FALSE(md.pq);
+  EXPECT_FALSE(md.hlg);
 }
 
 TEST(ColorimetryInfoTest, CanSetValues) {
@@ -31,9 +35,22 @@ TEST(ColorimetryInfoTest, CanSetValues) {
   ci.green = {0.30F, 0.60F};
   ci.blue = {0.15F, 0.06F};
   ci.white = {0.3127F, 0.3290F};
+  ci.has_primaries = true;
+  ci.has_default_white = true;
 
   EXPECT_FLOAT_EQ(ci.red.x, 0.64F);
   EXPECT_FLOAT_EQ(ci.white.y, 0.3290F);
+  EXPECT_TRUE(ci.has_primaries);
+  EXPECT_TRUE(ci.has_default_white);
+}
+
+TEST(SupportedColorimetryTest, DefaultValues) {
+  drm::display::SupportedColorimetry const w{};
+  EXPECT_FALSE(w.bt2020_cycc);
+  EXPECT_FALSE(w.bt2020_ycc);
+  EXPECT_FALSE(w.bt2020_rgb);
+  EXPECT_FALSE(w.st2113_rgb);
+  EXPECT_FALSE(w.ictcp);
 }
 
 TEST(ParseEdidTest, EmptyBlobReturnsError) {
@@ -77,5 +94,11 @@ TEST(ParseEdidTest, ValidEdidParses) {
   if (result.has_value()) {
     // Verify we got some data
     EXPECT_FALSE(result->name.empty());
+    // Pre-CTA EDID 1.3 has no HDR / wide-gamut data blocks; those
+    // optionals should remain empty. Default colorimetry from the
+    // base EDID chromaticity bytes may or may not populate depending
+    // on the libdisplay-info version's handling of zero coordinates.
+    EXPECT_FALSE(result->hdr.has_value());
+    EXPECT_FALSE(result->wide_gamut.has_value());
   }
 }

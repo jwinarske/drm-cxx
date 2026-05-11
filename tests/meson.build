@@ -97,6 +97,48 @@ test('test_display',
   ),
 )
 
+test('test_color_pipeline_curves',
+  executable('test_color_pipeline_curves',
+    'unit/test_color_pipeline_curves.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_connector_capabilities',
+  executable('test_connector_capabilities',
+    'unit/test_connector_capabilities.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_hdr_metadata',
+  executable('test_hdr_metadata',
+    'unit/test_hdr_metadata.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_hdr_metadata_cache',
+  executable('test_hdr_metadata_cache',
+    'unit/test_hdr_metadata_cache.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_output_signaling',
+  executable('test_output_signaling',
+    'unit/test_output_signaling.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_tone_mapper',
+  executable('test_tone_mapper',
+    'unit/test_tone_mapper.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_gbm',
   executable('test_gbm',
     'unit/test_gbm.cpp',
@@ -219,7 +261,7 @@ if has_blend2d
   )
 endif
 
-# LayerScene Phase 2.2 property-minimization tests against VKMS.
+# LayerScene property-minimization tests against VKMS.
 # CommitReport diagnostics, not capture::snapshot — independent of the
 # blend2d gate.
 test('test_layer_scene_minimization_vkms',
@@ -229,7 +271,25 @@ test('test_layer_scene_minimization_vkms',
   ),
 )
 
-# LayerScene Phase 2.4 rebind tests against VKMS.
+# CRTC color-pipeline integration against vkms.
+test('test_crtc_color_pipeline_vkms',
+  executable('test_crtc_color_pipeline_vkms',
+    'integration/test_crtc_color_pipeline_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# Buffer::create_planar(P010) round-trip against vkms.
+# Self-skips when vkms isn't loaded. No capture::snapshot dependency
+# (we verify the commit chain, not pixels).
+test('test_dumb_buffer_p010_vkms',
+  executable('test_dumb_buffer_p010_vkms',
+    'integration/test_dumb_buffer_p010_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# LayerScene rebind tests against VKMS.
 test('test_layer_scene_rebind_vkms',
   executable('test_layer_scene_rebind_vkms',
     'integration/test_layer_scene_rebind_vkms.cpp',

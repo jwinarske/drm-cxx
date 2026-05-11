@@ -247,7 +247,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   // Bail to full_search when the caller's external_reserved set
   // overlaps with our remembered allocation. The previous frame's
   // assignment placed a layer where the caller now wants the canvas
-  // (or some other reserved use); we can't honour both, and the
+  // (or some other reserved use); we can't honor both, and the
   // simplest path is to re-search from scratch.
   for (const auto& [plane_id, layer] : previous_allocation_) {
     for (const auto reserved : external_reserved_) {

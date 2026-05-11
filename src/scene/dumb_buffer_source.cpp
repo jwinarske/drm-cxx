@@ -10,6 +10,8 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
 
+#include <drm_fourcc.h>
+
 #include <cstdint>
 #include <memory>
 #include <system_error>
@@ -17,16 +19,37 @@
 
 namespace drm::scene {
 
-drm::expected<std::unique_ptr<DumbBufferSource>, std::error_code> DumbBufferSource::create(
+namespace {
+
+// dispatch the right `dumb::Buffer` factory for a given
+// fourcc. Single-plane RGB / packed YUV go through the plain
+// `create()`; semi-planar 4:2:0 (NV12 / NV21 / P010 / P012 / P016)
+// goes through `create_planar()` which handles the over-allocation
+// for the UV plane plus the multi-plane AddFB2 wiring.
+[[nodiscard]] bool is_semiplanar_yuv(std::uint32_t fourcc) noexcept {
+  return fourcc == DRM_FORMAT_NV12 || fourcc == DRM_FORMAT_NV21 || fourcc == DRM_FORMAT_P010 ||
+         fourcc == DRM_FORMAT_P012 || fourcc == DRM_FORMAT_P016;
+}
+
+[[nodiscard]] drm::expected<drm::dumb::Buffer, std::error_code> allocate_for_format(
     const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_format) {
+  if (is_semiplanar_yuv(drm_format)) {
+    return drm::dumb::Buffer::create_planar(dev, drm_format, width, height);
+  }
   drm::dumb::Config cfg;
   cfg.width = width;
   cfg.height = height;
   cfg.drm_format = drm_format;
-  cfg.bpp = 32;  // ARGB/XRGB; other formats reach for a different source type
+  cfg.bpp = 32;  // ARGB/XRGB packed; the only single-plane shape this source ships today.
   cfg.add_fb = true;
+  return drm::dumb::Buffer::create(dev, cfg);
+}
 
-  auto r = drm::dumb::Buffer::create(dev, cfg);
+}  // namespace
+
+drm::expected<std::unique_ptr<DumbBufferSource>, std::error_code> DumbBufferSource::create(
+    const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_format) {
+  auto r = allocate_for_format(dev, width, height, drm_format);
   if (!r) {
     return drm::unexpected<std::error_code>(r.error());
   }
@@ -95,14 +118,7 @@ drm::expected<void, std::error_code> DumbBufferSource::on_session_resumed(
 
   buffer_.forget();
 
-  drm::dumb::Config cfg;
-  cfg.width = prev_width;
-  cfg.height = prev_height;
-  cfg.drm_format = prev_format;
-  cfg.bpp = 32;
-  cfg.add_fb = true;
-
-  auto r = drm::dumb::Buffer::create(new_dev, cfg);
+  auto r = allocate_for_format(new_dev, prev_width, prev_height, prev_format);
   if (!r) {
     return drm::unexpected<std::error_code>(r.error());
   }

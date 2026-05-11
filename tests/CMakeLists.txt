@@ -30,6 +30,12 @@ set(DRM_CXX_TESTS
   test_key_repeater
   test_mode
   test_display
+  test_color_pipeline_curves
+  test_connector_capabilities
+  test_hdr_metadata
+  test_hdr_metadata_cache
+  test_output_signaling
+  test_tone_mapper
   test_gbm
   test_dumb_buffer
   test_buffer_mapping
@@ -85,7 +91,7 @@ if(DRM_CXX_HAS_BLEND2D)
   gtest_discover_tests(test_layer_scene_composition_vkms)
 endif()
 
-# LayerScene Phase 2.2 property-minimization tests against VKMS. No
+# LayerScene property-minimization tests against VKMS. No
 # Blend2D dependency — diagnostics readback is via CommitReport, not
 # capture::snapshot — so this stays out of the DRM_CXX_HAS_BLEND2D
 # block above.
@@ -97,7 +103,7 @@ target_link_libraries(test_layer_scene_minimization_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_minimization_vkms)
 
-# LayerScene Phase 2.4 rebind tests against VKMS. Same rationale as
+# LayerScene rebind tests against VKMS. Same rationale as
 # the minimization suite — pure scene API, no capture dependency.
 add_executable(test_layer_scene_rebind_vkms
   integration/test_layer_scene_rebind_vkms.cpp)
@@ -106,6 +112,29 @@ target_link_libraries(test_layer_scene_rebind_vkms PRIVATE
   GTest::gtest
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_rebind_vkms)
+
+# CRTC color-pipeline integration test against VKMS.
+# vkms only exposes GAMMA_LUT (not DEGAMMA / CTM), so the test
+# exercises the gamma half + the apply path; full DEGAMMA / CTM
+# coverage needs amdgpu / i915 hardware.
+add_executable(test_crtc_color_pipeline_vkms
+  integration/test_crtc_color_pipeline_vkms.cpp)
+target_link_libraries(test_crtc_color_pipeline_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_crtc_color_pipeline_vkms)
+
+# Buffer::create_planar(P010) round-trip against VKMS.
+# Same shape as the other vkms tests; verifies multi-plane AddFB2 +
+# atomic primary-plane scanout end to end. No capture dependency.
+add_executable(test_dumb_buffer_p010_vkms
+  integration/test_dumb_buffer_p010_vkms.cpp)
+target_link_libraries(test_dumb_buffer_p010_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_dumb_buffer_p010_vkms)
 
 # Buffer-side coverage against the kernel's virtual GEM driver (VGEM).
 # Self-skips when vgem isn't loaded, so this stays green on hosts that

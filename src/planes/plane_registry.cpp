@@ -211,6 +211,19 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
           }
         }
       }
+    } else if (std::strcmp(prop->name, "PLANE_DEGAMMA_LUT") == 0) {
+      caps.has_plane_degamma_lut = true;
+    } else if (std::strcmp(prop->name, "PLANE_DEGAMMA_LUT_SIZE") == 0) {
+      // Immutable range property: upper bound is the LUT row count
+      // the driver expects in the blob. Mirrors CRTC
+      // *_LUT_SIZE handling.
+      if (((prop->flags & DRM_MODE_PROP_RANGE) != 0U) && prop->count_values >= 1) {
+        caps.plane_degamma_lut_size = static_cast<std::uint32_t>(prop_vals[i]);
+      }
+    } else if (std::strcmp(prop->name, "PLANE_CTM") == 0) {
+      caps.has_plane_ctm = true;
+    } else if (std::strcmp(prop->name, "PLANE_HDR_MULT") == 0) {
+      caps.has_plane_hdr_mult = true;
     }
 
     drmModeFreeProperty(prop);

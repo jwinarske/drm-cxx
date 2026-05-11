@@ -14,3 +14,7 @@ foreach(_bench plane_stress allocator_torture)
   target_include_directories(${_bench} PRIVATE
     ${CMAKE_SOURCE_DIR}/examples)
 endforeach()
+
+# Pure-CPU microbenchmark; no example helpers needed.
+add_executable(tone_mapper_bench tone_mapper_bench/main.cpp)
+target_link_libraries(tone_mapper_bench PRIVATE drm-cxx::drm-cxx)

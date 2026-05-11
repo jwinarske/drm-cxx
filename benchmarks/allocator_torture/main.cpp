@@ -3,7 +3,7 @@
 //
 // allocator_torture — adversarial test battery for the LayerScene
 // allocator. Six cases that each construct a scene shape designed to
-// expose a specific allocator behaviour, run the scene for as many
+// expose a specific allocator behavior, run the scene for as many
 // frames as the case needs, and print PASS / FAIL / SKIP plus
 // concrete metrics. The numbers are what blog posts and READMEs
 // quote ("warm-start steady state holds at 1 test_commit / frame

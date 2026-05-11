@@ -8,6 +8,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/display/tone_mapper.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <drm_fourcc.h>
@@ -55,6 +56,33 @@ constexpr std::uint8_t component_b(std::uint32_t pixel) noexcept {
 // will saturate visibly because rgb is treated as already-scaled;
 // callers must convert beforehand (or let the kernel scanout-blend
 // after we hand them off).
+// apply a ToneMapper to a single u32 ARGB8888 pixel.
+// The mapper operates on u64 (4 × u16 channels), so we expand
+// each u8 channel to u16 by multiplying by 257 (which makes
+// `0x00 → 0x0000` and `0xFF → 0xFFFF` exactly), invoke the
+// mapper, then compress back via `(c + 128) / 257`.
+std::uint32_t apply_tone_mapper_argb(std::uint32_t argb,
+                                     const drm::display::ToneMapper& mapper) noexcept {
+  const std::uint16_t a = component_a(argb);
+  const std::uint16_t r = component_r(argb);
+  const std::uint16_t g = component_g(argb);
+  const std::uint16_t b = component_b(argb);
+  const std::uint64_t packed =
+      static_cast<std::uint64_t>(static_cast<std::uint16_t>(r * 257)) |
+      (static_cast<std::uint64_t>(static_cast<std::uint16_t>(g * 257)) << 16U) |
+      (static_cast<std::uint64_t>(static_cast<std::uint16_t>(b * 257)) << 32U) |
+      (static_cast<std::uint64_t>(static_cast<std::uint16_t>(a * 257)) << 48U);
+  const std::uint64_t out = mapper(packed);
+  const auto out_r = static_cast<std::uint16_t>(out & 0xFFFFU);
+  const auto out_g = static_cast<std::uint16_t>((out >> 16U) & 0xFFFFU);
+  const auto out_b = static_cast<std::uint16_t>((out >> 32U) & 0xFFFFU);
+  const auto out_a = static_cast<std::uint16_t>((out >> 48U) & 0xFFFFU);
+  return pack_argb(static_cast<std::uint8_t>((out_a + 128U) / 257U),
+                   static_cast<std::uint8_t>((out_r + 128U) / 257U),
+                   static_cast<std::uint8_t>((out_g + 128U) / 257U),
+                   static_cast<std::uint8_t>((out_b + 128U) / 257U));
+}
+
 std::uint32_t blend_pixel_over(std::uint32_t src, std::uint32_t dst) noexcept {
   const std::uint32_t sa = component_a(src);
   if (sa == 0U) {
@@ -147,7 +175,7 @@ std::uint32_t map_src_index(std::uint32_t dst_idx, std::uint32_t dst_visible,
   if (dst_visible <= 1U) {
     return 0U;
   }
-  // Centre-aligned NN: pixel k of dst lands at (k + 0.5) * src/dst.
+  // Center-aligned NN: pixel k of dst lands at (k + 0.5) * src/dst.
   return (dst_idx * src_span) / dst_visible;
 }
 
@@ -368,6 +396,7 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
         yr.src_start + (no_scale ? dy : map_src_index(dy, dst_visible_y, yr.src_span));
     auto* dst_row = dst_base + (static_cast<std::size_t>(yr.dst_start + dy) * dst_stride_px);
     const auto* src_row = src_base + (static_cast<std::size_t>(sy) * src_stride_px);
+    const auto* tm = src.tone_mapper;
     if (no_scale) {
       const auto* src_px = src_row + xr.src_start;
       auto* dst_px = dst_row + xr.dst_start;
@@ -375,6 +404,9 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
         std::uint32_t s = src_px[dx];
         if (opaque_src) {
           s |= 0xFF000000U;
+        }
+        if (tm != nullptr) {
+          s = apply_tone_mapper_argb(s, *tm);
         }
         if (modulate_alpha) {
           s = modulate_pixel(s);
@@ -387,6 +419,9 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
         std::uint32_t s = src_row[sx];
         if (opaque_src) {
           s |= 0xFF000000U;
+        }
+        if (tm != nullptr) {
+          s = apply_tone_mapper_argb(s, *tm);
         }
         if (modulate_alpha) {
           s = modulate_pixel(s);

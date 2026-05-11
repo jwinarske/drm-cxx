@@ -75,7 +75,7 @@ void fill_rect(const PaintTarget& t, std::uint32_t x0, std::uint32_t y0, std::ui
 // rightmost bar absorbs the remainder so the right edge always meets the
 // frame boundary exactly.
 void paint_smpte_bars(const PaintTarget& t) noexcept {
-  // Top band — 7 colour bars at 75 % intensity. Order matches RP 219
+  // Top band — 7 color bars at 75 % intensity. Order matches RP 219
   // top-band convention (gray, Y, C, G, M, R, B), descending by Y'.
   static constexpr std::array<std::uint32_t, 7> k_top_bars = {
       pack(k_75, k_75, k_75),  // 75 % gray
@@ -215,8 +215,8 @@ void paint_color_gradient(const PaintTarget& t) noexcept {
   const std::uint32_t band_h = t.height / 3U;
   const std::uint32_t denom = (t.width > 1U) ? (t.width - 1U) : 1U;
   // Pre-fill the bottom band's slack rows with black before painting
-  // the three colour bands so the rounding remainder rows aren't left
-  // at the zero-init colour they were already at — the buffer is zero-
+  // the three color bands so the rounding remainder rows aren't left
+  // at the zero-init color they were already at — the buffer is zero-
   // filled on creation but a re-paint over a previous pattern wouldn't be.
   fill_rows(t, 0, t.height, k_black);
   for (std::uint32_t y = 0; y < band_h; ++y) {

@@ -62,7 +62,7 @@
 // **Out of scope for this example:**
 //
 //   - YUV (NV12, NV21) layers. These are multi-plane formats requiring
-//     a non-32bpp dumb allocation or a GBM-imported buffer. The plan's
+//     a non-32bpp dumb allocation or a GBM-imported buffer. The design's
 //     v2 foreign-buffer-source work (V4L2, accel) is the natural home
 //     for a YUV showcase; revisit when GbmBufferSource gains explicit
 //     YUV support or a dedicated YUV source type lands.
@@ -248,7 +248,7 @@ int main(int argc, char* argv[]) {
   }
   auto scene = std::move(*scene_r);
 
-  // Tiles laid out non-overlapping in a 2x2 grid covering the centre
+  // Tiles laid out non-overlapping in a 2x2 grid covering the center
   // of the screen. The scaler layer's src_rect is half the size of
   // its dst_rect — that 2× upscale is what makes the scaler match
   // mandatory. The other three layers are 1:1 and don't constrain

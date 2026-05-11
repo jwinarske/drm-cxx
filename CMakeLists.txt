@@ -64,7 +64,7 @@ if(PROJECT_IS_TOP_LEVEL)
   set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
-# Mirror meson's b_lto=true, but only for optimised configs (per-config LTO
+# Mirror meson's b_lto=true, but only for optimized configs (per-config LTO
 # is the CMake idiom; enabling it in Debug wastes local build time).
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _drm_cxx_ipo_ok OUTPUT _drm_cxx_ipo_msg)
@@ -74,6 +74,34 @@ if(_drm_cxx_ipo_ok)
 endif()
 
 find_package(PkgConfig REQUIRED)
+
+# Promote a third-party imported target so its INTERFACE_INCLUDE_DIRECTORIES
+# also flow through INTERFACE_SYSTEM_INCLUDE_DIRECTORIES. Without this,
+# pkg_check_modules / find_package targets whose headers live outside the
+# compiler's default system search path (e.g. CI's $GITHUB_WORKSPACE/foo-install
+# install prefixes for libdisplay-info / blend2d / libcamera) get -I rather
+# than -isystem -- which means clang-tidy treats them as user code and fails
+# on their own naming-convention or unused-includes diagnostics. Apt-installed
+# /usr/include deps already get -isystem from the toolchain default; this
+# helper makes the behavior uniform regardless of install prefix, matching
+# meson's `include_type : 'system'` on every third-party `dependency()`.
+function(_drm_cxx_promote_system_includes target)
+  if(NOT TARGET ${target})
+    return()
+  endif()
+  get_target_property(_alias ${target} ALIASED_TARGET)
+  if(_alias)
+    set(_real ${_alias})
+  else()
+    set(_real ${target})
+  endif()
+  get_target_property(_incs ${_real} INTERFACE_INCLUDE_DIRECTORIES)
+  if(_incs)
+    set_property(TARGET ${_real}
+                 APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_incs})
+  endif()
+endfunction()
+
 pkg_check_modules(drm            REQUIRED IMPORTED_TARGET libdrm)
 pkg_check_modules(gbm            REQUIRED IMPORTED_TARGET gbm)
 
@@ -86,13 +114,19 @@ unset(CMAKE_REQUIRED_LIBRARIES)
 pkg_check_modules(libinput       REQUIRED IMPORTED_TARGET libinput)
 pkg_check_modules(libudev        REQUIRED IMPORTED_TARGET libudev)
 pkg_check_modules(xkbcommon      REQUIRED IMPORTED_TARGET xkbcommon)
-pkg_check_modules(libdisplayinfo REQUIRED IMPORTED_TARGET libdisplay-info)
+# Require >=0.2.0 for the HDR static metadata, color primaries, and
+# signal-colorimetry APIs consumed by src/display/edid.cpp.
+pkg_check_modules(libdisplayinfo REQUIRED IMPORTED_TARGET libdisplay-info>=0.2.0)
+foreach(_t drm gbm libinput libudev xkbcommon libdisplayinfo)
+  _drm_cxx_promote_system_includes(PkgConfig::${_t})
+endforeach()
 
 find_library(RT_LIBRARY NAMES rt REQUIRED)
 find_library(DL_LIBRARY NAMES dl REQUIRED)
 
 if(DRM_CXX_VULKAN)
   pkg_check_modules(vulkan REQUIRED IMPORTED_TARGET vulkan)
+  _drm_cxx_promote_system_includes(PkgConfig::vulkan)
 endif()
 
 # libseat probe — optional, per DRM_CXX_SESSION. Sourced strictly from
@@ -103,6 +137,7 @@ if(NOT DRM_CXX_SESSION STREQUAL "OFF")
   else()
     pkg_check_modules(libseat IMPORTED_TARGET libseat)
   endif()
+  _drm_cxx_promote_system_includes(PkgConfig::libseat)
 endif()
 if(TARGET PkgConfig::libseat)
   set(DRM_CXX_HAS_LIBSEAT 1)
@@ -127,6 +162,9 @@ if(NOT DRM_CXX_GSTREAMER STREQUAL "OFF")
     pkg_check_modules(gstreamer_alloc IMPORTED_TARGET gstreamer-allocators-1.0)
     pkg_check_modules(gstreamer_video IMPORTED_TARGET gstreamer-video-1.0)
   endif()
+  foreach(_t gstreamer gstreamer_app gstreamer_alloc gstreamer_video)
+    _drm_cxx_promote_system_includes(PkgConfig::${_t})
+  endforeach()
 endif()
 if(TARGET PkgConfig::gstreamer AND TARGET PkgConfig::gstreamer_app
     AND TARGET PkgConfig::gstreamer_alloc AND TARGET PkgConfig::gstreamer_video)
@@ -146,6 +184,7 @@ if(NOT DRM_CXX_CURSOR STREQUAL "OFF")
   else()
     pkg_check_modules(xcursor IMPORTED_TARGET xcursor)
   endif()
+  _drm_cxx_promote_system_includes(PkgConfig::xcursor)
 endif()
 if(TARGET PkgConfig::xcursor)
   set(DRM_CXX_HAS_XCURSOR 1)
@@ -188,6 +227,7 @@ if(TARGET blend2d::blend2d)
   unset(CMAKE_REQUIRED_INCLUDES)
   if(DRM_CXX_BLEND2D_HEADER_REACHABLE OR DRM_CXX_BLEND2D_FLAT_HEADER_REACHABLE)
     set(DRM_CXX_HAS_BLEND2D 1)
+    _drm_cxx_promote_system_includes(blend2d::blend2d)
   else()
     set(DRM_CXX_HAS_BLEND2D 0)
     message(STATUS

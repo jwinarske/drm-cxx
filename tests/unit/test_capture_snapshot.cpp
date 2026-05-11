@@ -47,7 +47,7 @@ TEST(CaptureImage, DimensionsAndStride) {
   EXPECT_EQ(img.height(), 3U);
   EXPECT_EQ(img.stride_bytes(), 16U);
   ASSERT_EQ(img.pixels().size(), 12U);
-  // Zero-initialised.
+  // Zero-initialized.
   for (const auto px : img.pixels()) {
     EXPECT_EQ(px, 0U);
   }

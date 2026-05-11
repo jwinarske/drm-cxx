@@ -66,7 +66,7 @@ class Layer {
   // ── Display-side mutation ──────────────────────────────────────────
   // Each setter flips the dirty flag. The scene clears it after a
   // successful commit via mark_clean(). The granularity is per-layer,
-  // not per-field — Phase 2.2's property minimization refines that.
+  // not per-field — property minimization refines that.
 
   /// Update `display.src_rect`. Marks the layer dirty.
   void set_src_rect(Rect r) noexcept {
@@ -107,6 +107,22 @@ class Layer {
   /// Marks the layer dirty.
   void set_zpos(std::optional<int> z) noexcept {
     display_.zpos = z;
+    dirty_ = true;
+  }
+  /// Update `display.color_primaries`. Drives the scene's
+  /// auto-derived connector `Colorspace` write. `std::nullopt`
+  /// removes this layer's contribution to the widest-gamut decision.
+  /// Marks the layer dirty.
+  void set_color_primaries(std::optional<ColorPrimaries> cp) noexcept {
+    display_.color_primaries = cp;
+    dirty_ = true;
+  }
+  /// Update `display.source_eotf`. Setting an HDR transfer
+  /// (PQ / HLG) on any layer triggers the scene's auto-derived
+  /// HDR_OUTPUT_METADATA write. `std::nullopt` removes this layer's
+  /// contribution. Marks the layer dirty.
+  void set_source_eotf(std::optional<drm::display::TransferFunction> eotf) noexcept {
+    display_.source_eotf = eotf;
     dirty_ = true;
   }
 

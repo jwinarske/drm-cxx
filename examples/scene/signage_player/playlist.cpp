@@ -35,7 +35,7 @@ namespace signage {
 
 namespace {
 
-// Parse a hex-colour literal "#rrggbb" or "#rrggbbaa" into packed
+// Parse a hex-color literal "#rrggbb" or "#rrggbbaa" into packed
 // 0xAARRGGBB. Returns empty on malformed input.
 std::optional<Argb> parse_color(std::string_view lit) noexcept {
   if (lit.empty() || lit.front() != '#') {

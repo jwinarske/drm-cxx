@@ -19,7 +19,14 @@ drm_cxx_sources = files(
   'input/key_repeater.cpp',
   'input/pointer.cpp',
   'input/event_dispatcher.cpp',
+  'display/color_pipeline_curves.cpp',
+  'display/connector_capabilities.cpp',
+  'display/crtc_capabilities.cpp',
+  'display/crtc_color_pipeline.cpp',
   'display/edid.cpp',
+  'display/hdr_metadata.cpp',
+  'display/tone_mapper.cpp',
+  'display/hdr_metadata_cache.cpp',
   'display/hotplug_monitor.cpp',
   'session/seat.cpp',
   'time/clock.cpp',
@@ -33,6 +40,7 @@ drm_cxx_sources = files(
   'scene/gbm_buffer_source.cpp',
   'scene/gst_appsink_source.cpp',
   'scene/layer_scene.cpp',
+  'scene/output_signaling.cpp',
   'scene/v4l2_decoder_source.cpp',
   'sync/fence.cpp',
 )
@@ -195,10 +203,16 @@ install_headers(
 )
 
 install_headers(
+  'display/color_pipeline_curves.hpp',
+  'display/connector_capabilities.hpp',
   'display/connector_info.hpp',
+  'display/crtc_capabilities.hpp',
+  'display/crtc_color_pipeline.hpp',
   'display/edid.hpp',
   'display/hdr_metadata.hpp',
+  'display/hdr_metadata_cache.hpp',
   'display/hotplug_monitor.hpp',
+  'display/tone_mapper.hpp',
   subdir : 'drm-cxx/display',
 )
 
@@ -271,6 +285,7 @@ install_headers(
   'scene/layer_desc.hpp',
   'scene/layer_handle.hpp',
   'scene/layer_scene.hpp',
+  'scene/output_signaling.hpp',
   'scene/v4l2_decoder_source.hpp',
   subdir : 'drm-cxx/scene',
 )

@@ -175,21 +175,32 @@ struct DrmPlaneLayout {
 // per-plane handle/pitch/offset arrays.
 //
 // The two shapes that come up in practice with V4L2 stateful decoders:
-//   * Single-V4L2-plane NV12: Y at offset 0, UV at offset
+//   * Single-V4L2-plane semi-planar 4:2:0 (NV12 / P010 / P012 /
+//     P016): Y at offset 0, interleaved UV at offset
 //     bytesperline * height. Both DRM planes share V4L2 plane 0's
-//     dmabuf fd (the kernel dedups on prime-import).
+//     dmabuf fd (the kernel dedups on prime-import). The 16-bit-
+//     per-sample P0xx variants use the same shape — V4L2's
+//     bytesperline is already in bytes (so 2x the sample count for
+//     P010 vs NV12), so the offset math is unchanged.
 //   * MPLANE V4L2 with num_planes matching the DRM fourcc's plane
 //     count: 1:1 mapping, each DRM plane reads its own V4L2 plane.
 //
-// Other shapes (single-V4L2-plane YUV420, MPLANE with mismatched
-// counts, RGB packed in MPLANE-with-1-plane) collapse into the 1:1
-// default. The default is also correct for any single-DRM-plane
-// format (RGB, packed YUYV, etc.).
+// Other shapes (single-V4L2-plane YUV420, single-V4L2-plane
+// non-4:2:0 semi-planar like NV16, MPLANE with mismatched counts,
+// RGB packed in MPLANE-with-1-plane) collapse into the 1:1 default.
+// The default is also correct for any single-DRM-plane format
+// (RGB, packed YUYV, etc.).
 [[nodiscard]] std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mplane,
                                                       std::uint32_t drm_fourcc,
                                                       DrmPlaneLayout& out) noexcept {
-  // Special case: single-V4L2-plane NV12 -> 2 DRM planes via offset math.
-  if (drm_fourcc == DRM_FORMAT_NV12 && !is_mplane) {
+  // Special case: single-V4L2-plane semi-planar 4:2:0 -> 2 DRM
+  // planes via offset math. Covers NV12 (8-bit) plus the
+  // 16-bit-per-sample HDR variants (P010 / P012 / P016) — they
+  // share the storage shape; only the per-sample bit width differs
+  // and that's already baked into bytesperline by V4L2.
+  const bool is_semiplanar_420 = drm_fourcc == DRM_FORMAT_NV12 || drm_fourcc == DRM_FORMAT_P010 ||
+                                 drm_fourcc == DRM_FORMAT_P012 || drm_fourcc == DRM_FORMAT_P016;
+  if (is_semiplanar_420 && !is_mplane) {
     std::uint32_t const bpl = cap_fmt.fmt.pix.bytesperline;
     std::uint32_t const h = cap_fmt.fmt.pix.height;
     if (bpl == 0 || h == 0) {
