@@ -606,6 +606,52 @@ std::string modifier_label(std::uint64_t modifier) {
   return "unknown";
 }
 
+// Per-camera VAAPI quirk list. Cameras whose MJPG output radeonsi VCN
+// silently mis-decodes (decode succeeds, output BO never gets populated
+// — green-screen forever) are forced onto the libyuv MJPG tier
+// instead. Matched by USB vendor:product substring in the libcamera-
+// reported id string.
+//
+// Returns the matched substring (e.g., "046d:0825") so callers can log
+// it, or empty when the camera is not on the list. When matched,
+// mutates `target` in place: switches mode to MjpegToXrgb and points
+// plane_id at the first XRGB-capable plane (overlay preferred), with
+// LINEAR modifier — libyuv writes into a CPU-mappable DumbBufferSource.
+std::string_view apply_vaapi_quirk_list(NegotiatedTarget& target, std::string_view cam_id,
+                                        const std::vector<DisplayFmt>& display_formats) {
+  if (target.mode != ConversionMode::MjpegVaapiNv12) {
+    return {};
+  }
+  static constexpr std::array<std::string_view, 1> k_vaapi_quirked_cams{
+      "046d:0825",  // Logitech C270 (old sensor, radeonsi VCN green-screens)
+  };
+  for (const auto bad : k_vaapi_quirked_cams) {
+    if (cam_id.find(bad) == std::string_view::npos) {
+      continue;
+    }
+    target.mode = ConversionMode::MjpegToXrgb;
+    const DisplayFmt* xrgb_overlay = nullptr;
+    const DisplayFmt* xrgb_any = nullptr;
+    for (const auto& df : display_formats) {
+      if (df.fourcc == DRM_FORMAT_XRGB8888) {
+        if (df.is_overlay && xrgb_overlay == nullptr) {
+          xrgb_overlay = &df;
+        }
+        if (xrgb_any == nullptr) {
+          xrgb_any = &df;
+        }
+      }
+    }
+    if (const auto* xrgb_pick = xrgb_overlay != nullptr ? xrgb_overlay : xrgb_any;
+        xrgb_pick != nullptr) {
+      target.plane_id = xrgb_pick->plane_id;
+      target.modifier = DRM_FORMAT_MOD_LINEAR;
+    }
+    return bad;
+  }
+  return {};
+}
+
 void print_negotiation(const std::optional<NegotiatedTarget>& target) {
   drm::println("");
   if (!target) {
@@ -864,45 +910,12 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::L
     drm::println(stderr, "configure_slot[{}]: no common format / size", cam_index);
     return nullptr;
   }
-  // Per-camera VAAPI quirk list. Cameras whose MJPG output radeonsi
-  // VCN silently mis-decodes (decode succeeds, output BO never gets
-  // populated → green-screen forever) are forced onto the libyuv
-  // MJPG tier instead. Matched by USB vendor:product substring in
-  // the libcamera-reported id string.
-  if (target->mode == ConversionMode::MjpegVaapiNv12) {
-    static constexpr std::array<std::string_view, 1> k_vaapi_quirked_cams{
-        "046d:0825",  // Logitech C270 (old sensor, radeonsi VCN green-screens)
-    };
-    const auto cam_id = camera->id();
-    for (const auto bad : k_vaapi_quirked_cams) {
-      if (cam_id.find(bad) != std::string::npos) {
-        drm::println(stderr,
-                     "configure_slot[{}]: camera {} is on the VAAPI quirk list — forcing libyuv "
-                     "MJPG tier",
-                     cam_index, bad);
-        target->mode = ConversionMode::MjpegToXrgb;
-        // Switch the plane to an XRGB-capable one and reset the
-        // modifier (libyuv writes into a LINEAR DumbBufferSource).
-        const DisplayFmt* xrgb_overlay = nullptr;
-        const DisplayFmt* xrgb_any = nullptr;
-        for (const auto& df : display_formats) {
-          if (df.fourcc == DRM_FORMAT_XRGB8888) {
-            if (df.is_overlay && xrgb_overlay == nullptr) {
-              xrgb_overlay = &df;
-            }
-            if (xrgb_any == nullptr) {
-              xrgb_any = &df;
-            }
-          }
-        }
-        const auto* xrgb_pick = xrgb_overlay != nullptr ? xrgb_overlay : xrgb_any;
-        if (xrgb_pick != nullptr) {
-          target->plane_id = xrgb_pick->plane_id;
-          target->modifier = DRM_FORMAT_MOD_LINEAR;
-        }
-        break;
-      }
-    }
+  if (const auto quirked = apply_vaapi_quirk_list(*target, camera->id(), display_formats);
+      !quirked.empty()) {
+    drm::println(stderr,
+                 "configure_slot[{}]: camera {} is on the VAAPI quirk list — forcing libyuv "
+                 "MJPG tier",
+                 cam_index, quirked);
   }
   slot->target = *target;
 
@@ -2465,12 +2478,15 @@ int run_probe(int argc, char* argv[]) {
       }
       // Multi-camera --show forces ZeroCopy off; reflect that here so
       // the output matches what the streaming run will do.
-      const auto t = negotiate(display_formats, per_cam, mode.hdisplay, mode.vdisplay,
-                               /*allow_zero_copy=*/false);
+      auto t = negotiate(display_formats, per_cam, mode.hdisplay, mode.vdisplay,
+                         /*allow_zero_copy=*/false);
       if (!t) {
         drm::println("  [{}] no common format", i);
         continue;
       }
+      // Apply the same VAAPI quirk list configure_slot would: cameras
+      // on the list ride libyuv MJPG even when negotiate picked VAAPI.
+      (void)apply_vaapi_quirk_list(*t, cameras.at(i)->id(), display_formats);
       const auto cam_chars = fourcc_to_chars(t->camera_fourcc);
       drm::println("  [{}] capture {} {}x{}  path: {}", i, std::string_view(cam_chars.data(), 4),
                    t->size.width, t->size.height, mode_label(t->mode));
@@ -2481,8 +2497,12 @@ int run_probe(int argc, char* argv[]) {
   drm::println("");
   drm::println("Single-camera negotiation across all visible cameras (allow_zero_copy={}):",
                zero_copy_ok ? "true" : "false");
-  print_negotiation(
-      negotiate(display_formats, capture_formats, mode.hdisplay, mode.vdisplay, zero_copy_ok));
+  auto single =
+      negotiate(display_formats, capture_formats, mode.hdisplay, mode.vdisplay, zero_copy_ok);
+  if (single) {
+    (void)apply_vaapi_quirk_list(*single, single->camera_id, display_formats);
+  }
+  print_negotiation(single);
   return EXIT_SUCCESS;
 }
 
