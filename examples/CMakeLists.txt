@@ -71,6 +71,7 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
     set(camera_sources
       scene/camera/main.cpp
       scene/camera/convert.cpp
+      scene/camera/double_dumb_source.cpp
       scene/camera/libcamera_nv12_source.cpp
       scene/camera/status_overlay_renderer.cpp)
     # VAAPI MJPEG decode (auto-feature). libva + libva-drm together

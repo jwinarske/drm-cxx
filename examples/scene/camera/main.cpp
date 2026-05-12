@@ -33,6 +33,7 @@
 #include "../../common/session_pump.hpp"
 #include "../../common/vt_switch.hpp"
 #include "convert.hpp"
+#include "double_dumb_source.hpp"
 #include "libcamera_nv12_source.hpp"
 #include "status_overlay_renderer.hpp"
 #if CAMERA_HAS_VAAPI
@@ -822,6 +823,12 @@ struct CameraSlot {
   // LayerBufferSource unique_ptr inside the scene. drain_slot needs
   // it to call set_current_fd() per request.
   drm::examples::camera::LibcameraNv12Source* libcamera_nv12_source{nullptr};
+  // Non-owning view of the DoubleDumbSource built for libyuv tiers
+  // (Yuy2/Nv12/MjpegToXrgb). Same lifetime pattern as
+  // libcamera_nv12_source: owned by the scene's Layer, accessed by
+  // drain_slot to call publish() after each successful conversion.
+  // Null for VAAPI / ZeroCopy slots.
+  drm::examples::camera::DoubleDumbSource* double_dumb_source{nullptr};
   // Sticky once we hit at least one successful conversion+commit, so
   // hotplug churn doesn't keep "first frame" diagnostics bouncing.
   bool first_frame_seen{false};
@@ -1085,14 +1092,15 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::L
   }
 #endif
   if (!dest_source) {
-    auto dest = drm::scene::DumbBufferSource::create(dev, target->size.width, target->size.height,
-                                                     DRM_FORMAT_XRGB8888);
+    auto dest = drm::examples::camera::DoubleDumbSource::create(
+        dev, target->size.width, target->size.height, DRM_FORMAT_XRGB8888);
     if (!dest) {
-      drm::println(stderr, "configure_slot[{}]: DumbBufferSource: {}", cam_index,
+      drm::println(stderr, "configure_slot[{}]: DoubleDumbSource: {}", cam_index,
                    dest.error().message());
       camera->release();
       return nullptr;
     }
+    slot->double_dumb_source = dest->get();
     dest_source = std::move(*dest);
   }
   drm::scene::LayerDesc desc;
@@ -1317,13 +1325,14 @@ void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, const bool s
     slot.va_display = nullptr;
   }
 
-  auto dest_r = drm::scene::DumbBufferSource::create(*slot.dev, slot.target.size.width,
-                                                     slot.target.size.height, DRM_FORMAT_XRGB8888);
+  auto dest_r = drm::examples::camera::DoubleDumbSource::create(
+      *slot.dev, slot.target.size.width, slot.target.size.height, DRM_FORMAT_XRGB8888);
   if (!dest_r) {
-    drm::println(stderr, "configure_slot[{}]: downgrade DumbBufferSource: {}",
+    drm::println(stderr, "configure_slot[{}]: downgrade DoubleDumbSource: {}",
                  slot.target.camera_index, dest_r.error().message());
     return false;
   }
+  slot.double_dumb_source = dest_r->get();
 
   // Switch the target's plane to an XRGB-capable one so the allocator
   // doesn't try to pin the new XRGB source onto an NV12 plane.
@@ -1394,13 +1403,14 @@ void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, const bool s
   // routing fd flips at it.
   slot.libcamera_nv12_source = nullptr;
 
-  auto dest_r = drm::scene::DumbBufferSource::create(*slot.dev, slot.target.size.width,
-                                                     slot.target.size.height, DRM_FORMAT_XRGB8888);
+  auto dest_r = drm::examples::camera::DoubleDumbSource::create(
+      *slot.dev, slot.target.size.width, slot.target.size.height, DRM_FORMAT_XRGB8888);
   if (!dest_r) {
-    drm::println(stderr, "configure_slot[{}]: zero-copy downgrade DumbBufferSource: {}",
+    drm::println(stderr, "configure_slot[{}]: zero-copy downgrade DoubleDumbSource: {}",
                  slot.target.camera_index, dest_r.error().message());
     return false;
   }
+  slot.double_dumb_source = dest_r->get();
 
   const DisplayFmt* xrgb_overlay = nullptr;
   const DisplayFmt* xrgb_any = nullptr;
@@ -1577,6 +1587,14 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
                   break;  // handled above (VAAPI) or unreachable in multi-cam streaming
               }
             }
+          }
+          // Hand the just-filled back buffer to the scene. publish()
+          // is a single integer flip; the next acquire() pulls the
+          // new front. Without this, the libyuv tiers regress to
+          // single-buffer behaviour (the producer keeps overwriting
+          // the one buffer the scene is still scanning out from).
+          if (frame_landed && slot.double_dumb_source != nullptr) {
+            slot.double_dumb_source->publish();
           }
         }
         // NOLINTNEXTLINE(readability-misleading-indentation)

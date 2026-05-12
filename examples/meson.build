@@ -102,6 +102,7 @@ if not camera_feature.disabled()
     camera_sources = [
       'scene/camera/main.cpp',
       'scene/camera/convert.cpp',
+      'scene/camera/double_dumb_source.cpp',
       'scene/camera/libcamera_nv12_source.cpp',
       'scene/camera/status_overlay_renderer.cpp',
     ]
