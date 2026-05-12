@@ -1162,8 +1162,11 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::L
   }
 
   slot->last_frame_at = std::chrono::steady_clock::now();
-  drm::println("camera[{}] {} {}x{} stride={} -> {}", cam_index, camera->id(), target->size.width,
-               target->size.height, slot->src_stride, mode_label(target->mode));
+  // Per-slot summary is printed by drain_hotplug_events after the
+  // canvas-overflow downgrade pass — the slot's target.mode here is
+  // the negotiated tier, not necessarily the one that ends up
+  // streaming. Printing it now would lie when the just-added slot
+  // immediately gets downgraded to a libyuv tier.
   return slot;
 }
 
@@ -1844,6 +1847,15 @@ bool drain_hotplug_events(drm::Device const& dev, drm::scene::LayerScene& scene,
         }
       }
 #endif
+      // Per-slot summary, emitted after every downgrade pass so the
+      // printed tier matches what's actually about to stream. Walks
+      // every slot rather than just slots.back() because a canvas-
+      // overflow downgrade may have retargeted older slots too.
+      for (const auto& s : slots) {
+        drm::println("camera[{}] {} {}x{} stride={} -> {}", s->target.camera_index, s->camera->id(),
+                     s->target.size.width, s->target.size.height, s->src_stride,
+                     mode_label(s->target.mode));
+      }
     }
   }
 
