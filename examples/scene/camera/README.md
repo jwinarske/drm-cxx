@@ -37,13 +37,44 @@ amdgpu, `iHD_drv_video.so` on Intel.
 ## Run
 
 ```
-sudo camera --probe [/dev/dri/cardN]
-sudo camera --show  [/dev/dri/cardN]
+sudo camera --probe [--no-vaapi] [/dev/dri/cardN]
+sudo camera --show  [--no-vaapi] [/dev/dri/cardN]
 ```
 
 `sudo` is the path of least resistance for a bare-TTY run; on a
 seatd-managed system membership in the `seat` and `video` groups is
 enough. `--probe` and `--show` are mutually exclusive.
+
+`--no-vaapi` forces every MJPEG slot onto the libyuv CPU tier even
+when the example was compiled with VA-API support. Useful when the
+host VA driver is buggy on the GPU at hand — Ubuntu 20.04's
+`intel-media-va-driver 20.1.1` (`iHD_drv_video.so`), for example,
+segfaults inside `vaEndPicture` on UVC-emitted 4:2:2 MJPEGs; until the
+package is upgraded, `--no-vaapi` keeps the example streaming.
+
+## VA-API driver discovery
+
+The VA-API tier opens the loader via `vaGetDisplayDRM(card_fd)`, then
+relies on libva to dlopen the right `*_drv_video.so`. libva searches
+`LIBVA_DRIVERS_PATH` first, then a compile-time default (the configure
+prefix's `lib/dri`). A libva built from source with `--prefix=/usr/local`
+defaults to `/usr/local/lib/x86_64-linux-gnu/dri`, which is empty on a
+typical Debian/Ubuntu system — the distro ships drivers at
+`/usr/lib/x86_64-linux-gnu/dri`. The mismatch surfaces as
+
+```
+libva info: Trying to open /usr/local/lib/x86_64-linux-gnu/dri/iHD_drv_video.so
+libva info: va_openDriver() returns -1
+[vaapi_jpeg_decoder] vaInitialize: unknown libva error (0xffffffff)
+configure_slot[…]: VAAPI MJPEG unavailable, falling back to libyuv
+```
+
+Either rebuild libva with `--with-drivers-dir=/usr/lib/x86_64-linux-gnu/dri`
+or set the env var at run time:
+
+```
+LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri camera --show
+```
 
 ## `--probe` output
 

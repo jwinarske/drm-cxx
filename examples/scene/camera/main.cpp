@@ -1331,6 +1331,75 @@ void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, const bool s
 }
 #endif
 
+// Downgrade a slot from ZeroCopy (native NV12 via LibcameraNv12Source)
+// to Nv12ToXrgb (libyuv NV12->XRGB into a DumbBufferSource). Used when
+// total cams ≥ 3 — the LayerScene allocator starts routing the NV12
+// zero-copy layer to canvas composition at that point (a libcamera-
+// owned dma-buf has no CPU mapping, so the composite path drops every
+// frame). Same libcamera config; just swap the destination source and
+// retarget to an XRGB-capable plane. Caller is responsible for
+// confirming the slot is currently in ZeroCopy mode.
+[[nodiscard]] bool downgrade_zero_copy_slot_to_libyuv(
+    CameraSlot& slot, drm::scene::LayerScene& scene,
+    const std::vector<DisplayFmt>& display_formats) {
+  if (slot.dev == nullptr) {
+    return false;
+  }
+  drm::scene::Rect preserved_dst{0, 0, slot.target.size.width, slot.target.size.height};
+  if (auto* existing = scene.get_layer(slot.layer_handle); existing != nullptr) {
+    preserved_dst = existing->display().dst_rect;
+  }
+  scene.remove_layer(slot.layer_handle);
+  slot.layer_handle = {};
+  // The LibcameraNv12Source was owned by the scene's Layer; remove_layer
+  // already dropped it. Null the cached raw pointer so drain_slot stops
+  // routing fd flips at it.
+  slot.libcamera_nv12_source = nullptr;
+
+  auto dest_r = drm::scene::DumbBufferSource::create(*slot.dev, slot.target.size.width,
+                                                     slot.target.size.height, DRM_FORMAT_XRGB8888);
+  if (!dest_r) {
+    drm::println(stderr, "configure_slot[{}]: zero-copy downgrade DumbBufferSource: {}",
+                 slot.target.camera_index, dest_r.error().message());
+    return false;
+  }
+
+  const DisplayFmt* xrgb_overlay = nullptr;
+  const DisplayFmt* xrgb_any = nullptr;
+  for (const auto& df : display_formats) {
+    if (df.fourcc == DRM_FORMAT_XRGB8888) {
+      if (df.is_overlay && xrgb_overlay == nullptr) {
+        xrgb_overlay = &df;
+      }
+      if (xrgb_any == nullptr) {
+        xrgb_any = &df;
+      }
+    }
+  }
+  const auto* xrgb_pick = xrgb_overlay != nullptr ? xrgb_overlay : xrgb_any;
+  if (xrgb_pick != nullptr) {
+    slot.target.plane_id = xrgb_pick->plane_id;
+    slot.target.modifier = DRM_FORMAT_MOD_LINEAR;
+  }
+  slot.target.mode = ConversionMode::Nv12ToXrgb;
+
+  drm::scene::LayerDesc desc;
+  desc.source = std::move(*dest_r);
+  desc.display.src_rect = {0, 0, slot.target.size.width, slot.target.size.height};
+  desc.display.dst_rect = preserved_dst;
+  desc.display.zpos = static_cast<int>(3 + slot.target.camera_index);
+  desc.content_type = drm::planes::ContentType::Video;
+  desc.update_hint_hz = 30;
+  auto handle_r = scene.add_layer(std::move(desc));
+  if (!handle_r) {
+    drm::println(stderr, "configure_slot[{}]: zero-copy downgrade add_layer: {}",
+                 slot.target.camera_index, handle_r.error().message());
+    return false;
+  }
+  slot.layer_handle = *handle_r;
+  return true;
+}
+
 void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
   std::queue<libcamera::Request*> local;
   {
@@ -1580,6 +1649,13 @@ void apply_layout(const std::vector<std::unique_ptr<CameraSlot>>& slots,
 // one extra O(slots) walk with an atomic load per slot — kept
 // deliberately as belt-and-suspenders so neither signal lagging nor
 // failing to fire reopens the freeze.
+
+// Forward declaration: defined below run_streaming with the rest of the
+// CLI-set globals. Read inside drain_hotplug_events to mask the
+// VAAPI tier on when `--no-vaapi` was passed.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+extern std::atomic<bool> g_no_vaapi;
+
 bool drain_hotplug_events(drm::Device const& dev, drm::scene::LayerScene& scene,
                           PendingHotplug& pending, std::vector<std::unique_ptr<CameraSlot>>& slots,
                           const std::vector<DisplayFmt>& display_formats,
@@ -1654,13 +1730,38 @@ bool drain_hotplug_events(drm::Device const& dev, drm::scene::LayerScene& scene,
         ++vaapi_in_use;
       }
     }
-    const bool vaapi_available = vaapi_in_use < n_overlay_planes;
+    const bool vaapi_available =
+        !g_no_vaapi.load(std::memory_order_relaxed) && vaapi_in_use < n_overlay_planes;
 #else
     (void)n_overlay_planes;
     constexpr bool vaapi_available = false;
 #endif
+    // Zero-copy NV12 (LibcameraNv12Source) is uncompositable by design:
+    // its map() returns function_not_supported. Up through 2 simultaneous
+    // cameras the LayerScene allocator keeps every layer on hardware
+    // overlays and we get 60 fps single-cam Brio plus a libyuv neighbor.
+    // At 3+ cameras the allocator reserves an OVERLAY for the canvas
+    // (it can't prove ahead of time that none of the layers will need
+    // compositing) and starts spilling the NV12 layer onto the canvas
+    // plane — where the source can't be mapped and the frame drops.
+    // Pre-empt by downgrading every existing ZeroCopy slot to libyuv
+    // Nv12->XRGB before the 3rd camera lands; the new slot is then
+    // configured with allow_zero_copy=false so it also lands on libyuv.
+    const bool zero_copy_now = zero_copy_ok && slots.size() < 2;
+    if (slots.size() >= 2 && zero_copy_ok) {
+      for (auto& s : slots) {
+        if (s->target.mode != ConversionMode::ZeroCopy) {
+          continue;
+        }
+        drm::println(stderr,
+                     "configure_slot[{}]: downgrading ZeroCopy -> libyuv NV12 (3+ camera "
+                     "canvas reservation)",
+                     s->target.camera_index);
+        (void)downgrade_zero_copy_slot_to_libyuv(*s, scene, display_formats);
+      }
+    }
     if (auto slot = configure_slot(dev, scene, cam, display_formats, mode_w, mode_h, slots.size(),
-                                   vaapi_available, zero_copy_ok)) {
+                                   vaapi_available, zero_copy_now)) {
       slots.push_back(std::move(slot));
       changed = true;
 #if CAMERA_HAS_VAAPI
@@ -1779,6 +1880,13 @@ std::atomic<bool> g_running{true};
 extern "C" void on_sigint(int /*signum*/) noexcept {
   g_running.store(false, std::memory_order_relaxed);
 }
+
+// `--no-vaapi` CLI gate. Set before run_streaming starts. The flag is
+// non-atomic because it's written once during argv parsing and read on
+// the main loop thread only; the atomic spelling matches g_running so
+// the analyzer-suppression annotation can be shared.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<bool> g_no_vaapi{false};
 
 // Multi-camera streaming loop. Builds the LayerScene with a fullscreen
 // gradient background, then runs until SIGINT: each iteration drains
@@ -2211,7 +2319,7 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
 }
 
 void print_usage() {
-  drm::println(stderr, "usage: camera (--probe | --show) [/dev/dri/cardN]");
+  drm::println(stderr, "usage: camera (--probe | --show) [--no-vaapi] [/dev/dri/cardN]");
 }
 
 int run_probe(int argc, char* argv[]) {
@@ -2358,6 +2466,14 @@ int main(int argc, char* argv[]) {
       want_probe = true;
     } else if (arg == "--show") {
       want_show = true;
+    } else if (arg == "--no-vaapi") {
+      // Force every MJPEG slot onto the libyuv CPU tier even when the
+      // example was compiled with CAMERA_HAS_VAAPI. Used when the host
+      // VA driver is buggy on this hardware (Ubuntu 20.04's iHD
+      // 20.1.1 crashes inside vaEndPicture on UVC 4:2:2 MJPEGs, for
+      // example). Has no effect when CAMERA_HAS_VAAPI=0 — the VAAPI
+      // path was already compiled out.
+      g_no_vaapi.store(true, std::memory_order_relaxed);
     } else if (arg == "--help" || arg == "-h") {
       print_usage();
       return EXIT_SUCCESS;

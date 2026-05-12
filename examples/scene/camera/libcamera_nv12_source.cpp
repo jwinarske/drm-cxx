@@ -150,12 +150,15 @@ bool LibcameraNv12Source::register_fd(int fd) noexcept {
                  fd, e.gem_handle);
   }
 
-  // Make the first successfully-registered fd the current one so an
-  // early acquire() (e.g. cold-start before the first frame lands)
-  // returns a valid fb_id rather than 0 / EAGAIN.
-  if (current_fb_id_ == 0) {
-    current_fb_id_ = e.fb_id;
-  }
+  // Leave current_fb_id_ at 0 until drain_slot calls set_current_fd
+  // after the first libcamera request completes. Pre-seeding it here
+  // (so an early acquire returned a valid FB instead of EAGAIN) made
+  // the slot scan out the freshly-allocated, zero-filled libcamera
+  // buffer for a frame or two — and NV12 with Y=0 / UV=0 reads as
+  // BT.601 green, so the viewfinder flashed a green tile before the
+  // first real frame. LayerScene's commit path already treats
+  // `resource_unavailable_try_again` as "skip this layer this
+  // vblank", so the layer is simply absent until pixels arrive.
   cache_.emplace(fd, e);
   return true;
 }

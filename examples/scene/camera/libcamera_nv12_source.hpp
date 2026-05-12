@@ -122,7 +122,7 @@ class LibcameraNv12Source : public drm::scene::LayerBufferSource {
   drm::scene::SourceFormat fmt_{};
   NV12PlaneInfo y_{};
   NV12PlaneInfo uv_{};
-  std::unordered_map<int, FbEntry> cache_{};
+  std::unordered_map<int, FbEntry> cache_;
   std::uint32_t current_fb_id_{0};
 };
 
