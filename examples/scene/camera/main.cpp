@@ -1755,6 +1755,15 @@ bool drain_hotplug_events(drm::Device const& dev, drm::scene::LayerScene& scene,
       continue;
     }
     drm::println("camera added: {}", cam->id());
+    // Snapshot existing slots' tiers so the post-pass readout can
+    // print only the rows that actually changed in this hotplug
+    // iteration (the just-added slot plus anything the downgrade
+    // passes retargeted) instead of the whole table.
+    std::unordered_map<std::size_t, ConversionMode> pre_modes;
+    pre_modes.reserve(slots.size());
+    for (const auto& s : slots) {
+      pre_modes[s->target.camera_index] = s->target.mode;
+    }
 #if CAMERA_HAS_VAAPI
     // Count VAAPI slots already claiming OVERLAY planes. Anything past
     // n_overlay_planes overflows; the negotiator should route the
@@ -1848,10 +1857,15 @@ bool drain_hotplug_events(drm::Device const& dev, drm::scene::LayerScene& scene,
       }
 #endif
       // Per-slot summary, emitted after every downgrade pass so the
-      // printed tier matches what's actually about to stream. Walks
-      // every slot rather than just slots.back() because a canvas-
-      // overflow downgrade may have retargeted older slots too.
+      // printed tier matches what's actually about to stream. Only
+      // prints rows that changed in this iteration: the just-added
+      // slot (absent from pre_modes) plus anything the downgrade
+      // passes retargeted (mode differs from the snapshot).
       for (const auto& s : slots) {
+        const auto it = pre_modes.find(s->target.camera_index);
+        if (it != pre_modes.end() && it->second == s->target.mode) {
+          continue;
+        }
         drm::println("camera[{}] {} {}x{} stride={} -> {}", s->target.camera_index, s->camera->id(),
                      s->target.size.width, s->target.size.height, s->src_stride,
                      mode_label(s->target.mode));
