@@ -10,7 +10,6 @@
 #include <drm-cxx/detail/span.hpp>
 
 #include <drm.h>
-#include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -34,10 +33,6 @@ namespace drm::scene {
 namespace {
 
 constexpr std::uint64_t k_mod_invalid = (1ULL << 56U) - 1U;  // DRM_FORMAT_MOD_INVALID
-
-[[nodiscard]] bool modifier_is_linear(std::uint64_t modifier) noexcept {
-  return modifier == DRM_FORMAT_MOD_LINEAR || modifier == k_mod_invalid;
-}
 
 [[nodiscard]] std::error_code last_errno_or(std::errc fallback) noexcept {
   const int e = errno;
@@ -75,13 +70,12 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
     debug_step("validate plane count");
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
-  // Tiled modifiers are out of scope — kernel plane-format negotiation
-  // around modifiers is driver-specific in ways we can't pre-validate.
-  if (!modifier_is_linear(modifier)) {
-    debug_step("validate modifier (only LINEAR/INVALID supported)");
-    return drm::unexpected<std::error_code>(
-        std::make_error_code(std::errc::operation_not_supported));
-  }
+  // Any modifier the caller knows is forwarded to
+  // drmModeAddFB2WithModifiers; the kernel validates against driver
+  // tables and rejects unsupported tilings at AddFB2 time. Producers
+  // like VAAPI / V4L2 stateful decoders that allocate in a vendor tiled
+  // layout pass that modifier through here verbatim — pre-restricting
+  // to LINEAR would lock out every hw-decoded NV12 surface.
   for (const auto& p : planes) {
     if (p.fd < 0 || p.pitch == 0) {
       debug_step("validate plane fields (fd >= 0, pitch != 0)");

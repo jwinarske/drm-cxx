@@ -8,13 +8,20 @@ A libcamera → KMS scanout viewfinder built on `LayerScene`. Two modes:
   modifier) tuple a streaming run would pick, and exits without
   acquiring streaming resources.
 - **`--show`** — runtime. Streams from the first usable camera onto a
-  scene layer at the negotiated configuration. Where the camera's
-  output already matches a scanout-capable plane (NV12 from a UVC cam
-  whose stride is 256-byte-aligned), the frame goes through directly
-  via `ExternalDmaBufSource`. Otherwise libyuv repacks each frame into
-  an XRGB8888 `DumbBufferSource` — YUY2/NV12/MJPEG paths cover the
-  common UVC fallbacks. The path actually taken is logged once at
-  startup.
+  scene layer at the negotiated configuration. Conversion tiers, in
+  order of preference:
+  1. **NV12 zero-copy** — camera already emits NV12 at a
+     scanout-aligned stride; `ExternalDmaBufSource` wraps the libcamera
+     dma-buf and the kernel scans it out directly.
+  2. **MJPEG → NV12 via VA-API** (when `libva` + `libva-drm` are
+     present at build time) — `VaapiJpegDecoder` decodes each JPEG
+     into a reusable VA-API NV12 surface, exported once as a dma-buf
+     and held by an `ExternalDmaBufSource` for the slot's lifetime.
+     No CPU touches pixels; scanout reads the GPU-decoded surface.
+  3. **YUY2 → XRGB**, **NV12 → XRGB**, **MJPEG → XRGB** via libyuv
+     into a CPU-mapped `DumbBufferSource`.
+
+  The path actually taken is logged once at startup.
 
 Both libcamera (≥0.3.0) and libyuv are example-only build dependencies
 and are auto-detected; if either is missing the target is skipped
@@ -22,16 +29,52 @@ rather than failing the whole drm-cxx build. Ubuntu 24.04 ships
 libcamera 0.2.0, so the CI pipeline builds 0.5.2 from source — see
 the comment in `examples/CMakeLists.txt` for details.
 
+`libva` + `libva-drm` are also auto-detected; absent, the VA-API tier
+is compiled out and MJPEG falls back to the CPU libyuv path. Linking
+needs a runtime VA-API driver as well — `radeonsi_drv_video.so` on
+amdgpu, `iHD_drv_video.so` on Intel.
+
 ## Run
 
 ```
-sudo camera --probe [/dev/dri/cardN]
-sudo camera --show  [/dev/dri/cardN]
+sudo camera --probe [--no-vaapi] [/dev/dri/cardN]
+sudo camera --show  [--no-vaapi] [/dev/dri/cardN]
 ```
 
 `sudo` is the path of least resistance for a bare-TTY run; on a
 seatd-managed system membership in the `seat` and `video` groups is
 enough. `--probe` and `--show` are mutually exclusive.
+
+`--no-vaapi` forces every MJPEG slot onto the libyuv CPU tier even
+when the example was compiled with VA-API support. Useful when the
+host VA driver is buggy on the GPU at hand — Ubuntu 20.04's
+`intel-media-va-driver 20.1.1` (`iHD_drv_video.so`), for example,
+segfaults inside `vaEndPicture` on UVC-emitted 4:2:2 MJPEGs; until the
+package is upgraded, `--no-vaapi` keeps the example streaming.
+
+## VA-API driver discovery
+
+The VA-API tier opens the loader via `vaGetDisplayDRM(card_fd)`, then
+relies on libva to dlopen the right `*_drv_video.so`. libva searches
+`LIBVA_DRIVERS_PATH` first, then a compile-time default (the configure
+prefix's `lib/dri`). A libva built from source with `--prefix=/usr/local`
+defaults to `/usr/local/lib/x86_64-linux-gnu/dri`, which is empty on a
+typical Debian/Ubuntu system — the distro ships drivers at
+`/usr/lib/x86_64-linux-gnu/dri`. The mismatch surfaces as
+
+```
+libva info: Trying to open /usr/local/lib/x86_64-linux-gnu/dri/iHD_drv_video.so
+libva info: va_openDriver() returns -1
+[vaapi_jpeg_decoder] vaInitialize: unknown libva error (0xffffffff)
+configure_slot[…]: VAAPI MJPEG unavailable, falling back to libyuv
+```
+
+Either rebuild libva with `--with-drivers-dir=/usr/lib/x86_64-linux-gnu/dri`
+or set the env var at run time:
+
+```
+LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri camera --show
+```
 
 ## `--probe` output
 
@@ -66,6 +109,8 @@ scene; if none, the example exits with a clean shutdown.
   UVC cameras whose stride is 640 (the kernel's default minimum from
   `dumb_create`) do not, so those fall through to the libyuv repack
   path.
-- MJPEG decode goes through libjpeg-turbo (`MJPGToARGB`); I-frame-only
-  cameras and corrupt streams print a per-frame warning and skip the
-  frame rather than dropping the stream.
+- MJPEG software decode goes through libjpeg-turbo (`MJPGToARGB`);
+  the VA-API tier replaces it transparently when both `libva` and a
+  matching GPU driver are present. Baseline JPEGs only (UVC universally
+  emits baseline). Truncated or non-baseline streams skip the frame
+  rather than dropping the stream.

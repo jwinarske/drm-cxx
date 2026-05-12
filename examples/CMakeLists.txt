@@ -68,12 +68,32 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
   endif()
 
   if(TARGET PkgConfig::libcamera AND TARGET drm_cxx_libyuv)
-    add_executable(camera
+    set(camera_sources
       scene/camera/main.cpp
       scene/camera/convert.cpp
+      scene/camera/double_dumb_source.cpp
+      scene/camera/libcamera_nv12_source.cpp
       scene/camera/status_overlay_renderer.cpp)
+    # VAAPI MJPEG decode (auto-feature). libva + libva-drm together
+    # unlock zero-copy JPEG -> NV12 -> scanout on AMD/Intel; missing
+    # either falls the example back to the CPU libyuv path.
+    pkg_check_modules(libva IMPORTED_TARGET libva)
+    pkg_check_modules(libva_drm IMPORTED_TARGET libva-drm)
+    if(TARGET PkgConfig::libva AND TARGET PkgConfig::libva_drm)
+      _drm_cxx_promote_system_includes(PkgConfig::libva)
+      _drm_cxx_promote_system_includes(PkgConfig::libva_drm)
+      list(APPEND camera_sources scene/camera/vaapi_jpeg_decoder.cpp)
+    else()
+      message(STATUS
+        "camera: libva / libva-drm not found, MJPEG falls back to CPU libyuv decode")
+    endif()
+    add_executable(camera ${camera_sources})
     target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera drm_cxx_libyuv)
     target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(TARGET PkgConfig::libva AND TARGET PkgConfig::libva_drm)
+      target_link_libraries(camera PRIVATE PkgConfig::libva PkgConfig::libva_drm)
+      target_compile_definitions(camera PRIVATE CAMERA_HAS_VAAPI=1)
+    endif()
     # Status overlay paints a small "fps=N cameras=M" badge via Blend2D
     # when the umbrella gate is on; without it the TU compiles cleanly
     # and main.cpp skips adding the overlay layer entirely.
