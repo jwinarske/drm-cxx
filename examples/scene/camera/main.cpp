@@ -2406,6 +2406,24 @@ int run_probe(int argc, char* argv[]) {
     print_plane(*p, display_formats);
   }
 
+  // Mirror the driver-name carve-out from run_streaming: amdgpu DC's
+  // foreign-dma-buf provenance check rejects every UVC import, so the
+  // native NV12 zero-copy tier is upfront-disabled there. The probe
+  // needs the same gate or the single-camera negotiation prints
+  // `zero-copy (PRIME import, NV12)` even though `--show` would never
+  // attempt it.
+  bool zero_copy_ok = true;
+  if (auto* ver = drmGetVersion(dev.fd()); ver != nullptr) {
+    const std::string_view name(ver->name, static_cast<std::size_t>(ver->name_len));
+    if (name == "amdgpu") {
+      zero_copy_ok = false;
+      drm::println(stderr,
+                   "negotiator: amdgpu driver — native NV12 zero-copy tier disabled "
+                   "(foreign dma-buf provenance rejected at AddFB2)");
+    }
+    drmFreeVersion(ver);
+  }
+
   drm::println("");
   libcamera::CameraManager cm;
   if (const int rc = cm.start(); rc < 0) {
@@ -2447,8 +2465,10 @@ int run_probe(int argc, char* argv[]) {
   cm.stop();
 
   drm::println("");
-  drm::println("Single-camera (--allow_zero_copy) negotiation across all visible cameras:");
-  print_negotiation(negotiate(display_formats, capture_formats, mode.hdisplay, mode.vdisplay));
+  drm::println("Single-camera negotiation across all visible cameras (allow_zero_copy={}):",
+               zero_copy_ok ? "true" : "false");
+  print_negotiation(
+      negotiate(display_formats, capture_formats, mode.hdisplay, mode.vdisplay, zero_copy_ok));
   return EXIT_SUCCESS;
 }
 
