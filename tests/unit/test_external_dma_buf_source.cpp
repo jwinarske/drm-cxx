@@ -117,7 +117,13 @@ TEST(SceneExternalDmaBufSource, RejectsTooManyPlanes) {
   EXPECT_EQ(r.error(), std::make_error_code(std::errc::invalid_argument));
 }
 
-TEST(SceneExternalDmaBufSource, RejectsTiledModifier) {
+TEST(SceneExternalDmaBufSource, AcceptsTiledModifierLayoutValidation) {
+  // The factory no longer rejects tiled modifiers up front; vendor-tiled
+  // bit-patterns (VAAPI surfaces, V4L2 stateful decoders, etc.) are
+  // forwarded verbatim to drmModeAddFB2WithModifiers, which is the only
+  // layer that knows whether the (modifier, plane) combination is
+  // scanout-capable. Without a real DRM device the failure surfaces as
+  // bad_file_descriptor — same shape as the multi-plane tests above.
   auto dev = drm::Device::from_fd(-1);
   std::array<drm::scene::ExternalPlaneInfo, 1> planes{dummy_plane(0)};
   // I915_FORMAT_MOD_X_TILED — picked as a representative non-LINEAR
@@ -126,7 +132,7 @@ TEST(SceneExternalDmaBufSource, RejectsTiledModifier) {
   auto r = drm::scene::ExternalDmaBufSource::create(dev, k_w, k_h, DRM_FORMAT_ARGB8888, k_x_tiled,
                                                     planes);
   ASSERT_FALSE(r.has_value());
-  EXPECT_EQ(r.error(), std::make_error_code(std::errc::operation_not_supported));
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::bad_file_descriptor));
 }
 
 // ─────────────────────────────────────────────────────────────────────
