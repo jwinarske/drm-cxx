@@ -99,14 +99,30 @@ if not camera_feature.disabled()
   if libcamera_dep.found() and libyuv_dep.found()
     camera_deps = [drm_cxx_dep, libcamera_dep, libyuv_dep]
     camera_args = []
+    camera_sources = [
+      'scene/camera/main.cpp',
+      'scene/camera/convert.cpp',
+      'scene/camera/libcamera_nv12_source.cpp',
+      'scene/camera/status_overlay_renderer.cpp',
+    ]
     if has_blend2d
       camera_deps += blend2d_dep
       camera_args += '-DCAMERA_STATUS_HAS_BLEND2D=1'
     endif
+    # VAAPI MJPEG decode (auto-feature). libva + libva-drm together
+    # unlock zero-copy JPEG -> NV12 -> scanout on AMD/Intel; missing
+    # either falls the example back to the CPU libyuv path.
+    libva_dep = dependency('libva', include_type : 'system', required : false)
+    libva_drm_dep = dependency('libva-drm', include_type : 'system', required : false)
+    if libva_dep.found() and libva_drm_dep.found()
+      camera_deps += [libva_dep, libva_drm_dep]
+      camera_sources += 'scene/camera/vaapi_jpeg_decoder.cpp'
+      camera_args += '-DCAMERA_HAS_VAAPI=1'
+    else
+      message('camera: libva / libva-drm not found, MJPEG falls back to CPU libyuv decode')
+    endif
     executable('camera',
-      'scene/camera/main.cpp',
-      'scene/camera/convert.cpp',
-      'scene/camera/status_overlay_renderer.cpp',
+      camera_sources,
       dependencies : camera_deps,
       cpp_args : camera_args,
     )
