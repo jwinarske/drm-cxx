@@ -1094,6 +1094,18 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::L
   // canvas-composited fallback in that case.
   desc.content_type = drm::planes::ContentType::Video;
   desc.update_hint_hz = 30;
+  // Every tier creates a brand-new destination buffer here — VAAPI's
+  // exported NV12 BO is zero-filled (scans out saturated green; UV=0
+  // is the most-negative chroma, nowhere near the neutral 0x80) and
+  // the libyuv tiers' DumbBufferSource XRGB8888 is zero-filled (black-
+  // opaque). Neither one matches what's about to land. Hide the layer
+  // until drain_slot writes real pixels; the first-frame bump in
+  // drain_slot restores 0xFFFF.
+  //
+  // vaPutImage can't pre-seed the VAAPI surface — radeonsi rebinds the
+  // BO under us — so the scene-level alpha gate is the only path that
+  // works across every tier.
+  desc.display.alpha = 0;
   auto handle_r = scene.add_layer(std::move(desc));
   if (!handle_r) {
     drm::println(stderr, "configure_slot[{}]: add_layer: {}", cam_index,
@@ -1250,6 +1262,11 @@ void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, const bool s
   desc.display.zpos = static_cast<int>(3 + slot.target.camera_index);
   desc.content_type = drm::planes::ContentType::Video;
   desc.update_hint_hz = 30;
+  // Same first-frame gate as configure_slot — the rebuilt surface is
+  // a fresh zero-filled BO until the next decode lands. Reset
+  // first_frame_seen so drain_slot's alpha bump re-arms.
+  desc.display.alpha = 0;
+  slot.first_frame_seen = false;
   auto handle_r = scene.add_layer(std::move(desc));
   if (!handle_r) {
     return false;
@@ -1320,6 +1337,11 @@ void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, const bool s
   desc.display.zpos = static_cast<int>(3 + slot.target.camera_index);
   desc.content_type = drm::planes::ContentType::Video;
   desc.update_hint_hz = 30;
+  // The replacement XRGB DumbBufferSource is zero-filled (black). Hide
+  // the layer until drain_slot writes the next frame; first_frame_seen
+  // re-arms so the bump fires.
+  desc.display.alpha = 0;
+  slot.first_frame_seen = false;
   auto handle_r = scene.add_layer(std::move(desc));
   if (!handle_r) {
     drm::println(stderr, "configure_slot[{}]: downgrade add_layer: {}", slot.target.camera_index,
@@ -1390,6 +1412,11 @@ void teardown_slot(CameraSlot& slot, drm::scene::LayerScene& scene, const bool s
   desc.display.zpos = static_cast<int>(3 + slot.target.camera_index);
   desc.content_type = drm::planes::ContentType::Video;
   desc.update_hint_hz = 30;
+  // The replacement XRGB DumbBufferSource is zero-filled (black). Hide
+  // the layer until drain_slot writes the next frame; first_frame_seen
+  // re-arms so the bump fires.
+  desc.display.alpha = 0;
+  slot.first_frame_seen = false;
   auto handle_r = scene.add_layer(std::move(desc));
   if (!handle_r) {
     drm::println(stderr, "configure_slot[{}]: zero-copy downgrade add_layer: {}",
@@ -1542,6 +1569,12 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
             slot.first_frame_seen = true;
             drm::println(stderr, "slot[{}]: first frame landed ({})", slot.target.camera_index,
                          mode_label(slot.target.mode));
+            // configure_slot / rebuild_vaapi_slot / both downgrade
+            // helpers add the layer at alpha=0 so the freshly-allocated
+            // destination (zero-filled NV12 → green, or zero-filled
+            // XRGB → black) never reaches scanout. With the first real
+            // frame now in the surface, raise alpha to fully opaque.
+            layer->set_alpha(0xFFFF);
           }
           slot.last_frame_at = std::chrono::steady_clock::now();
         }

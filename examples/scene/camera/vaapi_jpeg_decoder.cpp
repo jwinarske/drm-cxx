@@ -427,9 +427,12 @@ std::unique_ptr<VaapiJpegDecoder> VaapiJpegDecoder::create(void* va_display, std
   // step was removed — radeonsi appears to rebind the surface to a
   // freshly-allocated BO on vaPutImage, after which our exported
   // dma-buf still references the OLD (now-stale) BO that the VP
-  // never writes to. End result: green-on-screen forever. The
-  // initial green flash before the first decoded frame is cosmetic
-  // and goes away within ~33 ms once decode_into_surface lands.
+  // never writes to. End result: green-on-screen forever. The caller
+  // sidesteps the issue by adding the layer at alpha=0 and bumping
+  // back to 0xFFFF once decode_into_surface has written a real frame
+  // (see configure_slot in main.cpp; the same first-frame gate covers
+  // the libyuv tiers, whose XRGB DumbBufferSource is zero-filled and
+  // would otherwise flash black for one to two frames).
 
   // Export the OUTPUT (NV12) surface as a dma-buf with separate-layers
   // so each plane has its own (offset, pitch); ExternalDmaBufSource
