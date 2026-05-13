@@ -103,6 +103,17 @@ target_link_libraries(test_layer_scene_minimization_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_minimization_vkms)
 
+# Hardware-gated EGL Streams integration. All TESTs self-skip via
+# GTEST_SKIP when probe_stream_capability returns Unsupported, so
+# CI hosts on Mesa-only stacks see the binary run-and-skip cleanly.
+add_executable(test_egl_streams_hw
+  integration/test_egl_streams_hw.cpp)
+target_link_libraries(test_egl_streams_hw PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_egl_streams_hw)
+
 # LayerScene rebind tests against VKMS. Same rationale as
 # the minimization suite — pure scene API, no capture dependency.
 add_executable(test_layer_scene_rebind_vkms
@@ -157,6 +168,27 @@ target_link_libraries(test_scene PRIVATE
   GTest::gtest
   GTest::gtest_main)
 gtest_discover_tests(test_scene)
+
+add_executable(test_stream_capability unit/test_stream_capability.cpp)
+target_link_libraries(test_stream_capability PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_stream_capability)
+
+add_executable(test_egl_stream_builder unit/test_egl_stream_builder.cpp)
+target_link_libraries(test_egl_stream_builder PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_egl_stream_builder)
+
+add_executable(test_egl_stream_source unit/test_egl_stream_source.cpp)
+target_link_libraries(test_egl_stream_source PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_egl_stream_source)
 
 add_executable(test_composite_canvas unit/test_composite_canvas.cpp)
 target_link_libraries(test_composite_canvas PRIVATE

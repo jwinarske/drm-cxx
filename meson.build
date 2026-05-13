@@ -233,6 +233,40 @@ if not has_gstreamer and not gstreamer_feature.disabled()
   message('drm-cxx: gstreamer not found — drm::scene::GstAppsinkSource will not be built')
 endif
 
+# EGL Streams probe for drm::scene::EglStreamSource. We only need
+# the headers at build time — libEGL is NEVER linked into libdrm-cxx;
+# the capability probe and the source use dlopen("libEGL.so.1") so the
+# library remains usable on Mesa systems that don't even have libEGL
+# installed. The 'egl' pkg-config name is the standard Khronos one
+# (egl.pc); on systems where pkg-config doesn't see it we fall back to
+# a header-only check against <EGL/egl.h> on the include path. The
+# probe-side stub when neither is found is documented in
+# src/scene/stream_capability.cpp.
+streams_feature = get_option('streams')
+if not streams_feature.disabled()
+  egl_dep = dependency('egl', required : false, include_type : 'system')
+  if egl_dep.found()
+    has_egl_headers = true
+  else
+    has_egl_headers = cpp.has_header('EGL/egl.h') and cpp.has_header('EGL/eglext.h')
+    if has_egl_headers
+      egl_dep = declare_dependency()
+    else
+      egl_dep = disabler()
+    endif
+  endif
+  if streams_feature.enabled() and not has_egl_headers
+    error('drm-cxx: streams=enabled requested but EGL headers not found (install libegl-dev / mesa-libEGL-devel)')
+  endif
+else
+  egl_dep = disabler()
+  has_egl_headers = false
+endif
+has_egl_streams = has_egl_headers
+if not has_egl_streams and not streams_feature.disabled()
+  message('drm-cxx: EGL headers not found — drm::scene EGL Streams support will be a runtime no-op')
+endif
+
 #── Configuration ─────────────────────────────────────────────
 conf = configuration_data()
 conf.set('DRM_CXX_VERSION', meson.project_version())

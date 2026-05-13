@@ -35,6 +35,18 @@ Layer& Layer::set_composited() noexcept {
   return *this;
 }
 
+Layer& Layer::set_transient_composited(bool composited) noexcept {
+  if (transient_composited_ != composited) {
+    transient_composited_ = composited;
+    dirty_ = true;
+  }
+  return *this;
+}
+
+bool Layer::is_transient_composited() const noexcept {
+  return transient_composited_;
+}
+
 Layer& Layer::set_content_type(ContentType type) noexcept {
   content_type_ = type;
   return *this;
@@ -126,6 +138,15 @@ Rect Layer::crtc_rect() const {
 
 bool Layer::is_composition_layer() const noexcept {
   return is_composition_layer_;
+}
+
+bool Layer::is_externally_bound() const noexcept {
+  return externally_bound_;
+}
+
+Layer& Layer::set_externally_bound(bool externally_bound) noexcept {
+  externally_bound_ = externally_bound;
+  return *this;
 }
 
 bool Layer::is_dirty() const noexcept {

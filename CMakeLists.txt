@@ -50,6 +50,15 @@ set(DRM_CXX_GSTREAMER "AUTO" CACHE STRING
     "Build drm::scene::GstAppsinkSource on top of GStreamer: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_GSTREAMER PROPERTY STRINGS AUTO ON OFF)
 
+# Optional drm::scene EGL Streams support. Headers-only build dep
+# (libEGL is dlopen'd at runtime by stream_capability.cpp /
+# EglStreamSource), gated to keep Mesa-only systems from carrying the
+# header dep when streams are explicitly off. AUTO probes for EGL headers
+# and falls back to a no-op probe when they are absent.
+set(DRM_CXX_STREAMS "AUTO" CACHE STRING
+    "Build drm::scene EGL Streams support (NVIDIA proprietary / Tegra): AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_STREAMS PROPERTY STRINGS AUTO ON OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -175,6 +184,43 @@ else()
     message(STATUS
       "drm-cxx: gstreamer not found — drm::scene::GstAppsinkSource will not be built")
   endif()
+endif()
+
+# EGL Streams headers-only probe. Try egl.pc first (Khronos
+# canonical), then fall back to a bare <EGL/egl.h> check on the include
+# path. Result is a DRM_CXX_HAS_EGL_STREAMS gate consumed by
+# src/CMakeLists.txt; libEGL itself is never linked. AUTO is silent,
+# ON hard-fails when the headers are absent, OFF skips entirely.
+if(NOT DRM_CXX_STREAMS STREQUAL "OFF")
+  if(DRM_CXX_STREAMS STREQUAL "ON")
+    pkg_check_modules(egl REQUIRED IMPORTED_TARGET egl)
+  else()
+    pkg_check_modules(egl IMPORTED_TARGET egl)
+  endif()
+  if(TARGET PkgConfig::egl)
+    _drm_cxx_promote_system_includes(PkgConfig::egl)
+    set(DRM_CXX_HAS_EGL_STREAMS 1)
+  else()
+    include(CheckIncludeFileCXX)
+    check_include_file_cxx("EGL/egl.h" DRM_CXX_HAS_EGL_HEADER)
+    check_include_file_cxx("EGL/eglext.h" DRM_CXX_HAS_EGLEXT_HEADER)
+    if(DRM_CXX_HAS_EGL_HEADER AND DRM_CXX_HAS_EGLEXT_HEADER)
+      set(DRM_CXX_HAS_EGL_STREAMS 1)
+    else()
+      set(DRM_CXX_HAS_EGL_STREAMS 0)
+      if(DRM_CXX_STREAMS STREQUAL "ON")
+        message(FATAL_ERROR
+          "drm-cxx: DRM_CXX_STREAMS=ON requested but EGL headers (<EGL/egl.h>, "
+          "<EGL/eglext.h>) are not on the include path. Install libegl-dev / "
+          "mesa-libEGL-devel and reconfigure.")
+      endif()
+    endif()
+  endif()
+else()
+  set(DRM_CXX_HAS_EGL_STREAMS 0)
+endif()
+if(NOT DRM_CXX_HAS_EGL_STREAMS AND NOT DRM_CXX_STREAMS STREQUAL "OFF")
+  message(STATUS "drm-cxx: EGL headers not found — drm::scene EGL Streams support will be a runtime no-op")
 endif()
 
 # libxcursor probe for drm::cursor.

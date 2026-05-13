@@ -3,18 +3,13 @@
 //
 // layer_scene.hpp — top-level scene façade.
 //
-// scope per docs/implementation_plan.md:
-//   - Construct from (Device, CRTC/connector/mode).
-//   - add/remove/get layers by handle, monotonic + generation.
-//   - Single test() / commit() path that runs the existing
-//     drm::planes::Allocator against a fresh AtomicRequest.
-//   - Diagnostic CommitReport.
-//
-// Not in (shipped in later phases):
-//   - Property minimization.
-//   - Composition fallback for unassigned layers.
-//   - rebind() for CRTC/connector/mode changes.
-//   - Page-flip async completion handling / buffer release after scanout.
+// Constructs from (Device, CRTC/connector/mode); manages layers by
+// handle (monotonic + generation); runs a single test() / commit()
+// path through drm::planes::Allocator against a fresh AtomicRequest;
+// surfaces diagnostics through CommitReport. Property minimization,
+// composition fallback for unassigned layers, rebind() across
+// CRTC/connector/mode changes, and page-flip async completion are
+// all wired through this façade as well.
 //
 // The pimpl keeps drm::planes::Output, drm::planes::Allocator, and
 // drm::PropertyStore out of this header — they are implementation
@@ -29,6 +24,7 @@
 #include "layer.hpp"
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
+#include "stream_capability.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 
@@ -56,6 +52,19 @@ class LayerScene {
     std::uint32_t crtc_id{0};
     std::uint32_t connector_id{0};
     drmModeModeInfo mode{};
+
+    /// EGL Streams capability for this scene. Defaults to
+    /// `StreamMixingMode::Unsupported` so `EglStreamSource` layers
+    /// are rejected at `add_layer` time. Callers who need streams
+    /// must call `probe_stream_capability(dev)` and assign the
+    /// result before passing this Config to `create()`; tests may
+    /// construct a `StreamCapability` directly.
+    ///
+    /// Storing the capability on the Config (rather than auto-probing
+    /// inside `create()`) keeps construction free of implicit IO on
+    /// every scene — the dlopen-probe runs only when the application
+    /// actually intends to use streams.
+    StreamCapability stream_capability{};
   };
 
   /// Build a LayerScene bound to the given CRTC + connector + mode.
@@ -89,6 +98,69 @@ class LayerScene {
   [[nodiscard]] const Layer* get_layer(LayerHandle handle) const noexcept;
 
   [[nodiscard]] std::size_t layer_count() const noexcept;
+
+  /// The stream capability the scene was constructed with. Callers
+  /// inspect this to decide whether to add `EglStreamSource`-backed
+  /// layers (when `mixing != StreamMixingMode::Unsupported`) and to
+  /// branch the producer-side wiring on the extension set the driver
+  /// exposes. Survives `rebind()` and pause/resume verbatim — the
+  /// capability describes the driver, not the connector or CRTC.
+  /// The `mixing` field may be upgraded from `Exclusive` to `Mixed`
+  /// by a successful `probe_stream_mixing()` call.
+  [[nodiscard]] const StreamCapability& stream_capability() const noexcept;
+
+  /// Run the stream-layer plane-pin pre-pass that normally fires
+  /// inside `commit()`. After this returns, every alive
+  /// `DriverOwnsBinding` layer has its source bound to a plane (or
+  /// has logged a failure), and `EglStreamSource::producer_surface()`
+  /// returns a usable handle.
+  ///
+  /// Callers driving the NVIDIA-Streams flow use this to obtain the
+  /// producer surface BEFORE the first commit so they can render a
+  /// first frame; `commit()` then routes the atomic request through
+  /// `eglStreamConsumerAcquireAttribKHR` with
+  /// `EGL_DRM_ATOMIC_REQUEST_NV`, handing the first-frame acquire +
+  /// commit submission off to the driver.
+  ///
+  /// Idempotent: subsequent calls are a no-op for slots already
+  /// pinned. Safe to call before any frame has been committed.
+  void prepare_stream_layers();
+
+  /// Run an empirical TEST atomic commit that pairs an already-bound
+  /// stream consumer plane with a temporary FB-ID-attached plane on
+  /// the same CRTC. On kernel acceptance the scene's cached
+  /// `StreamCapability::mixing` upgrades from `Exclusive` to `Mixed`
+  /// and the result is sticky for the rest of the scene's lifetime
+  /// (cleared on `rebind()` / `on_session_resumed()`).
+  ///
+  /// Preconditions:
+  ///
+  ///   * `stream_capability().usable()` must be true.
+  ///   * At least one alive layer must have a `DriverOwnsBinding`
+  ///     source that has already been committed once (i.e. has been
+  ///     pinned to a plane and `bind_to_plane()` has succeeded).
+  ///     Without an existing stream binding the probe has nothing to
+  ///     test against.
+  ///
+  /// Returns the current mixing mode on success, regardless of
+  /// whether it was upgraded. The probe is informational; callers
+  /// who get back `Exclusive` know the driver enforces the
+  /// single-stream-layer-per-CRTC restriction on this hardware.
+  ///
+  /// Error returns:
+  ///
+  ///   * `errc::function_not_supported` — capability is `Unsupported`
+  ///     or no stream layer is currently bound to a plane.
+  ///   * `errc::resource_unavailable_try_again` — no DRM plane is
+  ///     available on the CRTC to serve as the probe's FB-ID target
+  ///     (every non-cursor plane is already in use or reserved).
+  ///   * `errc::not_enough_memory` — failed to allocate the probe's
+  ///     scratch dumb buffer or atomic request.
+  ///
+  /// Idempotent on subsequent calls: once the probe has run (success
+  /// or kernel rejection), the cached value is returned without
+  /// re-issuing the TEST commit.
+  drm::expected<StreamMixingMode, std::error_code> probe_stream_mixing();
 
   // ── Commit cycle ───────────────────────────────────────────────────
 

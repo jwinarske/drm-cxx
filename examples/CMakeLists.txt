@@ -123,6 +123,34 @@ add_executable(cursor_rotate advanced/cursor_rotate/main.cpp)
 target_link_libraries(cursor_rotate PRIVATE drm-cxx::drm-cxx)
 target_include_directories(cursor_rotate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
+# Dumps the per-device EGL Streams capability shape so users can verify
+# whether their system can host an EglStreamSource. Independent of
+# DRM_CXX_HAS_EGL_STREAMS: the binary builds on every host (the probe
+# itself short-circuits to Unsupported when EGL headers were absent).
+add_executable(stream_probe advanced/stream_probe/main.cpp)
+target_link_libraries(stream_probe PRIVATE drm-cxx::drm-cxx)
+target_include_directories(stream_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# stream_demo — end-to-end EGL Streams demo: a stream-source layer
+# centered over a dumb-buffer background, fed by a GLES 3 producer
+# loop that animates the clear color. Gated on DRM_CXX_HAS_EGL_STREAMS
+# (the EglStreamBuilder header isn't defined without it) AND on
+# glesv2.pc availability (the demo links real EGL + GLES, no dlopen
+# shenanigans — only the library does that). Hardware-only: needs
+# the proprietary EGL stack to actually scan a stream out.
+if(DRM_CXX_HAS_EGL_STREAMS)
+  pkg_check_modules(glesv2 IMPORTED_TARGET glesv2)
+  if(TARGET PkgConfig::glesv2 AND TARGET PkgConfig::egl)
+    add_executable(stream_demo advanced/stream_demo/main.cpp)
+    target_link_libraries(stream_demo PRIVATE
+      drm-cxx::drm-cxx
+      PkgConfig::egl
+      PkgConfig::glesv2)
+    target_include_directories(stream_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  endif()
+endif()
+
 # capture_demo — libinput-driven snapshot demo for drm::capture.
 # Only built when Blend2D is on (same gate as the library module it exercises).
 if(DRM_CXX_HAS_BLEND2D)

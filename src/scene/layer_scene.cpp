@@ -11,6 +11,11 @@
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
 #include "output_signaling.hpp"
+#include "stream_capability.hpp"
+
+#if DRM_CXX_HAS_EGL_STREAMS
+#include "egl_stream_source.hpp"
+#endif
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
@@ -20,6 +25,7 @@
 #include <drm-cxx/display/connector_capabilities.hpp>
 #include <drm-cxx/display/hdr_metadata.hpp>
 #include <drm-cxx/display/hdr_metadata_cache.hpp>
+#include <drm-cxx/dumb/buffer.hpp>
 #include <drm-cxx/log.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
 #include <drm-cxx/planes/allocator.hpp>
@@ -67,8 +73,155 @@ class LayerScene::Impl {
         connector_id_(cfg.connector_id),
         mode_(cfg.mode),
         registry_(std::move(registry)),
-        output_(cfg.crtc_id, composition_planes_layer_) {
+        output_(cfg.crtc_id, composition_planes_layer_),
+        stream_capability_(cfg.stream_capability) {
     allocator_.emplace(*dev_, registry_);
+  }
+
+  [[nodiscard]] const StreamCapability& stream_capability() const noexcept {
+    return stream_capability_;
+  }
+
+  // Empirical mixing probe. See LayerScene::probe_stream_mixing()
+  // docstring for the API contract. Implementation runs a single
+  // DRM_MODE_ATOMIC_TEST_ONLY commit that adds an FB-ID-attached
+  // plane alongside an existing stream-bound plane on the same
+  // CRTC; if the kernel accepts, the driver permits FB-ID + stream
+  // consumer cohabitation on one CRTC and the scene upgrades to
+  // Mixed.
+  drm::expected<StreamMixingMode, std::error_code> probe_stream_mixing() {
+    if (mixing_probe_ran_) {
+      return stream_capability_.mixing;
+    }
+    if (!stream_capability_.usable()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+
+    // Find a bound stream layer to test against. Without one, there's
+    // no kernel-side stream-consumer plane state for the FB-ID probe
+    // plane to coexist with.
+    std::optional<std::uint32_t> stream_plane_id;
+    for (const auto& slot : slots_) {
+      if (slot.alive && slot.stream_pinned_plane_id.has_value()) {
+        stream_plane_id = slot.stream_pinned_plane_id;
+        break;
+      }
+    }
+    if (!stream_plane_id.has_value()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+
+    // Pick a plane to host the probe FB. Skip cursor, the stream pin,
+    // every other stream pin, and the canvas reservation. Require
+    // ARGB8888 support so the dumb buffer we're about to allocate
+    // matches.
+    std::optional<std::uint32_t> probe_plane_id;
+    for (const auto* p : registry_.for_crtc(*crtc_index)) {
+      if (p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (p->id == *stream_plane_id) {
+        continue;
+      }
+      if (last_canvas_plane_id_.has_value() && *last_canvas_plane_id_ == p->id) {
+        continue;
+      }
+      const bool pinned_elsewhere =
+          std::any_of(slots_.begin(), slots_.end(), [pid = p->id](const Slot& s) {
+            return s.alive && s.stream_pinned_plane_id.has_value() &&
+                   *s.stream_pinned_plane_id == pid;
+          });
+      if (pinned_elsewhere) {
+        continue;
+      }
+      if (!p->supports_format(DRM_FORMAT_ARGB8888)) {
+        continue;
+      }
+      probe_plane_id = p->id;
+      break;
+    }
+    if (!probe_plane_id.has_value()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::resource_unavailable_try_again));
+    }
+
+    // Allocate a small throwaway dumb buffer + FB. The kernel only
+    // looks at the FB's format / size / pitch during atomic_check;
+    // it never reads pixels for TEST commits.
+    static constexpr std::uint32_t probe_dim = 16;
+    drm::dumb::Config dumb_cfg;
+    dumb_cfg.width = probe_dim;
+    dumb_cfg.height = probe_dim;
+    dumb_cfg.drm_format = DRM_FORMAT_ARGB8888;
+    dumb_cfg.bpp = 32;
+    dumb_cfg.add_fb = true;
+    auto probe_buf_r = drm::dumb::Buffer::create(*dev_, dumb_cfg);
+    if (!probe_buf_r) {
+      return drm::unexpected<std::error_code>(probe_buf_r.error());
+    }
+    auto probe_buf = std::move(*probe_buf_r);
+
+    drm::AtomicRequest req(*dev_);
+    if (!req.valid()) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
+    }
+
+    auto write = [&](std::uint32_t plane_id, const char* name,
+                     std::uint64_t value) -> drm::expected<void, std::error_code> {
+      auto id = props_.property_id(plane_id, name);
+      if (!id.has_value()) {
+        return {};
+      }
+      if (props_.is_immutable(plane_id, name).value_or(false)) {
+        return {};
+      }
+      return req.add_property(plane_id, *id, value);
+    };
+
+    const std::uint64_t src_w = static_cast<std::uint64_t>(probe_dim) << 16U;
+    const std::uint64_t src_h = static_cast<std::uint64_t>(probe_dim) << 16U;
+    const std::array<std::pair<const char*, std::uint64_t>, 10> probe_props{{
+        {"FB_ID", probe_buf.fb_id()},
+        {"CRTC_ID", crtc_id_},
+        {"CRTC_X", 0},
+        {"CRTC_Y", 0},
+        {"CRTC_W", probe_dim},
+        {"CRTC_H", probe_dim},
+        {"SRC_X", 0},
+        {"SRC_Y", 0},
+        {"SRC_W", src_w},
+        {"SRC_H", src_h},
+    }};
+    for (const auto& [name, value] : probe_props) {
+      if (auto r = write(*probe_plane_id, name, value); !r) {
+        return drm::unexpected<std::error_code>(r.error());
+      }
+    }
+
+    // TEST-only. The kernel evaluates whether the proposed delta —
+    // FB-ID arm on probe_plane — is admissible alongside the current
+    // stream-consumer state on stream_plane. Success means the
+    // driver does NOT enforce single-stream-layer-per-CRTC; failure
+    // typically means it does (EBUSY / EINVAL on the test commit).
+    const auto commit_r = req.commit(DRM_MODE_ATOMIC_TEST_ONLY);
+    mixing_probe_ran_ = true;
+    if (commit_r.has_value()) {
+      stream_capability_.mixing = StreamMixingMode::Mixed;
+      drm::log_info("scene::LayerScene: stream-mixing probe accepted by kernel; upgraded to Mixed");
+      return StreamMixingMode::Mixed;
+    }
+    drm::log_info(
+        "scene::LayerScene: stream-mixing probe rejected by kernel ({}); staying Exclusive",
+        commit_r.error().message());
+    return stream_capability_.mixing;
   }
 
   ~Impl() { destroy_mode_blob(); }
@@ -145,6 +298,19 @@ class LayerScene::Impl {
     if (!desc.source) {
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
     }
+    // Gate DriverOwnsBinding sources behind a usable stream
+    // capability. The scene cannot drive a layer whose FB_ID it isn't
+    // permitted to write, so rejecting at registration time keeps the
+    // failure local to the caller's add_layer instead of erupting deep
+    // in commit().
+    if (desc.source->binding_model() == BindingModel::DriverOwnsBinding &&
+        !stream_capability_.usable()) {
+      drm::log_warn(
+          "scene::LayerScene::add_layer: source reports DriverOwnsBinding but the scene was "
+          "constructed with StreamMixingMode::Unsupported — pass a StreamCapability from "
+          "probe_stream_capability() in Config.stream_capability");
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+    }
 
     std::uint32_t slot_idx = 0;
     if (!free_ids_.empty()) {
@@ -178,6 +344,14 @@ class LayerScene::Impl {
     auto* slot = slot_for(handle);
     if (slot == nullptr) {
       return;
+    }
+    // If the source's stream consumer is currently bound to a plane,
+    // tear that binding down before the source unique_ptr is reset.
+    // unbind_from_plane is noexcept; failures are logged inside the
+    // source.
+    if (slot->stream_pinned_plane_id.has_value() && slot->scene_layer) {
+      slot->scene_layer->source().unbind_from_plane(*slot->stream_pinned_plane_id);
+      slot->stream_pinned_plane_id.reset();
     }
     if (slot->planes_layer != nullptr) {
       // Drop any allocator state keyed on this Layer's address before
@@ -229,6 +403,23 @@ class LayerScene::Impl {
     if (suspended_) {
       return CommitReport{};
     }
+
+    // Establish stream-source plane pins before acquire_all runs. EGL
+    // stream sources return EAGAIN from acquire() until their consumer
+    // is wired to a plane (eglStreamConsumerOutputEXT), and that wiring
+    // is what ensure_stream_layer_pins drives via the source's
+    // bind_to_plane hook. Non-stream sources are untouched.
+    ensure_stream_layer_pins();
+
+    // Exclusive-mixing constraint enforcement. When the stream
+    // capability says Exclusive (the driver doesn't permit FB-ID and
+    // stream-consumer planes to coexist on one CRTC) and any layer
+    // in the scene is stream-bound, force every non-stream layer
+    // through the composition path so the kernel only sees the
+    // stream plane + the canvas plane on this CRTC. Mixed-mode
+    // capability skips the constraint — the allocator can place
+    // FB-ID layers natively alongside the stream consumer plane.
+    apply_exclusive_mixing_constraint();
 
     // Acquire every live layer's buffer up front. On any failure the
     // already-acquired buffers are handed back to their sources.
@@ -336,10 +527,25 @@ class LayerScene::Impl {
         last_canvas_plane_id_ = resv;
       }
     }
-    const std::array<std::uint32_t, 1> reserved_planes{last_canvas_plane_id_.value_or(0)};
-    const auto reserved_span = last_canvas_plane_id_.has_value()
-                                   ? drm::span<const std::uint32_t>(reserved_planes.data(), 1)
-                                   : drm::span<const std::uint32_t>{};
+    // External reservations: the composition canvas plane (if any)
+    // plus every plane pinned to a DriverOwnsBinding source. The
+    // allocator must leave all of these alone — the scene writes
+    // their properties itself via compose_unassigned / the canvas-arm
+    // path and arm_stream_layer_planes respectively.
+    std::vector<std::uint32_t> reserved_planes;
+    reserved_planes.reserve(1 + acquisitions.size());
+    if (last_canvas_plane_id_.has_value()) {
+      reserved_planes.push_back(*last_canvas_plane_id_);
+    }
+    for (const auto& acq : acquisitions) {
+      if (acq.stream_pinned_plane_id.has_value()) {
+        reserved_planes.push_back(*acq.stream_pinned_plane_id);
+      }
+    }
+    const auto reserved_span =
+        reserved_planes.empty()
+            ? drm::span<const std::uint32_t>{}
+            : drm::span<const std::uint32_t>(reserved_planes.data(), reserved_planes.size());
     auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         allocator_->apply(output_, req, effective_flags, reserved_span);
     if (!assigned) {
@@ -367,6 +573,16 @@ class LayerScene::Impl {
     // transparent layer ghosts whatever scans out below it on the
     // CRTC. Match the canvas's premultiplied output convention so
     // both natively-assigned and composited cells blend identically.
+    // Stream layers are intentionally untouched in the scene's
+    // atomic commit. Desktop NVIDIA (no EGL_NV_output_drm_atomic
+    // extension) handles plane FB / CRTC binding inside
+    // eglStreamConsumerOutputEXT and subsequent auto-acquire
+    // events; if the scene writes CRTC_*/SRC_* without FB_ID the
+    // kernel rejects the commit (EINVAL on an active plane with
+    // no framebuffer). bookkeeping-only here keeps the dropped-
+    // layers tally honest.
+    count_stream_layers_assigned(acquisitions, report);
+
     arm_layer_plane_blend_defaults(acquisitions, req, report);
     arm_layer_plane_color_props(acquisitions, req, report);
 
@@ -528,6 +744,11 @@ class LayerScene::Impl {
       if (slot.alive && slot.scene_layer) {
         slot.scene_layer->source().on_session_paused();
       }
+      // Clear stream pins: the source's on_session_paused tears down
+      // the EGL stream and producer surface, so the previous plane
+      // binding is gone too. The next commit's ensure_stream_layer_pins
+      // pass will re-pick and re-bind once the session resumes.
+      slot.stream_pinned_plane_id.reset();
     }
     if (composition_canvas_) {
       composition_canvas_->on_session_paused();
@@ -610,6 +831,9 @@ class LayerScene::Impl {
     // values so the next composing frame re-resolves from scratch.
     last_canvas_plane_id_.reset();
     cached_crtc_index_.reset();
+    // Empirical mixing result is tied to the prior fd's kernel state;
+    // re-probe under the fresh fd if the caller wants the upgrade.
+    mixing_probe_ran_ = false;
     if (composition_canvas_) {
       if (auto r = composition_canvas_->on_session_resumed(new_dev); !r) {
         composition_canvas_.reset();
@@ -676,7 +900,17 @@ class LayerScene::Impl {
     for (auto& slot : slots_) {
       if (!slot.alive || !slot.scene_layer) {
         slot.planes_layer = nullptr;
+        slot.stream_pinned_plane_id.reset();
         continue;
+      }
+      // Stream pins are CRTC-local: the new CRTC may not even expose
+      // the same plane id, and the kernel-side consumer binding from
+      // the old CRTC is no longer valid. Tear it down via the source
+      // hook; the next commit's ensure_stream_layer_pins pass will
+      // re-pick and re-bind on the new CRTC.
+      if (slot.stream_pinned_plane_id.has_value()) {
+        slot.scene_layer->source().unbind_from_plane(*slot.stream_pinned_plane_id);
+        slot.stream_pinned_plane_id.reset();
       }
       auto& fresh = output_.add_layer();
       slot.planes_layer = &fresh;
@@ -704,6 +938,10 @@ class LayerScene::Impl {
     composition_canvas_.reset();
     last_canvas_plane_id_.reset();
     cached_crtc_index_.reset();
+    // The mixing probe's last verdict was for the previous CRTC; on
+    // the new one the driver may behave differently. Re-probe on
+    // next call.
+    mixing_probe_ran_ = false;
 
     // First commit after rebind must modeset the new CRTC.
     first_commit_ = true;
@@ -749,6 +987,12 @@ class LayerScene::Impl {
     drm::planes::Layer* planes_layer{nullptr};
     std::uint32_t generation{0};
     bool alive{false};
+    // For DriverOwnsBinding sources only: the DRM plane this source's
+    // EGL stream consumer has been bound to. Picked once on first
+    // commit, reused thereafter; cleared on session pause / rebind so
+    // the next commit re-picks and re-calls bind_to_plane (the source
+    // tears down its stream + producer surface on session pause).
+    std::optional<std::uint32_t> stream_pinned_plane_id;
   };
 
   struct AcquisitionSlot {
@@ -763,6 +1007,12 @@ class LayerScene::Impl {
     // been armed and before atomic commit) — `BufferMapping`'s dtor
     // pairs with `gbm_bo_unmap` for GBM-backed sources.
     std::optional<drm::BufferMapping> cached_mapping;
+    // Copied from Slot::stream_pinned_plane_id at acquire_all time.
+    // Drives the post-apply property writes in arm_stream_layer_planes
+    // and the blend / color arm passes' fallback when the allocator
+    // didn't assign the layer (which is always the case for stream
+    // layers — they're filtered out of the bipartite match).
+    std::optional<std::uint32_t> stream_pinned_plane_id;
   };
 
   // Slot-table helpers — return nullptr on any handle that doesn't
@@ -805,7 +1055,13 @@ class LayerScene::Impl {
                       slot.scene_layer->handle().id, acq.error().message());
         return drm::unexpected<std::error_code>(acq.error());
       }
-      out.push_back({slot.scene_layer.get(), slot.planes_layer, *acq});
+      out.push_back({
+          .scene_layer = slot.scene_layer.get(),
+          .planes_layer = slot.planes_layer,
+          .buffer = *acq,
+          .cached_mapping = std::nullopt,
+          .stream_pinned_plane_id = slot.stream_pinned_plane_id,
+      });
     }
     return {};
   }
@@ -826,8 +1082,20 @@ class LayerScene::Impl {
                           std::uint32_t crtc_id, std::optional<std::uint64_t> default_zpos_hint) {
     const auto& d = src.display();
     const auto fmt = src.source().format();
+    const bool driver_owns_binding =
+        src.source().binding_model() == BindingModel::DriverOwnsBinding;
 
-    dst.set_property("FB_ID", fb_id);
+    // DriverOwnsBinding sources (EGL stream consumers, ...) get their
+    // FB_ID set up by the producer-side extension stack
+    // (eglStreamConsumerOutputEXT and friends), not by the scene.
+    // Skipping the property write avoids racing the consumer's
+    // internal FB_ID state and lets the allocator treat the layer as
+    // externally bound — see is_externally_bound() and the parallel
+    // guards in the allocator.
+    dst.set_externally_bound(driver_owns_binding);
+    if (!driver_owns_binding) {
+      dst.set_property("FB_ID", fb_id);
+    }
     // CRTC_ID binds the plane to this scene's CRTC. Without it the
     // kernel rejects the plane commit (FB armed, but the plane is still
     // bound to nothing / to whatever the previous committed CRTC was),
@@ -1031,6 +1299,173 @@ class LayerScene::Impl {
     }
     return (primary_fallback != nullptr) ? std::optional<std::uint32_t>(primary_fallback->id)
                                          : std::nullopt;
+  }
+
+  // Pick a DRM plane for a DriverOwnsBinding source's stream consumer
+  // to bind to. The allocator never matches stream layers (their
+  // planes::Layer is_externally_bound), so the scene picks here:
+  // first CRTC-compatible non-cursor plane that supports the source's
+  // format and isn't already pinned to another stream layer or
+  // reserved for the composition canvas. Prefers PRIMARY when free,
+  // otherwise the first matching OVERLAY. Returns nullopt when no
+  // candidate exists; the caller drops the stream layer for the frame
+  // and retries next commit.
+  std::optional<std::uint32_t> pick_stream_plane(
+      std::uint32_t crtc_index, std::uint32_t source_fourcc,
+      const std::vector<std::uint32_t>& already_pinned) const {
+    auto is_unavailable = [&](std::uint32_t plane_id) {
+      if (last_canvas_plane_id_.has_value() && *last_canvas_plane_id_ == plane_id) {
+        return true;
+      }
+      return std::any_of(already_pinned.begin(), already_pinned.end(),
+                         [plane_id](std::uint32_t p) { return p == plane_id; });
+    };
+    const drm::planes::PlaneCapabilities* primary_match = nullptr;
+    for (const auto* p : registry_.for_crtc(crtc_index)) {
+      if (p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (is_unavailable(p->id)) {
+        continue;
+      }
+      if (!p->supports_format(source_fourcc)) {
+        continue;
+      }
+      if (p->type == drm::planes::DRMPlaneType::PRIMARY) {
+        if (primary_match == nullptr) {
+          primary_match = p;
+        }
+        continue;
+      }
+      // OVERLAY (or any non-cursor non-primary) — take the first one.
+      return p->id;
+    }
+    if (primary_match != nullptr) {
+      return primary_match->id;
+    }
+    return std::nullopt;
+  }
+
+  // For every alive slot whose source is DriverOwnsBinding and that
+  // has no current plane pin, pick a plane and call the source's
+  // bind_to_plane(). On success the slot remembers the plane; on
+  // failure the slot stays unpinned and the source's acquire() will
+  // return EAGAIN, so the scene drops the layer for this frame and
+  // the next commit retries.
+  //
+  // Called before acquire_all(), because EglStreamSource::acquire()
+  // returns EAGAIN until bind_to_plane has succeeded. Also called
+  // directly from LayerScene::prepare_stream_layers (the public
+  // pre-commit hook the NVIDIA-Streams first-frame flow needs), so
+  // it sits in the public section despite being implementation
+  // detail for everyone else.
+ public:
+  void ensure_stream_layer_pins() {
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return;
+    }
+    std::vector<std::uint32_t> already_pinned;
+    already_pinned.reserve(8);
+    for (const auto& slot : slots_) {
+      if (slot.alive && slot.stream_pinned_plane_id.has_value()) {
+        already_pinned.push_back(*slot.stream_pinned_plane_id);
+      }
+    }
+    for (auto& slot : slots_) {
+      if (!slot.alive || slot.scene_layer == nullptr) {
+        continue;
+      }
+      if (slot.stream_pinned_plane_id.has_value()) {
+        continue;
+      }
+      if (slot.scene_layer->source().binding_model() != BindingModel::DriverOwnsBinding) {
+        continue;
+      }
+      const auto fmt = slot.scene_layer->source().format();
+      const auto plane_id = pick_stream_plane(*crtc_index, fmt.drm_fourcc, already_pinned);
+      if (!plane_id.has_value()) {
+        drm::log_warn(
+            "scene::LayerScene: no DRM plane available for stream layer {} (format 0x{:x})",
+            slot.scene_layer->handle().id, fmt.drm_fourcc);
+        continue;
+      }
+      auto bind_r = slot.scene_layer->source().bind_to_plane(*plane_id);
+      if (!bind_r) {
+        drm::log_warn("scene::LayerScene: bind_to_plane({}) failed for stream layer {}: {}",
+                      *plane_id, slot.scene_layer->handle().id, bind_r.error().message());
+        continue;
+      }
+      slot.stream_pinned_plane_id = plane_id;
+      already_pinned.push_back(*plane_id);
+    }
+  }
+
+  // Apply the `Exclusive` stream-mixing constraint: when the
+  // empirical probe has confirmed the driver can't have FB-ID +
+  // stream consumer planes on the same CRTC, force every non-stream
+  // layer through the composition path so only the stream plane +
+  // the canvas plane end up on the CRTC. Resets the per-layer
+  // transient-composited flag at every call (clearing the previous
+  // commit's decision), then sets it for non-stream layers when:
+  //
+  //   * The mixing probe has actually run (mixing_probe_ran_),
+  //   * its verdict is Exclusive (not the conservative default),
+  //   * and at least one stream layer is present.
+  //
+  // Pre-probe the cached `mixing` defaults to Exclusive, but acting
+  // on that on the very first commit would force the background
+  // through composition before modeset has armed PRIMARY -- the
+  // canvas plane has nowhere to land and the kernel rejects the
+  // commit with EINVAL. The probe runs after at least one commit
+  // has succeeded with the stream layer bound, so this gate
+  // naturally lets the first commit proceed permissively (Mixed
+  // shape) and only tightens to Exclusive once the kernel has
+  // confirmed it.
+  void apply_exclusive_mixing_constraint() {
+    for (auto& slot : slots_) {
+      if (slot.alive && (slot.planes_layer != nullptr)) {
+        slot.planes_layer->set_transient_composited(false);
+      }
+    }
+    if (!mixing_probe_ran_ || stream_capability_.mixing != StreamMixingMode::Exclusive) {
+      return;
+    }
+    const bool has_stream_layer = std::any_of(slots_.begin(), slots_.end(), [](const Slot& s) {
+      return s.alive && (s.scene_layer != nullptr) &&
+             s.scene_layer->source().binding_model() == BindingModel::DriverOwnsBinding;
+    });
+    if (!has_stream_layer) {
+      return;
+    }
+    for (auto& slot : slots_) {
+      if (!slot.alive || (slot.scene_layer == nullptr) || (slot.planes_layer == nullptr)) {
+        continue;
+      }
+      if (slot.scene_layer->source().binding_model() == BindingModel::DriverOwnsBinding) {
+        continue;
+      }
+      slot.planes_layer->set_transient_composited(true);
+    }
+  }
+
+ private:
+  // Bookkeeping for stream-pinned acquisitions. We don't write any
+  // KMS properties for these planes — desktop NVIDIA drives the
+  // consumer plane's FB / CRTC binding entirely inside
+  // eglStreamConsumerOutputEXT + auto-acquire; mixing in our own
+  // CRTC_*/SRC_* writes earns an EINVAL from atomic_check because
+  // the plane is "active" without a userspace-armed FB. The
+  // accounting here just keeps `report.layers_assigned` honest so
+  // the post-loop "dropped" tally doesn't fire on stream layers
+  // that are working as intended.
+  static void count_stream_layers_assigned(const std::vector<AcquisitionSlot>& acquisitions,
+                                           CommitReport& report) {
+    for (const auto& acq : acquisitions) {
+      if (acq.stream_pinned_plane_id.has_value() && acq.planes_layer != nullptr) {
+        ++report.layers_assigned;
+      }
+    }
   }
 
   // Pick a plane on this CRTC that the allocator did not assign and
@@ -1403,7 +1838,13 @@ class LayerScene::Impl {
       return;
     }
     for (const auto& acq : acquisitions) {
-      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      // Fall back to the scene-side stream pin when the allocator
+      // didn't assign — stream-bound layers are filtered out of
+      // placement but their plane still needs blend defaults armed.
+      auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        plane_id = acq.stream_pinned_plane_id;
+      }
       if (!plane_id.has_value()) {
         continue;
       }
@@ -1446,7 +1887,12 @@ class LayerScene::Impl {
       return;
     }
     for (const auto& acq : acquisitions) {
-      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      // Fall back to the stream pin when the allocator didn't assign,
+      // mirroring arm_layer_plane_blend_defaults.
+      auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        plane_id = acq.stream_pinned_plane_id;
+      }
       if (!plane_id.has_value()) {
         continue;
       }
@@ -1782,6 +2228,21 @@ class LayerScene::Impl {
   // zpos — see do_commit for the rationale.
   std::optional<std::uint64_t> primary_zpos_hint_;
 
+  // Stream capability snapshot, taken at construction (and
+  // preserved across rebind / resume — the capability describes the
+  // driver and is invariant under connector/CRTC changes). Consumed
+  // by add_layer to gate `BindingModel::DriverOwnsBinding` sources
+  // and by the commit-path branch.
+  StreamCapability stream_capability_;
+
+  // True once probe_stream_mixing() has run since the most recent
+  // create() / rebind() / session_resumed. Once true, subsequent
+  // calls return the cached `stream_capability_.mixing` without
+  // re-running the kernel-side TEST commit. Cleared on rebind and
+  // session resume because the new CRTC / fresh fd would need its
+  // own empirical confirmation.
+  bool mixing_probe_ran_{false};
+
   // Lazy composition canvas. Allocated on first compose_unassigned()
   // call that actually needs it; survives across frames so the dumb
   // buffer + fb_id are reused. on_session_paused() forgets the kernel
@@ -1887,6 +2348,18 @@ const Layer* LayerScene::get_layer(LayerHandle handle) const noexcept {
 
 std::size_t LayerScene::layer_count() const noexcept {
   return impl_->layer_count();
+}
+
+const StreamCapability& LayerScene::stream_capability() const noexcept {
+  return impl_->stream_capability();
+}
+
+drm::expected<StreamMixingMode, std::error_code> LayerScene::probe_stream_mixing() {
+  return impl_->probe_stream_mixing();
+}
+
+void LayerScene::prepare_stream_layers() {
+  impl_->ensure_stream_layer_pins();
 }
 
 drm::expected<CommitReport, std::error_code> LayerScene::test() {

@@ -195,6 +195,30 @@ executable('cursor_rotate',
   dependencies : [drm_cxx_dep],
 )
 
+# stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
+# Builds on every host independent of the streams= option; the probe
+# itself short-circuits to Unsupported on builds without EGL headers
+# so the CLI is informative in either configuration.
+executable('stream_probe',
+  'advanced/stream_probe/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
+# stream_demo — end-to-end EGL Streams demo. Gated on the streams
+# option (the EglStreamBuilder header isn't defined without it) AND
+# on glesv2.pc availability (the demo links real EGL + GLES). The
+# library itself never links these — only the demo does, since it
+# drives the producer side directly.
+if has_egl_streams
+  glesv2_dep = dependency('glesv2', required : false)
+  if glesv2_dep.found() and egl_dep.found()
+    executable('stream_demo',
+      'advanced/stream_demo/main.cpp',
+      dependencies : [drm_cxx_dep, egl_dep, glesv2_dep],
+    )
+  endif
+endif
+
 # capture_demo — libinput-driven snapshot demo for drm::capture. Gated
 # on blend2d since it #includes drm-cxx/capture/*.hpp.
 if has_blend2d

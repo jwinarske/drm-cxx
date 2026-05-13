@@ -37,11 +37,15 @@ set(DRM_CXX_SOURCES
   dumb/buffer.cpp
   scene/composite_canvas.cpp
   scene/dumb_buffer_source.cpp
+  scene/egl_runtime.cpp
+  scene/egl_stream_builder.cpp
+  scene/egl_stream_source.cpp
   scene/external_dma_buf_source.cpp
   scene/gbm_buffer_source.cpp
   scene/gst_appsink_source.cpp
   scene/layer_scene.cpp
   scene/output_signaling.cpp
+  scene/stream_capability.cpp
   scene/v4l2_decoder_source.cpp
   sync/fence.cpp)
 
@@ -158,6 +162,23 @@ if(DRM_CXX_HAS_GSTREAMER)
   target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_GSTREAMER=1)
 else()
   target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_GSTREAMER=0)
+endif()
+
+# EGL Streams — headers-only. libEGL must NOT be linked: the .cpp
+# dlopen's "libEGL.so.1" at runtime so drm-cxx stays loadable on Mesa
+# systems that have egl.h installed but no libEGL.so.1 (or no NVIDIA
+# stack at all). PkgConfig::egl carries -lEGL on most distros, so we
+# only adopt its include dirs rather than linking it.
+if(DRM_CXX_HAS_EGL_STREAMS)
+  if(TARGET PkgConfig::egl)
+    get_target_property(_egl_incs PkgConfig::egl INTERFACE_INCLUDE_DIRECTORIES)
+    if(_egl_incs)
+      target_include_directories(drm-cxx SYSTEM PRIVATE ${_egl_incs})
+    endif()
+  endif()
+  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=1)
+else()
+  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=0)
 endif()
 
 # libxcursor: linked PRIVATE and included as -isystem so its public
@@ -339,6 +360,7 @@ install(FILES
     scene/layer_handle.hpp
     scene/layer_scene.hpp
     scene/output_signaling.hpp
+    scene/stream_capability.hpp
     scene/v4l2_decoder_source.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
 
@@ -346,6 +368,19 @@ install(FILES
 # the capture / csd pattern.
 if(DRM_CXX_HAS_GSTREAMER)
   install(FILES scene/gst_appsink_source.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
+endif()
+
+# EglStreamBuilder + EglStreamSource headers only install when the
+# streams gate is on — both pull in EGL/egl.h and would fail to
+# compile on hosts without EGL development headers. The source
+# header is part of the public surface so callers can query
+# `producer_surface()` after the scene's first commit triggers the
+# deferred producer-side attachment.
+if(DRM_CXX_HAS_EGL_STREAMS)
+  install(FILES
+      scene/egl_stream_builder.hpp
+      scene/egl_stream_source.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
 endif()
 
