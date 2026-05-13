@@ -58,6 +58,7 @@ struct EglRuntime {
   decltype(&eglMakeCurrent) make_current{nullptr};
   decltype(&eglDestroySurface) destroy_surface{nullptr};
   decltype(&eglChooseConfig) choose_config{nullptr};
+  decltype(&eglBindAPI) bind_api{nullptr};
 
   // Device-enumeration extension entry points — non-null iff the
   // corresponding client-side extension is advertised. The probe

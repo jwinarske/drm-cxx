@@ -37,6 +37,7 @@ drm_cxx_sources = files(
   'scene/composite_canvas.cpp',
   'scene/dumb_buffer_source.cpp',
   'scene/egl_runtime.cpp',
+  'scene/egl_stream_builder.cpp',
   'scene/egl_stream_source.cpp',
   'scene/external_dma_buf_source.cpp',
   'scene/gbm_buffer_source.cpp',
@@ -172,6 +173,10 @@ drm_cxx_dep = declare_dependency(
   link_with : drm_cxx_lib,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
+  # Streams macro is part of the public ABI: consumers of the
+  # installed scene/egl_stream_builder.hpp gate on it, so dependents
+  # must see the same value drm-cxx was built with.
+  compile_args : streams_cpp_args,
 )
 
 # Install public headers
@@ -317,6 +322,16 @@ install_headers(
 if has_gstreamer
   install_headers(
     'scene/gst_appsink_source.hpp',
+    subdir : 'drm-cxx/scene',
+  )
+endif
+
+# EglStreamBuilder header only installs when the streams gate is on —
+# pulls in EGL/egl.h and would fail to compile on hosts without
+# EGL development headers.
+if has_egl_streams
+  install_headers(
+    'scene/egl_stream_builder.hpp',
     subdir : 'drm-cxx/scene',
   )
 endif

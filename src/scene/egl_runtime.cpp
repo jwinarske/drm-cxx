@@ -47,6 +47,7 @@ void initialize_runtime(EglRuntime& rt) noexcept {
   rt.make_current = resolve_sym<decltype(rt.make_current)>(rt.handle, "eglMakeCurrent");
   rt.destroy_surface = resolve_sym<decltype(rt.destroy_surface)>(rt.handle, "eglDestroySurface");
   rt.choose_config = resolve_sym<decltype(rt.choose_config)>(rt.handle, "eglChooseConfig");
+  rt.bind_api = resolve_sym<decltype(rt.bind_api)>(rt.handle, "eglBindAPI");
 
   if ((rt.get_proc_address == nullptr) || (rt.query_string == nullptr) ||
       (rt.initialize == nullptr) || (rt.terminate == nullptr) || (rt.get_error == nullptr)) {

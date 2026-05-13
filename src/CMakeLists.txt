@@ -38,6 +38,7 @@ set(DRM_CXX_SOURCES
   scene/composite_canvas.cpp
   scene/dumb_buffer_source.cpp
   scene/egl_runtime.cpp
+  scene/egl_stream_builder.cpp
   scene/egl_stream_source.cpp
   scene/external_dma_buf_source.cpp
   scene/gbm_buffer_source.cpp
@@ -175,9 +176,9 @@ if(DRM_CXX_HAS_EGL_STREAMS)
       target_include_directories(drm-cxx SYSTEM PRIVATE ${_egl_incs})
     endif()
   endif()
-  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_EGL_STREAMS=1)
+  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=1)
 else()
-  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_EGL_STREAMS=0)
+  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=0)
 endif()
 
 # libxcursor: linked PRIVATE and included as -isystem so its public
@@ -367,6 +368,14 @@ install(FILES
 # the capture / csd pattern.
 if(DRM_CXX_HAS_GSTREAMER)
   install(FILES scene/gst_appsink_source.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
+endif()
+
+# EglStreamBuilder header only installs when the streams gate is on —
+# the header pulls in EGL/egl.h and would fail to compile on hosts
+# without EGL development headers.
+if(DRM_CXX_HAS_EGL_STREAMS)
+  install(FILES scene/egl_stream_builder.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
 endif()
 
