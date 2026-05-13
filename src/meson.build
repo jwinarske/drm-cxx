@@ -101,7 +101,7 @@ if has_gstreamer
   drm_cxx_deps += [gst_dep, gst_app_dep, gst_alloc_dep, gst_video_dep]
 endif
 
-# EGL Streams (M7) — headers-only build dependency; libEGL is dlopen'd
+# EGL Streams — headers-only build dependency; libEGL is dlopen'd
 # at runtime by stream_capability.cpp / egl_stream_source.cpp. The
 # public header (scene/stream_capability.hpp) is EGL-free; the .cpp
 # branches on DRM_CXX_HAS_EGL_STREAMS so a build without EGL headers

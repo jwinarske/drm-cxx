@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 //
-// Unit tests for drm::scene::StreamCapability and probe_stream_capability
-// (M7 Phase 7.1). The probe is dlopen-driven and can't be deterministically
-// exercised in CI (Mesa-only systems return Unsupported, NVIDIA systems
-// return Exclusive), so the tests focus on:
+// Unit tests for drm::scene::StreamCapability and probe_stream_capability.
+// The probe is dlopen-driven and can't be deterministically exercised in
+// CI (Mesa-only systems return Unsupported, NVIDIA systems return
+// Exclusive), so the tests focus on:
 //
 //   * Pure helpers (to_string, stream_capability_unsupported, usable) —
 //     deterministic and free of IO.
@@ -24,12 +24,11 @@
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/stream_capability.hpp>
 
+#include <cstring>
 #include <fcntl.h>
 #include <gtest/gtest.h>
-#include <unistd.h>
-
-#include <cstring>
 #include <system_error>
+#include <unistd.h>
 
 namespace {
 
@@ -141,10 +140,8 @@ TEST(SceneStreamCapability, ProbeOnNonDrmFdReturnsUnsupported) {
 // We can't construct a real LayerScene without a live DRM device, so
 // these tests focus on the gate's behavioral contract by verifying the
 // FakeSource itself reports the binding model the gate keys off. The
-// gating's actual enforcement is exercised in
-// tests/integration/test_layer_scene_streams_vkms.cpp once Phase 7.2
-// lands (vkms is sufficient for the rejection path because the gate
-// fires before any KMS commit).
+// gating's actual enforcement is exercised against real hardware in
+// tests/integration/test_egl_streams_hw.cpp.
 
 TEST(SceneStreamCapability, FakeSourceReportsBindingModel) {
   FakeSource fb_id(drm::scene::BindingModel::SceneSubmitsFbId);

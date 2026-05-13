@@ -213,9 +213,9 @@ StreamCapability probe_stream_capability(const drm::Device& dev) noexcept {
   cap.client_apis = std::move(chosen_caps.client_apis);
 
   if (chosen_has_streams) {
-    // Conservative default. Phase 7.2 will add an empirical mixing
-    // probe (test commit with stream consumer + FB-ID plane) that can
-    // upgrade this to Mixed.
+    // Conservative default. `LayerScene::probe_stream_mixing()` runs
+    // an empirical test commit (stream consumer + FB-ID plane on the
+    // same CRTC) and upgrades this to Mixed when the kernel accepts.
     cap.mixing = StreamMixingMode::Exclusive;
   }
   return cap;

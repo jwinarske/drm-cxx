@@ -2,9 +2,9 @@
 
 ## unreleased — CSD Tier 0 presenter, mdi_demo, cursor hardening, GstAppsinkSource
 
-### `drm::scene` — EGL Streams capability probe (M7 Phase 7.1)
+### `drm::scene` — EGL Streams capability probe
 
-- **`drm::scene::StreamCapability` + `probe_stream_capability(dev)`** — runtime capability probe for EGL Streams support. dlopen-only against `libEGL.so.1` (libdrm-cxx is never link-bound to libEGL, even when the headers are present at build time); inspects client-side `EGL_EXT_platform_device` / `EGL_EXT_device_drm`, enumerates `EGLDeviceEXT`s, matches each against the caller's `drm::Device` by `st_rdev`, and returns the per-device-display extension set (`EGL_EXT_output_drm`, `EGL_KHR_stream`, `EGL_EXT_stream_consumer_egloutput`, `EGL_NV_stream_consumer_eglimage`, `EGL_KHR_stream_producer_eglsurface`) along with vendor / version / client-api strings. Mesa-only systems return `StreamMixingMode::Unsupported` deterministically; NVIDIA proprietary / Tegra return `Exclusive` (conservative default — empirical mixing detection lands in Phase 7.2 alongside `EglStreamSource`).
+- **`drm::scene::StreamCapability` + `probe_stream_capability(dev)`** — runtime capability probe for EGL Streams support. dlopen-only against `libEGL.so.1` (libdrm-cxx is never link-bound to libEGL, even when the headers are present at build time); inspects client-side `EGL_EXT_platform_device` / `EGL_EXT_device_drm`, enumerates `EGLDeviceEXT`s, matches each against the caller's `drm::Device` by `st_rdev`, and returns the per-device-display extension set (`EGL_EXT_output_drm`, `EGL_KHR_stream`, `EGL_EXT_stream_consumer_egloutput`, `EGL_NV_stream_consumer_eglimage`, `EGL_KHR_stream_producer_eglsurface`) along with vendor / version / client-api strings. Mesa-only systems return `StreamMixingMode::Unsupported` deterministically; NVIDIA proprietary / Tegra return `Exclusive` (conservative default — empirical mixing detection lands alongside `EglStreamSource`).
 - **`LayerScene::Config::stream_capability`** — explicit pass-through field so applications opt into streams by calling `probe_stream_capability` themselves rather than paying the dlopen cost on every scene construction. Survives `rebind()` and pause/resume verbatim (the capability describes the driver, not the connector). Accessor `LayerScene::stream_capability()` lets layers and producer-side builders consult the result.
 - **`add_layer` gating on `BindingModel::DriverOwnsBinding`** — registration now rejects sources reporting `DriverOwnsBinding` when the scene was constructed with `StreamMixingMode::Unsupported`. Failure mode is `errc::not_supported` at registration time rather than at first commit; callers who hit this either need to populate `Config::stream_capability` via the probe or remove the stream source. v1 sources are unaffected — none override `binding_model()`.
 - **Build wiring** — `meson -Dstreams={auto,enabled,disabled}` / `cmake -DDRM_CXX_STREAMS={AUTO,ON,OFF}`. Headers-only build dependency on `egl.pc` (or a bare `<EGL/egl.h>` + `<EGL/eglext.h>` probe when pkg-config doesn't see it); libEGL is never linked into libdrm-cxx so the library stays loadable on Mesa systems with no EGL runtime. `DRM_CXX_HAS_EGL_STREAMS=0` builds short-circuit `probe_stream_capability` to a constant `Unsupported`.
@@ -162,8 +162,8 @@
 
 ## v1.1.0 — C++17 migration
 
-- **Project language target lowered from C++23 to C++17** (Phase D of the C++17
-  migration). The library still picks up `std::expected`, `std::span`, and
+- **Project language target lowered from C++23 to C++17.** The library
+  still picks up `std::expected`, `std::span`, and
   `std::print` when the toolchain has them; otherwise the `drm::expected`,
   `drm::span`, `drm::print`, and `drm::format` adapter headers transparently
   fall back to `tl::expected`, `tcb::span`, and `{fmt}`.

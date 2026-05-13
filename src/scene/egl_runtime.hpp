@@ -3,7 +3,7 @@
 //
 // egl_runtime.hpp — process-singleton libEGL.so.1 dlopen wrapper shared
 // by the EGL Streams probe (stream_capability.cpp) and the
-// EglStreamSource construction path (egl_stream_source.cpp, Phase 7.2).
+// EglStreamSource construction path (egl_stream_source.cpp).
 //
 // Internal header. Not exported under include/drm-cxx/. Translation
 // units that need to drive libEGL include this and access the

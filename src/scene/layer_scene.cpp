@@ -298,12 +298,11 @@ class LayerScene::Impl {
     if (!desc.source) {
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
     }
-    // M7: gate DriverOwnsBinding sources behind a usable stream
-    // capability. Until Phase 7.2 lands the commit-path branch and the
-    // EglStreamSource itself, this is the only honest answer: a v1
-    // scene cannot drive a layer whose FB_ID it isn't permitted to
-    // write, so rejecting at registration time keeps the failure local
-    // to the caller's add_layer instead of erupting deep in commit().
+    // Gate DriverOwnsBinding sources behind a usable stream
+    // capability. The scene cannot drive a layer whose FB_ID it isn't
+    // permitted to write, so rejecting at registration time keeps the
+    // failure local to the caller's add_layer instead of erupting deep
+    // in commit().
     if (desc.source->binding_model() == BindingModel::DriverOwnsBinding &&
         !stream_capability_.usable()) {
       drm::log_warn(
@@ -2229,7 +2228,7 @@ class LayerScene::Impl {
   // zpos — see do_commit for the rationale.
   std::optional<std::uint64_t> primary_zpos_hint_;
 
-  // M7 stream capability snapshot, taken at construction (and
+  // Stream capability snapshot, taken at construction (and
   // preserved across rebind / resume — the capability describes the
   // driver and is invariant under connector/CRTC changes). Consumed
   // by add_layer to gate `BindingModel::DriverOwnsBinding` sources

@@ -1,16 +1,15 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 //
-// stream_capability.hpp — runtime EGL Streams capability probe (M7
-// Phase 7.1). See docs/roadmap.md Milestone 7 and docs/streams.md (TBD)
-// for the full design.
+// stream_capability.hpp — runtime EGL Streams capability probe.
+// See docs/streams.md for the full design.
 //
 // What this is and isn't:
 //
 //   * IS: an EGL-header-free public API that reports whether the
 //     running system has libEGL with the extension set drm::scene's
-//     EglStreamSource (M7 Phase 7.2) needs. The probe does the dlopen
-//     itself; consumers never link or load libEGL directly.
+//     EglStreamSource needs. The probe does the dlopen itself;
+//     consumers never link or load libEGL directly.
 //
 //   * IS: the input to LayerScene::Config that lets the scene decide
 //     up-front whether a layer carrying `BindingModel::DriverOwnsBinding`
@@ -160,9 +159,9 @@ struct StreamCapability {
 ///     must run an empirical mixing test (a TEST commit with both a
 ///     stream consumer and a fully-armed FB-ID plane on the same
 ///     CRTC) and override the field on the returned struct before
-///     handing it to `LayerScene::Config`. Auto-upgrade is deferred
-///     to Phase 7.2 once `EglStreamSource` is available to actually
-///     construct stream consumers for the probe.
+///     handing it to `LayerScene::Config`. `LayerScene::probe_stream_mixing()`
+///     drives that test once an `EglStreamSource` has bound a consumer
+///     plane; on success it upgrades the cached mixing verdict.
 ///
 ///   * On a build with `-Dstreams=disabled` or with EGL headers
 ///     unavailable at build time, this is a no-op that returns

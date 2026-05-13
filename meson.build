@@ -233,7 +233,7 @@ if not has_gstreamer and not gstreamer_feature.disabled()
   message('drm-cxx: gstreamer not found — drm::scene::GstAppsinkSource will not be built')
 endif
 
-# EGL Streams probe for drm::scene::EglStreamSource (M7). We only need
+# EGL Streams probe for drm::scene::EglStreamSource. We only need
 # the headers at build time — libEGL is NEVER linked into libdrm-cxx;
 # the capability probe and the source use dlopen("libEGL.so.1") so the
 # library remains usable on Mesa systems that don't even have libEGL

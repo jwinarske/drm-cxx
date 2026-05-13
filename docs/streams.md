@@ -421,4 +421,3 @@ a Mesa-only stack.
   contract.
 - `src/scene/egl_stream_builder.hpp` — `EglStreamBuilder::Request` /
   `Result` and the build() factory.
-- `docs/streams_plan.md` — working notes from M7 phase 7.2.

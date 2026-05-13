@@ -164,7 +164,7 @@ else()
   target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_GSTREAMER=0)
 endif()
 
-# EGL Streams (M7) — headers-only. libEGL must NOT be linked: the .cpp
+# EGL Streams — headers-only. libEGL must NOT be linked: the .cpp
 # dlopen's "libEGL.so.1" at runtime so drm-cxx stays loadable on Mesa
 # systems that have egl.h installed but no libEGL.so.1 (or no NVIDIA
 # stack at all). PkgConfig::egl carries -lEGL on most distros, so we

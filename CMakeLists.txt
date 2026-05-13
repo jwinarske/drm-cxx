@@ -50,8 +50,8 @@ set(DRM_CXX_GSTREAMER "AUTO" CACHE STRING
     "Build drm::scene::GstAppsinkSource on top of GStreamer: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_GSTREAMER PROPERTY STRINGS AUTO ON OFF)
 
-# Optional drm::scene EGL Streams support (M7). Headers-only build dep
-# (libEGL is dlopen'd at runtime by stream_capability.cpp / the future
+# Optional drm::scene EGL Streams support. Headers-only build dep
+# (libEGL is dlopen'd at runtime by stream_capability.cpp /
 # EglStreamSource), gated to keep Mesa-only systems from carrying the
 # header dep when streams are explicitly off. AUTO probes for EGL headers
 # and falls back to a no-op probe when they are absent.
@@ -186,7 +186,7 @@ else()
   endif()
 endif()
 
-# EGL Streams (M7) headers-only probe. Try egl.pc first (Khronos
+# EGL Streams headers-only probe. Try egl.pc first (Khronos
 # canonical), then fall back to a bare <EGL/egl.h> check on the include
 # path. Result is a DRM_CXX_HAS_EGL_STREAMS gate consumed by
 # src/CMakeLists.txt; libEGL itself is never linked. AUTO is silent,

@@ -3,18 +3,13 @@
 //
 // layer_scene.hpp — top-level scene façade.
 //
-// scope per docs/implementation_plan.md:
-//   - Construct from (Device, CRTC/connector/mode).
-//   - add/remove/get layers by handle, monotonic + generation.
-//   - Single test() / commit() path that runs the existing
-//     drm::planes::Allocator against a fresh AtomicRequest.
-//   - Diagnostic CommitReport.
-//
-// Not in (shipped in later phases):
-//   - Property minimization.
-//   - Composition fallback for unassigned layers.
-//   - rebind() for CRTC/connector/mode changes.
-//   - Page-flip async completion handling / buffer release after scanout.
+// Constructs from (Device, CRTC/connector/mode); manages layers by
+// handle (monotonic + generation); runs a single test() / commit()
+// path through drm::planes::Allocator against a fresh AtomicRequest;
+// surfaces diagnostics through CommitReport. Property minimization,
+// composition fallback for unassigned layers, rebind() across
+// CRTC/connector/mode changes, and page-flip async completion are
+// all wired through this façade as well.
 //
 // The pimpl keeps drm::planes::Output, drm::planes::Allocator, and
 // drm::PropertyStore out of this header — they are implementation
@@ -58,7 +53,7 @@ class LayerScene {
     std::uint32_t connector_id{0};
     drmModeModeInfo mode{};
 
-    /// EGL Streams capability for this scene (M7). Defaults to
+    /// EGL Streams capability for this scene. Defaults to
     /// `StreamMixingMode::Unsupported` so `EglStreamSource` layers
     /// are rejected at `add_layer` time. Callers who need streams
     /// must call `probe_stream_capability(dev)` and assign the
