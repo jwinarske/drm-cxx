@@ -195,6 +195,15 @@ executable('cursor_rotate',
   dependencies : [drm_cxx_dep],
 )
 
+# stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
+# Builds on every host independent of the streams= option; the probe
+# itself short-circuits to Unsupported on builds without EGL headers
+# so the CLI is informative in either configuration.
+executable('stream_probe',
+  'advanced/stream_probe/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # capture_demo — libinput-driven snapshot demo for drm::capture. Gated
 # on blend2d since it #includes drm-cxx/capture/*.hpp.
 if has_blend2d

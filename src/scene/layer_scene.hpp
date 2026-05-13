@@ -29,6 +29,7 @@
 #include "layer.hpp"
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
+#include "stream_capability.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 
@@ -56,6 +57,19 @@ class LayerScene {
     std::uint32_t crtc_id{0};
     std::uint32_t connector_id{0};
     drmModeModeInfo mode{};
+
+    /// EGL Streams capability for this scene (M7). Defaults to
+    /// `StreamMixingMode::Unsupported` so `EglStreamSource` layers
+    /// are rejected at `add_layer` time. Callers who need streams
+    /// must call `probe_stream_capability(dev)` and assign the
+    /// result before passing this Config to `create()`; tests may
+    /// construct a `StreamCapability` directly.
+    ///
+    /// Storing the capability on the Config (rather than auto-probing
+    /// inside `create()`) keeps construction free of implicit IO on
+    /// every scene — the dlopen-probe runs only when the application
+    /// actually intends to use streams.
+    StreamCapability stream_capability{};
   };
 
   /// Build a LayerScene bound to the given CRTC + connector + mode.
@@ -89,6 +103,14 @@ class LayerScene {
   [[nodiscard]] const Layer* get_layer(LayerHandle handle) const noexcept;
 
   [[nodiscard]] std::size_t layer_count() const noexcept;
+
+  /// The stream capability the scene was constructed with. Callers
+  /// inspect this to decide whether to add `EglStreamSource`-backed
+  /// layers (when `mixing != StreamMixingMode::Unsupported`) and to
+  /// branch the producer-side wiring on the extension set the driver
+  /// exposes. Survives `rebind()` and pause/resume verbatim — the
+  /// capability describes the driver, not the connector or CRTC.
+  [[nodiscard]] const StreamCapability& stream_capability() const noexcept;
 
   // ── Commit cycle ───────────────────────────────────────────────────
 

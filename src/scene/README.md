@@ -147,9 +147,11 @@ The scene's v1 charter is the **common case**: CPU- or GBM-rendered scanout, ato
 
 ### EGL Streams
 
-EGL Streams remains the path NVIDIA's proprietary driver and Tegra-based automotive/industrial stacks use for non-GBM workflows. Stream-consumed planes mix awkwardly with FB-ID-attached planes in the same atomic commit (driver-version-dependent restrictions); the kernel surface and capability probes that would let the allocator reason about that mix are non-trivial and `vkms` cannot emulate them.
+EGL Streams remains the path NVIDIA's proprietary driver and Tegra-based automotive/industrial stacks use for non-GBM workflows. Stream-consumed planes mix awkwardly with FB-ID-attached planes in the same atomic commit (driver-version-dependent restrictions); `vkms` cannot emulate them, so end-to-end coverage is manual against proprietary hardware.
 
-The `LayerBufferSource` interface accommodates streams architecturally: a future `EglStreamSource` would report `BindingModel::DriverOwnsBinding`, override `bind_to_plane` / `unbind_from_plane` to drive the EGL stream-consumer lifecycle, and the scene's commit path will skip `FB_ID` writes for those layers. The hooks are present and called today; v1 sources just don't override them. We see this audience and intend to cover it in v2.
+**M7 Phase 7.1 — capability probe (landed).** `drm::scene::probe_stream_capability(dev)` runtime-loads `libEGL.so.1` (libdrm-cxx is never link-bound to libEGL) and reports the per-DRM-node extension set as a `StreamCapability` struct. Mesa-only systems return `StreamMixingMode::Unsupported` deterministically; NVIDIA proprietary / Tegra return `Exclusive`. Pass the result to `LayerScene::Config::stream_capability` so the scene knows whether `BindingModel::DriverOwnsBinding` layers are admissible; `add_layer` rejects stream sources with `errc::not_supported` when the capability says `Unsupported`. Gated by `meson -Dstreams=` / `cmake -DDRM_CXX_STREAMS=`; off-builds compile but always report `Unsupported`.
+
+**M7 Phase 7.2 (pending).** `EglStreamSource` itself — a concrete `LayerBufferSource` reporting `BindingModel::DriverOwnsBinding`, overriding `bind_to_plane` / `unbind_from_plane` to drive the EGL stream-consumer lifecycle, and a commit-path branch that skips `FB_ID` writes for those layers. The hooks are present and called today; v1 sources just don't override them.
 
 ### Foreign DMA-BUF producers (V4L2 / NPU / accel)
 

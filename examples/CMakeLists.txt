@@ -123,6 +123,15 @@ add_executable(cursor_rotate advanced/cursor_rotate/main.cpp)
 target_link_libraries(cursor_rotate PRIVATE drm-cxx::drm-cxx)
 target_include_directories(cursor_rotate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
+# Dumps the per-device EGL Streams capability shape so users can verify
+# whether their system can host an EglStreamSource. Independent of
+# DRM_CXX_HAS_EGL_STREAMS: the binary builds on every host (the probe
+# itself short-circuits to Unsupported when EGL headers were absent).
+add_executable(stream_probe advanced/stream_probe/main.cpp)
+target_link_libraries(stream_probe PRIVATE drm-cxx::drm-cxx)
+target_include_directories(stream_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # capture_demo — libinput-driven snapshot demo for drm::capture.
 # Only built when Blend2D is on (same gate as the library module it exercises).
 if(DRM_CXX_HAS_BLEND2D)

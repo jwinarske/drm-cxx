@@ -158,6 +158,13 @@ target_link_libraries(test_scene PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_scene)
 
+add_executable(test_stream_capability unit/test_stream_capability.cpp)
+target_link_libraries(test_stream_capability PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_stream_capability)
+
 add_executable(test_composite_canvas unit/test_composite_canvas.cpp)
 target_link_libraries(test_composite_canvas PRIVATE
   drm-cxx::drm-cxx

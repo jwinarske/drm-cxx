@@ -319,6 +319,13 @@ test('test_scene',
   ),
 )
 
+test('test_stream_capability',
+  executable('test_stream_capability',
+    'unit/test_stream_capability.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_external_dma_buf_source',
   executable('test_external_dma_buf_source',
     'unit/test_external_dma_buf_source.cpp',

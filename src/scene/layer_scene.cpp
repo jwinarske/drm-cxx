@@ -67,8 +67,13 @@ class LayerScene::Impl {
         connector_id_(cfg.connector_id),
         mode_(cfg.mode),
         registry_(std::move(registry)),
-        output_(cfg.crtc_id, composition_planes_layer_) {
+        output_(cfg.crtc_id, composition_planes_layer_),
+        stream_capability_(cfg.stream_capability) {
     allocator_.emplace(*dev_, registry_);
+  }
+
+  [[nodiscard]] const StreamCapability& stream_capability() const noexcept {
+    return stream_capability_;
   }
 
   ~Impl() { destroy_mode_blob(); }
@@ -144,6 +149,20 @@ class LayerScene::Impl {
   drm::expected<LayerHandle, std::error_code> add_layer(LayerDesc desc) {
     if (!desc.source) {
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    // M7: gate DriverOwnsBinding sources behind a usable stream
+    // capability. Until Phase 7.2 lands the commit-path branch and the
+    // EglStreamSource itself, this is the only honest answer: a v1
+    // scene cannot drive a layer whose FB_ID it isn't permitted to
+    // write, so rejecting at registration time keeps the failure local
+    // to the caller's add_layer instead of erupting deep in commit().
+    if (desc.source->binding_model() == BindingModel::DriverOwnsBinding &&
+        !stream_capability_.usable()) {
+      drm::log_warn(
+          "scene::LayerScene::add_layer: source reports DriverOwnsBinding but the scene was "
+          "constructed with StreamMixingMode::Unsupported — pass a StreamCapability from "
+          "probe_stream_capability() in Config.stream_capability");
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
     }
 
     std::uint32_t slot_idx = 0;
@@ -1782,6 +1801,13 @@ class LayerScene::Impl {
   // zpos — see do_commit for the rationale.
   std::optional<std::uint64_t> primary_zpos_hint_;
 
+  // M7 stream capability snapshot, taken at construction (and
+  // preserved across rebind / resume — the capability describes the
+  // driver and is invariant under connector/CRTC changes). Consumed
+  // by add_layer to gate `BindingModel::DriverOwnsBinding` sources
+  // and by the Phase 7.2 commit-path branch.
+  StreamCapability stream_capability_;
+
   // Lazy composition canvas. Allocated on first compose_unassigned()
   // call that actually needs it; survives across frames so the dumb
   // buffer + fb_id are reused. on_session_paused() forgets the kernel
@@ -1887,6 +1913,10 @@ const Layer* LayerScene::get_layer(LayerHandle handle) const noexcept {
 
 std::size_t LayerScene::layer_count() const noexcept {
   return impl_->layer_count();
+}
+
+const StreamCapability& LayerScene::stream_capability() const noexcept {
+  return impl_->stream_capability();
 }
 
 drm::expected<CommitReport, std::error_code> LayerScene::test() {

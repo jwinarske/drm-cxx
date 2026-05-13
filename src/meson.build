@@ -41,6 +41,7 @@ drm_cxx_sources = files(
   'scene/gst_appsink_source.cpp',
   'scene/layer_scene.cpp',
   'scene/output_signaling.cpp',
+  'scene/stream_capability.cpp',
   'scene/v4l2_decoder_source.cpp',
   'sync/fence.cpp',
 )
@@ -97,6 +98,24 @@ if has_gstreamer
   drm_cxx_deps += [gst_dep, gst_app_dep, gst_alloc_dep, gst_video_dep]
 endif
 
+# EGL Streams (M7) — headers-only build dependency; libEGL is dlopen'd
+# at runtime by stream_capability.cpp / egl_stream_source.cpp. The
+# public header (scene/stream_capability.hpp) is EGL-free; the .cpp
+# branches on DRM_CXX_HAS_EGL_STREAMS so a build without EGL headers
+# still compiles and reports StreamMixingMode::Unsupported at probe.
+#
+# We deliberately use `egl_dep.partial_dependency(compile_args, includes)`
+# rather than the full dep so libEGL is NOT added to the link line of
+# libdrm-cxx — making drm-cxx loadable on Mesa systems that have egl.h
+# but no libEGL.so.1 installed, and keeping our resolution strictly
+# dlopen-driven.
+streams_cpp_args = has_egl_streams \
+  ? ['-DDRM_CXX_HAS_EGL_STREAMS=1'] \
+  : ['-DDRM_CXX_HAS_EGL_STREAMS=0']
+if has_egl_streams
+  drm_cxx_deps += egl_dep.partial_dependency(compile_args : true, includes : true)
+endif
+
 # drm::cursor is a feature: the .cpp files only compile when libxcursor
 # is present. Public headers stay in the tree but callers linking a
 # cursor-less build hit an unresolved symbol at load() / create() time.
@@ -143,7 +162,7 @@ drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
-  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args + gstreamer_cpp_args,
+  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args + gstreamer_cpp_args + streams_cpp_args,
   install : true,
 )
 
@@ -286,6 +305,7 @@ install_headers(
   'scene/layer_handle.hpp',
   'scene/layer_scene.hpp',
   'scene/output_signaling.hpp',
+  'scene/stream_capability.hpp',
   'scene/v4l2_decoder_source.hpp',
   subdir : 'drm-cxx/scene',
 )
