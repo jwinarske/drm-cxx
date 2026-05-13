@@ -351,8 +351,15 @@ jobs:
           # vaapi_jpeg_decoder TU so it lands in compile_commands.json
           # for tidy; absent, tidy walks it with default flags and lints
           # a half-parsed TU.
+          # libegl1-mesa-dev + libgles2-mesa-dev cover scene/egl_runtime,
+          # scene/stream_capability, scene/egl_stream_source, and
+          # scene/egl_stream_builder so the EGL Streams TUs land in
+          # compile_commands.json for tidy. Mesa's libEGL is enough for
+          # the headers — no NVIDIA proprietary userspace needed at lint
+          # time; the runtime probe only ever reports Unsupported on
+          # Mesa hosts (intentional and tested).
           # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
-          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libva-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata clang-19 clang-tidy-19 clang-format-19
+          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libva-dev libegl1-mesa-dev libgles2-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata clang-19 clang-tidy-19 clang-format-19
           version: 1.0
 
       # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
