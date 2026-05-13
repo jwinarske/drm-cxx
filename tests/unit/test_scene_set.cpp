@@ -164,6 +164,55 @@ TEST(SceneSetLayerSpec, AddLayerRejectsOutOfRangeSceneIndex) {
   EXPECT_EQ(h.error(), std::make_error_code(std::errc::invalid_argument));
 }
 
+// ─── add_scene / remove_scene validation ───────────────────────────
+//
+// The full hotplug round-trip (real LayerScene constructed against a
+// vkms output, attached/detached, set commit observed) lives in the
+// vkms integration test. These unit tests cover the validation gate
+// only — LayerScene cannot be constructed without a real DRM device.
+
+TEST(SceneSetAddScene, RejectsNull) {
+  const NullFd nfd;
+  ASSERT_GE(nfd.fd(), 0);
+  auto dev = drm::Device::from_fd(nfd.fd());
+  auto set = drm::scene::SceneSet::create(dev, {});
+  ASSERT_TRUE(set.has_value());
+
+  auto idx = (*set)->add_scene(std::unique_ptr<drm::scene::LayerScene>{});
+  ASSERT_FALSE(idx.has_value());
+  EXPECT_EQ(idx.error(), std::make_error_code(std::errc::invalid_argument));
+  EXPECT_EQ((*set)->scene_count(), 0U);
+}
+
+TEST(SceneSetRemoveScene, OutOfRangeIsNoOp) {
+  const NullFd nfd;
+  ASSERT_GE(nfd.fd(), 0);
+  auto dev = drm::Device::from_fd(nfd.fd());
+  auto set = drm::scene::SceneSet::create(dev, {});
+  ASSERT_TRUE(set.has_value());
+
+  (*set)->remove_scene(0);   // empty set
+  (*set)->remove_scene(42);  // far past the end
+  EXPECT_EQ((*set)->scene_count(), 0U);
+}
+
+TEST(SceneSetCommit, AllNullScenesSkipsKernelCommit) {
+  // After every scene has been removed, scenes_ holds only holes; the
+  // narrow per-CRTC fallback must return per-scene zero reports without
+  // touching the kernel. With the test fd backed by /dev/null an actual
+  // ioctl would surface as ENOTTY — a successful empty CommitReport
+  // vector confirms we bypassed it.
+  const NullFd nfd;
+  ASSERT_GE(nfd.fd(), 0);
+  auto dev = drm::Device::from_fd(nfd.fd());
+  auto set = drm::scene::SceneSet::create(dev, {});
+  ASSERT_TRUE(set.has_value());
+
+  auto reports = (*set)->commit();
+  ASSERT_TRUE(reports.has_value()) << reports.error().message();
+  EXPECT_TRUE(reports->empty());
+}
+
 TEST(SceneSetRemoveLayer, StaleHandleIsNoOp) {
   const NullFd nfd;
   ASSERT_GE(nfd.fd(), 0);

@@ -14,6 +14,7 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -87,6 +88,51 @@ class SceneSet::Impl {
     return (index < scenes_.size()) ? scenes_[index].get() : nullptr;
   }
 
+  // ── Hotplug-driven set composition ───────────────────────────────
+  //
+  // add_scene / remove_scene keep scene indices stable across
+  // mutations so previously-issued SetLayerHandles stay meaningful.
+  // Removed slots are preserved as nullptr entries in scenes_; the
+  // next add_scene reuses the lowest hole rather than appending.
+
+  [[nodiscard]] drm::expected<std::size_t, std::error_code> add_scene(
+      std::unique_ptr<LayerScene> scene) {
+    if (!scene) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    for (std::size_t i = 0; i < scenes_.size(); ++i) {
+      if (!scenes_[i]) {
+        scenes_[i] = std::move(scene);
+        return i;
+      }
+    }
+    scenes_.push_back(std::move(scene));
+    return scenes_.size() - 1;
+  }
+
+  void remove_scene(std::size_t index) noexcept {
+    if (index >= scenes_.size() || !scenes_[index]) {
+      return;
+    }
+    // Walk every set-level slot and drop pins that targeted this
+    // scene. Other targets in the same slot stay live so a mirrored
+    // SetLayerSpec across two scenes survives unplug of one of them.
+    for (auto& slot : set_slots_) {
+      if (!slot.alive) {
+        continue;
+      }
+      auto& pins = slot.pins;
+      pins.erase(std::remove_if(pins.begin(), pins.end(),
+                                [index](const PerScenePin& p) { return p.scene_index == index; }),
+                 pins.end());
+    }
+    // Destroy the LayerScene last — its dtor releases buffers /
+    // unbinds planes / etc., and we want every set-level pin already
+    // removed by then so no LayerHandle-targeted remove_layer() runs
+    // against a half-destroyed scene.
+    scenes_[index].reset();
+  }
+
   // ── SceneSet-level layer routing ─────────────────────────────────
   //
   // SetLayerHandle.id encodes a 1-based slot index into set_slots_;
@@ -109,7 +155,7 @@ class SceneSet::Impl {
     std::unordered_set<std::size_t> seen;
     seen.reserve(spec.targets.size());
     for (const auto& t : spec.targets) {
-      if (t.scene_index >= scenes_.size()) {
+      if (t.scene_index >= scenes_.size() || !scenes_[t.scene_index]) {
         return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
       }
       if (!seen.insert(t.scene_index).second) {
@@ -170,7 +216,7 @@ class SceneSet::Impl {
       return;
     }
     for (const auto& p : slot.pins) {
-      if (p.scene_index < scenes_.size()) {
+      if (p.scene_index < scenes_.size() && scenes_[p.scene_index]) {
         scenes_[p.scene_index]->remove_layer(p.layer_handle);
       }
     }
@@ -196,13 +242,20 @@ class SceneSet::Impl {
     }
 
     // Build every scene's writes onto the shared request.
-    // Suspended scenes return a null FrameBuildPtr — we record a
+    // Suspended scenes (and holes from remove_scene) record a null
     // sentinel so the post-commit finalize loop can emit a zero
     // CommitReport at the matching index without touching the scene.
     std::vector<FrameBuildPtr> states;
     states.reserve(scenes_.size());
     std::uint32_t combined_flags = caller_flags;
+    std::size_t engaged_count = 0;
     for (auto& scene : scenes_) {
+      if (!scene) {
+        // Hole left by remove_scene: contribute nothing to the
+        // combined request, emit a zero report at finalize time.
+        states.push_back(FrameBuildPtr{});
+        continue;
+      }
       auto build = scene->build_frame_into(req, caller_flags, test_only);
       if (!build) {
         // A scene's build failed: roll back every successful build by
@@ -226,6 +279,17 @@ class SceneSet::Impl {
       }
       combined_flags |= LayerScene::effective_flags_of(**build);
       states.push_back(std::move(*build));
+      ++engaged_count;
+    }
+
+    // Narrow per-CRTC fallback: with zero engaged scenes (every child
+    // suspended, removed, or both) the combined AtomicRequest is empty
+    // and the kernel commit would be a wasted ioctl on every frame —
+    // the steady-state cost during a VT-switched session. Emit zero
+    // reports per scene and return without touching the kernel.
+    if (engaged_count == 0) {
+      reports.assign(scenes_.size(), CommitReport{});
+      return reports;
     }
 
     // One combined kernel commit covering every engaged scene's writes.
@@ -243,7 +307,7 @@ class SceneSet::Impl {
     // suspended_ flag.
     for (std::size_t i = 0; i < scenes_.size(); ++i) {
       if (states[i] == nullptr) {
-        reports.emplace_back();  // suspended scene: zero report
+        reports.emplace_back();  // suspended / removed scene: zero report
         continue;
       }
       auto r = scenes_[i]->finalize_frame(std::move(states[i]), kr);
@@ -308,6 +372,14 @@ drm::expected<SetLayerHandle, std::error_code> SceneSet::add_layer(const SceneSe
 
 void SceneSet::remove_layer(SetLayerHandle handle) {
   impl_->remove_set_layer(handle);
+}
+
+drm::expected<std::size_t, std::error_code> SceneSet::add_scene(std::unique_ptr<LayerScene> scene) {
+  return impl_->add_scene(std::move(scene));
+}
+
+void SceneSet::remove_scene(std::size_t index) {
+  impl_->remove_scene(index);
 }
 
 drm::expected<std::vector<CommitReport>, std::error_code> SceneSet::commit(std::uint32_t flags,

@@ -234,3 +234,89 @@ TEST(SceneSetVkms, MirroredLayerAcceptsAcrossMultiCrtc) {
     EXPECT_EQ(r.layers_total, 0U);
   }
 }
+
+// Hotplug round-trip: build a SceneSet with one of the two vkms
+// outputs, then add_scene the second one, run a combined test commit,
+// remove_scene the first slot, and verify the resulting hole survives
+// a follow-up combined test commit. Also confirms add_scene reuses the
+// hole at the lowest index rather than appending.
+TEST(SceneSetVkms, AddRemoveSceneRoundTrip) {
+  const auto node = find_vkms_multi_crtc(2);
+  if (!node) {
+    GTEST_SKIP() << "no vkms instance with >=2 connected outputs";
+  }
+  auto fx_r = open_scenes(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+  ASSERT_GE(fx.scenes.size(), 2U);
+
+  // Keep scene[1] on the side; build the set with just scene[0].
+  std::unique_ptr<drm::scene::LayerScene> spare = std::move(fx.scenes[1]);
+  fx.scenes.pop_back();
+  auto set_r = drm::scene::SceneSet::create(*fx.dev, std::move(fx.scenes));
+  ASSERT_TRUE(set_r.has_value()) << set_r.error().message();
+  EXPECT_EQ((*set_r)->scene_count(), 1U);
+
+  // Single-scene combined test commit still lands.
+  {
+    auto reports = (*set_r)->test();
+    ASSERT_TRUE(reports.has_value()) << reports.error().message();
+    EXPECT_EQ(reports->size(), 1U);
+  }
+
+  // add_scene appends to grow the set to two entries.
+  auto added = (*set_r)->add_scene(std::move(spare));
+  ASSERT_TRUE(added.has_value()) << added.error().message();
+  EXPECT_EQ(*added, 1U);
+  EXPECT_EQ((*set_r)->scene_count(), 2U);
+  EXPECT_NE((*set_r)->scene(0), nullptr);
+  EXPECT_NE((*set_r)->scene(1), nullptr);
+
+  {
+    auto reports = (*set_r)->test();
+    ASSERT_TRUE(reports.has_value()) << reports.error().message();
+    EXPECT_EQ(reports->size(), 2U);
+  }
+
+  // remove_scene leaves a hole at index 0; scene_count stays at 2.
+  (*set_r)->remove_scene(0);
+  EXPECT_EQ((*set_r)->scene_count(), 2U);
+  EXPECT_EQ((*set_r)->scene(0), nullptr);
+  EXPECT_NE((*set_r)->scene(1), nullptr);
+
+  // Hole + one engaged scene: combined commit still lands; the hole
+  // contributes a zero CommitReport at its index.
+  {
+    auto reports = (*set_r)->test();
+    ASSERT_TRUE(reports.has_value()) << reports.error().message();
+    ASSERT_EQ(reports->size(), 2U);
+    EXPECT_EQ((*reports)[0].layers_total, 0U);
+  }
+
+  // add_layer must reject the hole index now even though it's in range.
+  {
+    auto shared_src = drm::scene::DumbBufferSource::create(*fx.dev, 64, 64, DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(shared_src.has_value()) << shared_src.error().message();
+    const std::shared_ptr<drm::scene::LayerBufferSource> src(std::move(*shared_src));
+
+    drm::scene::SceneSetLayerSpec spec;
+    spec.source = src;
+    spec.targets.push_back({.scene_index = 0, .display = {}, .force_composited = false});
+    auto h = (*set_r)->add_layer(spec);
+    ASSERT_FALSE(h.has_value());
+    EXPECT_EQ(h.error(), std::make_error_code(std::errc::invalid_argument));
+  }
+
+  // A fresh add_scene reuses the lowest hole rather than appending.
+  drm::scene::LayerScene::Config cfg;
+  cfg.crtc_id = fx.outputs[0].crtc_id;
+  cfg.connector_id = fx.outputs[0].connector_id;
+  cfg.mode = fx.outputs[0].mode;
+  auto rebuilt = drm::scene::LayerScene::create(*fx.dev, cfg);
+  ASSERT_TRUE(rebuilt.has_value()) << rebuilt.error().message();
+  auto refilled = (*set_r)->add_scene(std::move(*rebuilt));
+  ASSERT_TRUE(refilled.has_value());
+  EXPECT_EQ(*refilled, 0U);
+  EXPECT_EQ((*set_r)->scene_count(), 2U);
+  EXPECT_NE((*set_r)->scene(0), nullptr);
+}
