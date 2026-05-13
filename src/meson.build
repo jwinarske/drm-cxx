@@ -36,6 +36,7 @@ drm_cxx_sources = files(
   'dumb/buffer.cpp',
   'scene/composite_canvas.cpp',
   'scene/dumb_buffer_source.cpp',
+  'scene/egl_runtime.cpp',
   'scene/external_dma_buf_source.cpp',
   'scene/gbm_buffer_source.cpp',
   'scene/gst_appsink_source.cpp',

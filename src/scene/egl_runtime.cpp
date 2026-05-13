@@ -1,0 +1,131 @@
+// SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
+// SPDX-License-Identifier: MIT
+
+#include "egl_runtime.hpp"
+
+#if DRM_CXX_HAS_EGL_STREAMS
+
+#include <drm-cxx/log.hpp>
+
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <cstddef>
+#include <cstring>
+#include <dlfcn.h>
+#include <mutex>
+
+namespace drm::scene::detail {
+
+namespace {
+
+template <typename Fn>
+Fn resolve_sym(void* handle, const char* name) noexcept {
+  return reinterpret_cast<Fn>(::dlsym(handle, name));
+}
+
+template <typename Fn>
+Fn resolve_proc(PFNEGLGETPROCADDRESSPROC gpa, const char* name) noexcept {
+  return reinterpret_cast<Fn>(gpa(name));
+}
+
+void initialize_runtime(EglRuntime& rt) noexcept {
+  rt.handle = ::dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
+  if (rt.handle == nullptr) {
+    drm::log_info("scene::egl_runtime: libEGL.so.1 not loadable ({}) — EGL Streams unsupported",
+                  ::dlerror() != nullptr ? ::dlerror() : "no error reported");
+    return;
+  }
+
+  rt.get_proc_address = resolve_sym<PFNEGLGETPROCADDRESSPROC>(rt.handle, "eglGetProcAddress");
+  rt.query_string = resolve_sym<decltype(rt.query_string)>(rt.handle, "eglQueryString");
+  rt.get_display = resolve_sym<decltype(rt.get_display)>(rt.handle, "eglGetDisplay");
+  rt.initialize = resolve_sym<decltype(rt.initialize)>(rt.handle, "eglInitialize");
+  rt.terminate = resolve_sym<decltype(rt.terminate)>(rt.handle, "eglTerminate");
+  rt.get_error = resolve_sym<decltype(rt.get_error)>(rt.handle, "eglGetError");
+  rt.create_context = resolve_sym<decltype(rt.create_context)>(rt.handle, "eglCreateContext");
+  rt.destroy_context = resolve_sym<decltype(rt.destroy_context)>(rt.handle, "eglDestroyContext");
+  rt.make_current = resolve_sym<decltype(rt.make_current)>(rt.handle, "eglMakeCurrent");
+  rt.destroy_surface = resolve_sym<decltype(rt.destroy_surface)>(rt.handle, "eglDestroySurface");
+  rt.choose_config = resolve_sym<decltype(rt.choose_config)>(rt.handle, "eglChooseConfig");
+
+  if ((rt.get_proc_address == nullptr) || (rt.query_string == nullptr) ||
+      (rt.initialize == nullptr) || (rt.terminate == nullptr) || (rt.get_error == nullptr)) {
+    drm::log_warn(
+        "scene::egl_runtime: libEGL.so.1 loaded but missing core symbols — treating as "
+        "unsupported");
+    rt.handle = nullptr;
+    return;
+  }
+
+  // Device-enumeration extension entry points. Null on Mesa stacks
+  // without libglvnd, present on every modern libEGL.
+  rt.query_devices =
+      resolve_proc<PFNEGLQUERYDEVICESEXTPROC>(rt.get_proc_address, "eglQueryDevicesEXT");
+  rt.query_device_string =
+      resolve_proc<PFNEGLQUERYDEVICESTRINGEXTPROC>(rt.get_proc_address, "eglQueryDeviceStringEXT");
+  rt.get_platform_display = resolve_proc<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+      rt.get_proc_address, "eglGetPlatformDisplayEXT");
+
+  // Streams extension entry points. Null on Mesa-only stacks; non-null
+  // on the proprietary EGL implementations that advertise the
+  // EGL_KHR_stream / EGL_EXT_output_drm / EGL_EXT_stream_consumer_egloutput
+  // chain on the device-bound display. Per-display absence shows up
+  // as the pointer being null because eglGetProcAddress returns null
+  // for unsupported names.
+  rt.create_stream =
+      resolve_proc<PFNEGLCREATESTREAMKHRPROC>(rt.get_proc_address, "eglCreateStreamKHR");
+  rt.destroy_stream =
+      resolve_proc<PFNEGLDESTROYSTREAMKHRPROC>(rt.get_proc_address, "eglDestroyStreamKHR");
+  rt.stream_attrib =
+      resolve_proc<PFNEGLSTREAMATTRIBKHRPROC>(rt.get_proc_address, "eglStreamAttribKHR");
+  rt.query_stream =
+      resolve_proc<PFNEGLQUERYSTREAMKHRPROC>(rt.get_proc_address, "eglQueryStreamKHR");
+  rt.get_output_layers =
+      resolve_proc<PFNEGLGETOUTPUTLAYERSEXTPROC>(rt.get_proc_address, "eglGetOutputLayersEXT");
+  rt.query_output_layer_attrib = resolve_proc<PFNEGLQUERYOUTPUTLAYERATTRIBEXTPROC>(
+      rt.get_proc_address, "eglQueryOutputLayerAttribEXT");
+  rt.stream_consumer_output = resolve_proc<PFNEGLSTREAMCONSUMEROUTPUTEXTPROC>(
+      rt.get_proc_address, "eglStreamConsumerOutputEXT");
+  rt.create_stream_producer_surface = resolve_proc<PFNEGLCREATESTREAMPRODUCERSURFACEKHRPROC>(
+      rt.get_proc_address, "eglCreateStreamProducerSurfaceKHR");
+  rt.stream_consumer_acquire = resolve_proc<PFNEGLSTREAMCONSUMERACQUIREKHRPROC>(
+      rt.get_proc_address, "eglStreamConsumerAcquireKHR");
+  rt.stream_consumer_release = resolve_proc<PFNEGLSTREAMCONSUMERRELEASEKHRPROC>(
+      rt.get_proc_address, "eglStreamConsumerReleaseKHR");
+
+  rt.loaded = true;
+}
+
+}  // namespace
+
+const EglRuntime& egl_runtime() noexcept {
+  static EglRuntime rt;
+  static std::once_flag once;
+  std::call_once(once, [] { initialize_runtime(rt); });
+  return rt;
+}
+
+bool extension_present(const char* extensions, const char* name) noexcept {
+  if ((extensions == nullptr) || (name == nullptr)) {
+    return false;
+  }
+  const std::size_t name_len = ::strlen(name);
+  const char* cursor = extensions;
+  while (true) {
+    const char* match = ::strstr(cursor, name);
+    if (match == nullptr) {
+      return false;
+    }
+    const bool left_ok = (match == extensions) || (match[-1] == ' ');
+    const char tail = match[name_len];
+    const bool right_ok = (tail == '\0') || (tail == ' ');
+    if (left_ok && right_ok) {
+      return true;
+    }
+    cursor = match + name_len;
+  }
+}
+
+}  // namespace drm::scene::detail
+
+#endif  // DRM_CXX_HAS_EGL_STREAMS

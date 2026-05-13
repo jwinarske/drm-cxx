@@ -7,17 +7,15 @@
 #include <drm-cxx/log.hpp>
 
 #include <cerrno>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
 #include <string>
 #include <sys/stat.h>
 
 #if DRM_CXX_HAS_EGL_STREAMS
+#include "egl_runtime.hpp"
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <dlfcn.h>
-#include <mutex>
 #include <utility>
 #include <vector>
 #endif
@@ -52,94 +50,8 @@ StreamCapability probe_stream_capability(const drm::Device& /*dev*/) noexcept {
 
 namespace {
 
-// Singleton EGL runtime loader. The proprietary EGL implementations
-// keep thread-local state across initialize/terminate and don't
-// gracefully survive dlclose once eglQueryDevicesEXT has been called.
-// We open libEGL.so.1 once per process and leak the handle — the
-// probe is short-lived and the state cost is one void*.
-//
-// Returns nullptr (handle) and `loaded == false` on first call that
-// cannot find libEGL.so.1; subsequent calls remember the failure and
-// short-circuit without retrying dlopen.
-struct EglRuntime {
-  void* handle{nullptr};
-  bool loaded{false};
-  bool tried{false};
-
-  // Required client-side function pointers. eglGetProcAddress can't
-  // resolve eglGetProcAddress itself, and the platform-device entry
-  // points are only fetched via eglGetProcAddress because they were
-  // added by extension. So we dlsym the bootstrap symbols.
-  PFNEGLGETPROCADDRESSPROC get_proc_address{nullptr};
-  decltype(&eglQueryString) query_string{nullptr};
-  decltype(&eglGetDisplay) get_display{nullptr};
-  decltype(&eglInitialize) initialize{nullptr};
-  decltype(&eglTerminate) terminate{nullptr};
-  decltype(&eglGetError) get_error{nullptr};
-
-  // Extension entry points resolved lazily after the client extension
-  // string has been queried. Null until the relevant client extension
-  // is confirmed present.
-  PFNEGLQUERYDEVICESEXTPROC query_devices{nullptr};
-  PFNEGLQUERYDEVICESTRINGEXTPROC query_device_string{nullptr};
-  PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform_display{nullptr};
-};
-
-EglRuntime& egl_runtime() noexcept {
-  static EglRuntime rt;
-  static std::once_flag once;
-  std::call_once(once, [&] {
-    rt.tried = true;
-    rt.handle = ::dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (rt.handle == nullptr) {
-      drm::log_info(
-          "scene::stream_capability: libEGL.so.1 not loadable ({}) — EGL Streams unsupported",
-          ::dlerror() != nullptr ? ::dlerror() : "no error reported");
-      return;
-    }
-    rt.get_proc_address =
-        reinterpret_cast<PFNEGLGETPROCADDRESSPROC>(::dlsym(rt.handle, "eglGetProcAddress"));
-    rt.query_string =
-        reinterpret_cast<decltype(rt.query_string)>(::dlsym(rt.handle, "eglQueryString"));
-    rt.get_display =
-        reinterpret_cast<decltype(rt.get_display)>(::dlsym(rt.handle, "eglGetDisplay"));
-    rt.initialize = reinterpret_cast<decltype(rt.initialize)>(::dlsym(rt.handle, "eglInitialize"));
-    rt.terminate = reinterpret_cast<decltype(rt.terminate)>(::dlsym(rt.handle, "eglTerminate"));
-    rt.get_error = reinterpret_cast<decltype(rt.get_error)>(::dlsym(rt.handle, "eglGetError"));
-
-    if ((rt.get_proc_address == nullptr) || (rt.query_string == nullptr) ||
-        (rt.initialize == nullptr) || (rt.terminate == nullptr) || (rt.get_error == nullptr)) {
-      drm::log_warn(
-          "scene::stream_capability: libEGL.so.1 loaded but missing core symbols — treating as "
-          "unsupported");
-      rt.handle = nullptr;
-      return;
-    }
-    rt.loaded = true;
-  });
-  return rt;
-}
-
-bool extension_present(const char* extensions, const char* name) noexcept {
-  if ((extensions == nullptr) || (name == nullptr)) {
-    return false;
-  }
-  const std::size_t name_len = ::strlen(name);
-  const char* cursor = extensions;
-  while (true) {
-    const char* match = ::strstr(cursor, name);
-    if (match == nullptr) {
-      return false;
-    }
-    const bool left_ok = (match == extensions) || (match[-1] == ' ');
-    const char tail = match[name_len];
-    const bool right_ok = (tail == '\0') || (tail == ' ');
-    if (left_ok && right_ok) {
-      return true;
-    }
-    cursor = match + name_len;
-  }
-}
+using detail::egl_runtime;
+using detail::extension_present;
 
 // Resolve the DRM-node path the EGL device reports against the
 // caller-supplied drm::Device by comparing st_rdev. Symlink-resolution
@@ -167,7 +79,7 @@ bool matches_drm_node(int dev_fd, const char* egl_drm_path) noexcept {
 
 StreamCapability probe_stream_capability(const drm::Device& dev) noexcept {
   StreamCapability cap;
-  auto& rt = egl_runtime();
+  const auto& rt = egl_runtime();
   if (!rt.loaded) {
     return cap;
   }
@@ -190,12 +102,6 @@ StreamCapability probe_stream_capability(const drm::Device& dev) noexcept {
     return cap;
   }
 
-  rt.query_devices =
-      reinterpret_cast<PFNEGLQUERYDEVICESEXTPROC>(rt.get_proc_address("eglQueryDevicesEXT"));
-  rt.query_device_string = reinterpret_cast<PFNEGLQUERYDEVICESTRINGEXTPROC>(
-      rt.get_proc_address("eglQueryDeviceStringEXT"));
-  rt.get_platform_display = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
-      rt.get_proc_address("eglGetPlatformDisplayEXT"));
   if ((rt.query_devices == nullptr) || (rt.query_device_string == nullptr) ||
       (rt.get_platform_display == nullptr)) {
     drm::log_warn(
