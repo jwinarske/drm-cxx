@@ -204,6 +204,17 @@ executable('stream_probe',
   dependencies : [drm_cxx_dep],
 )
 
+# multi_crtc_probe — enumerate connected outputs on a card and report
+# whether a combined-CRTC TEST_ONLY atomic commit is accepted by the
+# kernel. Foundational probe for SceneSet-style multi-display work
+# (cluster_sim's passenger display, dual_display, video_wall_multi).
+# `--hotplug` re-runs the probe on each udev event so the verdict
+# tracks topology changes.
+executable('multi_crtc_probe',
+  'advanced/multi_crtc_probe/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # stream_demo — end-to-end EGL Streams demo. Gated on the streams
 # option (the EglStreamBuilder header isn't defined without it) AND
 # on glesv2.pc availability (the demo links real EGL + GLES). The

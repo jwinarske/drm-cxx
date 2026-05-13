@@ -8,6 +8,7 @@ drm_cxx_sources = files(
   'core/format.cpp',
   'modeset/atomic.cpp',
   'modeset/mode.cpp',
+  'modeset/modeset.cpp',
   'modeset/page_flip.cpp',
   'planes/plane_registry.cpp',
   'planes/layer.cpp',
@@ -205,6 +206,7 @@ install_headers(
 install_headers(
   'modeset/atomic.hpp',
   'modeset/mode.hpp',
+  'modeset/modeset.hpp',
   'modeset/page_flip.hpp',
   subdir : 'drm-cxx/modeset',
 )
