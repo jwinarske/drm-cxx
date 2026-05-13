@@ -40,6 +40,7 @@
 #include <array>
 #include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -70,6 +71,7 @@ struct Args {
   std::string device_path = "/dev/dri/card0";
   bool hotplug = false;
   bool scene_test = false;
+  bool mirror = false;
 };
 
 [[nodiscard]] Args parse_args(int argc, char* argv[]) {
@@ -82,12 +84,15 @@ struct Args {
       args.hotplug = true;
     } else if (a == "--scene-test") {
       args.scene_test = true;
+    } else if (a == "--mirror") {
+      args.mirror = true;
     } else if (a == "--help" || a == "-h") {
-      drm::println("usage: {} [--device PATH] [--hotplug] [--scene-test]", argv[0]);
+      drm::println("usage: {} [--device PATH] [--hotplug] [--scene-test] [--mirror]", argv[0]);
       std::exit(0);
     } else {
       drm::println(stderr, "unrecognized argument: {}", a);
-      drm::println(stderr, "usage: {} [--device PATH] [--hotplug] [--scene-test]", argv[0]);
+      drm::println(stderr, "usage: {} [--device PATH] [--hotplug] [--scene-test] [--mirror]",
+                   argv[0]);
       std::exit(2);
     }
   }
@@ -136,7 +141,8 @@ void run_probe(const drm::Device& dev) {
 // physical display. Callers wanting a real flip should build a
 // dual_display example instead.
 void run_scene_test(drm::Device& dev,
-                    const std::vector<drm::examples::multi_crtc::ConnectedOutput>& outputs) {
+                    const std::vector<drm::examples::multi_crtc::ConnectedOutput>& outputs,
+                    bool mirror) {
   if (outputs.empty()) {
     drm::println("scene-test: no outputs to drive");
     return;
@@ -156,25 +162,28 @@ void run_scene_test(drm::Device& dev,
       return;
     }
 
-    // One trivial full-size layer per scene so the allocator has
-    // something to place. ARGB8888 dumb buffers are universally
-    // accepted on PRIMARY planes; keep it small enough that
-    // allocation never fails on production setups.
-    auto src = drm::scene::DumbBufferSource::create(dev, o.mode.hdisplay, o.mode.vdisplay,
-                                                    DRM_FORMAT_ARGB8888);
-    if (!src) {
-      drm::println(stderr, "scene-test: DumbBufferSource::create({}) failed: {}", o.connector_name,
-                   src.error().message());
-      return;
-    }
-    drm::scene::LayerDesc desc;
-    desc.source = std::move(*src);
-    desc.display.src_rect = drm::scene::Rect{0, 0, o.mode.hdisplay, o.mode.vdisplay};
-    desc.display.dst_rect = drm::scene::Rect{0, 0, o.mode.hdisplay, o.mode.vdisplay};
-    if (auto h = (*s)->add_layer(std::move(desc)); !h) {
-      drm::println(stderr, "scene-test: add_layer({}) failed: {}", o.connector_name,
-                   h.error().message());
-      return;
+    if (!mirror) {
+      // Non-mirror path: one trivial full-size layer per scene
+      // (each scene gets its own DumbBufferSource sized to its mode).
+      // ARGB8888 dumb buffers are universally accepted on PRIMARY
+      // planes; this is the same workload the original --scene-test
+      // exercised on amdgpu card1.
+      auto src = drm::scene::DumbBufferSource::create(dev, o.mode.hdisplay, o.mode.vdisplay,
+                                                      DRM_FORMAT_ARGB8888);
+      if (!src) {
+        drm::println(stderr, "scene-test: DumbBufferSource::create({}) failed: {}",
+                     o.connector_name, src.error().message());
+        return;
+      }
+      drm::scene::LayerDesc desc;
+      desc.source = std::move(*src);
+      desc.display.src_rect = drm::scene::Rect{0, 0, o.mode.hdisplay, o.mode.vdisplay};
+      desc.display.dst_rect = drm::scene::Rect{0, 0, o.mode.hdisplay, o.mode.vdisplay};
+      if (auto h = (*s)->add_layer(std::move(desc)); !h) {
+        drm::println(stderr, "scene-test: add_layer({}) failed: {}", o.connector_name,
+                     h.error().message());
+        return;
+      }
     }
     scenes.push_back(std::move(*s));
   }
@@ -183,6 +192,49 @@ void run_scene_test(drm::Device& dev,
   if (!set_r) {
     drm::println(stderr, "scene-test: SceneSet::create failed: {}", set_r.error().message());
     return;
+  }
+
+  if (mirror) {
+    // Mirror path: a single 256x256 shared dumb buffer rides every
+    // connected output via SceneSet::add_layer. Each output's
+    // DisplayParams centers the layer in its mode so a CRTC with a
+    // different resolution sees the same content at a comparable
+    // position. The shared source survives until the SetLayerHandle
+    // is removed and every per-scene LayerHandle releases it.
+    constexpr std::uint32_t mirror_side = 256;
+    auto shared =
+        drm::scene::DumbBufferSource::create(dev, mirror_side, mirror_side, DRM_FORMAT_ARGB8888);
+    if (!shared) {
+      drm::println(stderr, "scene-test: shared DumbBufferSource::create failed: {}",
+                   shared.error().message());
+      return;
+    }
+    const std::shared_ptr<drm::scene::LayerBufferSource> shared_src(std::move(*shared));
+
+    drm::scene::SceneSetLayerSpec spec;
+    spec.source = shared_src;
+    spec.targets.reserve(outputs.size());
+    for (std::size_t i = 0; i < outputs.size(); ++i) {
+      const auto& o = outputs[i];
+      const std::uint32_t cx =
+          (o.mode.hdisplay > mirror_side) ? (o.mode.hdisplay - mirror_side) / 2 : 0;
+      const std::uint32_t cy =
+          (o.mode.vdisplay > mirror_side) ? (o.mode.vdisplay - mirror_side) / 2 : 0;
+      drm::scene::DisplayParams display;
+      display.src_rect = drm::scene::Rect{0, 0, mirror_side, mirror_side};
+      display.dst_rect = drm::scene::Rect{static_cast<std::int32_t>(cx),
+                                          static_cast<std::int32_t>(cy), mirror_side, mirror_side};
+      spec.targets.push_back({.scene_index = i, .display = display, .force_composited = false});
+    }
+
+    auto h = (*set_r)->add_layer(spec);
+    if (!h) {
+      drm::println(stderr, "scene-test: SceneSet::add_layer (mirror) failed: {}",
+                   h.error().message());
+      return;
+    }
+    drm::println("scene-test: mirrored layer added across {} outputs (id={})", outputs.size(),
+                 h->id);
   }
 
   auto reports = (*set_r)->test();
@@ -226,7 +278,7 @@ int main(int argc, char* argv[]) {
   run_probe(dev);
   if (args.scene_test) {
     auto outputs = drm::examples::multi_crtc::enumerate_connected_outputs(dev);
-    run_scene_test(dev, outputs);
+    run_scene_test(dev, outputs, args.mirror);
   }
 
   if (!args.hotplug) {
@@ -248,7 +300,7 @@ int main(int argc, char* argv[]) {
     run_probe(dev);
     if (args.scene_test) {
       auto outputs = drm::examples::multi_crtc::enumerate_connected_outputs(dev);
-      run_scene_test(dev, outputs);
+      run_scene_test(dev, outputs, args.mirror);
     }
   });
 

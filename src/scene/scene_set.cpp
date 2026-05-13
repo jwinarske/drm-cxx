@@ -3,9 +3,13 @@
 
 #include "scene_set.hpp"
 
+#include "buffer_source.hpp"
 #include "commit_report.hpp"
+#include "layer_desc.hpp"
+#include "layer_handle.hpp"
 #include "layer_scene.hpp"
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
@@ -14,10 +18,60 @@
 #include <cstdint>
 #include <memory>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace drm::scene {
+
+namespace {
+
+// Per-scene LayerBufferSource forwarder. Each forwarder owns a
+// shared_ptr to the application-provided underlying source and
+// pass-through-forwards every virtual call. The underlying source's
+// lifetime extends until the last forwarder is destroyed (which
+// happens when the SceneSet drops the matching LayerHandles).
+//
+// Limitations match SceneSetLayerSpec's documented surface:
+//   * acquire() / release() pass through verbatim — the underlying
+//     source sees one call per participating scene per frame. Static-
+//     buffer sources tolerate this; per-frame ring sources do not.
+//   * on_session_resumed() is invoked once per participating scene
+//     in the resume cycle. Resumable static-buffer sources tolerate
+//     N back-to-back re-allocations.
+class SharedLayerBufferSource final : public LayerBufferSource {
+ public:
+  explicit SharedLayerBufferSource(std::shared_ptr<LayerBufferSource> inner) noexcept
+      : inner_(std::move(inner)) {}
+
+  [[nodiscard]] drm::expected<AcquiredBuffer, std::error_code> acquire() override {
+    return inner_->acquire();
+  }
+  void release(AcquiredBuffer acquired) noexcept override { inner_->release(acquired); }
+  [[nodiscard]] BindingModel binding_model() const noexcept override {
+    return inner_->binding_model();
+  }
+  [[nodiscard]] SourceFormat format() const noexcept override { return inner_->format(); }
+  [[nodiscard]] drm::expected<drm::BufferMapping, std::error_code> map(
+      drm::MapAccess access) override {
+    return inner_->map(access);
+  }
+  drm::expected<void, std::error_code> bind_to_plane(std::uint32_t plane_id) override {
+    return inner_->bind_to_plane(plane_id);
+  }
+  void unbind_from_plane(std::uint32_t plane_id) noexcept override {
+    inner_->unbind_from_plane(plane_id);
+  }
+  void on_session_paused() noexcept override { inner_->on_session_paused(); }
+  drm::expected<void, std::error_code> on_session_resumed(const drm::Device& new_dev) override {
+    return inner_->on_session_resumed(new_dev);
+  }
+
+ private:
+  std::shared_ptr<LayerBufferSource> inner_;
+};
+
+}  // namespace
 
 class SceneSet::Impl {
  public:
@@ -31,6 +85,98 @@ class SceneSet::Impl {
   }
   [[nodiscard]] const LayerScene* scene(std::size_t index) const noexcept {
     return (index < scenes_.size()) ? scenes_[index].get() : nullptr;
+  }
+
+  // ── SceneSet-level layer routing ─────────────────────────────────
+  //
+  // SetLayerHandle.id encodes a 1-based slot index into set_slots_;
+  // generation guards against use-after-remove. Each slot tracks the
+  // per-scene LayerHandles produced when the SetLayerSpec was added,
+  // so remove_layer can walk back and remove each.
+
+  [[nodiscard]] drm::expected<SetLayerHandle, std::error_code> add_set_layer(
+      const SceneSetLayerSpec& spec) {
+    if (!spec.source) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    if (spec.targets.empty()) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    // Validate target indices are in range and unique. Duplicates
+    // would route two LayerDescs onto the same scene under one
+    // SetLayerHandle, which makes remove_layer's per-target loop
+    // ambiguous and serves no real use case.
+    std::unordered_set<std::size_t> seen;
+    seen.reserve(spec.targets.size());
+    for (const auto& t : spec.targets) {
+      if (t.scene_index >= scenes_.size()) {
+        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+      }
+      if (!seen.insert(t.scene_index).second) {
+        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+      }
+    }
+
+    // Build the per-target LayerDescs + add to each scene. On the
+    // first failure, roll back every successful add so the caller
+    // sees an atomic outcome.
+    std::vector<PerScenePin> pins;
+    pins.reserve(spec.targets.size());
+    for (const auto& t : spec.targets) {
+      LayerDesc desc;
+      desc.source = std::make_unique<SharedLayerBufferSource>(spec.source);
+      desc.display = t.display;
+      desc.force_composited = t.force_composited;
+
+      auto h = scenes_[t.scene_index]->add_layer(std::move(desc));
+      if (!h) {
+        // Roll back successful entries.
+        for (const auto& p : pins) {
+          scenes_[p.scene_index]->remove_layer(p.layer_handle);
+        }
+        return drm::unexpected<std::error_code>(h.error());
+      }
+      pins.push_back(PerScenePin{t.scene_index, *h});
+    }
+
+    // Allocate (or recycle) a slot.
+    SetLayerSlot* slot = nullptr;
+    std::uint32_t slot_idx = 0;
+    if (!free_set_slot_ids_.empty()) {
+      slot_idx = free_set_slot_ids_.back();
+      free_set_slot_ids_.pop_back();
+      slot = &set_slots_[slot_idx];
+    } else {
+      set_slots_.emplace_back();
+      slot_idx = static_cast<std::uint32_t>(set_slots_.size() - 1);
+      slot = &set_slots_.back();
+    }
+    slot->pins = std::move(pins);
+    slot->alive = true;
+    slot->generation += 1;
+
+    SetLayerHandle handle;
+    handle.id = slot_idx + 1;
+    handle.generation = slot->generation;
+    return handle;
+  }
+
+  void remove_set_layer(SetLayerHandle handle) noexcept {
+    if (handle.id == 0 || handle.id > set_slots_.size()) {
+      return;
+    }
+    auto& slot = set_slots_[handle.id - 1];
+    if (!slot.alive || slot.generation != handle.generation) {
+      return;
+    }
+    for (const auto& p : slot.pins) {
+      if (p.scene_index < scenes_.size()) {
+        scenes_[p.scene_index]->remove_layer(p.layer_handle);
+      }
+    }
+    slot.pins.clear();
+    slot.alive = false;
+    free_set_slot_ids_.push_back(handle.id - 1);
   }
 
   // Workhorse for both commit() and test(). The split mirrors
@@ -119,8 +265,21 @@ class SceneSet::Impl {
   }
 
  private:
+  struct PerScenePin {
+    std::size_t scene_index{0};
+    LayerHandle layer_handle{};
+  };
+
+  struct SetLayerSlot {
+    std::vector<PerScenePin> pins;
+    std::uint32_t generation{0};
+    bool alive{false};
+  };
+
   drm::Device* dev_;
   std::vector<std::unique_ptr<LayerScene>> scenes_;
+  std::vector<SetLayerSlot> set_slots_;
+  std::vector<std::uint32_t> free_set_slot_ids_;
 };
 
 SceneSet::SceneSet(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -141,6 +300,14 @@ LayerScene* SceneSet::scene(std::size_t index) noexcept {
 
 const LayerScene* SceneSet::scene(std::size_t index) const noexcept {
   return impl_->scene(index);
+}
+
+drm::expected<SetLayerHandle, std::error_code> SceneSet::add_layer(const SceneSetLayerSpec& spec) {
+  return impl_->add_set_layer(spec);
+}
+
+void SceneSet::remove_layer(SetLayerHandle handle) {
+  impl_->remove_set_layer(handle);
 }
 
 drm::expected<std::vector<CommitReport>, std::error_code> SceneSet::commit(std::uint32_t flags,
