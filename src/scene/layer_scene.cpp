@@ -472,6 +472,19 @@ class LayerScene::Impl {
   }
   [[nodiscard]] bool force_full_property_writes() const noexcept { return force_full_writes_; }
 
+  // Conservative pre-build peek for SceneSet::NarrowPolicy::AutoOnModeset.
+  // Returns true iff the next build_frame_into pass will definitely OR
+  // ALLOW_MODESET into effective_flags. Currently this is just
+  // first_commit_ (after create() / rebind() / a session resume).
+  // Auto-derived colorspace / HDR signaling changes from the layer set
+  // would still escalate the actual build pass to ALLOW_MODESET, but
+  // those are observable only by running the build itself — too
+  // expensive to mirror non-destructively here. A false return is
+  // therefore "probably steady-state, but the build may still
+  // escalate"; SceneSet handles that conservatively by checking
+  // post-build flags before issuing the kernel commit.
+  [[nodiscard]] bool would_request_modeset() const noexcept { return first_commit_; }
+
   // Wire up the allocator's internal test_preparer to this Impl's
   // modeset-state injector. Called once during LayerScene::create after
   // the Impl is fully constructed — can't go in the ctor because the
@@ -2495,6 +2508,10 @@ drm::expected<CommitReport, std::error_code> LayerScene::finalize_frame(
 
 std::uint32_t LayerScene::effective_flags_of(const FrameBuildState& state) noexcept {
   return state.effective_flags;
+}
+
+bool LayerScene::would_request_modeset() const noexcept {
+  return impl_->would_request_modeset();
 }
 
 void LayerScene::set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src) {

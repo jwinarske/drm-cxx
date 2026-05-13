@@ -91,6 +91,56 @@ struct SceneSetLayerSpec {
   std::vector<Target> targets;
 };
 
+/// Cross-CRTC commit grouping policy for `SceneSet::commit` / `test`.
+///
+/// The library's default is `AutoOnModeset`: every frame rides one
+/// combined `drmModeAtomicCommit` covering every engaged scene, except
+/// when one or more scenes need `ALLOW_MODESET` for the upcoming
+/// commit and others do not. In that case the modeset-needing scenes
+/// commit first as their own combined group, and the steady-state
+/// scenes commit second as a separate combined group — so a hotplug
+/// or rebind on one CRTC doesn't pull unrelated CRTCs through a
+/// modeset transition (visible on amdgpu / i915 as a brief blank).
+///
+/// `Combined` forces the pre-policy single-commit behavior; useful
+/// when the application accepts the modeset disturbance for the sake
+/// of strict cross-CRTC tear-free sync on every frame.
+///
+/// `PerCrtc` issues one commit per engaged scene unconditionally. No
+/// cross-CRTC sync. Intended for diagnostics and for apps that drive
+/// strictly-independent outputs from one SceneSet (a typical instrument
+/// cluster does not).
+enum class NarrowPolicy : std::uint8_t {
+  Combined,       // never split; one ioctl per commit() call
+  AutoOnModeset,  // split only when ALLOW_MODESET state is mixed
+  PerCrtc,        // split unconditionally, one ioctl per engaged scene
+};
+
+namespace detail {
+
+/// Snapshot of a single SceneSet slot used by the partition planner.
+/// `is_hole` mirrors `scenes_[i] == nullptr` (after a `remove_scene`
+/// or never-filled); `wants_modeset` mirrors the corresponding
+/// scene's `LayerScene::would_request_modeset()` peek.
+/// `wants_modeset` is ignored when `is_hole == true`.
+struct SceneSlotState {
+  bool is_hole{false};
+  bool wants_modeset{false};
+};
+
+/// Pure partition planner. Returns the per-group submission order
+/// `SceneSet::commit` should follow for the given policy + slot
+/// states. Holes never appear in any group; engaged-ish scenes
+/// (non-hole) always appear in exactly one group. Modeset-needing
+/// scenes go first under `AutoOnModeset` when the policy splits.
+///
+/// Pure and exposed for unit testing — production callers go
+/// through `SceneSet::commit` / `test`.
+[[nodiscard]] std::vector<std::vector<std::size_t>> partition_for_policy(
+    const std::vector<SceneSlotState>& slots, NarrowPolicy policy);
+
+}  // namespace detail
+
 /// Opaque handle for a SceneSet-level layer. Returned by
 /// SceneSet::add_layer; passed to SceneSet::remove_layer. Generation-
 /// tagged so stale handles (after remove_layer, slot recycling) are
@@ -137,14 +187,22 @@ class SceneSet {
   /// `user_data` is forwarded to drmModeAtomicCommit verbatim.
   /// Callers wiring PAGE_FLIP_EVENT typically pass their PageFlip*
   /// here; the kernel routes it back as user_data on the next vblank.
+  /// When `policy` splits the commit into more than one group, every
+  /// resulting kernel commit carries the same `user_data` — callers
+  /// using PAGE_FLIP_EVENT receive one event per CRTC per group, so
+  /// the total event count still matches the engaged scene count.
   [[nodiscard]] drm::expected<std::vector<CommitReport>, std::error_code> commit(
-      std::uint32_t flags = 0, void* user_data = nullptr);
+      std::uint32_t flags = 0, void* user_data = nullptr,
+      NarrowPolicy policy = NarrowPolicy::AutoOnModeset);
 
-  /// Build + issue the combined AtomicRequest as DRM_MODE_ATOMIC_TEST_ONLY.
+  /// Build + issue the AtomicRequest(s) as DRM_MODE_ATOMIC_TEST_ONLY.
   /// Same return shape as commit() but no kernel state is applied and
-  /// no per-scene observable state mutates. Useful as a one-shot
-  /// validator before committing for real.
-  [[nodiscard]] drm::expected<std::vector<CommitReport>, std::error_code> test();
+  /// no per-scene observable state mutates. `policy` controls
+  /// grouping the same way it does in commit(); the default mirrors
+  /// the runtime behavior so a TEST that passes is a faithful
+  /// preview of the matching commit().
+  [[nodiscard]] drm::expected<std::vector<CommitReport>, std::error_code> test(
+      NarrowPolicy policy = NarrowPolicy::AutoOnModeset);
 
   /// Add a layer that rides one or more child scenes. For each target
   /// the SceneSet builds a LayerDesc wrapping `spec.source` in a

@@ -74,6 +74,66 @@ class SharedLayerBufferSource final : public LayerBufferSource {
 
 }  // namespace
 
+namespace detail {
+
+std::vector<std::vector<std::size_t>> partition_for_policy(const std::vector<SceneSlotState>& slots,
+                                                           NarrowPolicy policy) {
+  std::vector<std::vector<std::size_t>> groups;
+  if (policy == NarrowPolicy::PerCrtc) {
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+      if (!slots[i].is_hole) {
+        groups.push_back({i});
+      }
+    }
+    return groups;
+  }
+  if (policy == NarrowPolicy::AutoOnModeset) {
+    std::vector<std::size_t> modeset_group;
+    std::vector<std::size_t> steady_group;
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+      if (slots[i].is_hole) {
+        continue;
+      }
+      if (slots[i].wants_modeset) {
+        modeset_group.push_back(i);
+      } else {
+        steady_group.push_back(i);
+      }
+    }
+    // Mixed -> split (modeset first); uniform -> single combined group.
+    if (!modeset_group.empty() && !steady_group.empty()) {
+      groups.push_back(std::move(modeset_group));
+      groups.push_back(std::move(steady_group));
+    } else {
+      std::vector<std::size_t> combined;
+      combined.reserve(modeset_group.size() + steady_group.size());
+      for (auto i : modeset_group) {
+        combined.push_back(i);
+      }
+      for (auto i : steady_group) {
+        combined.push_back(i);
+      }
+      if (!combined.empty()) {
+        groups.push_back(std::move(combined));
+      }
+    }
+    return groups;
+  }
+  // NarrowPolicy::Combined — one group with every non-hole slot.
+  std::vector<std::size_t> combined;
+  for (std::size_t i = 0; i < slots.size(); ++i) {
+    if (!slots[i].is_hole) {
+      combined.push_back(i);
+    }
+  }
+  if (!combined.empty()) {
+    groups.push_back(std::move(combined));
+  }
+  return groups;
+}
+
+}  // namespace detail
+
 class SceneSet::Impl {
  public:
   Impl(drm::Device& dev, std::vector<std::unique_ptr<LayerScene>> scenes) noexcept
@@ -225,105 +285,125 @@ class SceneSet::Impl {
     free_set_slot_ids_.push_back(handle.id - 1);
   }
 
-  // Workhorse for both commit() and test(). The split mirrors
-  // LayerScene::Impl::do_commit's split — build all, submit once,
-  // finalize all — but spans every owned scene.
+  // Snapshot every slot's hole / modeset state for the partition
+  // planner. Pure read of scenes_ state; no destructive build.
+  [[nodiscard]] std::vector<detail::SceneSlotState> snapshot_slots() const {
+    std::vector<detail::SceneSlotState> slots;
+    slots.reserve(scenes_.size());
+    for (const auto& scene : scenes_) {
+      if (scene) {
+        slots.push_back({/*is_hole=*/false, scene->would_request_modeset()});
+      } else {
+        slots.push_back({/*is_hole=*/true, /*wants_modeset=*/false});
+      }
+    }
+    return slots;
+  }
+
+  // Workhorse for both commit() and test(). Splits scenes into groups
+  // per policy, then per group: build all → submit one ioctl →
+  // finalize all. Combined / Auto-uniform paths collapse to the
+  // single-ioctl shape SceneSet shipped with originally; PerCrtc and
+  // Auto-mixed paths fan out into two-or-more ioctls submitted
+  // sequentially.
+  //
+  // When a group's commit fails, that group's scenes are finalized
+  // with the kernel error so their acquisitions release, and every
+  // not-yet-built later group is treated as also-failed (no kernel
+  // commit issued) — the SetCommitReport for those scenes stays
+  // zeroed. Already-committed earlier groups are not rolled back;
+  // splitting inherently sacrifices that property in exchange for
+  // narrower commit shape. AutoOnModeset documents the trade.
   [[nodiscard]] drm::expected<std::vector<CommitReport>, std::error_code> do_commit_all(
-      std::uint32_t caller_flags, bool test_only, void* user_data) {
-    std::vector<CommitReport> reports;
-    reports.reserve(scenes_.size());
+      std::uint32_t caller_flags, bool test_only, void* user_data, NarrowPolicy policy) {
+    std::vector<CommitReport> reports(scenes_.size());
     if (scenes_.empty()) {
       return reports;
     }
 
-    drm::AtomicRequest req(*dev_);
-    if (!req.valid()) {
-      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
-    }
-
-    // Build every scene's writes onto the shared request.
-    // Suspended scenes (and holes from remove_scene) record a null
-    // sentinel so the post-commit finalize loop can emit a zero
-    // CommitReport at the matching index without touching the scene.
-    std::vector<FrameBuildPtr> states;
-    states.reserve(scenes_.size());
-    std::uint32_t combined_flags = caller_flags;
-    std::size_t engaged_count = 0;
-    for (auto& scene : scenes_) {
-      if (!scene) {
-        // Hole left by remove_scene: contribute nothing to the
-        // combined request, emit a zero report at finalize time.
-        states.push_back(FrameBuildPtr{});
-        continue;
-      }
-      auto build = scene->build_frame_into(req, caller_flags, test_only);
-      if (!build) {
-        // A scene's build failed: roll back every successful build by
-        // running it through finalize_frame with the same error so
-        // its acquisitions get released. Then propagate.
-        const auto err = build.error();
-        for (std::size_t i = 0; i < states.size(); ++i) {
-          if (states[i] != nullptr) {
-            (void)scenes_[i]->finalize_frame(std::move(states[i]),
-                                             drm::unexpected<std::error_code>(err));
-          }
-        }
-        return drm::unexpected<std::error_code>(err);
-      }
-      if (*build == nullptr) {
-        // Scene is suspended: skip its participation in the commit.
-        // The sentinel keeps the per-scene CommitReport vector
-        // aligned with the constructor's scene order.
-        states.push_back(FrameBuildPtr{});
-        continue;
-      }
-      combined_flags |= LayerScene::effective_flags_of(**build);
-      states.push_back(std::move(*build));
-      ++engaged_count;
-    }
-
-    // Narrow per-CRTC fallback: with zero engaged scenes (every child
-    // suspended, removed, or both) the combined AtomicRequest is empty
-    // and the kernel commit would be a wasted ioctl on every frame —
-    // the steady-state cost during a VT-switched session. Emit zero
-    // reports per scene and return without touching the kernel.
-    if (engaged_count == 0) {
-      reports.assign(scenes_.size(), CommitReport{});
+    const auto groups = detail::partition_for_policy(snapshot_slots(), policy);
+    if (groups.empty()) {
+      // Either every slot is a hole, or scenes_ is empty. Either way
+      // the kernel commit would carry no writes — skip.
       return reports;
     }
 
-    // One combined kernel commit covering every engaged scene's writes.
-    drm::expected<void, std::error_code> kr;
-    if (test_only) {
-      kr = req.test(combined_flags);
-    } else {
-      kr = req.commit(combined_flags, user_data);
-    }
+    std::error_code first_error;
+    for (const auto& group : groups) {
+      drm::AtomicRequest req(*dev_);
+      if (!req.valid()) {
+        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
+      }
 
-    // Per-scene finalize. Every scene that produced an
-    // engaged state sees the same kernel result — successes get the
-    // post-commit state update (mark_clean / recorded placements),
-    // EACCES on commit failure flips each participating scene's
-    // suspended_ flag.
-    for (std::size_t i = 0; i < scenes_.size(); ++i) {
-      if (states[i] == nullptr) {
-        reports.emplace_back();  // suspended / removed scene: zero report
+      // Track each scene's engaged build for this group. Suspended
+      // scenes (build returns null) and holes leave a default-zero
+      // report in `reports` and contribute nothing here.
+      struct EngagedBuild {
+        std::size_t scene_index;
+        FrameBuildPtr state;
+      };
+      std::vector<EngagedBuild> engaged;
+      engaged.reserve(group.size());
+      std::uint32_t combined_flags = caller_flags;
+
+      for (auto idx : group) {
+        auto& scene = scenes_[idx];
+        if (!scene) {
+          continue;  // hole — partition_for_policy already filtered, but be defensive
+        }
+        auto build = scene->build_frame_into(req, caller_flags, test_only);
+        if (!build) {
+          // Roll back this group's already-built engaged states with
+          // the build error, then propagate. Earlier successful
+          // groups have already finalized + committed.
+          const auto err = build.error();
+          for (auto& eb : engaged) {
+            (void)scenes_[eb.scene_index]->finalize_frame(std::move(eb.state),
+                                                          drm::unexpected<std::error_code>(err));
+          }
+          return drm::unexpected<std::error_code>(err);
+        }
+        if (*build == nullptr) {
+          continue;  // scene suspended
+        }
+        combined_flags |= LayerScene::effective_flags_of(**build);
+        engaged.push_back({idx, std::move(*build)});
+      }
+
+      if (engaged.empty()) {
+        // Group resolved to no engaged scenes. Skip the kernel ioctl
+        // entirely — the prior "zero-engaged commit-skip"
+        // optimization, scoped to this group rather than the whole
+        // set.
         continue;
       }
-      auto r = scenes_[i]->finalize_frame(std::move(states[i]), kr);
-      if (r) {
-        reports.push_back(std::move(*r));
+
+      drm::expected<void, std::error_code> kr;
+      if (test_only) {
+        kr = req.test(combined_flags);
       } else {
-        // finalize_frame surfacing an error is the kernel-commit
-        // failure being reported back; record a zero report and
-        // continue finalizing the remaining scenes so no scene leaks
-        // acquisitions.
-        reports.emplace_back();
+        kr = req.commit(combined_flags, user_data);
+      }
+
+      // Finalize every engaged scene in this group against this
+      // group's kernel result. Same shape as the pre-split path,
+      // bounded to this group.
+      for (auto& eb : engaged) {
+        auto r = scenes_[eb.scene_index]->finalize_frame(std::move(eb.state), kr);
+        if (r) {
+          reports[eb.scene_index] = std::move(*r);
+        }
+        // finalize_frame returning an error means the kernel-commit
+        // failure is being reported back; the slot stays zero.
+      }
+
+      if (!kr && !first_error) {
+        first_error = kr.error();
       }
     }
 
-    if (!kr) {
-      return drm::unexpected<std::error_code>(kr.error());
+    if (first_error) {
+      return drm::unexpected<std::error_code>(first_error);
     }
     return reports;
   }
@@ -383,12 +463,13 @@ void SceneSet::remove_scene(std::size_t index) {
 }
 
 drm::expected<std::vector<CommitReport>, std::error_code> SceneSet::commit(std::uint32_t flags,
-                                                                           void* user_data) {
-  return impl_->do_commit_all(flags, /*test_only=*/false, user_data);
+                                                                           void* user_data,
+                                                                           NarrowPolicy policy) {
+  return impl_->do_commit_all(flags, /*test_only=*/false, user_data, policy);
 }
 
-drm::expected<std::vector<CommitReport>, std::error_code> SceneSet::test() {
-  return impl_->do_commit_all(0, /*test_only=*/true, /*user_data=*/nullptr);
+drm::expected<std::vector<CommitReport>, std::error_code> SceneSet::test(NarrowPolicy policy) {
+  return impl_->do_commit_all(0, /*test_only=*/true, /*user_data=*/nullptr, policy);
 }
 
 }  // namespace drm::scene

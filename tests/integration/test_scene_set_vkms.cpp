@@ -320,3 +320,132 @@ TEST(SceneSetVkms, AddRemoveSceneRoundTrip) {
   EXPECT_EQ((*set_r)->scene_count(), 2U);
   EXPECT_NE((*set_r)->scene(0), nullptr);
 }
+
+// AutoOnModeset split round-trip. Commit one scene first so it's
+// steady-state, then add_scene a fresh second scene (first_commit_
+// pending → would_request_modeset == true). NarrowPolicy::AutoOnModeset
+// should split the next commit into two ioctls (modeset-needing first,
+// steady second) and both scenes' reports should reflect a successful
+// frame. After this split commit, both scenes are steady, so the
+// follow-up AutoOnModeset commit collapses back to one combined ioctl.
+TEST(SceneSetVkms, AutoOnModesetSplitsThenReconverges) {
+  const auto node = find_vkms_multi_crtc(2);
+  if (!node) {
+    GTEST_SKIP() << "no vkms instance with >=2 connected outputs";
+  }
+  auto fx_r = open_scenes(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+  ASSERT_GE(fx.scenes.size(), 2U);
+
+  // Build SceneSet with just scene[0]. scene[1] stays on the side.
+  std::unique_ptr<drm::scene::LayerScene> spare = std::move(fx.scenes[1]);
+  fx.scenes.pop_back();
+  auto set_r = drm::scene::SceneSet::create(*fx.dev, std::move(fx.scenes));
+  ASSERT_TRUE(set_r.has_value()) << set_r.error().message();
+
+  // Layer for scene[0].
+  {
+    const auto& o0 = fx.outputs[0];
+    auto src = drm::scene::DumbBufferSource::create(*fx.dev, o0.mode.hdisplay, o0.mode.vdisplay,
+                                                    DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    drm::scene::LayerDesc desc;
+    desc.source = std::move(*src);
+    desc.display.src_rect = drm::scene::Rect{0, 0, o0.mode.hdisplay, o0.mode.vdisplay};
+    desc.display.dst_rect = drm::scene::Rect{0, 0, o0.mode.hdisplay, o0.mode.vdisplay};
+    ASSERT_TRUE((*set_r)->scene(0));
+    auto h = (*set_r)->scene(0)->add_layer(std::move(desc));
+    ASSERT_TRUE(h.has_value()) << h.error().message();
+  }
+
+  // Real commit to flip scene[0] past first_commit_.
+  {
+    auto reports = (*set_r)->commit(0, nullptr, drm::scene::NarrowPolicy::AutoOnModeset);
+    ASSERT_TRUE(reports.has_value()) << reports.error().message();
+    ASSERT_EQ(reports->size(), 1U);
+  }
+
+  // Add the second scene + a layer. would_request_modeset is true on
+  // the fresh scene; the existing scene[0] is steady. Mixed state →
+  // AutoOnModeset should split.
+  const auto& o1 = fx.outputs[1];
+  {
+    auto src = drm::scene::DumbBufferSource::create(*fx.dev, o1.mode.hdisplay, o1.mode.vdisplay,
+                                                    DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    drm::scene::LayerDesc desc;
+    desc.source = std::move(*src);
+    desc.display.src_rect = drm::scene::Rect{0, 0, o1.mode.hdisplay, o1.mode.vdisplay};
+    desc.display.dst_rect = drm::scene::Rect{0, 0, o1.mode.hdisplay, o1.mode.vdisplay};
+    auto h = spare->add_layer(std::move(desc));
+    ASSERT_TRUE(h.has_value()) << h.error().message();
+  }
+
+  EXPECT_FALSE((*set_r)->scene(0)->would_request_modeset())
+      << "scene[0] should be steady after first commit";
+  EXPECT_TRUE(spare->would_request_modeset())
+      << "fresh scene should report modeset-pending pre-add";
+
+  auto added = (*set_r)->add_scene(std::move(spare));
+  ASSERT_TRUE(added.has_value()) << added.error().message();
+  EXPECT_EQ((*set_r)->scene_count(), 2U);
+
+  // Real commit under AutoOnModeset; the kernel sees two separate
+  // commits in sequence. Both scenes' reports should reflect their
+  // active layer.
+  {
+    auto reports = (*set_r)->commit(0, nullptr, drm::scene::NarrowPolicy::AutoOnModeset);
+    ASSERT_TRUE(reports.has_value()) << reports.error().message();
+    ASSERT_EQ(reports->size(), 2U);
+    EXPECT_EQ((*reports)[0].layers_total, 1U);
+    EXPECT_EQ((*reports)[1].layers_total, 1U);
+  }
+
+  // After the split commit, both scenes have flipped past first_commit_.
+  // The next AutoOnModeset commit should reconverge to one combined
+  // group, and a TEST call should also accept.
+  EXPECT_FALSE((*set_r)->scene(0)->would_request_modeset());
+  EXPECT_FALSE((*set_r)->scene(1)->would_request_modeset());
+
+  auto follow = (*set_r)->test(drm::scene::NarrowPolicy::AutoOnModeset);
+  ASSERT_TRUE(follow.has_value()) << follow.error().message();
+  EXPECT_EQ(follow->size(), 2U);
+}
+
+// PerCrtc forces a per-scene ioctl unconditionally; verify it also
+// accepts on vkms with two engaged scenes and produces one report per
+// scene with the layer counts the underlying scene assignments
+// reported.
+TEST(SceneSetVkms, PerCrtcAcceptsTwoEngagedScenes) {
+  const auto node = find_vkms_multi_crtc(2);
+  if (!node) {
+    GTEST_SKIP() << "no vkms instance with >=2 connected outputs";
+  }
+  auto fx_r = open_scenes(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+
+  for (std::size_t i = 0; i < fx.outputs.size(); ++i) {
+    const auto& o = fx.outputs[i];
+    auto src = drm::scene::DumbBufferSource::create(*fx.dev, o.mode.hdisplay, o.mode.vdisplay,
+                                                    DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    drm::scene::LayerDesc desc;
+    desc.source = std::move(*src);
+    desc.display.src_rect = drm::scene::Rect{0, 0, o.mode.hdisplay, o.mode.vdisplay};
+    desc.display.dst_rect = drm::scene::Rect{0, 0, o.mode.hdisplay, o.mode.vdisplay};
+    auto h = fx.scenes[i]->add_layer(std::move(desc));
+    ASSERT_TRUE(h.has_value()) << h.error().message();
+  }
+
+  auto set_r = drm::scene::SceneSet::create(*fx.dev, std::move(fx.scenes));
+  ASSERT_TRUE(set_r.has_value()) << set_r.error().message();
+
+  auto reports = (*set_r)->test(drm::scene::NarrowPolicy::PerCrtc);
+  ASSERT_TRUE(reports.has_value()) << reports.error().message();
+  ASSERT_EQ(reports->size(), fx.outputs.size());
+  for (std::size_t i = 0; i < reports->size(); ++i) {
+    EXPECT_EQ((*reports)[i].layers_total, 1U) << "scene " << i;
+  }
+}

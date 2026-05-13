@@ -236,6 +236,24 @@ class LayerScene {
   /// them before passing the combined flags to req.commit().
   [[nodiscard]] static std::uint32_t effective_flags_of(const FrameBuildState& state) noexcept;
 
+  /// Conservative pre-build peek: would the next `build_frame_into`
+  /// pass OR `DRM_MODE_ATOMIC_ALLOW_MODESET` into its effective_flags?
+  /// Returns true for the cases knowable without running the build —
+  /// `first_commit_` pending (after `create()` / `rebind()` / a
+  /// session-resume cycle), or user-set HDR / colorspace state that
+  /// hasn't been written yet.
+  ///
+  /// Returns false for cases that depend on layer content (auto-
+  /// derived colorspace / HDR signaling changes from the current
+  /// layer set) — those would still flip `effective_flags` during
+  /// the actual build, but only the build pass itself can observe
+  /// them. Treat false as "probably not, but may still escalate."
+  ///
+  /// Used by `SceneSet`'s `NarrowPolicy::AutoOnModeset` to decide
+  /// whether to partition the combined commit into a modeset-needing
+  /// group and a steady-state group before any destructive work runs.
+  [[nodiscard]] bool would_request_modeset() const noexcept;
+
   /// Set or clear the HDR static metadata signaled on this scene's
   /// connector. Wires the per-CRTC `HdrMetadataCache` so the next
   /// `commit()` writes the connector's `HDR_OUTPUT_METADATA`
