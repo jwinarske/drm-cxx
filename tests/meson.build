@@ -329,6 +329,13 @@ test('test_scene',
   ),
 )
 
+test('test_scene_set',
+  executable('test_scene_set',
+    'unit/test_scene_set.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_stream_capability',
   executable('test_stream_capability',
     'unit/test_stream_capability.cpp',

@@ -169,6 +169,13 @@ target_link_libraries(test_scene PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_scene)
 
+add_executable(test_scene_set unit/test_scene_set.cpp)
+target_link_libraries(test_scene_set PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_scene_set)
+
 add_executable(test_stream_capability unit/test_stream_capability.cpp)
 target_link_libraries(test_stream_capability PRIVATE
   drm-cxx::drm-cxx
