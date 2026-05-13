@@ -6,9 +6,6 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/log.hpp>
 
-#include <cerrno>
-#include <cstring>
-#include <string>
 #include <sys/stat.h>
 
 #if DRM_CXX_HAS_EGL_STREAMS
@@ -16,6 +13,8 @@
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <EGL/eglplatform.h>
+#include <cstddef>
 #include <utility>
 #include <vector>
 #endif
@@ -130,7 +129,7 @@ StreamCapability probe_stream_capability(const drm::Device& dev) noexcept {
   StreamCapability chosen_caps;
   bool chosen_has_streams = false;
 
-  for (auto egl_dev : devices) {
+  for (auto* egl_dev : devices) {
     const char* drm_path = rt.query_device_string(egl_dev, EGL_DRM_DEVICE_FILE_EXT);
     if (!matches_drm_node(dev.fd(), drm_path)) {
       continue;
