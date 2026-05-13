@@ -190,7 +190,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   bool has_new_layer = false;
   if (previous_allocation_valid_) {
     for (const auto* layer : output.layers()) {
-      if (layer->is_composition_layer()) {
+      if (layer->is_composition_layer() || layer->is_externally_bound()) {
         continue;
       }
       bool seen = false;
@@ -312,7 +312,8 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   }
   // Mark unassigned layers as needing composition
   for (auto* layer : output.layers()) {
-    if (!layer->assigned_plane_.has_value() && !layer->is_composition_layer()) {
+    if (!layer->assigned_plane_.has_value() && !layer->is_composition_layer() &&
+        !layer->is_externally_bound()) {
       layer->needs_composition_ = true;
     }
   }
@@ -328,8 +329,22 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
                                                                    const uint32_t crtc_index) {
   output.sort_layers_by_zpos();
 
+  // Externally-bound layers (e.g. EGL stream sources whose plane is
+  // owned out-of-band) must not feed into the bipartite match — they
+  // already have a plane and the scene writes their properties
+  // directly. Strip them once here so split_independent_groups,
+  // place_group, and the per-group TEST commits don't see them.
+  std::vector<Layer*> placeable_layers;
+  placeable_layers.reserve(output.layers().size());
+  for (auto* l : output.layers()) {
+    if (l->is_externally_bound()) {
+      continue;
+    }
+    placeable_layers.push_back(l);
+  }
+
   // §13.7 Spatial intersection splitting
-  auto groups = split_independent_groups(output.layers());
+  auto groups = split_independent_groups(placeable_layers);
 
   auto available_planes = registry_.for_crtc(crtc_index);
   // Externally reserved planes are off-limits for placement *and*
@@ -388,7 +403,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     std::vector<Layer*> placeable;
     placeable.reserve(output.layers().size());
     for (auto* l : output.layers()) {
-      if (l->force_composited_ || l->is_composition_layer()) {
+      if (l->force_composited_ || l->is_composition_layer() || l->is_externally_bound()) {
         continue;
       }
       placeable.push_back(l);
@@ -431,7 +446,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
 
   // Mark unassigned layers
   for (auto* layer : output.layers()) {
-    if (!layer->assigned_plane_.has_value() && !layer->is_composition_layer()) {
+    if (!layer->assigned_plane_.has_value() && !layer->is_composition_layer() &&
+        !layer->is_externally_bound()) {
       layer->needs_composition_ = true;
     }
   }
@@ -1084,6 +1100,13 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
       continue;
     }
     if (prop_store_.is_immutable(plane_id, name).value_or(false)) {
+      continue;
+    }
+    // Externally-bound layers (EGL stream sources) have their FB_ID
+    // set up by the producer-side extension stack; suppress the
+    // scene-side write defensively even if a caller has somehow
+    // stuffed FB_ID into the layer's property bag.
+    if (layer.is_externally_bound() && name == "FB_ID") {
       continue;
     }
     bool need_write = full_write;

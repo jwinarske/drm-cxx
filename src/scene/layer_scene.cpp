@@ -845,8 +845,20 @@ class LayerScene::Impl {
                           std::uint32_t crtc_id, std::optional<std::uint64_t> default_zpos_hint) {
     const auto& d = src.display();
     const auto fmt = src.source().format();
+    const bool driver_owns_binding =
+        src.source().binding_model() == BindingModel::DriverOwnsBinding;
 
-    dst.set_property("FB_ID", fb_id);
+    // DriverOwnsBinding sources (EGL stream consumers, ...) get their
+    // FB_ID set up by the producer-side extension stack
+    // (eglStreamConsumerOutputEXT and friends), not by the scene.
+    // Skipping the property write avoids racing the consumer's
+    // internal FB_ID state and lets the allocator treat the layer as
+    // externally bound — see is_externally_bound() and the parallel
+    // guards in the allocator.
+    dst.set_externally_bound(driver_owns_binding);
+    if (!driver_owns_binding) {
+      dst.set_property("FB_ID", fb_id);
+    }
     // CRTC_ID binds the plane to this scene's CRTC. Without it the
     // kernel rejects the plane commit (FB armed, but the plane is still
     // bound to nothing / to whatever the previous committed CRTC was),

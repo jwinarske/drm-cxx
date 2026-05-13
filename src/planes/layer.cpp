@@ -128,6 +128,15 @@ bool Layer::is_composition_layer() const noexcept {
   return is_composition_layer_;
 }
 
+bool Layer::is_externally_bound() const noexcept {
+  return externally_bound_;
+}
+
+Layer& Layer::set_externally_bound(bool externally_bound) noexcept {
+  externally_bound_ = externally_bound;
+  return *this;
+}
+
 bool Layer::is_dirty() const noexcept {
   return dirty_;
 }

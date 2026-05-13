@@ -59,6 +59,23 @@ class Layer {
   [[nodiscard]] Rect crtc_rect() const;
 
   [[nodiscard]] bool is_composition_layer() const noexcept;
+
+  /// True iff the scene has pinned this layer to a specific plane and
+  /// owns the property writes itself — the allocator must skip it
+  /// during plane assignment, scoring, and the test-commit pipeline,
+  /// the same way it skips `is_composition_layer()`. Used by EGL
+  /// stream sources, whose backing plane state is established
+  /// out-of-band (eglStreamConsumerOutputEXT) before the scene's
+  /// atomic commit; the allocator's TEST commits would reject a
+  /// stream-bound plane that lacks the kernel-internal FB_ID those
+  /// extensions set up.
+  [[nodiscard]] bool is_externally_bound() const noexcept;
+
+  /// Mark this layer as externally bound. Default false. Set by the
+  /// scene during layer lowering for sources whose `binding_model()`
+  /// is `DriverOwnsBinding`.
+  Layer& set_externally_bound(bool externally_bound) noexcept;
+
   [[nodiscard]] bool is_dirty() const noexcept;
   [[nodiscard]] ContentType content_type() const noexcept;
   [[nodiscard]] uint32_t update_hz() const noexcept;
@@ -76,6 +93,7 @@ class Layer {
   bool needs_composition_{false};
   bool dirty_{true};
   bool is_composition_layer_{false};
+  bool externally_bound_{false};
   std::optional<uint32_t> assigned_plane_;
   ContentType content_type_{ContentType::Generic};
   uint32_t update_hz_{0};
