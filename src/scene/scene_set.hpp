@@ -166,10 +166,51 @@ class SceneSet {
   [[nodiscard]] std::size_t scene_count() const noexcept;
 
   /// Non-owning access to a child scene by index. Returns nullptr for
-  /// out-of-range indices; otherwise the pointer is valid for the
-  /// SceneSet's lifetime.
+  /// out-of-range indices and for slots vacated by `remove_scene` (the
+  /// vector keeps stable indices across remove/add so live SetLayerHandles
+  /// don't shift); otherwise the pointer is valid until the next
+  /// `remove_scene` or SceneSet destruction.
   [[nodiscard]] LayerScene* scene(std::size_t index) noexcept;
   [[nodiscard]] const LayerScene* scene(std::size_t index) const noexcept;
+
+  /// Application-driven hotplug: attach a new child scene to the set.
+  /// The caller-supplied `scene` must already be constructed against
+  /// the same `drm::Device` the SceneSet was created with (mismatched
+  /// devices fail with `-EBADF` on the next combined commit; the set
+  /// does not introspect to enforce this up front).
+  ///
+  /// New scenes fill the lowest-index hole left by a previous
+  /// `remove_scene`, if any; otherwise the scene is appended and the
+  /// vector grows by one. The returned index is the slot the scene
+  /// occupies and is stable until the slot is explicitly removed.
+  ///
+  /// Recommended usage: the application's hotplug handler builds a
+  /// fresh `LayerScene` (typically after probing the new connector),
+  /// runs one single-CRTC `LayerScene::commit()` to clear the implicit
+  /// `ALLOW_MODESET` from first commit, then hands the warmed scene to
+  /// `add_scene` so the next `SceneSet::commit()` doesn't promote the
+  /// whole combined commit to modeset mode. See docs/multi_output.md
+  /// for the full warmup pattern.
+  ///
+  /// Rejections:
+  ///   * `std::errc::invalid_argument` — `scene` is null.
+  [[nodiscard]] drm::expected<std::size_t, std::error_code> add_scene(
+      std::unique_ptr<LayerScene> scene);
+
+  /// Application-driven hotplug: detach the child scene at `index` and
+  /// destroy it. Walks every active SetLayerSpec and drops any pins
+  /// that target this scene; the underlying shared `LayerBufferSource`
+  /// stays alive for other targets it rides. SetLayerHandles that
+  /// retain pins on other scenes remain valid; ones whose every target
+  /// was on the removed scene become non-functional but still safe
+  /// (subsequent `remove_layer` calls are no-ops).
+  ///
+  /// Out-of-range indices and already-removed slots are silent no-ops.
+  /// The slot itself is preserved as a hole — `scene(index)` returns
+  /// nullptr, `scene_count()` still reports `index + 1` until a
+  /// later `add_scene` reuses the hole. This keeps every other
+  /// scene's index stable across the call.
+  void remove_scene(std::size_t index);
 
  private:
   class Impl;
