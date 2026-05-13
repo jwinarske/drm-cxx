@@ -11,6 +11,7 @@
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
 #include "output_signaling.hpp"
+#include "stream_capability.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
@@ -20,6 +21,7 @@
 #include <drm-cxx/display/connector_capabilities.hpp>
 #include <drm-cxx/display/hdr_metadata.hpp>
 #include <drm-cxx/display/hdr_metadata_cache.hpp>
+#include <drm-cxx/dumb/buffer.hpp>
 #include <drm-cxx/log.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
 #include <drm-cxx/planes/allocator.hpp>
@@ -32,6 +34,7 @@
 #include <xf86drmMode.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -73,6 +76,148 @@ class LayerScene::Impl {
 
   [[nodiscard]] const StreamCapability& stream_capability() const noexcept {
     return stream_capability_;
+  }
+
+  // Empirical mixing probe. See LayerScene::probe_stream_mixing()
+  // docstring for the API contract. Implementation runs a single
+  // DRM_MODE_ATOMIC_TEST_ONLY commit that adds an FB-ID-attached
+  // plane alongside an existing stream-bound plane on the same
+  // CRTC; if the kernel accepts, the driver permits FB-ID + stream
+  // consumer cohabitation on one CRTC and the scene upgrades to
+  // Mixed.
+  drm::expected<StreamMixingMode, std::error_code> probe_stream_mixing() {
+    if (mixing_probe_ran_) {
+      return stream_capability_.mixing;
+    }
+    if (!stream_capability_.usable()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+
+    // Find a bound stream layer to test against. Without one, there's
+    // no kernel-side stream-consumer plane state for the FB-ID probe
+    // plane to coexist with.
+    std::optional<std::uint32_t> stream_plane_id;
+    for (const auto& slot : slots_) {
+      if (slot.alive && slot.stream_pinned_plane_id.has_value()) {
+        stream_plane_id = slot.stream_pinned_plane_id;
+        break;
+      }
+    }
+    if (!stream_plane_id.has_value()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+
+    // Pick a plane to host the probe FB. Skip cursor, the stream pin,
+    // every other stream pin, and the canvas reservation. Require
+    // ARGB8888 support so the dumb buffer we're about to allocate
+    // matches.
+    std::optional<std::uint32_t> probe_plane_id;
+    for (const auto* p : registry_.for_crtc(*crtc_index)) {
+      if (p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (p->id == *stream_plane_id) {
+        continue;
+      }
+      if (last_canvas_plane_id_.has_value() && *last_canvas_plane_id_ == p->id) {
+        continue;
+      }
+      const bool pinned_elsewhere =
+          std::any_of(slots_.begin(), slots_.end(), [pid = p->id](const Slot& s) {
+            return s.alive && s.stream_pinned_plane_id.has_value() &&
+                   *s.stream_pinned_plane_id == pid;
+          });
+      if (pinned_elsewhere) {
+        continue;
+      }
+      if (!p->supports_format(DRM_FORMAT_ARGB8888)) {
+        continue;
+      }
+      probe_plane_id = p->id;
+      break;
+    }
+    if (!probe_plane_id.has_value()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::resource_unavailable_try_again));
+    }
+
+    // Allocate a small throwaway dumb buffer + FB. The kernel only
+    // looks at the FB's format / size / pitch during atomic_check;
+    // it never reads pixels for TEST commits.
+    static constexpr std::uint32_t probe_dim = 16;
+    drm::dumb::Config dumb_cfg;
+    dumb_cfg.width = probe_dim;
+    dumb_cfg.height = probe_dim;
+    dumb_cfg.drm_format = DRM_FORMAT_ARGB8888;
+    dumb_cfg.bpp = 32;
+    dumb_cfg.add_fb = true;
+    auto probe_buf_r = drm::dumb::Buffer::create(*dev_, dumb_cfg);
+    if (!probe_buf_r) {
+      return drm::unexpected<std::error_code>(probe_buf_r.error());
+    }
+    auto probe_buf = std::move(*probe_buf_r);
+
+    drm::AtomicRequest req(*dev_);
+    if (!req.valid()) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
+    }
+
+    auto write = [&](std::uint32_t plane_id, const char* name,
+                     std::uint64_t value) -> drm::expected<void, std::error_code> {
+      auto id = props_.property_id(plane_id, name);
+      if (!id.has_value()) {
+        return {};
+      }
+      if (props_.is_immutable(plane_id, name).value_or(false)) {
+        return {};
+      }
+      return req.add_property(plane_id, *id, value);
+    };
+
+    const std::uint64_t src_w = static_cast<std::uint64_t>(probe_dim) << 16U;
+    const std::uint64_t src_h = static_cast<std::uint64_t>(probe_dim) << 16U;
+    const std::array<std::pair<const char*, std::uint64_t>, 10> probe_props{{
+        {"FB_ID", probe_buf.fb_id()},
+        {"CRTC_ID", crtc_id_},
+        {"CRTC_X", 0},
+        {"CRTC_Y", 0},
+        {"CRTC_W", probe_dim},
+        {"CRTC_H", probe_dim},
+        {"SRC_X", 0},
+        {"SRC_Y", 0},
+        {"SRC_W", src_w},
+        {"SRC_H", src_h},
+    }};
+    for (const auto& [name, value] : probe_props) {
+      if (auto r = write(*probe_plane_id, name, value); !r) {
+        return drm::unexpected<std::error_code>(r.error());
+      }
+    }
+
+    // TEST-only. The kernel evaluates whether the proposed delta —
+    // FB-ID arm on probe_plane — is admissible alongside the current
+    // stream-consumer state on stream_plane. Success means the
+    // driver does NOT enforce single-stream-layer-per-CRTC; failure
+    // typically means it does (EBUSY / EINVAL on the test commit).
+    const auto commit_r = req.commit(DRM_MODE_ATOMIC_TEST_ONLY);
+    mixing_probe_ran_ = true;
+    if (commit_r.has_value()) {
+      stream_capability_.mixing = StreamMixingMode::Mixed;
+      drm::log_info("scene::LayerScene: stream-mixing probe accepted by kernel; upgraded to Mixed");
+      return StreamMixingMode::Mixed;
+    }
+    drm::log_info(
+        "scene::LayerScene: stream-mixing probe rejected by kernel ({}); staying Exclusive",
+        commit_r.error().message());
+    return stream_capability_.mixing;
   }
 
   ~Impl() { destroy_mode_blob(); }
@@ -670,6 +815,9 @@ class LayerScene::Impl {
     // values so the next composing frame re-resolves from scratch.
     last_canvas_plane_id_.reset();
     cached_crtc_index_.reset();
+    // Empirical mixing result is tied to the prior fd's kernel state;
+    // re-probe under the fresh fd if the caller wants the upgrade.
+    mixing_probe_ran_ = false;
     if (composition_canvas_) {
       if (auto r = composition_canvas_->on_session_resumed(new_dev); !r) {
         composition_canvas_.reset();
@@ -774,6 +922,10 @@ class LayerScene::Impl {
     composition_canvas_.reset();
     last_canvas_plane_id_.reset();
     cached_crtc_index_.reset();
+    // The mixing probe's last verdict was for the previous CRTC; on
+    // the new one the driver may behave differently. Re-probe on
+    // next call.
+    mixing_probe_ran_ = false;
 
     // First commit after rebind must modeset the new CRTC.
     first_commit_ = true;
@@ -2024,8 +2176,16 @@ class LayerScene::Impl {
   // preserved across rebind / resume — the capability describes the
   // driver and is invariant under connector/CRTC changes). Consumed
   // by add_layer to gate `BindingModel::DriverOwnsBinding` sources
-  // and by the Phase 7.2 commit-path branch.
+  // and by the commit-path branch.
   StreamCapability stream_capability_;
+
+  // True once probe_stream_mixing() has run since the most recent
+  // create() / rebind() / session_resumed. Once true, subsequent
+  // calls return the cached `stream_capability_.mixing` without
+  // re-running the kernel-side TEST commit. Cleared on rebind and
+  // session resume because the new CRTC / fresh fd would need its
+  // own empirical confirmation.
+  bool mixing_probe_ran_{false};
 
   // Lazy composition canvas. Allocated on first compose_unassigned()
   // call that actually needs it; survives across frames so the dumb
@@ -2136,6 +2296,10 @@ std::size_t LayerScene::layer_count() const noexcept {
 
 const StreamCapability& LayerScene::stream_capability() const noexcept {
   return impl_->stream_capability();
+}
+
+drm::expected<StreamMixingMode, std::error_code> LayerScene::probe_stream_mixing() {
+  return impl_->probe_stream_mixing();
 }
 
 drm::expected<CommitReport, std::error_code> LayerScene::test() {

@@ -110,7 +110,45 @@ class LayerScene {
   /// branch the producer-side wiring on the extension set the driver
   /// exposes. Survives `rebind()` and pause/resume verbatim — the
   /// capability describes the driver, not the connector or CRTC.
+  /// The `mixing` field may be upgraded from `Exclusive` to `Mixed`
+  /// by a successful `probe_stream_mixing()` call.
   [[nodiscard]] const StreamCapability& stream_capability() const noexcept;
+
+  /// Run an empirical TEST atomic commit that pairs an already-bound
+  /// stream consumer plane with a temporary FB-ID-attached plane on
+  /// the same CRTC. On kernel acceptance the scene's cached
+  /// `StreamCapability::mixing` upgrades from `Exclusive` to `Mixed`
+  /// and the result is sticky for the rest of the scene's lifetime
+  /// (cleared on `rebind()` / `on_session_resumed()`).
+  ///
+  /// Preconditions:
+  ///
+  ///   * `stream_capability().usable()` must be true.
+  ///   * At least one alive layer must have a `DriverOwnsBinding`
+  ///     source that has already been committed once (i.e. has been
+  ///     pinned to a plane and `bind_to_plane()` has succeeded).
+  ///     Without an existing stream binding the probe has nothing to
+  ///     test against.
+  ///
+  /// Returns the current mixing mode on success, regardless of
+  /// whether it was upgraded. The probe is informational; callers
+  /// who get back `Exclusive` know the driver enforces the
+  /// single-stream-layer-per-CRTC restriction on this hardware.
+  ///
+  /// Error returns:
+  ///
+  ///   * `errc::function_not_supported` — capability is `Unsupported`
+  ///     or no stream layer is currently bound to a plane.
+  ///   * `errc::resource_unavailable_try_again` — no DRM plane is
+  ///     available on the CRTC to serve as the probe's FB-ID target
+  ///     (every non-cursor plane is already in use or reserved).
+  ///   * `errc::not_enough_memory` — failed to allocate the probe's
+  ///     scratch dumb buffer or atomic request.
+  ///
+  /// Idempotent on subsequent calls: once the probe has run (success
+  /// or kernel rejection), the cached value is returned without
+  /// re-issuing the TEST commit.
+  drm::expected<StreamMixingMode, std::error_code> probe_stream_mixing();
 
   // ── Commit cycle ───────────────────────────────────────────────────
 
