@@ -32,7 +32,6 @@
 #include <xf86drmMode.h>
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -198,6 +197,14 @@ class LayerScene::Impl {
     if (slot == nullptr) {
       return;
     }
+    // If the source's stream consumer is currently bound to a plane,
+    // tear that binding down before the source unique_ptr is reset.
+    // unbind_from_plane is noexcept; failures are logged inside the
+    // source.
+    if (slot->stream_pinned_plane_id.has_value() && slot->scene_layer) {
+      slot->scene_layer->source().unbind_from_plane(*slot->stream_pinned_plane_id);
+      slot->stream_pinned_plane_id.reset();
+    }
     if (slot->planes_layer != nullptr) {
       // Drop any allocator state keyed on this Layer's address before
       // freeing it. last_committed_ stores raw Layer pointers as
@@ -248,6 +255,13 @@ class LayerScene::Impl {
     if (suspended_) {
       return CommitReport{};
     }
+
+    // Establish stream-source plane pins before acquire_all runs. EGL
+    // stream sources return EAGAIN from acquire() until their consumer
+    // is wired to a plane (eglStreamConsumerOutputEXT), and that wiring
+    // is what ensure_stream_layer_pins drives via the source's
+    // bind_to_plane hook. Non-stream sources are untouched.
+    ensure_stream_layer_pins();
 
     // Acquire every live layer's buffer up front. On any failure the
     // already-acquired buffers are handed back to their sources.
@@ -355,10 +369,25 @@ class LayerScene::Impl {
         last_canvas_plane_id_ = resv;
       }
     }
-    const std::array<std::uint32_t, 1> reserved_planes{last_canvas_plane_id_.value_or(0)};
-    const auto reserved_span = last_canvas_plane_id_.has_value()
-                                   ? drm::span<const std::uint32_t>(reserved_planes.data(), 1)
-                                   : drm::span<const std::uint32_t>{};
+    // External reservations: the composition canvas plane (if any)
+    // plus every plane pinned to a DriverOwnsBinding source. The
+    // allocator must leave all of these alone — the scene writes
+    // their properties itself via compose_unassigned / the canvas-arm
+    // path and arm_stream_layer_planes respectively.
+    std::vector<std::uint32_t> reserved_planes;
+    reserved_planes.reserve(1 + acquisitions.size());
+    if (last_canvas_plane_id_.has_value()) {
+      reserved_planes.push_back(*last_canvas_plane_id_);
+    }
+    for (const auto& acq : acquisitions) {
+      if (acq.stream_pinned_plane_id.has_value()) {
+        reserved_planes.push_back(*acq.stream_pinned_plane_id);
+      }
+    }
+    const auto reserved_span =
+        reserved_planes.empty()
+            ? drm::span<const std::uint32_t>{}
+            : drm::span<const std::uint32_t>(reserved_planes.data(), reserved_planes.size());
     auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         allocator_->apply(output_, req, effective_flags, reserved_span);
     if (!assigned) {
@@ -386,6 +415,13 @@ class LayerScene::Impl {
     // transparent layer ghosts whatever scans out below it on the
     // CRTC. Match the canvas's premultiplied output convention so
     // both natively-assigned and composited cells blend identically.
+    // Arm property bags for stream-pinned planes. Has to run before
+    // the blend / color defaults pass so those passes see CRTC_*/SRC_*
+    // already in req for the same plane; the allocator's diff-write
+    // logic doesn't service stream planes (they're filtered out), so
+    // this is the only path that writes their per-frame properties.
+    arm_stream_layer_planes(acquisitions, req, report);
+
     arm_layer_plane_blend_defaults(acquisitions, req, report);
     arm_layer_plane_color_props(acquisitions, req, report);
 
@@ -547,6 +583,11 @@ class LayerScene::Impl {
       if (slot.alive && slot.scene_layer) {
         slot.scene_layer->source().on_session_paused();
       }
+      // Clear stream pins: the source's on_session_paused tears down
+      // the EGL stream and producer surface, so the previous plane
+      // binding is gone too. The next commit's ensure_stream_layer_pins
+      // pass will re-pick and re-bind once the session resumes.
+      slot.stream_pinned_plane_id.reset();
     }
     if (composition_canvas_) {
       composition_canvas_->on_session_paused();
@@ -695,7 +736,17 @@ class LayerScene::Impl {
     for (auto& slot : slots_) {
       if (!slot.alive || !slot.scene_layer) {
         slot.planes_layer = nullptr;
+        slot.stream_pinned_plane_id.reset();
         continue;
+      }
+      // Stream pins are CRTC-local: the new CRTC may not even expose
+      // the same plane id, and the kernel-side consumer binding from
+      // the old CRTC is no longer valid. Tear it down via the source
+      // hook; the next commit's ensure_stream_layer_pins pass will
+      // re-pick and re-bind on the new CRTC.
+      if (slot.stream_pinned_plane_id.has_value()) {
+        slot.scene_layer->source().unbind_from_plane(*slot.stream_pinned_plane_id);
+        slot.stream_pinned_plane_id.reset();
       }
       auto& fresh = output_.add_layer();
       slot.planes_layer = &fresh;
@@ -768,6 +819,12 @@ class LayerScene::Impl {
     drm::planes::Layer* planes_layer{nullptr};
     std::uint32_t generation{0};
     bool alive{false};
+    // For DriverOwnsBinding sources only: the DRM plane this source's
+    // EGL stream consumer has been bound to. Picked once on first
+    // commit, reused thereafter; cleared on session pause / rebind so
+    // the next commit re-picks and re-calls bind_to_plane (the source
+    // tears down its stream + producer surface on session pause).
+    std::optional<std::uint32_t> stream_pinned_plane_id;
   };
 
   struct AcquisitionSlot {
@@ -782,6 +839,12 @@ class LayerScene::Impl {
     // been armed and before atomic commit) — `BufferMapping`'s dtor
     // pairs with `gbm_bo_unmap` for GBM-backed sources.
     std::optional<drm::BufferMapping> cached_mapping;
+    // Copied from Slot::stream_pinned_plane_id at acquire_all time.
+    // Drives the post-apply property writes in arm_stream_layer_planes
+    // and the blend / color arm passes' fallback when the allocator
+    // didn't assign the layer (which is always the case for stream
+    // layers — they're filtered out of the bipartite match).
+    std::optional<std::uint32_t> stream_pinned_plane_id;
   };
 
   // Slot-table helpers — return nullptr on any handle that doesn't
@@ -824,7 +887,13 @@ class LayerScene::Impl {
                       slot.scene_layer->handle().id, acq.error().message());
         return drm::unexpected<std::error_code>(acq.error());
       }
-      out.push_back({slot.scene_layer.get(), slot.planes_layer, *acq});
+      out.push_back({
+          .scene_layer = slot.scene_layer.get(),
+          .planes_layer = slot.planes_layer,
+          .buffer = *acq,
+          .cached_mapping = std::nullopt,
+          .stream_pinned_plane_id = slot.stream_pinned_plane_id,
+      });
     }
     return {};
   }
@@ -1062,6 +1131,133 @@ class LayerScene::Impl {
     }
     return (primary_fallback != nullptr) ? std::optional<std::uint32_t>(primary_fallback->id)
                                          : std::nullopt;
+  }
+
+  // Pick a DRM plane for a DriverOwnsBinding source's stream consumer
+  // to bind to. The allocator never matches stream layers (their
+  // planes::Layer is_externally_bound), so the scene picks here:
+  // first CRTC-compatible non-cursor plane that supports the source's
+  // format and isn't already pinned to another stream layer or
+  // reserved for the composition canvas. Prefers PRIMARY when free,
+  // otherwise the first matching OVERLAY. Returns nullopt when no
+  // candidate exists; the caller drops the stream layer for the frame
+  // and retries next commit.
+  std::optional<std::uint32_t> pick_stream_plane(
+      std::uint32_t crtc_index, std::uint32_t source_fourcc,
+      const std::vector<std::uint32_t>& already_pinned) const {
+    auto is_unavailable = [&](std::uint32_t plane_id) {
+      if (last_canvas_plane_id_.has_value() && *last_canvas_plane_id_ == plane_id) {
+        return true;
+      }
+      return std::any_of(already_pinned.begin(), already_pinned.end(),
+                         [plane_id](std::uint32_t p) { return p == plane_id; });
+    };
+    const drm::planes::PlaneCapabilities* primary_match = nullptr;
+    for (const auto* p : registry_.for_crtc(crtc_index)) {
+      if (p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (is_unavailable(p->id)) {
+        continue;
+      }
+      if (!p->supports_format(source_fourcc)) {
+        continue;
+      }
+      if (p->type == drm::planes::DRMPlaneType::PRIMARY) {
+        if (primary_match == nullptr) {
+          primary_match = p;
+        }
+        continue;
+      }
+      // OVERLAY (or any non-cursor non-primary) — take the first one.
+      return p->id;
+    }
+    if (primary_match != nullptr) {
+      return primary_match->id;
+    }
+    return std::nullopt;
+  }
+
+  // For every alive slot whose source is DriverOwnsBinding and that
+  // has no current plane pin, pick a plane and call the source's
+  // bind_to_plane(). On success the slot remembers the plane; on
+  // failure the slot stays unpinned and the source's acquire() will
+  // return EAGAIN, so the scene drops the layer for this frame and
+  // the next commit retries.
+  //
+  // Called before acquire_all(), because EglStreamSource::acquire()
+  // returns EAGAIN until bind_to_plane has succeeded.
+  void ensure_stream_layer_pins() {
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return;
+    }
+    std::vector<std::uint32_t> already_pinned;
+    already_pinned.reserve(8);
+    for (const auto& slot : slots_) {
+      if (slot.alive && slot.stream_pinned_plane_id.has_value()) {
+        already_pinned.push_back(*slot.stream_pinned_plane_id);
+      }
+    }
+    for (auto& slot : slots_) {
+      if (!slot.alive || slot.scene_layer == nullptr) {
+        continue;
+      }
+      if (slot.stream_pinned_plane_id.has_value()) {
+        continue;
+      }
+      if (slot.scene_layer->source().binding_model() != BindingModel::DriverOwnsBinding) {
+        continue;
+      }
+      const auto fmt = slot.scene_layer->source().format();
+      const auto plane_id = pick_stream_plane(*crtc_index, fmt.drm_fourcc, already_pinned);
+      if (!plane_id.has_value()) {
+        drm::log_warn(
+            "scene::LayerScene: no DRM plane available for stream layer {} (format 0x{:x})",
+            slot.scene_layer->handle().id, fmt.drm_fourcc);
+        continue;
+      }
+      auto bind_r = slot.scene_layer->source().bind_to_plane(*plane_id);
+      if (!bind_r) {
+        drm::log_warn("scene::LayerScene: bind_to_plane({}) failed for stream layer {}: {}",
+                      *plane_id, slot.scene_layer->handle().id, bind_r.error().message());
+        continue;
+      }
+      slot.stream_pinned_plane_id = plane_id;
+      already_pinned.push_back(*plane_id);
+    }
+  }
+
+  // Write the property bag for each stream-pinned plane directly into
+  // `req`. Mirrors what Allocator::apply_layer_to_plane_real does for
+  // allocator-assigned layers, but reads the planes::Layer property
+  // map for a plane the scene picked (not one the allocator chose)
+  // and unconditionally suppresses FB_ID. CRTC_*/SRC_* and other
+  // writable properties land normally so the kernel sees a complete
+  // plane configuration alongside the consumer-supplied FB_ID.
+  void arm_stream_layer_planes(const std::vector<AcquisitionSlot>& acquisitions,
+                               drm::AtomicRequest& req, CommitReport& report) {
+    for (const auto& acq : acquisitions) {
+      if (!acq.stream_pinned_plane_id.has_value() || acq.planes_layer == nullptr) {
+        continue;
+      }
+      const std::uint32_t plane_id = *acq.stream_pinned_plane_id;
+      for (const auto& [name, value] : acq.planes_layer->properties()) {
+        if (name == "FB_ID") {
+          continue;
+        }
+        const auto prop_id = props_.property_id(plane_id, name);
+        if (!prop_id) {
+          continue;
+        }
+        if (props_.is_immutable(plane_id, name).value_or(false)) {
+          continue;
+        }
+        if (auto r = req.add_property(plane_id, *prop_id, value); r.has_value()) {
+          ++report.properties_written;
+        }
+      }
+    }
   }
 
   // Pick a plane on this CRTC that the allocator did not assign and
@@ -1434,7 +1630,13 @@ class LayerScene::Impl {
       return;
     }
     for (const auto& acq : acquisitions) {
-      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      // Fall back to the scene-side stream pin when the allocator
+      // didn't assign — stream-bound layers are filtered out of
+      // placement but their plane still needs blend defaults armed.
+      auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        plane_id = acq.stream_pinned_plane_id;
+      }
       if (!plane_id.has_value()) {
         continue;
       }
@@ -1477,7 +1679,12 @@ class LayerScene::Impl {
       return;
     }
     for (const auto& acq : acquisitions) {
-      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      // Fall back to the stream pin when the allocator didn't assign,
+      // mirroring arm_layer_plane_blend_defaults.
+      auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        plane_id = acq.stream_pinned_plane_id;
+      }
       if (!plane_id.has_value()) {
         continue;
       }
