@@ -165,6 +165,20 @@ target_link_libraries(test_stream_capability PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_stream_capability)
 
+add_executable(test_egl_stream_builder unit/test_egl_stream_builder.cpp)
+target_link_libraries(test_egl_stream_builder PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_egl_stream_builder)
+
+add_executable(test_egl_stream_source unit/test_egl_stream_source.cpp)
+target_link_libraries(test_egl_stream_source PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_egl_stream_source)
+
 add_executable(test_composite_canvas unit/test_composite_canvas.cpp)
 target_link_libraries(test_composite_canvas PRIVATE
   drm-cxx::drm-cxx

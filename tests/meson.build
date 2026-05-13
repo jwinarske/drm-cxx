@@ -326,6 +326,20 @@ test('test_stream_capability',
   ),
 )
 
+test('test_egl_stream_builder',
+  executable('test_egl_stream_builder',
+    'unit/test_egl_stream_builder.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_egl_stream_source',
+  executable('test_egl_stream_source',
+    'unit/test_egl_stream_source.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_external_dma_buf_source',
   executable('test_external_dma_buf_source',
     'unit/test_external_dma_buf_source.cpp',
