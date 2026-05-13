@@ -67,6 +67,8 @@ namespace drm::scene {
 
 #if DRM_CXX_HAS_EGL_STREAMS
 
+class EglStreamSource;
+
 /// Build an EGL-streams-backed `LayerBufferSource` end-to-end —
 /// device matching, display + config + context setup, stream + producer
 /// surface wiring. Stateless: every call is independent.
@@ -131,16 +133,28 @@ class EglStreamBuilder {
     /// destruction responsibility is the caller's regardless.
     bool context_created_by_builder{false};
 
-    /// Producer EGLSurface. Make this current along with `context`
-    /// to render frames into the stream. May change identity across
-    /// the source's bind_to_plane rebind events — re-query through
-    /// the upcast source's diagnostics path if you need it after
-    /// the first commit.
-    EGLSurface producer_surface{EGL_NO_SURFACE};
+    /// Non-owning pointer to the underlying `EglStreamSource`. Stays
+    /// valid as long as the `LayerScene` that owns the (moved-into)
+    /// `source` keeps the layer alive. Use this to query the
+    /// producer surface after the first `LayerScene::commit()`:
+    /// NVIDIA's driver only lets the producer surface come into
+    /// existence after a consumer is attached, and the consumer
+    /// attach happens inside the scene's bind_to_plane pre-pass on
+    /// first commit.
+    ///
+    /// Typical flow:
+    ///
+    ///   scene.add_layer({.source = std::move(bld.source), ...});
+    ///   scene.commit();   // triggers source->bind_to_plane()
+    ///   auto surf = bld.source_ptr->producer_surface();
+    ///   eglMakeCurrent(bld.display, surf, surf, bld.context);
+    ///
+    /// Set to nullptr only when build() fails before constructing
+    /// the source; success paths always populate it.
+    EglStreamSource* source_ptr{nullptr};
 
     /// Backing EGLStream. Mostly diagnostic; the source manages the
-    /// stream's lifecycle. Like `producer_surface`, identity may
-    /// change across rebinds.
+    /// stream's lifecycle. Identity may change across rebinds.
     EGLStreamKHR stream{EGL_NO_STREAM_KHR};
   };
 

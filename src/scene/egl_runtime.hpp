@@ -59,6 +59,11 @@ struct EglRuntime {
   decltype(&eglDestroySurface) destroy_surface{nullptr};
   decltype(&eglChooseConfig) choose_config{nullptr};
   decltype(&eglBindAPI) bind_api{nullptr};
+  // EGL 1.5 core entry point — uses EGLAttrib (intptr_t) attribute
+  // lists, distinct from the EXT variant (`get_platform_display`,
+  // EGLint*). Needed for `EGL_DRM_MASTER_FD_EXT` which is documented
+  // for the core call only. Null on libEGL < 1.5.
+  decltype(&eglGetPlatformDisplay) get_platform_display_core{nullptr};
 
   // Device-enumeration extension entry points — non-null iff the
   // corresponding client-side extension is advertised. The probe
@@ -82,6 +87,12 @@ struct EglRuntime {
   PFNEGLCREATESTREAMPRODUCERSURFACEKHRPROC create_stream_producer_surface{nullptr};
   PFNEGLSTREAMCONSUMERACQUIREKHRPROC stream_consumer_acquire{nullptr};
   PFNEGLSTREAMCONSUMERRELEASEKHRPROC stream_consumer_release{nullptr};
+  // EGL_KHR_stream_attrib: takes an EGLAttrib attribute list so
+  // callers can pass `EGL_DRM_ATOMIC_REQUEST_NV, drmModeAtomicReq*`
+  // for the first-frame consumer acquire on an EGL_EXT_output_drm
+  // plane. NVIDIA's driver fills in FB_ID for the stream's first
+  // frame and submits the atomic commit itself.
+  PFNEGLSTREAMCONSUMERACQUIREATTRIBKHRPROC stream_consumer_acquire_attrib{nullptr};
 };
 
 /// Process-singleton EGL runtime accessor. First call performs the

@@ -114,6 +114,23 @@ class LayerScene {
   /// by a successful `probe_stream_mixing()` call.
   [[nodiscard]] const StreamCapability& stream_capability() const noexcept;
 
+  /// Run the stream-layer plane-pin pre-pass that normally fires
+  /// inside `commit()`. After this returns, every alive
+  /// `DriverOwnsBinding` layer has its source bound to a plane (or
+  /// has logged a failure), and `EglStreamSource::producer_surface()`
+  /// returns a usable handle.
+  ///
+  /// Callers driving the NVIDIA-Streams flow use this to obtain the
+  /// producer surface BEFORE the first commit so they can render a
+  /// first frame; `commit()` then routes the atomic request through
+  /// `eglStreamConsumerAcquireAttribKHR` with
+  /// `EGL_DRM_ATOMIC_REQUEST_NV`, handing the first-frame acquire +
+  /// commit submission off to the driver.
+  ///
+  /// Idempotent: subsequent calls are a no-op for slots already
+  /// pinned. Safe to call before any frame has been committed.
+  void prepare_stream_layers();
+
   /// Run an empirical TEST atomic commit that pairs an already-bound
   /// stream consumer plane with a temporary FB-ID-attached plane on
   /// the same CRTC. On kernel acceptance the scene's cached

@@ -16,6 +16,7 @@
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <sys/stat.h>
@@ -160,7 +161,7 @@ drm::expected<EglStreamBuilder::Result, std::error_code> EglStreamBuilder::build
     return drm::unexpected<std::error_code>(make_errc(std::errc::invalid_argument));
   }
   const auto& rt = egl_runtime();
-  if (!rt.loaded || (rt.initialize == nullptr) || (rt.get_platform_display == nullptr)) {
+  if (!rt.loaded || (rt.initialize == nullptr) || (rt.get_platform_display_core == nullptr)) {
     return drm::unexpected<std::error_code>(make_errc(std::errc::function_not_supported));
   }
 
@@ -178,9 +179,24 @@ drm::expected<EglStreamBuilder::Result, std::error_code> EglStreamBuilder::build
       drm::log_warn("EglStreamBuilder: no EGL device matches the DRM node");
       return drm::unexpected<std::error_code>(make_errc(std::errc::no_such_device));
     }
-    result.display = rt.get_platform_display(EGL_PLATFORM_DEVICE_EXT, egl_dev, nullptr);
+
+    // EGL 1.5 core eglGetPlatformDisplay with EGL_DRM_MASTER_FD_EXT.
+    // NVIDIA's EGL stack opens its own DRM fd internally; without
+    // being told the application's master fd, eglStreamConsumerOutputEXT
+    // fails with EGL_BAD_ACCESS even when our drm::Device IS master
+    // on its fd. The EXT variant of eglGetPlatformDisplay takes
+    // EGLint*, which can't hold a master fd value on 64-bit systems;
+    // the core EGL 1.5 call's EGLAttrib (intptr_t) attribute list
+    // is the right shape.
+    const std::array<EGLAttrib, 3> dpy_attribs{
+        EGL_DRM_MASTER_FD_EXT,
+        static_cast<EGLAttrib>(req.device->fd()),
+        EGL_NONE,
+    };
+    result.display =
+        rt.get_platform_display_core(EGL_PLATFORM_DEVICE_EXT, egl_dev, dpy_attribs.data());
     if (result.display == EGL_NO_DISPLAY) {
-      drm::log_warn("EglStreamBuilder: eglGetPlatformDisplayEXT failed (egl 0x{:x})",
+      drm::log_warn("EglStreamBuilder: eglGetPlatformDisplay failed (egl 0x{:x})",
                     rt.get_error != nullptr ? rt.get_error() : 0);
       return drm::unexpected<std::error_code>(make_errc(std::errc::io_error));
     }
@@ -232,12 +248,16 @@ drm::expected<EglStreamBuilder::Result, std::error_code> EglStreamBuilder::build
     return drm::unexpected<std::error_code>(src.error());
   }
 
-  // Snapshot the producer-side handles into the result. Identity is
-  // stable until a bind_to_plane rebind event, at which point the
-  // source recreates them and the cached values here go stale —
-  // documented in the header.
-  result.producer_surface = (*src)->producer_surface();
+  // Snapshot the stream handle. The producer surface stays
+  // EGL_NO_SURFACE until the first scene commit triggers
+  // EglStreamSource::bind_to_plane, which is the order NVIDIA's
+  // driver requires (consumer first, then producer surface). The
+  // user fetches the eventual surface through `source_ptr` after
+  // the first commit. `source_ptr` is non-owning; the scene holds
+  // the unique_ptr below, and the source outlives both pointers
+  // until LayerScene::remove_layer or scene destruction runs.
   result.stream = (*src)->stream();
+  result.source_ptr = src->get();
   result.source = std::move(*src);
   return result;
 }

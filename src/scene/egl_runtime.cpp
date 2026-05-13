@@ -48,6 +48,8 @@ void initialize_runtime(EglRuntime& rt) noexcept {
   rt.destroy_surface = resolve_sym<decltype(rt.destroy_surface)>(rt.handle, "eglDestroySurface");
   rt.choose_config = resolve_sym<decltype(rt.choose_config)>(rt.handle, "eglChooseConfig");
   rt.bind_api = resolve_sym<decltype(rt.bind_api)>(rt.handle, "eglBindAPI");
+  rt.get_platform_display_core =
+      resolve_sym<decltype(rt.get_platform_display_core)>(rt.handle, "eglGetPlatformDisplay");
 
   if ((rt.get_proc_address == nullptr) || (rt.query_string == nullptr) ||
       (rt.initialize == nullptr) || (rt.terminate == nullptr) || (rt.get_error == nullptr)) {
@@ -93,6 +95,15 @@ void initialize_runtime(EglRuntime& rt) noexcept {
       rt.get_proc_address, "eglStreamConsumerAcquireKHR");
   rt.stream_consumer_release = resolve_proc<PFNEGLSTREAMCONSUMERRELEASEKHRPROC>(
       rt.get_proc_address, "eglStreamConsumerReleaseKHR");
+  // Try the KHR name first (system-header standard), fall back to
+  // NVIDIA's EXT alias — NVIDIA exports both, but older drivers
+  // shipped only the EXT name.
+  rt.stream_consumer_acquire_attrib = resolve_proc<PFNEGLSTREAMCONSUMERACQUIREATTRIBKHRPROC>(
+      rt.get_proc_address, "eglStreamConsumerAcquireAttribKHR");
+  if (rt.stream_consumer_acquire_attrib == nullptr) {
+    rt.stream_consumer_acquire_attrib = resolve_proc<PFNEGLSTREAMCONSUMERACQUIREATTRIBKHRPROC>(
+        rt.get_proc_address, "eglStreamConsumerAcquireAttribEXT");
+  }
 
   rt.loaded = true;
 }

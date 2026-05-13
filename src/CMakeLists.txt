@@ -371,11 +371,16 @@ if(DRM_CXX_HAS_GSTREAMER)
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
 endif()
 
-# EglStreamBuilder header only installs when the streams gate is on —
-# the header pulls in EGL/egl.h and would fail to compile on hosts
-# without EGL development headers.
+# EglStreamBuilder + EglStreamSource headers only install when the
+# streams gate is on — both pull in EGL/egl.h and would fail to
+# compile on hosts without EGL development headers. The source
+# header is part of the public surface so callers can query
+# `producer_surface()` after the scene's first commit triggers the
+# deferred producer-side attachment.
 if(DRM_CXX_HAS_EGL_STREAMS)
-  install(FILES scene/egl_stream_builder.hpp
+  install(FILES
+      scene/egl_stream_builder.hpp
+      scene/egl_stream_source.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
 endif()
 

@@ -326,12 +326,16 @@ if has_gstreamer
   )
 endif
 
-# EglStreamBuilder header only installs when the streams gate is on —
-# pulls in EGL/egl.h and would fail to compile on hosts without
-# EGL development headers.
+# EglStreamBuilder + EglStreamSource headers only install when the
+# streams gate is on — both pull in EGL/egl.h and would fail to
+# compile on hosts without EGL development headers. The source
+# header is part of the public surface so callers can query
+# producer_surface() after the scene's first commit triggers the
+# deferred producer-side attachment.
 if has_egl_streams
   install_headers(
     'scene/egl_stream_builder.hpp',
+    'scene/egl_stream_source.hpp',
     subdir : 'drm-cxx/scene',
   )
 endif

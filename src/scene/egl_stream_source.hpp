@@ -51,6 +51,7 @@
 #include "stream_capability.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/modeset/atomic.hpp>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -151,10 +152,44 @@ class EglStreamSource final : public LayerBufferSource {
     return bound_plane_id_;
   }
 
+  /// True iff a producer frame has been pushed but the consumer-side
+  /// first-frame acquire (`prime_first_commit`) hasn't run yet.
+  /// LayerScene queries this to decide whether to route its first
+  /// atomic commit through `eglStreamConsumerAcquireAttribKHR` (with
+  /// `EGL_DRM_ATOMIC_REQUEST_NV`) instead of `drmModeAtomicCommit`.
+  /// After the first prime succeeds the source flips to
+  /// auto-acquire and subsequent commits go through normal KMS.
+  [[nodiscard]] bool needs_first_frame_prime() const noexcept {
+    return (stream_ != EGL_NO_STREAM_KHR) && !first_frame_primed_;
+  }
+
+  /// Drive the NVIDIA first-frame consumer acquire: hand the
+  /// caller's atomic request to `eglStreamConsumerAcquireAttribKHR`
+  /// with `EGL_DRM_ATOMIC_REQUEST_NV`. The driver fills in FB_ID
+  /// for the stream's first frame and submits the commit. On
+  /// success, re-enables `EGL_CONSUMER_AUTO_ACQUIRE_EXT` so
+  /// subsequent frames flow through NVIDIA's internal commits
+  /// without further scene intervention. The caller (LayerScene)
+  /// must NOT then drmModeAtomicCommit the same request — the
+  /// driver already did.
+  ///
+  /// Requires the producer to have pushed at least one frame
+  /// (eglSwapBuffers) since `bind_to_plane`. Returns:
+  ///
+  ///   * `errc::function_not_supported` — entry point missing on
+  ///     this libEGL.
+  ///   * `errc::resource_unavailable_try_again` — stream isn't
+  ///     bound, or producer hasn't yet pushed a frame.
+  ///   * `errc::io_error` — the underlying EGL call failed.
+  ///
+  /// Idempotent: a second call after success is a no-op.
+  drm::expected<void, std::error_code> prime_first_commit(drm::AtomicRequest& req);
+
  private:
   explicit EglStreamSource(Config cfg) noexcept;
 
-  [[nodiscard]] drm::expected<void, std::error_code> create_stream_and_producer() noexcept;
+  [[nodiscard]] drm::expected<void, std::error_code> create_stream() noexcept;
+  [[nodiscard]] drm::expected<void, std::error_code> create_producer_surface() noexcept;
   void destroy_stream_and_producer() noexcept;
 
   Config config_;
@@ -162,6 +197,10 @@ class EglStreamSource final : public LayerBufferSource {
   EGLSurface producer_surface_{EGL_NO_SURFACE};
   std::optional<std::uint32_t> bound_plane_id_;
   bool session_paused_{false};
+  // Tracks whether `prime_first_commit` has driven the NVIDIA
+  // first-frame consumer acquire on the current stream. Reset
+  // when the stream itself is rebuilt (destroy_stream_and_producer).
+  bool first_frame_primed_{false};
 };
 
 }  // namespace drm::scene

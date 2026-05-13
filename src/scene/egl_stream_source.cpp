@@ -11,12 +11,24 @@
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/log.hpp>
+#include <drm-cxx/modeset/atomic.hpp>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <system_error>
+
+namespace {
+// EGL_NV_stream_attrib + EGL_NV_output_drm_atomic constants. Not in
+// the system /usr/include/EGL/eglext.h; values from NVIDIA's
+// eglext_nv.h shipped with the JetPack SDK. Anonymous-namespace
+// constants keep the macro-as-constant lint quiet without losing
+// the "EGL_..._EXT" / "_NV" naming the upstream headers use.
+constexpr EGLenum egl_consumer_auto_acquire_ext = 0x332B;
+constexpr EGLAttrib egl_drm_atomic_request_nv = 0x3333;
+}  // namespace
 
 namespace drm::scene {
 
@@ -48,9 +60,13 @@ drm::expected<std::unique_ptr<EglStreamSource>, std::error_code> EglStreamSource
   }
 
   std::unique_ptr<EglStreamSource> source(new EglStreamSource(config));
-  if (auto r = source->create_stream_and_producer(); !r) {
+  if (auto r = source->create_stream(); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
+  // Producer surface creation is deferred until bind_to_plane() —
+  // NVIDIA's driver rejects producer attachment to a stream that
+  // doesn't yet have a consumer, so producer surface lives behind
+  // the consumer-bind call.
   return source;
 }
 
@@ -60,24 +76,40 @@ EglStreamSource::~EglStreamSource() {
   destroy_stream_and_producer();
 }
 
-drm::expected<void, std::error_code> EglStreamSource::create_stream_and_producer() noexcept {
+drm::expected<void, std::error_code> EglStreamSource::create_stream() noexcept {
   const auto& rt = egl_runtime();
 
-  // Empty attribute list: producer/consumer latency, FIFO depth, and
-  // acquire timeout default to the driver's choices. Tuning lands
-  // later with a real workload to measure against — opinionated
-  // defaults here would be guesses.
-  const EGLint stream_attribs[] = {EGL_NONE};
+  // FIFO length 0 = mailbox mode: producer swaps never block waiting
+  // for the consumer to retire prior frames. EGL_CONSUMER_AUTO_ACQUIRE
+  // is left at its default (TRUE) so NVIDIA's driver pulls each
+  // producer frame and arms the consumer plane internally — desktop
+  // NVIDIA doesn't support EGL_NV_output_drm_atomic, so there's no
+  // Tegra-style EGL_DRM_ATOMIC_REQUEST_NV first-frame handoff
+  // available; the consumer drives plane updates on its own once a
+  // frame lands in the stream.
+  const EGLint stream_attribs[] = {
+      EGL_STREAM_FIFO_LENGTH_KHR,
+      0,
+      EGL_NONE,
+  };
   stream_ = rt.create_stream(config_.display, stream_attribs);
   if (stream_ == EGL_NO_STREAM_KHR) {
     drm::log_warn("EglStreamSource: eglCreateStreamKHR failed (egl error 0x{:x})",
                   rt.get_error != nullptr ? rt.get_error() : 0);
     return drm::unexpected<std::error_code>(make_errc(std::errc::io_error));
   }
+  return {};
+}
 
-  // Producer surface dimensions match the source's declared format.
-  // The user's GL/GLES context renders into this surface; eglSwapBuffers
-  // pushes the frame into the stream for the consumer to acquire.
+drm::expected<void, std::error_code> EglStreamSource::create_producer_surface() noexcept {
+  const auto& rt = egl_runtime();
+
+  // The producer surface can only be created AFTER a consumer is
+  // attached on NVIDIA's implementation: eglCreateStreamProducerSurfaceKHR
+  // returns EGL_BAD_STATE_KHR on a freshly-created stream with no
+  // consumer. The KHR spec is permissive about ordering; the driver
+  // isn't. Callers should invoke this from bind_to_plane after the
+  // consumer-side eglStreamConsumerOutputEXT call returns success.
   const EGLint surface_attribs[] = {
       EGL_WIDTH,  static_cast<EGLint>(config_.format.width),
       EGL_HEIGHT, static_cast<EGLint>(config_.format.height),
@@ -88,8 +120,6 @@ drm::expected<void, std::error_code> EglStreamSource::create_stream_and_producer
   if (producer_surface_ == EGL_NO_SURFACE) {
     drm::log_warn("EglStreamSource: eglCreateStreamProducerSurfaceKHR failed (egl error 0x{:x})",
                   rt.get_error != nullptr ? rt.get_error() : 0);
-    rt.destroy_stream(config_.display, stream_);
-    stream_ = EGL_NO_STREAM_KHR;
     return drm::unexpected<std::error_code>(make_errc(std::errc::io_error));
   }
   return {};
@@ -110,6 +140,56 @@ void EglStreamSource::destroy_stream_and_producer() noexcept {
     stream_ = EGL_NO_STREAM_KHR;
   }
   bound_plane_id_.reset();
+  // Fresh stream means we need to drive a fresh first-frame prime
+  // before NVIDIA's auto-acquire path can take over.
+  first_frame_primed_ = false;
+}
+
+drm::expected<void, std::error_code> EglStreamSource::prime_first_commit(drm::AtomicRequest& req) {
+  if (first_frame_primed_) {
+    return {};
+  }
+  const auto& rt = egl_runtime();
+  if (rt.stream_consumer_acquire_attrib == nullptr || rt.stream_attrib == nullptr) {
+    return drm::unexpected<std::error_code>(make_errc(std::errc::function_not_supported));
+  }
+  if (stream_ == EGL_NO_STREAM_KHR || !bound_plane_id_.has_value()) {
+    return drm::unexpected<std::error_code>(make_errc(std::errc::resource_unavailable_try_again));
+  }
+  auto* atomic = req.native_handle();
+  if (atomic == nullptr) {
+    return drm::unexpected<std::error_code>(make_errc(std::errc::invalid_argument));
+  }
+
+  // Hand the atomic request to NVIDIA. The driver fills in FB_ID
+  // for the stream's first frame and submits the commit itself —
+  // the caller MUST NOT call req.commit() after this returns
+  // success, or the kernel sees the same state twice.
+  const std::array<EGLAttrib, 3> attrs{
+      egl_drm_atomic_request_nv,
+      reinterpret_cast<EGLAttrib>(atomic),
+      EGL_NONE,
+  };
+  if (rt.stream_consumer_acquire_attrib(config_.display, stream_, attrs.data()) != EGL_TRUE) {
+    drm::log_warn(
+        "EglStreamSource: eglStreamConsumerAcquireAttribKHR (first-frame prime) failed "
+        "(egl error 0x{:x})",
+        rt.get_error != nullptr ? rt.get_error() : 0);
+    return drm::unexpected<std::error_code>(make_errc(std::errc::io_error));
+  }
+
+  // Re-enable auto-acquire so the producer's subsequent
+  // eglSwapBuffers calls drive plane updates through NVIDIA's
+  // internal commits, no scene intervention required.
+  if (rt.stream_attrib(config_.display, stream_,
+                       static_cast<EGLenum>(egl_consumer_auto_acquire_ext), EGL_TRUE) != EGL_TRUE) {
+    drm::log_warn("EglStreamSource: failed to re-enable auto-acquire (egl error 0x{:x})",
+                  rt.get_error != nullptr ? rt.get_error() : 0);
+    // Not fatal — the stream still has a consumer-side queue. The
+    // caller can keep driving frames; auto-acquire just remains off.
+  }
+  first_frame_primed_ = true;
+  return {};
 }
 
 drm::expected<AcquiredBuffer, std::error_code> EglStreamSource::acquire() {
@@ -160,9 +240,11 @@ drm::expected<void, std::error_code> EglStreamSource::bind_to_plane(std::uint32_
   if (bound_plane_id_.has_value()) {
     drm::log_info("EglStreamSource: rebinding plane {} -> {}", *bound_plane_id_, plane_id);
     destroy_stream_and_producer();
-    if (auto r = create_stream_and_producer(); !r) {
+    if (auto r = create_stream(); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
+    // Producer surface stays absent for now — created below after
+    // the consumer-bind call succeeds on the new plane.
   }
 
   // Enumerate the EGLOutputLayer that wraps the requested DRM plane.
@@ -195,6 +277,17 @@ drm::expected<void, std::error_code> EglStreamSource::bind_to_plane(std::uint32_
     return drm::unexpected<std::error_code>(make_errc(std::errc::io_error));
   }
 
+  // Now that the consumer is attached, create the producer surface.
+  // This is the order NVIDIA's implementation requires; the
+  // EGL_KHR_stream_producer_eglsurface spec is permissive but the
+  // driver returns EGL_BAD_STATE_KHR when called against a
+  // consumer-less stream.
+  if (producer_surface_ == EGL_NO_SURFACE) {
+    if (auto r = create_producer_surface(); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+  }
+
   bound_plane_id_ = plane_id;
   return {};
 }
@@ -206,12 +299,12 @@ void EglStreamSource::unbind_from_plane(std::uint32_t plane_id) noexcept {
   if (!bound_plane_id_.has_value() || *bound_plane_id_ != plane_id) {
     return;
   }
-  // Destroy + recreate. The stream cannot be retargeted in place on
-  // most drivers, and even where it can the state machine would need
-  // to be drained first. A fresh stream is simpler and matches what
-  // the scene expects from bind_to_plane being called next.
+  // Destroy + recreate the stream. The producer surface stays gone
+  // until the next bind_to_plane attaches a fresh consumer. The
+  // stream cannot be retargeted in place on most drivers, and even
+  // where it can the state machine would need to be drained first.
   destroy_stream_and_producer();
-  if (auto r = create_stream_and_producer(); !r) {
+  if (auto r = create_stream(); !r) {
     drm::log_warn("EglStreamSource: failed to recreate stream after unbind from plane {}: {}",
                   plane_id, r.error().message());
   }
@@ -229,10 +322,12 @@ void EglStreamSource::on_session_paused() noexcept {
 drm::expected<void, std::error_code> EglStreamSource::on_session_resumed(
     const drm::Device& /*new_dev*/) {
   // The EGLDisplay typically survives session pause (it's bound to
-  // the EGLDeviceEXT, not the DRM fd). Recreate the stream + producer
-  // surface and wait for the scene to call bind_to_plane again.
+  // the EGLDeviceEXT, not the DRM fd). Recreate the stream only;
+  // the producer surface gets created when the scene re-calls
+  // bind_to_plane on the new fd, since NVIDIA requires the consumer
+  // to be in place first.
   session_paused_ = false;
-  if (auto r = create_stream_and_producer(); !r) {
+  if (auto r = create_stream(); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
   return {};

@@ -29,6 +29,14 @@ class AtomicRequest {
 
   drm::expected<void, std::error_code> commit(uint32_t flags, void* user_data = nullptr);
 
+  /// Underlying libdrm handle. Exposed for EGL Streams: NVIDIA's
+  /// `eglStreamConsumerAcquireAttribEXT` accepts a
+  /// `drmModeAtomicReq*` via the `EGL_DRM_ATOMIC_REQUEST_NV`
+  /// attribute and submits the commit itself — there is no
+  /// equivalent libdrm-side hook. Returns null when the request
+  /// failed to allocate.
+  [[nodiscard]] drmModeAtomicReq* native_handle() const noexcept { return req_; }
+
   ~AtomicRequest();
 
   AtomicRequest(AtomicRequest&& /*other*/) noexcept;

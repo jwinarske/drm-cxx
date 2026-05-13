@@ -13,6 +13,10 @@
 #include "output_signaling.hpp"
 #include "stream_capability.hpp"
 
+#if DRM_CXX_HAS_EGL_STREAMS
+#include "egl_stream_source.hpp"
+#endif
+
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/property_store.hpp>
@@ -560,12 +564,15 @@ class LayerScene::Impl {
     // transparent layer ghosts whatever scans out below it on the
     // CRTC. Match the canvas's premultiplied output convention so
     // both natively-assigned and composited cells blend identically.
-    // Arm property bags for stream-pinned planes. Has to run before
-    // the blend / color defaults pass so those passes see CRTC_*/SRC_*
-    // already in req for the same plane; the allocator's diff-write
-    // logic doesn't service stream planes (they're filtered out), so
-    // this is the only path that writes their per-frame properties.
-    arm_stream_layer_planes(acquisitions, req, report);
+    // Stream layers are intentionally untouched in the scene's
+    // atomic commit. Desktop NVIDIA (no EGL_NV_output_drm_atomic
+    // extension) handles plane FB / CRTC binding inside
+    // eglStreamConsumerOutputEXT and subsequent auto-acquire
+    // events; if the scene writes CRTC_*/SRC_* without FB_ID the
+    // kernel rejects the commit (EINVAL on an active plane with
+    // no framebuffer). bookkeeping-only here keeps the dropped-
+    // layers tally honest.
+    count_stream_layers_assigned(acquisitions, report);
 
     arm_layer_plane_blend_defaults(acquisitions, req, report);
     arm_layer_plane_color_props(acquisitions, req, report);
@@ -1338,7 +1345,12 @@ class LayerScene::Impl {
   // the next commit retries.
   //
   // Called before acquire_all(), because EglStreamSource::acquire()
-  // returns EAGAIN until bind_to_plane has succeeded.
+  // returns EAGAIN until bind_to_plane has succeeded. Also called
+  // directly from LayerScene::prepare_stream_layers (the public
+  // pre-commit hook the NVIDIA-Streams first-frame flow needs), so
+  // it sits in the public section despite being implementation
+  // detail for everyone else.
+ public:
   void ensure_stream_layer_pins() {
     const auto crtc_index = resolve_crtc_index();
     if (!crtc_index.has_value()) {
@@ -1380,34 +1392,21 @@ class LayerScene::Impl {
     }
   }
 
-  // Write the property bag for each stream-pinned plane directly into
-  // `req`. Mirrors what Allocator::apply_layer_to_plane_real does for
-  // allocator-assigned layers, but reads the planes::Layer property
-  // map for a plane the scene picked (not one the allocator chose)
-  // and unconditionally suppresses FB_ID. CRTC_*/SRC_* and other
-  // writable properties land normally so the kernel sees a complete
-  // plane configuration alongside the consumer-supplied FB_ID.
-  void arm_stream_layer_planes(const std::vector<AcquisitionSlot>& acquisitions,
-                               drm::AtomicRequest& req, CommitReport& report) {
+ private:
+  // Bookkeeping for stream-pinned acquisitions. We don't write any
+  // KMS properties for these planes — desktop NVIDIA drives the
+  // consumer plane's FB / CRTC binding entirely inside
+  // eglStreamConsumerOutputEXT + auto-acquire; mixing in our own
+  // CRTC_*/SRC_* writes earns an EINVAL from atomic_check because
+  // the plane is "active" without a userspace-armed FB. The
+  // accounting here just keeps `report.layers_assigned` honest so
+  // the post-loop "dropped" tally doesn't fire on stream layers
+  // that are working as intended.
+  static void count_stream_layers_assigned(const std::vector<AcquisitionSlot>& acquisitions,
+                                           CommitReport& report) {
     for (const auto& acq : acquisitions) {
-      if (!acq.stream_pinned_plane_id.has_value() || acq.planes_layer == nullptr) {
-        continue;
-      }
-      const std::uint32_t plane_id = *acq.stream_pinned_plane_id;
-      for (const auto& [name, value] : acq.planes_layer->properties()) {
-        if (name == "FB_ID") {
-          continue;
-        }
-        const auto prop_id = props_.property_id(plane_id, name);
-        if (!prop_id) {
-          continue;
-        }
-        if (props_.is_immutable(plane_id, name).value_or(false)) {
-          continue;
-        }
-        if (auto r = req.add_property(plane_id, *prop_id, value); r.has_value()) {
-          ++report.properties_written;
-        }
+      if (acq.stream_pinned_plane_id.has_value() && acq.planes_layer != nullptr) {
+        ++report.layers_assigned;
       }
     }
   }
@@ -2300,6 +2299,10 @@ const StreamCapability& LayerScene::stream_capability() const noexcept {
 
 drm::expected<StreamMixingMode, std::error_code> LayerScene::probe_stream_mixing() {
   return impl_->probe_stream_mixing();
+}
+
+void LayerScene::prepare_stream_layers() {
+  impl_->ensure_stream_layer_pins();
 }
 
 drm::expected<CommitReport, std::error_code> LayerScene::test() {
