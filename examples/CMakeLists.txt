@@ -132,6 +132,15 @@ add_executable(stream_probe advanced/stream_probe/main.cpp)
 target_link_libraries(stream_probe PRIVATE drm-cxx::drm-cxx)
 target_include_directories(stream_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# multi_crtc_probe — enumerate connected outputs and report whether a
+# combined-CRTC TEST_ONLY atomic commit is accepted by the kernel.
+# Foundational probe for SceneSet-style multi-display work
+# (cluster_sim's passenger display, dual_display, video_wall_multi).
+# `--hotplug` re-runs the probe on each udev event.
+add_executable(multi_crtc_probe advanced/multi_crtc_probe/main.cpp)
+target_link_libraries(multi_crtc_probe PRIVATE drm-cxx::drm-cxx)
+target_include_directories(multi_crtc_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # stream_demo — end-to-end EGL Streams demo: a stream-source layer
 # centered over a dumb-buffer background, fed by a GLES 3 producer
 # loop that animates the clear color. Gated on DRM_CXX_HAS_EGL_STREAMS

@@ -307,6 +307,17 @@ test('test_layer_scene_rebind_vkms',
   ),
 )
 
+# SceneSet combined-commit + mirrored-layer tests against a vkms
+# instance with >=2 connected outputs. Skips when no qualifying
+# vkms is present (see the test source header for the configfs
+# provisioning recipe).
+test('test_scene_set_vkms',
+  executable('test_scene_set_vkms',
+    'integration/test_scene_set_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # Buffer-side coverage against the kernel's virtual GEM driver (VGEM):
 # dumb::Buffer lifecycle, BufferMapping coherence, DMA-BUF prime export
 # / cross-fd import. Self-skips when vgem isn't loaded, so this stays
@@ -325,6 +336,13 @@ test('test_vgem_buffer',
 test('test_scene',
   executable('test_scene',
     'unit/test_scene.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_scene_set',
+  executable('test_scene_set',
+    'unit/test_scene_set.cpp',
     dependencies : test_deps,
   ),
 )

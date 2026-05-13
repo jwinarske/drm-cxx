@@ -45,6 +45,7 @@ set(DRM_CXX_SOURCES
   scene/gst_appsink_source.cpp
   scene/layer_scene.cpp
   scene/output_signaling.cpp
+  scene/scene_set.cpp
   scene/stream_capability.cpp
   scene/v4l2_decoder_source.cpp
   sync/fence.cpp)
@@ -360,6 +361,7 @@ install(FILES
     scene/layer_handle.hpp
     scene/layer_scene.hpp
     scene/output_signaling.hpp
+    scene/scene_set.hpp
     scene/stream_capability.hpp
     scene/v4l2_decoder_source.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)

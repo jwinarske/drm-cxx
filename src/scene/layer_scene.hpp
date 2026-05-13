@@ -37,6 +37,7 @@
 #include <system_error>
 
 namespace drm {
+class AtomicRequest;
 class Device;
 }  // namespace drm
 
@@ -45,6 +46,17 @@ struct HdrSourceMetadata;
 }  // namespace drm::display
 
 namespace drm::scene {
+
+class FrameBuildState;
+
+// Hides FrameBuildState's destructor inside layer_scene.cpp so the
+// public header can keep the type opaque while still letting callers
+// hold std::unique_ptr to it.
+struct FrameBuildStateDeleter {
+  void operator()(FrameBuildState* state) const noexcept;
+};
+
+using FrameBuildPtr = std::unique_ptr<FrameBuildState, FrameBuildStateDeleter>;
 
 class LayerScene {
  public:
@@ -182,6 +194,48 @@ class LayerScene {
   [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(std::uint32_t flags = 0,
                                                                     void* user_data = nullptr);
 
+  // ── SceneSet integration (advanced) ─────────────────────────────────
+  //
+  // Two-phase commit primitive. drm::scene::SceneSet uses this to
+  // batch N scenes' property writes into one cross-CRTC atomic
+  // commit; standard applications call commit()/test() and don't
+  // touch the build_frame_into / finalize_frame surface directly.
+  //
+  // Contract:
+  //   1. Caller constructs a drm::AtomicRequest.
+  //   2. For each scene call build_frame_into(req, caller_flags,
+  //      test_only). Each call appends this scene's property writes
+  //      to `req` and returns a FrameBuildState (or null if the
+  //      scene is suspended — skip it for this cycle).
+  //   3. Caller OR-combines effective_flags_of(*state) across all
+  //      engaged scenes and issues ONE req.commit() / req.test()
+  //      against `req`.
+  //   4. For each engaged scene call finalize_frame(state, kr) with
+  //      the kernel result. finalize_frame reconciles per-layer
+  //      state (mark_clean, recorded placements, FB release, the
+  //      suspended_ flag on EACCES) and returns the CommitReport.
+  //
+  // build_frame_into already releases the scene's own acquisitions
+  // on its internal error paths (e.g. acquire_all failed). The
+  // caller is responsible for finalizing only those scenes that
+  // returned engaged states.
+  //
+  // A returned FrameBuildState that is destroyed without going
+  // through finalize_frame leaks the held acquisitions — callers
+  // MUST finalize unless build_frame_into itself returned an error.
+  [[nodiscard]] drm::expected<FrameBuildPtr, std::error_code> build_frame_into(
+      drm::AtomicRequest& req, std::uint32_t caller_flags, bool test_only);
+
+  [[nodiscard]] drm::expected<CommitReport, std::error_code> finalize_frame(
+      FrameBuildPtr state, drm::expected<void, std::error_code> kernel_result);
+
+  /// Inspect the OR-combined `flags` the scene's build pass requires
+  /// (caller's flags OR-ed with implicit ALLOW_MODESET on first
+  /// commit / colorspace change / HDR metadata change). Callers
+  /// merging multiple scenes into one commit collect these and OR
+  /// them before passing the combined flags to req.commit().
+  [[nodiscard]] static std::uint32_t effective_flags_of(const FrameBuildState& state) noexcept;
+
   /// Set or clear the HDR static metadata signaled on this scene's
   /// connector. Wires the per-CRTC `HdrMetadataCache` so the next
   /// `commit()` writes the connector's `HDR_OUTPUT_METADATA`
@@ -257,6 +311,13 @@ class LayerScene {
 
  private:
   class Impl;
+  // FrameBuildState and its deleter need to name LayerScene::Impl
+  // (private nested type) when constructing/destroying state out of
+  // line; friending is scoped to those two helpers so the rest of the
+  // SceneSet path goes through the public build_frame_into / finalize_frame
+  // surface above.
+  friend class FrameBuildState;
+  friend struct FrameBuildStateDeleter;
   explicit LayerScene(std::unique_ptr<Impl> impl) noexcept;
   std::unique_ptr<Impl> impl_;
 };

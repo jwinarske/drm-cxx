@@ -8,6 +8,7 @@ drm_cxx_sources = files(
   'core/format.cpp',
   'modeset/atomic.cpp',
   'modeset/mode.cpp',
+  'modeset/modeset.cpp',
   'modeset/page_flip.cpp',
   'planes/plane_registry.cpp',
   'planes/layer.cpp',
@@ -44,6 +45,7 @@ drm_cxx_sources = files(
   'scene/gst_appsink_source.cpp',
   'scene/layer_scene.cpp',
   'scene/output_signaling.cpp',
+  'scene/scene_set.cpp',
   'scene/stream_capability.cpp',
   'scene/v4l2_decoder_source.cpp',
   'sync/fence.cpp',
@@ -205,6 +207,7 @@ install_headers(
 install_headers(
   'modeset/atomic.hpp',
   'modeset/mode.hpp',
+  'modeset/modeset.hpp',
   'modeset/page_flip.hpp',
   subdir : 'drm-cxx/modeset',
 )
@@ -312,6 +315,7 @@ install_headers(
   'scene/layer_handle.hpp',
   'scene/layer_scene.hpp',
   'scene/output_signaling.hpp',
+  'scene/scene_set.hpp',
   'scene/stream_capability.hpp',
   'scene/v4l2_decoder_source.hpp',
   subdir : 'drm-cxx/scene',

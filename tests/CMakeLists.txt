@@ -124,6 +124,16 @@ target_link_libraries(test_layer_scene_rebind_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_rebind_vkms)
 
+# SceneSet combined-commit + mirrored-layer integration test against
+# a vkms instance with >= 2 connected outputs.
+add_executable(test_scene_set_vkms
+  integration/test_scene_set_vkms.cpp)
+target_link_libraries(test_scene_set_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_scene_set_vkms)
+
 # CRTC color-pipeline integration test against VKMS.
 # vkms only exposes GAMMA_LUT (not DEGAMMA / CTM), so the test
 # exercises the gamma half + the apply path; full DEGAMMA / CTM
@@ -168,6 +178,13 @@ target_link_libraries(test_scene PRIVATE
   GTest::gtest
   GTest::gtest_main)
 gtest_discover_tests(test_scene)
+
+add_executable(test_scene_set unit/test_scene_set.cpp)
+target_link_libraries(test_scene_set PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_scene_set)
 
 add_executable(test_stream_capability unit/test_stream_capability.cpp)
 target_link_libraries(test_stream_capability PRIVATE
