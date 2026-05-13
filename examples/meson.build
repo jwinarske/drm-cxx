@@ -75,6 +75,16 @@ executable('video_grid',
   dependencies : [drm_cxx_dep],
 )
 
+# dual_display — minimal multi-CRTC SceneSet demo. Builds one
+# LayerScene per connected output and lays a single shared mirrored
+# layer across all of them via SceneSet::add_layer; every frame is one
+# combined cross-CRTC atomic commit. Needs >=2 connected outputs (real
+# hardware or scripts/vkms_dual.sh up).
+executable('dual_display',
+  'scene/dual_display/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # camera — zero-copy libcamera -> KMS scanout viewfinder, with libyuv
 # fallbacks for cameras whose stride / fourcc can't be scanned out
 # directly (YUY2 -> NV12 repack, MJPEG -> NV12 decode-and-repack).

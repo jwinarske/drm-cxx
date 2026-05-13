@@ -22,7 +22,8 @@ foreach(_path
     allocator/scene_priority
     allocator/scene_formats
     scene/layered_demo
-    scene/video_grid)
+    scene/video_grid
+    scene/dual_display)
   get_filename_component(_ex ${_path} NAME)
   add_executable(${_ex} ${_path}/main.cpp)
   target_link_libraries(${_ex} PRIVATE drm-cxx::drm-cxx)
