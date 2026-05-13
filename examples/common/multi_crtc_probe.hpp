@@ -249,10 +249,16 @@ inline std::vector<ConnectedOutput> enumerate_connected_outputs(const drm::Devic
 
 /// Issue a `DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET`
 /// commit covering every supplied output simultaneously. Each output
-/// gets a fresh 320x180 XRGB8888 dumb buffer attached to its primary
-/// plane plus a full modeset on its CRTC. Kernel acceptance is the
-/// signal that a SceneSet-style coordinator can land tear-free
-/// synchronized changes across these outputs.
+/// gets a fresh XRGB8888 dumb buffer sized to its mode and attached to
+/// its primary plane, plus a full modeset on its CRTC. Kernel
+/// acceptance is the signal that a SceneSet-style coordinator can land
+/// tear-free synchronized changes across these outputs.
+///
+/// Why mode-sized buffers: the probe answers the multi-CRTC commit
+/// question, not the plane-scaling question. vkms's primary plane
+/// rejects SRC != CRTC, so an undersized scratch would yield ERANGE
+/// there even when the real scenes (which size their sources to the
+/// mode) would land cleanly.
 ///
 /// Side effects: none. Scratch buffers are torn down before return.
 inline ProbeReport probe_combined_atomic(const drm::Device& dev,
@@ -263,17 +269,18 @@ inline ProbeReport probe_combined_atomic(const drm::Device& dev,
     return report;  // NotApplicable (default verdict)
   }
 
-  // Allocate a scratch dumb FB per output. Small (320x180) — the
-  // kernel just needs a valid FB_ID; plane SRC_W/H below scales to
-  // whatever the mode dimensions are.
+  // One scratch FB per output, sized to that output's mode so SRC and
+  // CRTC match — keeps drivers without primary-plane scaling (vkms)
+  // out of the failure path.
   std::vector<drm::dumb::Buffer> scratch_fbs;
   scratch_fbs.reserve(outputs.size());
   for (std::size_t i = 0; i < outputs.size(); ++i) {
-    auto buf_r = drm::dumb::Buffer::create(dev, drm::dumb::Config{.width = 320,
-                                                                  .height = 180,
-                                                                  .drm_format = DRM_FORMAT_XRGB8888,
-                                                                  .bpp = 32,
-                                                                  .add_fb = true});
+    auto buf_r =
+        drm::dumb::Buffer::create(dev, drm::dumb::Config{.width = outputs[i].mode.hdisplay,
+                                                         .height = outputs[i].mode.vdisplay,
+                                                         .drm_format = DRM_FORMAT_XRGB8888,
+                                                         .bpp = 32,
+                                                         .add_fb = true});
     if (!buf_r) {
       report.verdict = CombinedAtomicVerdict::Rejected;
       report.error = buf_r.error();
@@ -334,8 +341,8 @@ inline ProbeReport probe_combined_atomic(const drm::Device& dev,
 
     const std::uint64_t crtc_w = o.mode.hdisplay;
     const std::uint64_t crtc_h = o.mode.vdisplay;
-    const std::uint64_t src_w16_16 = static_cast<std::uint64_t>(320) << 16;
-    const std::uint64_t src_h16_16 = static_cast<std::uint64_t>(180) << 16;
+    const std::uint64_t src_w16_16 = crtc_w << 16;
+    const std::uint64_t src_h16_16 = crtc_h << 16;
 
     for (auto [name, value] : std::initializer_list<std::pair<const char*, std::uint64_t>>{
              {"FB_ID", scratch_fbs[i].fb_id()},
