@@ -271,6 +271,16 @@ test('test_layer_scene_minimization_vkms',
   ),
 )
 
+# Hardware-gated EGL Streams integration. All TESTs self-skip via
+# GTEST_SKIP when probe_stream_capability returns Unsupported, so
+# CI hosts on Mesa-only stacks see the binary run-and-skip cleanly.
+test('test_egl_streams_hw',
+  executable('test_egl_streams_hw',
+    'integration/test_egl_streams_hw.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # CRTC color-pipeline integration against vkms.
 test('test_crtc_color_pipeline_vkms',
   executable('test_crtc_color_pipeline_vkms',
