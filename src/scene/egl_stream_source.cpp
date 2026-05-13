@@ -21,13 +21,15 @@
 #include <system_error>
 
 namespace {
-// EGL_NV_stream_attrib + EGL_NV_output_drm_atomic constants. Not in
-// the system /usr/include/EGL/eglext.h; values from NVIDIA's
-// eglext_nv.h shipped with the JetPack SDK. Anonymous-namespace
-// constants keep the macro-as-constant lint quiet without losing
-// the "EGL_..._EXT" / "_NV" naming the upstream headers use.
+// EGL_NV_stream_attrib + EGL_NV_output_drm_atomic +
+// EGL_NV_output_drm_flip_event constants. Not in the system
+// /usr/include/EGL/eglext.h; values from NVIDIA's eglext_nv.h
+// shipped with the JetPack SDK. Anonymous-namespace constants
+// keep the macro-as-constant lint quiet without losing the
+// "EGL_..._EXT" / "_NV" naming the upstream headers use.
 constexpr EGLenum egl_consumer_auto_acquire_ext = 0x332B;
 constexpr EGLAttrib egl_drm_atomic_request_nv = 0x3333;
+constexpr EGLint egl_drm_flip_event_data_nv = 0x333E;
 }  // namespace
 
 namespace drm::scene {
@@ -140,6 +142,10 @@ void EglStreamSource::destroy_stream_and_producer() noexcept {
     stream_ = EGL_NO_STREAM_KHR;
   }
   bound_plane_id_.reset();
+  // The flip-event identifier is keyed to the destroyed consumer
+  // layer; a re-bind queries a fresh value if the new layer
+  // supports the extension.
+  flip_event_data_.reset();
   // Fresh stream means we need to drive a fresh first-frame prime
   // before NVIDIA's auto-acquire path can take over.
   first_frame_primed_ = false;
@@ -285,6 +291,22 @@ drm::expected<void, std::error_code> EglStreamSource::bind_to_plane(std::uint32_
   if (producer_surface_ == EGL_NO_SURFACE) {
     if (auto r = create_producer_surface(); !r) {
       return drm::unexpected<std::error_code>(r.error());
+    }
+  }
+
+  // Query the NVIDIA flip-event identifier on the consumer layer.
+  // When the driver exports EGL_NV_output_drm_flip_event, this is
+  // the user_data value the kernel passes back on drm vblank
+  // events for the consumer plane -- callers route flips to the
+  // right source by matching it. Absence is informational, not
+  // an error: Mesa and older proprietary drivers don't export
+  // the extension and the query returns EGL_FALSE with no event
+  // identifier available.
+  if (rt.query_output_layer_attrib != nullptr) {
+    EGLAttrib data = 0;
+    if (rt.query_output_layer_attrib(config_.display, layer, egl_drm_flip_event_data_nv, &data) ==
+        EGL_TRUE) {
+      flip_event_data_ = static_cast<std::uint64_t>(data);
     }
   }
 

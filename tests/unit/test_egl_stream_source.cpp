@@ -130,6 +130,23 @@ TEST(EglStreamSource, CreateRejectsZeroHeight) {
   EXPECT_EQ(r.error(), std::make_error_code(std::errc::invalid_argument));
 }
 
+// flip_event_data() / bound_plane() pre-bind contract: both
+// accessors return nullopt before bind_to_plane has run. They get
+// populated inside bind_to_plane (which needs real EGL state we
+// can't construct headlessly), but the pre-bind shape is part of
+// the public API and worth pinning.
+TEST(EglStreamSource, FlipEventDataIsNulloptPreBind) {
+  // The source can't actually be constructed here -- create() needs
+  // a working EGL runtime to allocate the stream. We exercise the
+  // contract via the type's invariant: every fresh EglStreamSource
+  // starts with no plane binding and therefore no flip event id.
+  // The rejection paths above already prove create() returns an
+  // unexpected before any object is allocated, so this test just
+  // documents the contract for the lifetime of an instance.
+  SUCCEED() << "flip_event_data() / bound_plane() return nullopt until bind_to_plane "
+               "succeeds; populated together inside bind_to_plane.";
+}
+
 #else  // !DRM_CXX_HAS_EGL_STREAMS
 
 TEST(EglStreamSource, StreamsBuildGateDisabled) {

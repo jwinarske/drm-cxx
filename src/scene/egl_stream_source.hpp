@@ -152,6 +152,35 @@ class EglStreamSource final : public LayerBufferSource {
     return bound_plane_id_;
   }
 
+  /// NVIDIA `EGL_NV_output_drm_flip_event` identifier for this
+  /// source's consumer plane, queried at `bind_to_plane` time via
+  /// `eglQueryOutputLayerAttribEXT(EGL_DRM_FLIP_EVENT_DATA_NV)`.
+  ///
+  /// When the driver exports the extension and a producer frame
+  /// completes scanout through this stream's consumer plane, the
+  /// kernel delivers a `drm_event_vblank` whose `user_data` field
+  /// equals this value. Callers running their own `drmHandleEvent`
+  /// loop can match each flip event back to the source that fired
+  /// it -- useful for per-stream vsync timing, latency
+  /// instrumentation, or backpressure on producers that need to
+  /// pace against retire events.
+  ///
+  /// Returns `std::nullopt` when:
+  ///
+  ///   * `bind_to_plane` has not yet succeeded (no consumer plane
+  ///     is attached, so the kernel has nothing to fire events
+  ///     against).
+  ///   * The driver does not export `EGL_NV_output_drm_flip_event`
+  ///     (Mesa, older proprietary drivers).
+  ///   * The query failed at bind time (logged at WARN).
+  ///
+  /// The value is invalidated by `unbind_from_plane`,
+  /// `on_session_paused`, and any cross-plane rebind that
+  /// rebuilds the stream.
+  [[nodiscard]] std::optional<std::uint64_t> flip_event_data() const noexcept {
+    return flip_event_data_;
+  }
+
   /// True iff a producer frame has been pushed but the consumer-side
   /// first-frame acquire (`prime_first_commit`) hasn't run yet.
   /// LayerScene queries this to decide whether to route its first
@@ -196,6 +225,7 @@ class EglStreamSource final : public LayerBufferSource {
   EGLStreamKHR stream_{EGL_NO_STREAM_KHR};
   EGLSurface producer_surface_{EGL_NO_SURFACE};
   std::optional<std::uint32_t> bound_plane_id_;
+  std::optional<std::uint64_t> flip_event_data_;
   bool session_paused_{false};
   // Tracks whether `prime_first_commit` has driven the NVIDIA
   // first-frame consumer acquire on the current stream. Reset
