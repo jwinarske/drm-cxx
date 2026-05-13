@@ -67,6 +67,14 @@ constexpr std::uint64_t to_16_16(std::uint32_t v) noexcept {
 
 class LayerScene::Impl {
  public:
+  // FrameBuildState (defined below Impl) reads acquisitions, flags, and
+  // pre-commit snapshots out of Impl-private nested types
+  // (AcquisitionSlot in particular). Friendship limits that exposure to
+  // the two SceneSet-integration entry points without dragging
+  // AcquisitionSlot into a header.
+  friend class drm::scene::FrameBuildState;
+  friend struct drm::scene::FrameBuildStateDeleter;
+
   Impl(drm::Device& dev, const Config& cfg, drm::planes::PlaneRegistry registry) noexcept
       : dev_(&dev),
         crtc_id_(cfg.crtc_id),
@@ -390,309 +398,62 @@ class LayerScene::Impl {
 
   // ── Commit path ───────────────────────────────────────────────────
 
-  drm::expected<CommitReport, std::error_code> do_commit(std::uint32_t caller_flags, bool test_only,
-                                                         void* user_data) {
-    CommitReport report;
-    report.layers_total = layer_count();
-
-    // Short-circuit while the seat is suspended. The kernel revokes
-    // commit privileges before libseat delivers pause_cb, so commit()
-    // starts returning EACCES some frames ahead of the notification. A
-    // sticky flag here keeps us from burning frames in the allocator
-    // between that first EACCES and the resume_cb that clears it.
-    if (suspended_) {
-      return CommitReport{};
-    }
-
-    // Establish stream-source plane pins before acquire_all runs. EGL
-    // stream sources return EAGAIN from acquire() until their consumer
-    // is wired to a plane (eglStreamConsumerOutputEXT), and that wiring
-    // is what ensure_stream_layer_pins drives via the source's
-    // bind_to_plane hook. Non-stream sources are untouched.
-    ensure_stream_layer_pins();
-
-    // Exclusive-mixing constraint enforcement. When the stream
-    // capability says Exclusive (the driver doesn't permit FB-ID and
-    // stream-consumer planes to coexist on one CRTC) and any layer
-    // in the scene is stream-bound, force every non-stream layer
-    // through the composition path so the kernel only sees the
-    // stream plane + the canvas plane on this CRTC. Mixed-mode
-    // capability skips the constraint — the allocator can place
-    // FB-ID layers natively alongside the stream consumer plane.
-    apply_exclusive_mixing_constraint();
-
-    // Acquire every live layer's buffer up front. On any failure the
-    // already-acquired buffers are handed back to their sources.
-    std::vector<AcquisitionSlot> acquisitions;
-    acquisitions.reserve(report.layers_total);
-    if (auto r = acquire_all(acquisitions, report); !r) {
-      release_all(acquisitions);
-      return drm::unexpected<std::error_code>(r.error());
-    }
-
-    // Lower each live scene::Layer into its corresponding planes::Layer
-    // property bag. This is what the allocator reads to pick planes.
-    //
-    // Steer one layer onto PRIMARY by handing it the PRIMARY plane's
-    // zpos_min as a hint: the allocator's preseed prefers OVERLAY (+2
-    // score) over PRIMARY for non-composition layers, which causes its
-    // TEST commits to explicitly disable PRIMARY while activating the
-    // CRTC — amdgpu rejects that combination with EINVAL (active CRTC
-    // requires an armed PRIMARY plane). Pinning zpos to PRIMARY's
-    // zpos_min lights up the primary-affinity bonus in score_pair and
-    // steers exactly that layer onto PRIMARY. The chosen target is the
-    // first layer in commit order without a caller-set zpos — for
-    // bottom-to-top scenes (the convention) that's the background; if a
-    // caller already pinned a layer to PRIMARY's slot, no hint is needed.
-    const Layer* hint_target = nullptr;
-    if (primary_zpos_hint_.has_value()) {
-      bool already_targeted = false;
-      for (const auto& acq : acquisitions) {
-        const auto z = acq.scene_layer->display().zpos;
-        if (z.has_value() && static_cast<std::uint64_t>(*z) == *primary_zpos_hint_) {
-          already_targeted = true;
-          break;
-        }
-      }
-      if (!already_targeted) {
-        for (const auto& acq : acquisitions) {
-          if (!acq.scene_layer->display().zpos.has_value()) {
-            hint_target = acq.scene_layer;
-            break;
-          }
-        }
-      }
-    }
-    for (const auto& acq : acquisitions) {
-      // acquire_all only pushes slots whose scene_layer + planes_layer
-      // are both non-null (the slot.alive guard plus add_layer always
-      // wires planes_layer before alive flips true), so the dereferences
-      // below are safe even though the analyzer can't prove it.
-      const std::optional<std::uint64_t> per_layer_hint =
-          (acq.scene_layer == hint_target) ? primary_zpos_hint_ : std::nullopt;
-      lower_layer(*acq.scene_layer,  // NOLINT(clang-analyzer-core.NonNullParamChecker)
-                  *acq.planes_layer, acq.buffer.fb_id, crtc_id_, per_layer_hint);
-    }
-
-    // Build the frame's AtomicRequest.
+  // Thin orchestrator over the two-phase build/finalize split. Built-in
+  // commit() and test() route through here; SceneSet drives the same
+  // split by hand so it can batch N scenes into one drm::AtomicRequest.
+  [[nodiscard]] drm::expected<CommitReport, std::error_code> do_commit(std::uint32_t caller_flags,
+                                                                       bool test_only,
+                                                                       void* user_data) {
     drm::AtomicRequest req(*dev_);
     if (!req.valid()) {
-      release_all(acquisitions);
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
     }
-
-    // Modeset state: on the first commit after create()/rebind() we must
-    // bring the CRTC up (MODE_ID blob + ACTIVE=1) and bind the connector
-    // to it. The allocator's internal test commits re-apply this via the
-    // test_preparer hook we installed in create().
-    std::uint32_t effective_flags = caller_flags;
-    if (first_commit_) {
-      effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
-      if (auto r = ensure_mode_blob(); !r) {
-        release_all(acquisitions);
-        return drm::unexpected<std::error_code>(r.error());
-      }
-      if (auto r = inject_modeset_state(req); !r) {
-        release_all(acquisitions);
-        return drm::unexpected<std::error_code>(r.error());
-      }
+    auto build = build_frame_into(req, caller_flags, test_only);
+    if (!build) {
+      return drm::unexpected<std::error_code>(build.error());
     }
-
-    // Let the allocator pick planes. apply() writes the winning layer-
-    // to-plane assignments into `req`. It returns how many layers were
-    // placed on hardware; anything else is unassigned and routed
-    // through compose_unassigned() below. allocator_ is engaged in
-    // the ctor and re-engaged across on_session_resumed — never empty
-    // by the time do_commit runs.
-    //
-    // If the previous frame ended with the composition canvas armed
-    // on a specific plane, hand that plane id to apply() as an
-    // "external reservation" so its disable_unused_planes pass leaves
-    // it alone — compose_unassigned will overwrite the properties
-    // moments later either way, but the reservation saves the
-    // round-trip and removes a dependency on last-write-wins ordering
-    // inside the kernel's atomic state machine.
-    // Pre-reserve a canvas plane when overflow is anticipated. If the
-    // scene has more layers than CRTC-compatible non-cursor planes,
-    // the allocator would greedily fill every plane and leave
-    // compose_unassigned with no plane to land the canvas on; the
-    // overflow layers would then drop. Reserving a plane up front
-    // forces the allocator to place at most N-1 layers on hardware,
-    // leaving one OVERLAY free for the canvas. The reservation is
-    // sticky once a frame uses it (via `last_canvas_plane_id_`), so
-    // subsequent frames don't keep flipping which plane the canvas
-    // lives on.
-    if (!last_canvas_plane_id_.has_value()) {
-      if (auto resv = pick_canvas_reservation_if_needed(); resv.has_value()) {
-        last_canvas_plane_id_ = resv;
-      }
+    if (!*build) {
+      // Suspended-mode short-circuit: build_frame_into observed
+      // suspended_=true and bailed without producing a state. Mirror
+      // the prior do_commit behavior of reporting "no work, no error."
+      return CommitReport{};
     }
-    // External reservations: the composition canvas plane (if any)
-    // plus every plane pinned to a DriverOwnsBinding source. The
-    // allocator must leave all of these alone — the scene writes
-    // their properties itself via compose_unassigned / the canvas-arm
-    // path and arm_stream_layer_planes respectively.
-    std::vector<std::uint32_t> reserved_planes;
-    reserved_planes.reserve(1 + acquisitions.size());
-    if (last_canvas_plane_id_.has_value()) {
-      reserved_planes.push_back(*last_canvas_plane_id_);
-    }
-    for (const auto& acq : acquisitions) {
-      if (acq.stream_pinned_plane_id.has_value()) {
-        reserved_planes.push_back(*acq.stream_pinned_plane_id);
-      }
-    }
-    const auto reserved_span =
-        reserved_planes.empty()
-            ? drm::span<const std::uint32_t>{}
-            : drm::span<const std::uint32_t>(reserved_planes.data(), reserved_planes.size());
-    auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        allocator_->apply(output_, req, effective_flags, reserved_span);
-    if (!assigned) {
-      release_all(acquisitions);
-      return drm::unexpected<std::error_code>(assigned.error());
-    }
-    report.layers_assigned = *assigned;
-    // Snapshot the allocator's diagnostics now — compose_unassigned's
-    // direct property writes below don't go through the allocator and
-    // therefore aren't reflected in its counters; we add them in by
-    // hand a few lines down.
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-    const auto alloc_diag = allocator_->diagnostics();
-    report.properties_written = alloc_diag.properties_written;
-    report.fbs_attached = alloc_diag.fbs_attached;
-    report.test_commits_issued = alloc_diag.test_commits_issued;
-
-    // Reset stale `pixel blend mode` on layer planes the allocator
-    // just claimed. layer.properties() carries no entry for it (the
-    // enum integer for "Pre-multiplied" is per-driver, only known
-    // once the layer-to-plane assignment is in hand), so the
-    // allocator's apply_layer_to_plane_real never emits it; without
-    // this pass the plane keeps whatever mode the previous compositor
-    // last wrote — typically "None" or "Coverage" — and a partially-
-    // transparent layer ghosts whatever scans out below it on the
-    // CRTC. Match the canvas's premultiplied output convention so
-    // both natively-assigned and composited cells blend identically.
-    // Stream layers are intentionally untouched in the scene's
-    // atomic commit. Desktop NVIDIA (no EGL_NV_output_drm_atomic
-    // extension) handles plane FB / CRTC binding inside
-    // eglStreamConsumerOutputEXT and subsequent auto-acquire
-    // events; if the scene writes CRTC_*/SRC_* without FB_ID the
-    // kernel rejects the commit (EINVAL on an active plane with
-    // no framebuffer). bookkeeping-only here keeps the dropped-
-    // layers tally honest.
-    count_stream_layers_assigned(acquisitions, report);
-
-    arm_layer_plane_blend_defaults(acquisitions, req, report);
-    arm_layer_plane_color_props(acquisitions, req, report);
-
-    // rescue unassigned layers via CPU composition before
-    // counting them as dropped. compose_unassigned() updates
-    // report.layers_composited and report.composition_buckets; the
-    // dropped tally below is the residual that wasn't rescued
-    // (no CPU mapping, no free plane, canvas alloc failed).
-    compose_unassigned(acquisitions, req, report);
-
-    // Subtract skipped layers from the residual: they're flow-controlled
-    // (no new frame this vblank), not dropped, and the warning below
-    // would be misleading otherwise.
-    const auto accounted =
-        report.layers_assigned + report.layers_composited + report.layers_skipped_no_frame;
-    if (report.layers_total > accounted) {
-      report.layers_unassigned = report.layers_total - accounted;
-      drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
-    }
-
-    // Per-layer placement readout. Always populates `report.placements`
-    // so test() consumers (e.g. probe modes) can see the same shape a
-    // real commit would land. Scene::Layer state is only updated on
-    // the real-commit success branch below, after req.commit() lands —
-    // test() must not mutate observable layer state.
-    populate_report_placements(acquisitions, report);
-
-    // auto-derive connector signaling from the live
-    // layers' DisplayParams. Manual `set_output_metadata` overrides
-    // the HDR half — the auto-derive is a sensible default for
-    // callers that haven't bothered to populate mastering data.
-    // Colorspace is always auto-derived (no manual override yet).
-    scratch_layer_params_.clear();
-    scratch_layer_params_.reserve(acquisitions.size());
-    for (const auto& acq : acquisitions) {
-      if (acq.scene_layer != nullptr) {
-        scratch_layer_params_.push_back(&acq.scene_layer->display());
-      }
-    }
-    const auto signaling = drm::scene::derive_output_signaling(
-        drm::span<const drm::scene::DisplayParams* const>(scratch_layer_params_.data(),
-                                                          scratch_layer_params_.size()),
-        &connector_caps_);
-    const auto& effective_hdr = hdr_user_set_ ? desired_hdr_ : signaling.hdr_metadata;
-    // surface the auto-derive's downgrade in the report
-    // so callers can see when their HDR layers got silently dropped
-    // to SDR. Manual override bypasses the constraint check, so the
-    // flag stays false on that path.
-    report.hdr_downgraded_no_max_bpc = signaling.hdr_downgraded;
-
-    // Colorspace first (modeset-needy properties on the same
-    // connector should batch into one ALLOW_MODESET commit).
-    auto cs_changed = inject_output_colorspace(req, signaling.colorspace);
-    if (!cs_changed) {
-      release_all(acquisitions);
-      return drm::unexpected<std::error_code>(cs_changed.error());
-    }
-    if (*cs_changed) {
-      effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
-    }
-
-    // HDR_OUTPUT_METADATA. inject_hdr_output_metadata hashes the
-    // metadata, dedups against the per-CRTC cache, and writes the
-    // property. No-op when neither manual nor auto-derive is in
-    // play, or when the connector doesn't expose the property.
-    auto hdr_needs_modeset = inject_hdr_output_metadata(req, effective_hdr);
-    if (!hdr_needs_modeset) {
-      release_all(acquisitions);
-      return drm::unexpected<std::error_code>(hdr_needs_modeset.error());
-    }
-    if (*hdr_needs_modeset) {
-      effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
-    }
-
-    // Apply or validate.
+    auto state = std::move(*build);
+    const std::uint32_t kernel_flags = LayerScene::effective_flags_of(*state);
+    drm::expected<void, std::error_code> kr;
     if (test_only) {
-      if (auto r = req.test(); !r) {
-        release_all(acquisitions);
-        return drm::unexpected<std::error_code>(r.error());
-      }
+      kr = req.test(kernel_flags);
     } else {
-      if (auto r = req.commit(effective_flags, user_data); !r) {
-        if (r.error() == std::errc::permission_denied) {
-          suspended_ = true;
-        }
-        release_all(acquisitions);
-        return drm::unexpected<std::error_code>(r.error());
-      }
-      // Commit succeeded: the connector property has switched to the
-      // new HDR blob, so prior blobs in the cache's pending-destruction
-      // queue are safe to release.
-      hdr_cache_.acknowledge_committed();
-      // Only real commits flip the scene past first-commit; tests don't.
-      first_commit_ = false;
-      // Mark dirty layers clean for a successful commit, and record the
-      // placement we just wrote so `Layer::last_assigned_plane_id()` /
-      // `Layer::last_placement()` reflect this commit's outcome on
-      // subsequent reads.
-      for (auto& slot : slots_) {
-        if (slot.alive && slot.scene_layer) {
-          slot.scene_layer->mark_clean();
-        }
-      }
-      record_layer_placements(acquisitions);
-      output_.mark_clean();
+      kr = req.commit(kernel_flags, user_data);
     }
-
-    release_all(acquisitions);
-    return report;
+    return finalize_frame(std::move(state), kr);
   }
+
+  // Build the frame's property writes onto the caller-supplied
+  // AtomicRequest. Returns a null FrameBuildPtr when the scene is
+  // suspended (caller skips this scene in the combined commit). Errors
+  // during build (acquisition failure, allocator failure on placement
+  // / composition, signaling injection) propagate as drm::unexpected
+  // with internal cleanup of any partial state already taken.
+  //
+  // Defined out-of-line below FrameBuildState so the returned
+  // FrameBuildPtr can be constructed against the complete type.
+  [[nodiscard]] drm::expected<FrameBuildPtr, std::error_code> build_frame_into(
+      drm::AtomicRequest& req, std::uint32_t caller_flags, bool test_only);
+
+  // Reconcile per-layer scene state with the observed kernel
+  // outcome. On commit success: acknowledge the HDR blob cache, clear
+  // first_commit_, mark every live layer clean, record placements. On
+  // commit failure: stick suspended_ on EACCES, propagate the error.
+  // Always release the held acquisitions before returning.
+  //
+  // Test-only builds skip the post-commit state updates and just
+  // release acquisitions — the commit_report from build_frame_into is
+  // already complete.
+  //
+  // Defined out-of-line below FrameBuildState.
+  [[nodiscard]] drm::expected<CommitReport, std::error_code> finalize_frame(
+      FrameBuildPtr state, drm::expected<void, std::error_code> kernel_result);
 
   // Driver-quirk forwarder. Stored on Impl so on_session_resumed can
   // re-propagate it after the allocator is rebuilt against the new
@@ -2297,6 +2058,357 @@ class LayerScene::Impl {
 };
 
 // ─────────────────────────────────────────────────────────────────────
+// FrameBuildState — owns the per-frame state that flows from
+// build_frame_into to finalize_frame. Defined after Impl so the
+// AcquisitionSlot type (an Impl-private nested struct) is complete.
+// ─────────────────────────────────────────────────────────────────────
+
+class FrameBuildState {
+ public:
+  FrameBuildState() = default;
+  FrameBuildState(const FrameBuildState&) = delete;
+  FrameBuildState& operator=(const FrameBuildState&) = delete;
+  FrameBuildState(FrameBuildState&&) noexcept = default;
+  FrameBuildState& operator=(FrameBuildState&&) noexcept = default;
+  ~FrameBuildState() = default;
+
+  std::vector<LayerScene::Impl::AcquisitionSlot> acquisitions;
+  std::uint32_t effective_flags{0};
+  bool test_only{false};
+  CommitReport report{};
+};
+
+void FrameBuildStateDeleter::operator()(FrameBuildState* state) const noexcept {
+  if (state != nullptr && !state->acquisitions.empty()) {
+    // Defensive: a caller that drops the state without finalize_frame
+    // would leak the source-held buffer acquisitions. The first-class
+    // paths (LayerScene::commit, SceneSet::commit) always finalize, so
+    // this branch is exception-safety insurance.
+    LayerScene::Impl::release_all(state->acquisitions);
+  }
+  delete state;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// LayerScene::Impl::build_frame_into / finalize_frame
+//
+// The two halves of the old do_commit. Defined out-of-line so they can
+// see FrameBuildState's complete type when constructing / consuming
+// the FrameBuildPtr. Behavior matches the pre-split flow line for
+// line; the only structural change is where `req.test()/commit()` sits
+// (now in do_commit / SceneSet) and what flows across the boundary
+// (a FrameBuildState rather than locals).
+// ─────────────────────────────────────────────────────────────────────
+
+drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into(
+    drm::AtomicRequest& req, std::uint32_t caller_flags, bool test_only) {
+  CommitReport report;
+  report.layers_total = layer_count();
+
+  // Short-circuit while the seat is suspended. The kernel revokes
+  // commit privileges before libseat delivers pause_cb, so commit()
+  // starts returning EACCES some frames ahead of the notification. A
+  // sticky flag here keeps us from burning frames in the allocator
+  // between that first EACCES and the resume_cb that clears it.
+  if (suspended_) {
+    return FrameBuildPtr{};
+  }
+
+  // Establish stream-source plane pins before acquire_all runs. EGL
+  // stream sources return EAGAIN from acquire() until their consumer
+  // is wired to a plane (eglStreamConsumerOutputEXT), and that wiring
+  // is what ensure_stream_layer_pins drives via the source's
+  // bind_to_plane hook. Non-stream sources are untouched.
+  ensure_stream_layer_pins();
+
+  // Exclusive-mixing constraint enforcement. When the stream
+  // capability says Exclusive (the driver doesn't permit FB-ID and
+  // stream-consumer planes to coexist on one CRTC) and any layer
+  // in the scene is stream-bound, force every non-stream layer
+  // through the composition path so the kernel only sees the
+  // stream plane + the canvas plane on this CRTC. Mixed-mode
+  // capability skips the constraint — the allocator can place
+  // FB-ID layers natively alongside the stream consumer plane.
+  apply_exclusive_mixing_constraint();
+
+  // Acquire every live layer's buffer up front. On any failure the
+  // already-acquired buffers are handed back to their sources.
+  std::vector<AcquisitionSlot> acquisitions;
+  acquisitions.reserve(report.layers_total);
+  if (auto r = acquire_all(acquisitions, report); !r) {
+    release_all(acquisitions);
+    return drm::unexpected<std::error_code>(r.error());
+  }
+
+  // Lower each live scene::Layer into its corresponding planes::Layer
+  // property bag. This is what the allocator reads to pick planes.
+  //
+  // Steer one layer onto PRIMARY by handing it the PRIMARY plane's
+  // zpos_min as a hint: the allocator's preseed prefers OVERLAY (+2
+  // score) over PRIMARY for non-composition layers, which causes its
+  // TEST commits to explicitly disable PRIMARY while activating the
+  // CRTC — amdgpu rejects that combination with EINVAL (active CRTC
+  // requires an armed PRIMARY plane). Pinning zpos to PRIMARY's
+  // zpos_min lights up the primary-affinity bonus in score_pair and
+  // steers exactly that layer onto PRIMARY. The chosen target is the
+  // first layer in commit order without a caller-set zpos — for
+  // bottom-to-top scenes (the convention) that's the background; if a
+  // caller already pinned a layer to PRIMARY's slot, no hint is needed.
+  const Layer* hint_target = nullptr;
+  if (primary_zpos_hint_.has_value()) {
+    bool already_targeted = false;
+    for (const auto& acq : acquisitions) {
+      const auto z = acq.scene_layer->display().zpos;
+      if (z.has_value() && static_cast<std::uint64_t>(*z) == *primary_zpos_hint_) {
+        already_targeted = true;
+        break;
+      }
+    }
+    if (!already_targeted) {
+      for (const auto& acq : acquisitions) {
+        if (!acq.scene_layer->display().zpos.has_value()) {
+          hint_target = acq.scene_layer;
+          break;
+        }
+      }
+    }
+  }
+  for (const auto& acq : acquisitions) {
+    // acquire_all only pushes slots whose scene_layer + planes_layer
+    // are both non-null (the slot.alive guard plus add_layer always
+    // wires planes_layer before alive flips true), so the dereferences
+    // below are safe even though the analyzer can't prove it.
+    const std::optional<std::uint64_t> per_layer_hint =
+        (acq.scene_layer == hint_target) ? primary_zpos_hint_ : std::nullopt;
+    lower_layer(*acq.scene_layer,  // NOLINT(clang-analyzer-core.NonNullParamChecker)
+                *acq.planes_layer, acq.buffer.fb_id, crtc_id_, per_layer_hint);
+  }
+
+  // Modeset state: on the first commit after create()/rebind() we must
+  // bring the CRTC up (MODE_ID blob + ACTIVE=1) and bind the connector
+  // to it. The allocator's internal test commits re-apply this via the
+  // test_preparer hook we installed in create().
+  std::uint32_t effective_flags = caller_flags;
+  if (first_commit_) {
+    effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+    if (auto r = ensure_mode_blob(); !r) {
+      release_all(acquisitions);
+      return drm::unexpected<std::error_code>(r.error());
+    }
+    if (auto r = inject_modeset_state(req); !r) {
+      release_all(acquisitions);
+      return drm::unexpected<std::error_code>(r.error());
+    }
+  }
+
+  // Let the allocator pick planes. apply() writes the winning layer-
+  // to-plane assignments into `req`. It returns how many layers were
+  // placed on hardware; anything else is unassigned and routed
+  // through compose_unassigned() below. allocator_ is engaged in
+  // the ctor and re-engaged across on_session_resumed — never empty
+  // by the time build_frame_into runs.
+  //
+  // If the previous frame ended with the composition canvas armed
+  // on a specific plane, hand that plane id to apply() as an
+  // "external reservation" so its disable_unused_planes pass leaves
+  // it alone — compose_unassigned will overwrite the properties
+  // moments later either way, but the reservation saves the
+  // round-trip and removes a dependency on last-write-wins ordering
+  // inside the kernel's atomic state machine.
+  // Pre-reserve a canvas plane when overflow is anticipated. If the
+  // scene has more layers than CRTC-compatible non-cursor planes,
+  // the allocator would greedily fill every plane and leave
+  // compose_unassigned with no plane to land the canvas on; the
+  // overflow layers would then drop. Reserving a plane up front
+  // forces the allocator to place at most N-1 layers on hardware,
+  // leaving one OVERLAY free for the canvas. The reservation is
+  // sticky once a frame uses it (via `last_canvas_plane_id_`), so
+  // subsequent frames don't keep flipping which plane the canvas
+  // lives on.
+  if (!last_canvas_plane_id_.has_value()) {
+    if (auto resv = pick_canvas_reservation_if_needed(); resv.has_value()) {
+      last_canvas_plane_id_ = resv;
+    }
+  }
+  // External reservations: the composition canvas plane (if any)
+  // plus every plane pinned to a DriverOwnsBinding source. The
+  // allocator must leave all of these alone — the scene writes
+  // their properties itself via compose_unassigned / the canvas-arm
+  // path and arm_stream_layer_planes respectively.
+  std::vector<std::uint32_t> reserved_planes;
+  reserved_planes.reserve(1 + acquisitions.size());
+  if (last_canvas_plane_id_.has_value()) {
+    reserved_planes.push_back(*last_canvas_plane_id_);
+  }
+  for (const auto& acq : acquisitions) {
+    if (acq.stream_pinned_plane_id.has_value()) {
+      reserved_planes.push_back(*acq.stream_pinned_plane_id);
+    }
+  }
+  const auto reserved_span =
+      reserved_planes.empty()
+          ? drm::span<const std::uint32_t>{}
+          : drm::span<const std::uint32_t>(reserved_planes.data(), reserved_planes.size());
+  auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+      allocator_->apply(output_, req, effective_flags, reserved_span);
+  if (!assigned) {
+    release_all(acquisitions);
+    return drm::unexpected<std::error_code>(assigned.error());
+  }
+  report.layers_assigned = *assigned;
+  // Snapshot the allocator's diagnostics now — compose_unassigned's
+  // direct property writes below don't go through the allocator and
+  // therefore aren't reflected in its counters; we add them in by
+  // hand a few lines down.
+  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+  const auto alloc_diag = allocator_->diagnostics();
+  report.properties_written = alloc_diag.properties_written;
+  report.fbs_attached = alloc_diag.fbs_attached;
+  report.test_commits_issued = alloc_diag.test_commits_issued;
+
+  // Reset stale `pixel blend mode` on layer planes the allocator
+  // just claimed. layer.properties() carries no entry for it (the
+  // enum integer for "Pre-multiplied" is per-driver, only known
+  // once the layer-to-plane assignment is in hand), so the
+  // allocator's apply_layer_to_plane_real never emits it; without
+  // this pass the plane keeps whatever mode the previous compositor
+  // last wrote — typically "None" or "Coverage" — and a partially-
+  // transparent layer ghosts whatever scans out below it on the
+  // CRTC. Match the canvas's premultiplied output convention so
+  // both natively-assigned and composited cells blend identically.
+  // Stream layers are intentionally untouched in the scene's
+  // atomic commit. Desktop NVIDIA (no EGL_NV_output_drm_atomic
+  // extension) handles plane FB / CRTC binding inside
+  // eglStreamConsumerOutputEXT and subsequent auto-acquire
+  // events; if the scene writes CRTC_*/SRC_* without FB_ID the
+  // kernel rejects the commit (EINVAL on an active plane with
+  // no framebuffer). bookkeeping-only here keeps the dropped-
+  // layers tally honest.
+  count_stream_layers_assigned(acquisitions, report);
+
+  arm_layer_plane_blend_defaults(acquisitions, req, report);
+  arm_layer_plane_color_props(acquisitions, req, report);
+
+  // rescue unassigned layers via CPU composition before
+  // counting them as dropped. compose_unassigned() updates
+  // report.layers_composited and report.composition_buckets; the
+  // dropped tally below is the residual that wasn't rescued
+  // (no CPU mapping, no free plane, canvas alloc failed).
+  compose_unassigned(acquisitions, req, report);
+
+  // Subtract skipped layers from the residual: they're flow-controlled
+  // (no new frame this vblank), not dropped, and the warning below
+  // would be misleading otherwise.
+  const auto accounted =
+      report.layers_assigned + report.layers_composited + report.layers_skipped_no_frame;
+  if (report.layers_total > accounted) {
+    report.layers_unassigned = report.layers_total - accounted;
+    drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
+  }
+
+  // Per-layer placement readout. Always populates `report.placements`
+  // so test() consumers (e.g. probe modes) can see the same shape a
+  // real commit would land. Scene::Layer state is only updated on
+  // the real-commit success branch in finalize_frame, after the
+  // kernel commit lands — test() must not mutate observable layer
+  // state.
+  populate_report_placements(acquisitions, report);
+
+  // auto-derive connector signaling from the live
+  // layers' DisplayParams. Manual `set_output_metadata` overrides
+  // the HDR half — the auto-derive is a sensible default for
+  // callers that haven't bothered to populate mastering data.
+  // Colorspace is always auto-derived (no manual override yet).
+  scratch_layer_params_.clear();
+  scratch_layer_params_.reserve(acquisitions.size());
+  for (const auto& acq : acquisitions) {
+    if (acq.scene_layer != nullptr) {
+      scratch_layer_params_.push_back(&acq.scene_layer->display());
+    }
+  }
+  const auto signaling = drm::scene::derive_output_signaling(
+      drm::span<const drm::scene::DisplayParams* const>(scratch_layer_params_.data(),
+                                                        scratch_layer_params_.size()),
+      &connector_caps_);
+  const auto& effective_hdr = hdr_user_set_ ? desired_hdr_ : signaling.hdr_metadata;
+  // surface the auto-derive's downgrade in the report
+  // so callers can see when their HDR layers got silently dropped
+  // to SDR. Manual override bypasses the constraint check, so the
+  // flag stays false on that path.
+  report.hdr_downgraded_no_max_bpc = signaling.hdr_downgraded;
+
+  // Colorspace first (modeset-needy properties on the same
+  // connector should batch into one ALLOW_MODESET commit).
+  auto cs_changed = inject_output_colorspace(req, signaling.colorspace);
+  if (!cs_changed) {
+    release_all(acquisitions);
+    return drm::unexpected<std::error_code>(cs_changed.error());
+  }
+  if (*cs_changed) {
+    effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+  }
+
+  // HDR_OUTPUT_METADATA. inject_hdr_output_metadata hashes the
+  // metadata, dedups against the per-CRTC cache, and writes the
+  // property. No-op when neither manual nor auto-derive is in
+  // play, or when the connector doesn't expose the property.
+  auto hdr_needs_modeset = inject_hdr_output_metadata(req, effective_hdr);
+  if (!hdr_needs_modeset) {
+    release_all(acquisitions);
+    return drm::unexpected<std::error_code>(hdr_needs_modeset.error());
+  }
+  if (*hdr_needs_modeset) {
+    effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+  }
+
+  FrameBuildPtr out(new FrameBuildState{});
+  out->acquisitions = std::move(acquisitions);
+  out->effective_flags = effective_flags;
+  out->test_only = test_only;
+  out->report = std::move(report);
+  return out;
+}
+
+drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
+    FrameBuildPtr state, drm::expected<void, std::error_code> kernel_result) {
+  CommitReport report = std::move(state->report);
+  // EACCES from the kernel means the seat just lost master (compositor
+  // foregrounded, libseat is about to fire pause_cb). Mirror the old
+  // do_commit logic: stick suspended_ so subsequent calls short-circuit
+  // until resume.
+  if (!kernel_result) {
+    if (kernel_result.error() == std::errc::permission_denied) {
+      suspended_ = true;
+    }
+    release_all(state->acquisitions);
+    return drm::unexpected<std::error_code>(kernel_result.error());
+  }
+
+  if (!state->test_only) {
+    // Commit succeeded: the connector property has switched to the
+    // new HDR blob, so prior blobs in the cache's pending-destruction
+    // queue are safe to release.
+    hdr_cache_.acknowledge_committed();
+    // Only real commits flip the scene past first-commit; tests don't.
+    first_commit_ = false;
+    // Mark dirty layers clean for a successful commit, and record the
+    // placement we just wrote so `Layer::last_assigned_plane_id()` /
+    // `Layer::last_placement()` reflect this commit's outcome on
+    // subsequent reads.
+    for (auto& slot : slots_) {
+      if (slot.alive && slot.scene_layer) {
+        slot.scene_layer->mark_clean();
+      }
+    }
+    record_layer_placements(state->acquisitions);
+    output_.mark_clean();
+  }
+
+  release_all(state->acquisitions);
+  return report;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // LayerScene
 // ─────────────────────────────────────────────────────────────────────
 
@@ -2369,6 +2481,20 @@ drm::expected<CommitReport, std::error_code> LayerScene::test() {
 drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t flags,
                                                                 void* user_data) {
   return impl_->do_commit(flags, /*test_only=*/false, user_data);
+}
+
+drm::expected<FrameBuildPtr, std::error_code> LayerScene::build_frame_into(
+    drm::AtomicRequest& req, std::uint32_t caller_flags, bool test_only) {
+  return impl_->build_frame_into(req, caller_flags, test_only);
+}
+
+drm::expected<CommitReport, std::error_code> LayerScene::finalize_frame(
+    FrameBuildPtr state, drm::expected<void, std::error_code> kernel_result) {
+  return impl_->finalize_frame(std::move(state), kernel_result);
+}
+
+std::uint32_t LayerScene::effective_flags_of(const FrameBuildState& state) noexcept {
+  return state.effective_flags;
 }
 
 void LayerScene::set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src) {
