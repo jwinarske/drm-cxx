@@ -41,6 +41,17 @@ class Layer {
   Layer& disable() noexcept;
   Layer& set_composited() noexcept;
 
+  /// Transient composition flag. Allocator treats this exactly like
+  /// `force_composited_` (skip from placement, route to composition
+  /// fallback), but the bit is set and cleared by the scene per
+  /// commit rather than by add_layer at layer-creation time. Lets
+  /// scene-level constraints (e.g. EGL Streams Exclusive mixing
+  /// mode forcing FB-ID layers through composition when a stream
+  /// layer is on the same CRTC) live alongside user-supplied
+  /// `force_composited` without conflating the two.
+  Layer& set_transient_composited(bool composited) noexcept;
+  [[nodiscard]] bool is_transient_composited() const noexcept;
+
   Layer& set_content_type(ContentType type) noexcept;
   Layer& set_update_hint(uint32_t hz) noexcept;
 
@@ -90,6 +101,7 @@ class Layer {
 
   PropertyMap properties_;
   bool force_composited_{false};
+  bool transient_composited_{false};
   bool needs_composition_{false};
   bool dirty_{true};
   bool is_composition_layer_{false};

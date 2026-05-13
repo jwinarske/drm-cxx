@@ -412,6 +412,16 @@ class LayerScene::Impl {
     // bind_to_plane hook. Non-stream sources are untouched.
     ensure_stream_layer_pins();
 
+    // Exclusive-mixing constraint enforcement. When the stream
+    // capability says Exclusive (the driver doesn't permit FB-ID and
+    // stream-consumer planes to coexist on one CRTC) and any layer
+    // in the scene is stream-bound, force every non-stream layer
+    // through the composition path so the kernel only sees the
+    // stream plane + the canvas plane on this CRTC. Mixed-mode
+    // capability skips the constraint — the allocator can place
+    // FB-ID layers natively alongside the stream consumer plane.
+    apply_exclusive_mixing_constraint();
+
     // Acquire every live layer's buffer up front. On any failure the
     // already-acquired buffers are handed back to their sources.
     std::vector<AcquisitionSlot> acquisitions;
@@ -1389,6 +1399,54 @@ class LayerScene::Impl {
       }
       slot.stream_pinned_plane_id = plane_id;
       already_pinned.push_back(*plane_id);
+    }
+  }
+
+  // Apply the `Exclusive` stream-mixing constraint: when the
+  // empirical probe has confirmed the driver can't have FB-ID +
+  // stream consumer planes on the same CRTC, force every non-stream
+  // layer through the composition path so only the stream plane +
+  // the canvas plane end up on the CRTC. Resets the per-layer
+  // transient-composited flag at every call (clearing the previous
+  // commit's decision), then sets it for non-stream layers when:
+  //
+  //   * The mixing probe has actually run (mixing_probe_ran_),
+  //   * its verdict is Exclusive (not the conservative default),
+  //   * and at least one stream layer is present.
+  //
+  // Pre-probe the cached `mixing` defaults to Exclusive, but acting
+  // on that on the very first commit would force the background
+  // through composition before modeset has armed PRIMARY -- the
+  // canvas plane has nowhere to land and the kernel rejects the
+  // commit with EINVAL. The probe runs after at least one commit
+  // has succeeded with the stream layer bound, so this gate
+  // naturally lets the first commit proceed permissively (Mixed
+  // shape) and only tightens to Exclusive once the kernel has
+  // confirmed it.
+  void apply_exclusive_mixing_constraint() {
+    for (auto& slot : slots_) {
+      if (slot.alive && (slot.planes_layer != nullptr)) {
+        slot.planes_layer->set_transient_composited(false);
+      }
+    }
+    if (!mixing_probe_ran_ || stream_capability_.mixing != StreamMixingMode::Exclusive) {
+      return;
+    }
+    const bool has_stream_layer = std::any_of(slots_.begin(), slots_.end(), [](const Slot& s) {
+      return s.alive && (s.scene_layer != nullptr) &&
+             s.scene_layer->source().binding_model() == BindingModel::DriverOwnsBinding;
+    });
+    if (!has_stream_layer) {
+      return;
+    }
+    for (auto& slot : slots_) {
+      if (!slot.alive || (slot.scene_layer == nullptr) || (slot.planes_layer == nullptr)) {
+        continue;
+      }
+      if (slot.scene_layer->source().binding_model() == BindingModel::DriverOwnsBinding) {
+        continue;
+      }
+      slot.planes_layer->set_transient_composited(true);
     }
   }
 

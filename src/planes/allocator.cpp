@@ -337,7 +337,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   std::vector<Layer*> placeable_layers;
   placeable_layers.reserve(output.layers().size());
   for (auto* l : output.layers()) {
-    if (l->is_externally_bound()) {
+    if (l->is_externally_bound() || l->is_transient_composited()) {
       continue;
     }
     placeable_layers.push_back(l);
@@ -403,7 +403,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     std::vector<Layer*> placeable;
     placeable.reserve(output.layers().size());
     for (auto* l : output.layers()) {
-      if (l->force_composited_ || l->is_composition_layer() || l->is_externally_bound()) {
+      if (l->force_composited_ || l->is_transient_composited() || l->is_composition_layer() ||
+          l->is_externally_bound()) {
         continue;
       }
       placeable.push_back(l);
@@ -777,7 +778,7 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
   // circuiting here propagates that decision through every downstream
   // path (bipartite preseed, candidate ranking, recursive backtrack)
   // without each having to re-check the flag.
-  if (layer.force_composited_) {
+  if (layer.force_composited_ || layer.is_transient_composited()) {
     return false;
   }
   if (!plane.compatible_with_crtc(crtc_index)) {
@@ -1166,8 +1167,8 @@ bool Allocator::backtrack(std::vector<Layer*>& layers,
 
   Layer* layer = layers.at(depth);
 
-  // Skip force-composited layers
-  if (layer->force_composited_) {
+  // Skip force-composited layers (user-set or scene-driven transient).
+  if (layer->force_composited_ || layer->is_transient_composited()) {
     layer->needs_composition_ = true;
     return backtrack(layers, planes, assignment, depth + 1, best_so_far, req, flags, crtc_index);
   }

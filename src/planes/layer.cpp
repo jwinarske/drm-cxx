@@ -35,6 +35,18 @@ Layer& Layer::set_composited() noexcept {
   return *this;
 }
 
+Layer& Layer::set_transient_composited(bool composited) noexcept {
+  if (transient_composited_ != composited) {
+    transient_composited_ = composited;
+    dirty_ = true;
+  }
+  return *this;
+}
+
+bool Layer::is_transient_composited() const noexcept {
+  return transient_composited_;
+}
+
 Layer& Layer::set_content_type(ContentType type) noexcept {
   content_type_ = type;
   return *this;
