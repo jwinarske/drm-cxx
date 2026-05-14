@@ -1149,6 +1149,42 @@ class LayerScene::Impl {
   // it sits in the public section despite being implementation
   // detail for everyone else.
  public:
+  // Union of (drm_format-matching) modifiers across every non-cursor
+  // plane on this CRTC. Drives producer-side modifier negotiation —
+  // see LayerScene::candidate_modifiers docstring.
+  std::vector<std::uint64_t> candidate_modifiers(std::uint32_t drm_format) {
+    std::vector<std::uint64_t> out;
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return out;
+    }
+    out.reserve(16);
+    for (const auto* p : registry_.for_crtc(*crtc_index)) {
+      if (p == nullptr || p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (p->has_format_modifiers) {
+        for (const auto& [fmt, mod] : p->format_modifiers) {
+          if (fmt != drm_format) {
+            continue;
+          }
+          if (std::find(out.begin(), out.end(), mod) == out.end()) {
+            out.push_back(mod);
+          }
+        }
+      } else if (p->supports_format(drm_format)) {
+        // No IN_FORMATS — driver only commits to LINEAR/INVALID
+        // semantics for this plane. Report INVALID once; callers
+        // treat it as "the driver picks (typically LINEAR)".
+        constexpr std::uint64_t k_mod_invalid = (1ULL << 56U) - 1U;
+        if (std::find(out.begin(), out.end(), k_mod_invalid) == out.end()) {
+          out.push_back(k_mod_invalid);
+        }
+      }
+    }
+    return out;
+  }
+
   void ensure_stream_layer_pins() {
     const auto crtc_index = resolve_crtc_index();
     if (!crtc_index.has_value()) {
@@ -2504,6 +2540,10 @@ std::size_t LayerScene::layer_count() const noexcept {
 
 const StreamCapability& LayerScene::stream_capability() const noexcept {
   return impl_->stream_capability();
+}
+
+std::vector<std::uint64_t> LayerScene::candidate_modifiers(std::uint32_t drm_format) const {
+  return impl_->candidate_modifiers(drm_format);
 }
 
 drm::expected<StreamMixingMode, std::error_code> LayerScene::probe_stream_mixing() {

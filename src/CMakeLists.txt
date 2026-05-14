@@ -42,6 +42,7 @@ set(DRM_CXX_SOURCES
   scene/egl_stream_source.cpp
   scene/external_dma_buf_source.cpp
   scene/gbm_buffer_source.cpp
+  scene/gbm_surface_source.cpp
   scene/gst_appsink_source.cpp
   scene/layer_scene.cpp
   scene/output_signaling.cpp
@@ -357,6 +358,7 @@ install(FILES
     scene/dumb_buffer_source.hpp
     scene/external_dma_buf_source.hpp
     scene/gbm_buffer_source.hpp
+    scene/gbm_surface_source.hpp
     scene/layer.hpp
     scene/layer_desc.hpp
     scene/layer_handle.hpp
