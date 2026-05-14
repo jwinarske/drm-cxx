@@ -85,6 +85,16 @@ executable('dual_display',
   dependencies : [drm_cxx_dep],
 )
 
+# video_wall_multi — N×N grid of synthesized "video" cells laid out
+# across every connected output on one card as one logical wall.
+# Straddling cells register two-target SceneSetLayerSpec entries on a
+# shared DumbBufferSource. Stresses the per-CRTC allocator and the
+# composition fallback alongside the cross-CRTC commit path.
+executable('video_wall_multi',
+  'scene/video_wall_multi/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # camera — zero-copy libcamera -> KMS scanout viewfinder, with libyuv
 # fallbacks for cameras whose stride / fourcc can't be scanned out
 # directly (YUY2 -> NV12 repack, MJPEG -> NV12 decode-and-repack).
