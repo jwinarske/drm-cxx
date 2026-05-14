@@ -406,8 +406,29 @@ void teardown_drm_state(GstAppsinkSource::Impl& impl) noexcept {
   const auto dst_span = bm.pixels();
   const std::uint32_t dst_stride = bm.stride();
   const std::uint32_t src_stride = layout.strides.at(0);
-  const auto* src_pixels = map.data + layout.offsets.at(0);
   const std::uint32_t copy_stride = std::min(src_stride, dst_stride);
+  // `layout.offsets.at(0)` and `layout.strides.at(0)` originate in the
+  // upstream GstVideoMeta — a misbehaving plugin can set them larger
+  // than the mapped buffer. Validate the footprint of the last row
+  // (`offset + (height-1)*stride + copy_stride`) fits inside
+  // `map.size` before the memcpy loop reads OOB into adjacent process
+  // memory. 64-bit arithmetic so a u32 wrap on the product can't
+  // bypass the guard.
+  if (impl.format_cache.height > 0) {
+    const auto offset_b = static_cast<std::size_t>(layout.offsets.at(0));
+    if (offset_b > map.size) {
+      gst_buffer_unmap(buf, &map);
+      return std::make_error_code(std::errc::protocol_error);
+    }
+    const auto last_row_end = (static_cast<std::uint64_t>(impl.format_cache.height - 1U) *
+                               static_cast<std::uint64_t>(src_stride)) +
+                              static_cast<std::uint64_t>(copy_stride);
+    if (last_row_end > static_cast<std::uint64_t>(map.size - offset_b)) {
+      gst_buffer_unmap(buf, &map);
+      return std::make_error_code(std::errc::protocol_error);
+    }
+  }
+  const auto* src_pixels = map.data + layout.offsets.at(0);
   for (std::uint32_t y = 0; y < impl.format_cache.height; ++y) {
     std::memcpy(dst_span.data() + (static_cast<std::size_t>(y) * dst_stride),
                 src_pixels + (static_cast<std::size_t>(y) * src_stride), copy_stride);
