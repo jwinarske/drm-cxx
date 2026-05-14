@@ -906,10 +906,33 @@ drm::expected<void, std::error_code> V4l2CameraSource::on_session_resumed(
     }
     std::uint64_t const modifier =
         (impl_->cfg.modifier == 0) ? DRM_FORMAT_MOD_LINEAR : impl_->cfg.modifier;
-    for (auto& slot : impl_->buffers) {
+    // Per-slot rollback on partial failure: if slot K's import fails,
+    // slots 0..K-1 already hold valid fb_ids and GEM handles on
+    // new_drm_fd. Without rollback they linger as kernel-side refs
+    // until libseat closes new_drm_fd, and the source is left in
+    // mixed state where acquire() returns EAGAIN against
+    // impl_->drm_fd == -1. Walk back and tear down the imports we
+    // made before returning the error so the source ends up in the
+    // same shape as on_session_paused.
+    for (std::size_t k = 0; k < impl_->buffers.size(); ++k) {
+      auto& slot = impl_->buffers.at(k);
       if (auto ec = import_capture_buffer_to_drm(new_drm_fd, impl_->fmt.width, impl_->fmt.height,
                                                  drm_fourcc, modifier, layout, slot);
           ec) {
+        for (std::size_t j = 0; j < k; ++j) {
+          auto& prior = impl_->buffers.at(j);
+          if (prior.fb_id != 0) {
+            drmModeRmFB(new_drm_fd, prior.fb_id);
+          }
+          for (auto h : prior.drm_handles) {
+            if (h != 0) {
+              drmCloseBufferHandle(new_drm_fd, h);
+            }
+          }
+          prior.drm_fd = -1;
+          prior.fb_id = 0;
+          prior.drm_handles.fill(0);
+        }
         return drm::unexpected<std::error_code>(ec);
       }
     }

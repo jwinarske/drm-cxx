@@ -219,13 +219,20 @@ drm::expected<void, std::error_code> ExternalDmaBufSource::on_session_resumed(
   }
   fd_ = new_fd;
 
-  // Re-import each duped fd into the new device.
+  // Re-import each duped fd into the new device. On any failure
+  // (partial import or AddFB2 below) roll back every handle imported
+  // so far via teardown_kernel_state() — otherwise the source holds
+  // N GEM refs on new_fd until destruction and returns EAGAIN from
+  // every acquire() (fb_id_ == 0). Rollback uses fd_, which we
+  // already pointed at new_fd above, so the close ioctls target the
+  // live device.
   for (std::size_t i = 0; i < plane_count_; ++i) {
     auto& rec = planes_.at(i);
     std::uint32_t handle = 0;
     const int rc = drmPrimeFDToHandle(new_fd, rec.duped_fd, &handle);
     if (rc != 0 || handle == 0) {
       const auto ec = last_errno_or(std::errc::io_error);
+      teardown_kernel_state();
       return drm::unexpected<std::error_code>(ec);
     }
     rec.gem_handle = handle;
@@ -250,6 +257,7 @@ drm::expected<void, std::error_code> ExternalDmaBufSource::on_session_resumed(
       use_modifiers ? DRM_MODE_FB_MODIFIERS : 0U);
   if (rc != 0 || fb_id_ == 0) {
     const auto ec = last_errno_or(std::errc::io_error);
+    teardown_kernel_state();
     return drm::unexpected<std::error_code>(ec);
   }
   return {};
