@@ -462,6 +462,14 @@ class LayerScene::Impl {
   void set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src) {
     desired_hdr_ = src;
     hdr_user_set_ = true;
+    // Conservative: any user-set call marks the next commit as
+    // potentially needing ALLOW_MODESET. Same-content sets won't
+    // actually escalate the build pass (the blob-id cache dedups),
+    // but `would_request_modeset()` can't tell without computing the
+    // blob — over-including is safer than under-including for
+    // `SceneSet::NarrowPolicy::AutoOnModeset` partitioning. Cleared
+    // by `finalize_frame` on a successful real commit.
+    hdr_dirty_pending_ = true;
   }
 
   void set_force_full_property_writes(bool force) noexcept {
@@ -473,17 +481,24 @@ class LayerScene::Impl {
   [[nodiscard]] bool force_full_property_writes() const noexcept { return force_full_writes_; }
 
   // Conservative pre-build peek for SceneSet::NarrowPolicy::AutoOnModeset.
-  // Returns true iff the next build_frame_into pass will definitely OR
-  // ALLOW_MODESET into effective_flags. Currently this is just
-  // first_commit_ (after create() / rebind() / a session resume).
-  // Auto-derived colorspace / HDR signaling changes from the layer set
-  // would still escalate the actual build pass to ALLOW_MODESET, but
-  // those are observable only by running the build itself — too
-  // expensive to mirror non-destructively here. A false return is
-  // therefore "probably steady-state, but the build may still
-  // escalate"; SceneSet handles that conservatively by checking
-  // post-build flags before issuing the kernel commit.
-  [[nodiscard]] bool would_request_modeset() const noexcept { return first_commit_; }
+  // Returns true iff the next build_frame_into pass will definitely
+  // (or very likely) OR ALLOW_MODESET into effective_flags.
+  // Captures:
+  //   * `first_commit_` — pending after create() / rebind() / a
+  //     session resume.
+  //   * `hdr_dirty_pending_` — a user-set HDR metadata call landed
+  //     since the last successful commit. Over-includes when the new
+  //     metadata happens to match the cached blob; under-including
+  //     here would silently miss user-initiated HDR transitions, so
+  //     the over-include is the right side to err on.
+  // Auto-derived colorspace / HDR signaling changes from layer
+  // content are still not observable here — only running the build
+  // can see them. False return is therefore "probably steady-state,
+  // but the build may still escalate"; SceneSet checks post-build
+  // flags before issuing the kernel commit either way.
+  [[nodiscard]] bool would_request_modeset() const noexcept {
+    return first_commit_ || hdr_dirty_pending_;
+  }
 
   // Wire up the allocator's internal test_preparer to this Impl's
   // modeset-state injector. Called once during LayerScene::create after
@@ -2058,6 +2073,12 @@ class LayerScene::Impl {
   drm::display::HdrMetadataCache hdr_cache_;
   std::optional<drm::display::HdrSourceMetadata> desired_hdr_;
   bool hdr_user_set_{false};
+  // Set by `set_output_metadata` and cleared on a successful real
+  // commit. Conservative pre-build signal for
+  // `SceneSet::NarrowPolicy::AutoOnModeset`: over-includes (same-
+  // content sets land here even though the build pass dedups them),
+  // but never under-includes a real HDR transition.
+  bool hdr_dirty_pending_{false};
   // Last HDR blob id we wrote to the connector property. Used to
   // detect changes that require ALLOW_MODESET. Cleared on session
   // loss / rebind alongside the cache.
@@ -2404,6 +2425,12 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
     hdr_cache_.acknowledge_committed();
     // Only real commits flip the scene past first-commit; tests don't.
     first_commit_ = false;
+    // The user's set_output_metadata input (if any) has been
+    // resolved by this commit's build pass — the cache caught a
+    // same-blob noop or the kernel acknowledged a new blob id. Clear
+    // the AutoOnModeset hint so the next commit isn't unnecessarily
+    // split off as modeset-needing.
+    hdr_dirty_pending_ = false;
     // Mark dirty layers clean for a successful commit, and record the
     // placement we just wrote so `Layer::last_assigned_plane_id()` /
     // `Layer::last_placement()` reflect this commit's outcome on

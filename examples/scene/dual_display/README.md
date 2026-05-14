@@ -73,10 +73,15 @@ cross-CRTC sync).
 - **No multi-card.** The kernel doesn't support atomic commits
   spanning two file descriptors, so a dual-card workstation isn't
   driveable from one `SceneSet`. Use one process per card.
-- **`would_request_modeset` is conservative.** It reports only the
-  cases knowable without running the build (first commit after
-  `create()` / `rebind()`). Auto-derived colorspace / HDR signaling
-  changes still escalate the actual build pass to `ALLOW_MODESET`,
-  but those don't influence `AutoOnModeset` group selection — the
-  affected scene's commit ends up in whichever group it landed in,
-  carrying `ALLOW_MODESET` for that ioctl. Tracked as a follow-up.
+- **`would_request_modeset` over-includes user-set HDR.** It flips
+  true on every `LayerScene::set_output_metadata` call, even when
+  the new content matches the cached HDR blob (a kernel-side no-op
+  the build pass would dedup). Worst case: one needlessly-split
+  commit. Under-including was the alternative and would miss real
+  HDR transitions; the trade favors splitting.
+- **Auto-derived signaling changes still aren't observable
+  pre-build.** When colorspace / HDR signaling shifts because the
+  layer set changed (not because the application called
+  `set_output_metadata`), only the build pass can see it. The
+  affected scene's commit still carries `ALLOW_MODESET` for its
+  group's ioctl — the grouping just won't have been optimal.
