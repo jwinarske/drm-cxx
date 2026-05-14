@@ -14,6 +14,8 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
 
+#include <drm_mode.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -301,19 +303,24 @@ class SceneSet::Impl {
   }
 
   // Workhorse for both commit() and test(). Splits scenes into groups
-  // per policy, then per group: build all → submit one ioctl →
-  // finalize all. Combined / Auto-uniform paths collapse to the
-  // single-ioctl shape SceneSet shipped with originally; PerCrtc and
-  // Auto-mixed paths fan out into two-or-more ioctls submitted
-  // sequentially.
+  // per policy, builds every group's AtomicRequest up front, then
+  // submits them in order: phase 1 = build all, phase 2 = commit all.
+  // The two-phase shape lets us know which group's ioctl is the *last
+  // engaged* one before any kernel call goes out, which matters for
+  // PAGE_FLIP_EVENT routing — the kernel queues one event per atomic
+  // commit that carries the flag, and a multi-group split with the
+  // flag uniformly applied would fire the caller's handler N times per
+  // logical SceneSet commit. We strip PAGE_FLIP_EVENT (and the
+  // matching user_data pointer) from every non-final group so exactly
+  // one kernel event ships per commit() call.
   //
-  // When a group's commit fails, that group's scenes are finalized
-  // with the kernel error so their acquisitions release, and every
-  // not-yet-built later group is treated as also-failed (no kernel
-  // commit issued) — the SetCommitReport for those scenes stays
-  // zeroed. Already-committed earlier groups are not rolled back;
-  // splitting inherently sacrifices that property in exchange for
-  // narrower commit shape. AutoOnModeset documents the trade.
+  // When any group's build fails, every previously built group's
+  // engaged scenes are finalized with that error and no kernel ioctl
+  // ships — the two-phase shape recovers the rollback that the prior
+  // build-and-commit-as-you-go implementation deliberately sacrificed.
+  // If a kernel commit fails partway through phase 2, earlier
+  // already-submitted commits still stand; that residual gap is
+  // documented under AutoOnModeset.
   [[nodiscard]] drm::expected<std::vector<CommitReport>, std::error_code> do_commit_all(
       std::uint32_t caller_flags, bool test_only, void* user_data, NarrowPolicy policy) {
     std::vector<CommitReport> reports(scenes_.size());
@@ -328,75 +335,105 @@ class SceneSet::Impl {
       return reports;
     }
 
-    std::error_code first_error;
-    for (const auto& group : groups) {
-      drm::AtomicRequest req(*dev_);
-      if (!req.valid()) {
-        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
-      }
-
-      // Track each scene's engaged build for this group. Suspended
-      // scenes (build returns null) and holes leave a default-zero
-      // report in `reports` and contribute nothing here.
-      struct EngagedBuild {
-        std::size_t scene_index;
-        FrameBuildPtr state;
-      };
+    struct EngagedBuild {
+      std::size_t scene_index;
+      FrameBuildPtr state;
+    };
+    struct GroupPending {
+      drm::AtomicRequest req;
       std::vector<EngagedBuild> engaged;
-      engaged.reserve(group.size());
-      std::uint32_t combined_flags = caller_flags;
+      std::uint32_t combined_flags{0};
+    };
 
+    // Helper to finalize a list of engaged builds with a kernel result
+    // (success or error). Used for rollback when a later group's build
+    // fails — the kernel commit never went out for these scenes, so
+    // we feed them an `unexpected` to release their acquisitions.
+    auto finalize_with = [this, &reports](std::vector<EngagedBuild>& engaged,
+                                          const drm::expected<void, std::error_code>& kr) {
+      for (auto& eb : engaged) {
+        auto r = scenes_[eb.scene_index]->finalize_frame(std::move(eb.state), kr);
+        if (r) {
+          reports[eb.scene_index] = std::move(*r);
+        }
+      }
+    };
+
+    // Phase 1: build every group's AtomicRequest. Groups that resolve
+    // to zero engaged scenes are dropped — they'd skip the kernel
+    // ioctl anyway, and dropping them keeps the "last engaged group"
+    // index honest.
+    std::vector<GroupPending> pending;
+    pending.reserve(groups.size());
+    for (const auto& group : groups) {
+      GroupPending gp{drm::AtomicRequest{*dev_}, {}, caller_flags};
+      if (!gp.req.valid()) {
+        const auto err = std::make_error_code(std::errc::not_enough_memory);
+        const drm::expected<void, std::error_code> rollback_kr{
+            drm::unexpected<std::error_code>{err}};
+        for (auto& prior : pending) {
+          finalize_with(prior.engaged, rollback_kr);
+        }
+        return drm::unexpected<std::error_code>(err);
+      }
+      gp.engaged.reserve(group.size());
       for (auto idx : group) {
         auto& scene = scenes_[idx];
         if (!scene) {
           continue;  // hole — partition_for_policy already filtered, but be defensive
         }
-        auto build = scene->build_frame_into(req, caller_flags, test_only);
+        auto build = scene->build_frame_into(gp.req, caller_flags, test_only);
         if (!build) {
-          // Roll back this group's already-built engaged states with
-          // the build error, then propagate. Earlier successful
-          // groups have already finalized + committed.
+          // Roll back this group's already-built engaged states plus
+          // every prior group with the build error. No kernel commit
+          // has run yet, so no kernel-side rollback is needed.
           const auto err = build.error();
-          for (auto& eb : engaged) {
-            (void)scenes_[eb.scene_index]->finalize_frame(std::move(eb.state),
-                                                          drm::unexpected<std::error_code>(err));
+          const drm::expected<void, std::error_code> rollback_kr{
+              drm::unexpected<std::error_code>{err}};
+          finalize_with(gp.engaged, rollback_kr);
+          for (auto& prior : pending) {
+            finalize_with(prior.engaged, rollback_kr);
           }
           return drm::unexpected<std::error_code>(err);
         }
         if (*build == nullptr) {
           continue;  // scene suspended
         }
-        combined_flags |= LayerScene::effective_flags_of(**build);
-        engaged.push_back({idx, std::move(*build)});
+        gp.combined_flags |= LayerScene::effective_flags_of(**build);
+        gp.engaged.push_back({idx, std::move(*build)});
       }
+      if (!gp.engaged.empty()) {
+        pending.push_back(std::move(gp));
+      }
+    }
 
-      if (engaged.empty()) {
-        // Group resolved to no engaged scenes. Skip the kernel ioctl
-        // entirely — the prior "zero-engaged commit-skip"
-        // optimization, scoped to this group rather than the whole
-        // set.
-        continue;
-      }
+    if (pending.empty()) {
+      return reports;
+    }
+
+    // Phase 2: submit ioctls in order. Strip PAGE_FLIP_EVENT (and
+    // user_data, which is only meaningful when the flag is set) from
+    // every non-final group so exactly one flip event fires per
+    // commit() call. test() goes through req.test() which already
+    // masks PAGE_FLIP_EVENT internally — the strip below is a no-op
+    // on that path but keeps both branches symmetric.
+    std::error_code first_error;
+    const std::size_t last_idx = pending.size() - 1;
+    for (std::size_t i = 0; i < pending.size(); ++i) {
+      auto& gp = pending[i];
+      const bool is_last = (i == last_idx);
+      const std::uint32_t submit_flags =
+          is_last ? gp.combined_flags
+                  : (gp.combined_flags & ~static_cast<std::uint32_t>(DRM_MODE_PAGE_FLIP_EVENT));
+      void* submit_user_data = is_last ? user_data : nullptr;
 
       drm::expected<void, std::error_code> kr;
       if (test_only) {
-        kr = req.test(combined_flags);
+        kr = gp.req.test(submit_flags);
       } else {
-        kr = req.commit(combined_flags, user_data);
+        kr = gp.req.commit(submit_flags, submit_user_data);
       }
-
-      // Finalize every engaged scene in this group against this
-      // group's kernel result. Same shape as the pre-split path,
-      // bounded to this group.
-      for (auto& eb : engaged) {
-        auto r = scenes_[eb.scene_index]->finalize_frame(std::move(eb.state), kr);
-        if (r) {
-          reports[eb.scene_index] = std::move(*r);
-        }
-        // finalize_frame returning an error means the kernel-commit
-        // failure is being reported back; the slot stays zero.
-      }
-
+      finalize_with(gp.engaged, kr);
       if (!kr && !first_error) {
         first_error = kr.error();
       }
