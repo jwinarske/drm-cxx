@@ -387,6 +387,13 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
   // emit at the layer's natural size, and the scene's dst_rect matches);
   // signage_player's clock + ticker hit it on every frame.
   const bool no_scale = (xr.src_span == dst_visible_x) && (yr.src_span == dst_visible_y);
+  // Pure-copy fast path: opaque source, no plane-alpha modulation, no
+  // tone-mapping → every dst pixel is just `src | 0xFF000000`. Skips the
+  // write-combined dst read in `blend_pixel_over` that dominates the
+  // composition budget (~240 ns/px → ~5 ns/px). XRGB layers with no
+  // tone-mapper hit this every frame on the signage / mdi demos.
+  const auto* tm = src.tone_mapper;
+  const bool pure_opaque_copy = opaque_src && !modulate_alpha && (tm == nullptr);
 
   auto* dst_base = reinterpret_cast<std::uint32_t*>(dst.data());
   const auto* src_base = reinterpret_cast<const std::uint32_t*>(src.pixels.data());
@@ -396,10 +403,15 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
         yr.src_start + (no_scale ? dy : map_src_index(dy, dst_visible_y, yr.src_span));
     auto* dst_row = dst_base + (static_cast<std::size_t>(yr.dst_start + dy) * dst_stride_px);
     const auto* src_row = src_base + (static_cast<std::size_t>(sy) * src_stride_px);
-    const auto* tm = src.tone_mapper;
     if (no_scale) {
       const auto* src_px = src_row + xr.src_start;
       auto* dst_px = dst_row + xr.dst_start;
+      if (pure_opaque_copy) {
+        for (std::uint32_t dx = 0; dx < dst_visible_x; ++dx) {
+          dst_px[dx] = src_px[dx] | 0xFF000000U;
+        }
+        continue;
+      }
       for (std::uint32_t dx = 0; dx < dst_visible_x; ++dx) {
         std::uint32_t s = src_px[dx];
         if (opaque_src) {
@@ -414,6 +426,13 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
         dst_px[dx] = blend_pixel_over(s, dst_px[dx]);
       }
     } else {
+      if (pure_opaque_copy) {
+        for (std::uint32_t dx = 0; dx < dst_visible_x; ++dx) {
+          const std::uint32_t sx = xr.src_start + map_src_index(dx, dst_visible_x, xr.src_span);
+          dst_row[xr.dst_start + dx] = src_row[sx] | 0xFF000000U;
+        }
+        continue;
+      }
       for (std::uint32_t dx = 0; dx < dst_visible_x; ++dx) {
         const std::uint32_t sx = xr.src_start + map_src_index(dx, dst_visible_x, xr.src_span);
         std::uint32_t s = src_row[sx];
