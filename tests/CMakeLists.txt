@@ -262,6 +262,23 @@ target_link_libraries(test_v4l2_decoder_source PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_v4l2_decoder_source)
 
+add_executable(test_v4l2_camera_source unit/test_v4l2_camera_source.cpp)
+target_link_libraries(test_v4l2_camera_source PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_v4l2_camera_source)
+
+# V4l2CameraSource integration test. Self-skips when no V4L2 capture
+# device or vkms isn't loaded.
+add_executable(test_v4l2_camera_source_vivid
+  integration/test_v4l2_camera_source_vivid.cpp)
+target_link_libraries(test_v4l2_camera_source_vivid PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_v4l2_camera_source_vivid)
+
 # V4l2DecoderSource integration test against vicodec + vkms. Self-skips
 # at runtime when either kernel module isn't loaded.
 add_executable(test_v4l2_decoder_source_vicodec
