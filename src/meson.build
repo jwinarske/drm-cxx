@@ -47,6 +47,7 @@ drm_cxx_sources = files(
   'scene/output_signaling.cpp',
   'scene/scene_set.cpp',
   'scene/stream_capability.cpp',
+  'scene/v4l2_camera_source.cpp',
   'scene/v4l2_decoder_source.cpp',
   'sync/fence.cpp',
 )
@@ -317,6 +318,7 @@ install_headers(
   'scene/output_signaling.hpp',
   'scene/scene_set.hpp',
   'scene/stream_capability.hpp',
+  'scene/v4l2_camera_source.hpp',
   'scene/v4l2_decoder_source.hpp',
   subdir : 'drm-cxx/scene',
 )

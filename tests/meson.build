@@ -410,6 +410,23 @@ test('test_v4l2_decoder_source',
   ),
 )
 
+test('test_v4l2_camera_source',
+  executable('test_v4l2_camera_source',
+    'unit/test_v4l2_camera_source.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# V4l2CameraSource integration test against any /dev/video* + vkms.
+# Self-skips at runtime when no usable CAPTURE device is present or
+# vkms isn't loaded.
+test('test_v4l2_camera_source_vivid',
+  executable('test_v4l2_camera_source_vivid',
+    'integration/test_v4l2_camera_source_vivid.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # V4l2DecoderSource integration test against vicodec + vkms. Self-skips
 # at runtime when either kernel module isn't loaded.
 test('test_v4l2_decoder_source_vicodec',

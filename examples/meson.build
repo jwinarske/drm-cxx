@@ -153,6 +153,7 @@ if not camera_feature.disabled()
 endif
 
 subdir('scene/signage_player')
+subdir('scene/v4l2_camera_demo')
 subdir('scene/video_player')
 subdir('scene/cluster_sim')
 subdir('scene/hdr_demo')
