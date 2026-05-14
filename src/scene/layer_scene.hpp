@@ -35,6 +35,7 @@
 #include <memory>
 #include <optional>
 #include <system_error>
+#include <vector>
 
 namespace drm {
 class AtomicRequest;
@@ -120,6 +121,27 @@ class LayerScene {
   /// The `mixing` field may be upgraded from `Exclusive` to `Mixed`
   /// by a successful `probe_stream_mixing()` call.
   [[nodiscard]] const StreamCapability& stream_capability() const noexcept;
+
+  /// DRM format modifiers any non-cursor plane on this scene's CRTC
+  /// accepts for `drm_format`. Used to negotiate which modifier a
+  /// GBM-surface or Vulkan/EGL producer should target — pass the
+  /// returned list to `eglQueryDmaBufModifiersEXT` /
+  /// `VkDrmFormatModifierPropertiesListEXT`, intersect, pick one,
+  /// then construct a `GbmSurfaceSource` with that single modifier.
+  ///
+  /// The list is the *union* across candidate planes — any modifier
+  /// in the returned set will be accepted by at least one plane the
+  /// allocator might pick for the layer. Duplicates are removed; the
+  /// order matches the order modifiers appear in IN_FORMATS (driver
+  /// preference). `DRM_FORMAT_MOD_LINEAR` is included when at least
+  /// one plane exposes it (explicitly or via the IN_FORMATS LINEAR
+  /// entry); `DRM_FORMAT_MOD_INVALID` is included only when the
+  /// driver doesn't expose IN_FORMATS at all (older legacy stacks).
+  ///
+  /// Returns an empty vector when no plane on this CRTC supports
+  /// `drm_format` at all, or when the CRTC index can't be resolved
+  /// (rare — only after `rebind()` failure).
+  [[nodiscard]] std::vector<std::uint64_t> candidate_modifiers(std::uint32_t drm_format) const;
 
   /// Run the stream-layer plane-pin pre-pass that normally fires
   /// inside `commit()`. After this returns, every alive

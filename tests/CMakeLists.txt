@@ -269,6 +269,23 @@ target_link_libraries(test_v4l2_camera_source PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_v4l2_camera_source)
 
+add_executable(test_gbm_surface_source unit/test_gbm_surface_source.cpp)
+target_link_libraries(test_gbm_surface_source PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_gbm_surface_source)
+
+# GbmSurfaceSource integration test against vkms. Self-skips when
+# vkms isn't loaded.
+add_executable(test_gbm_surface_source_vkms
+  integration/test_gbm_surface_source_vkms.cpp)
+target_link_libraries(test_gbm_surface_source_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_gbm_surface_source_vkms)
+
 # V4l2CameraSource integration test. Self-skips when no V4L2 capture
 # device or vkms isn't loaded.
 add_executable(test_v4l2_camera_source_vivid
