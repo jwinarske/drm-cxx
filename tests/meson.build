@@ -417,6 +417,22 @@ test('test_v4l2_camera_source',
   ),
 )
 
+test('test_gbm_surface_source',
+  executable('test_gbm_surface_source',
+    'unit/test_gbm_surface_source.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# GbmSurfaceSource integration test against vkms. Self-skips when
+# vkms isn't loaded.
+test('test_gbm_surface_source_vkms',
+  executable('test_gbm_surface_source_vkms',
+    'integration/test_gbm_surface_source_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # V4l2CameraSource integration test against any /dev/video* + vkms.
 # Self-skips at runtime when no usable CAPTURE device is present or
 # vkms isn't loaded.
