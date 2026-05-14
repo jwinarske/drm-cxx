@@ -185,6 +185,7 @@ if(DRM_CXX_VULKAN)
 endif()
 
 add_subdirectory(scene/signage_player)
+add_subdirectory(scene/v4l2_camera_demo)
 add_subdirectory(scene/video_player)
 add_subdirectory(scene/cluster_sim)
 add_subdirectory(scene/hdr_demo)
