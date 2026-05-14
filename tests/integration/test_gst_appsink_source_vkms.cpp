@@ -247,8 +247,6 @@ TEST_F(GstVkmsFixture, AcquiresSysmemSampleEndToEnd) {
 
   ASSERT_TRUE(acquired.has_value()) << "acquire() timed out without producing a sample";
   EXPECT_NE(acquired->fb_id, 0U) << "acquire() returned a zero fb_id";
-  EXPECT_EQ(acquired->acquire_fence_fd, -1)
-      << "no fence_extractor configured — fence fd should be -1";
 
   // Format should be populated after the first sample lands.
   const auto fmt = src->format();

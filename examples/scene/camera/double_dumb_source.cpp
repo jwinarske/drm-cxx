@@ -81,7 +81,6 @@ drm::expected<drm::scene::AcquiredBuffer, std::error_code> DoubleDumbSource::acq
   }
   drm::scene::AcquiredBuffer acq;
   acq.fb_id = front.fb_id();
-  acq.acquire_fence_fd = -1;
   acq.opaque = nullptr;
   return acq;
 }

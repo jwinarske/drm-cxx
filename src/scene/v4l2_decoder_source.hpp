@@ -44,7 +44,9 @@
 // Fence handling: out of scope for v1. V4L2's fence story
 // (V4L2_BUF_FLAG_REQUEST_FD + media-controller request API) is
 // driver-uneven, and most stateful decoders just produce ready buffers
-// synchronously. `AcquiredBuffer::acquire_fence_fd` stays -1.
+// synchronously. The `LayerBufferSource` contract carries no fence
+// field today (struck pending a real fence-producing source — see
+// `buffer_source.hpp`).
 //
 // Session pause/resume: the source drops its DRM-side state (FB IDs,
 // GEM handles) on pause and re-imports CAPTURE buffers' DMA-BUF fds

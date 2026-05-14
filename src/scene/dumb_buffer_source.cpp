@@ -72,7 +72,6 @@ drm::expected<AcquiredBuffer, std::error_code> DumbBufferSource::acquire() {
   }
   AcquiredBuffer acq;
   acq.fb_id = buffer_.fb_id();
-  acq.acquire_fence_fd = -1;
   acq.opaque = nullptr;
   return acq;
 }

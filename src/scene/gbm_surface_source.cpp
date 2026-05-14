@@ -283,7 +283,6 @@ drm::expected<AcquiredBuffer, std::error_code> GbmSurfaceSource::acquire() {
   impl_->live_bos.insert(bo);
   AcquiredBuffer acq;
   acq.fb_id = fb_id;
-  acq.acquire_fence_fd = -1;
   acq.opaque = bo;
   return acq;
 }
