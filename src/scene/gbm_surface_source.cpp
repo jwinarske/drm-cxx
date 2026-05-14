@@ -237,12 +237,10 @@ struct gbm_surface* GbmSurfaceSource::native_surface() const noexcept {
 }
 
 struct gbm_device* GbmSurfaceSource::native_device() const noexcept {
-  if (!impl_) {
+  if (impl_ == nullptr || !impl_->gbm_dev.has_value()) {
     return nullptr;
   }
-  if (!impl_->gbm_dev.has_value()) {
-    return nullptr;
-  }
+  // NOLINTNEXTLINE(bugprone-unchecked-optional-access) — has_value() checked above
   return impl_->gbm_dev->raw();
 }
 
