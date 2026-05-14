@@ -28,7 +28,11 @@ drm::gbm::Config buffer_config(std::uint32_t width, std::uint32_t height,
   cfg.width = width;
   cfg.height = height;
   cfg.drm_format = drm_format;
-  cfg.usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE;
+  // GBM_BO_USE_WRITE is rejected by amdgpu unconditionally (the driver
+  // treats it as a USE_TRANSFER flag it doesn't honor for scanout BOs),
+  // and USE_LINEAR already commits Mesa to a CPU-mappable layout, so
+  // the WRITE bit is redundant where it does work. Drop it everywhere.
+  cfg.usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR;
   cfg.add_fb = true;
   return cfg;
 }
