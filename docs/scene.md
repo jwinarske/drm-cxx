@@ -44,18 +44,44 @@ modifier, intrinsic size) from **how it should be displayed**
 KMS concept boundary. The same source can be displayed multiple ways;
 the same display configuration can scan different buffers.
 
-Two v1 implementations:
+v1 implementations + the producer-side additions that landed on
+top of the v1 surface:
 
 | Source | Backing | Use case |
 |---|---|---|
 | `DumbBufferSource` | single CPU-writable dumb buffer | software-rendered cursors, CSDs, test patterns, signage backgrounds |
-| `GbmBufferSource` | single CPU-mapped linear GBM scanout | software content where future variants may negotiate modifiers, export DMA-BUFs, or front a `gbm_surface` for GL/Vulkan producers |
+| `GbmBufferSource` | single CPU-mapped linear GBM scanout | software content where future variants may negotiate modifiers or export DMA-BUFs |
+| `ExternalDmaBufSource` | imported DMA-BUF + explicit format / modifier | foreign producers (cameras, decoders, NPUs) and Vulkan-rendered layers via `VK_EXT_image_drm_format_modifier` export |
+| `GbmSurfaceSource` | `gbm_surface` front-buffer queue rendered into by EGL or Vulkan | GL/Vulkan-rendered scene layers — the GPU-rendered, multi-buffer sister to `GbmBufferSource` |
+| `V4l2DecoderSource` | V4L2 stateful video decoder CAPTURE queue | hardware video decoders (NV12 + P010/P012/P016 today) |
+| `V4l2CameraSource` | V4L2 CAPTURE-only endpoints | UVC + embedded ISPs + vivid; DMABUF zero-copy or MMAP-copy fallback |
+| `GstAppsinkSource` | GStreamer `appsink` bridge | media pipelines whose decoders, demuxers, or filters already live in GStreamer |
+| `EglStreamSource` | EGL Streams consumer | NVIDIA proprietary / Tegra producers — uses `BindingModel::DriverOwnsBinding` |
 
-Both report `BindingModel::SceneSubmitsFbId`: the scene writes
-`FB_ID` to the atomic commit. Both expose `map(MapAccess)` — a scoped
-RAII guard returning a `drm::BufferMapping` — so consumers paint
-pixels and the composition fallback reads them through one unified
-surface.
+All FB-ID sources report `BindingModel::SceneSubmitsFbId`: the scene
+writes `FB_ID` to the atomic commit. `EglStreamSource` reports
+`DriverOwnsBinding` and the scene's commit path skips the FB_ID
+write for those layers (the stream consumer drives the plane update).
+The CPU-mappable sources (`DumbBufferSource`, the MMAP path in
+`V4l2CameraSource`) expose `map(MapAccess)` — a scoped RAII guard
+returning a `drm::BufferMapping` — so consumers paint pixels and the
+composition fallback reads them through one unified surface. Sources
+without a CPU mapping (`ExternalDmaBufSource`, `GbmSurfaceSource`,
+DMABUF-zero-copy `V4l2CameraSource`, `EglStreamSource`) return
+`function_not_supported` from `map()` and are uncompositable by
+design.
+
+`GbmSurfaceSource` is the v1.x answer to "I want my GL or Vulkan
+output as a scene layer." The companion `LayerScene::candidate_modifiers(drm_format)`
+returns the union of modifiers any non-cursor plane on the scene's
+CRTC accepts; the producer-side pattern is to intersect that with
+what the renderer's `eglQueryDmaBufModifiersEXT` /
+`VkDrmFormatModifierPropertiesListEXT` reports, pick one, and hand
+it back as `GbmSurfaceConfig::modifier`. The `examples/advanced/egl_scene/`
+demo walks the full negotiation; the `examples/advanced/vulkan_scene/`
+demo is the architectural counterpoint — `gbm_surface` is EGL-only,
+so the honest Vulkan path is `VK_EXT_image_drm_format_modifier`
+export wrapped in `ExternalDmaBufSource`.
 
 ### Why polymorphic, why now
 
@@ -207,9 +233,14 @@ caller-owned GStreamer `appsink` element into the
 `LayerBufferSource` contract with both DMABUF zero-copy and
 sysmem-memcpy import paths, and `drm::scene::V4l2DecoderSource`
 (PR #49) drives stateful V4L2 decoders directly without a
-GStreamer dependency. V4L2 cameras and accel/NPU outputs remain
-future work; the buffer-source contract has held up across both
-shipped sources without change.
+GStreamer dependency. The V4L2 camera slice shipped 2026-05-14:
+`drm::scene::V4l2CameraSource` (PR #59) covers CAPTURE-only V4L2
+endpoints with a DMABUF zero-copy + MMAP-memcpy fallback shape.
+The GL/Vulkan producer slice is the next to land —
+`drm::scene::GbmSurfaceSource` plus `LayerScene::candidate_modifiers`
+are on `feat/gbm-surface-source` with PR pending CI; accel/NPU
+outputs remain future work. The buffer-source contract has held
+up across all four shipped sources without change.
 
 ### Multi-CRTC orchestration
 

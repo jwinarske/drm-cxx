@@ -30,7 +30,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 
 | Driver       | Hardware                            | Kernel              | Work exercised |
 |--------------|-------------------------------------|---------------------|----------------|
-| `amdgpu`     | RDNA2 desktop (1× DP-1, 1× HDMI-A-1)| 6.19.14-200.fc43    | signage_player, cluster_sim, hdr_demo, csd_smoke, capture_demo, cursor_rotate, dual_display, video_wall_multi |
+| `amdgpu`     | RDNA2 desktop (1× DP-1, 1× HDMI-A-1)| 6.19.14-200.fc43    | signage_player, cluster_sim, hdr_demo, csd_smoke, capture_demo, cursor_rotate, dual_display, video_wall_multi, egl_scene, vulkan_scene |
 | `amdgpu`     | RDNA1, integrated APU               | 6.11+               | Multi-CRTC `SceneSet::test`, dual_display |
 | `i915`       | Skylake / Kaby Lake iGPU            | 6.x                 | Single-CRTC scene paths; cursor 64×64 floor (see quirk) |
 | `vkms`       | Configfs-spawned (kernel ≥6.11)     | 6.11+               | Most integration tests; multi-CRTC via `scripts/vkms_dual.sh` |
@@ -284,6 +284,8 @@ hardware categories:
 | `mdi_demo`                     | Blend2D Tier 0 plane presenter, window animation. |
 | `stream_demo`                  | EGL Streams end-to-end (NVIDIA Quadro). |
 | `vulkan_display`               | Vulkan WSI direct-to-display. |
+| `egl_scene`                    | `GbmSurfaceSource` + EGL/GLES 3 producer + `LayerScene::candidate_modifiers` negotiation. |
+| `vulkan_scene`                 | Vulkan-rendered scene layer via `VK_EXT_image_drm_format_modifier` + `ExternalDmaBufSource` (the deliberate non-`gbm_surface` Vulkan path). |
 
 ---
 

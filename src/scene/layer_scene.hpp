@@ -141,8 +141,7 @@ class LayerScene {
   /// Returns an empty vector when no plane on this CRTC supports
   /// `drm_format` at all, or when the CRTC index can't be resolved
   /// (rare — only after `rebind()` failure).
-  [[nodiscard]] std::vector<std::uint64_t> candidate_modifiers(
-      std::uint32_t drm_format) const;
+  [[nodiscard]] std::vector<std::uint64_t> candidate_modifiers(std::uint32_t drm_format) const;
 
   /// Run the stream-layer plane-pin pre-pass that normally fires
   /// inside `commit()`. After this returns, every alive
