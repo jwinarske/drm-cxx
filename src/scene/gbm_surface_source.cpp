@@ -237,6 +237,13 @@ struct gbm_surface* GbmSurfaceSource::native_surface() const noexcept {
   return impl_ ? impl_->surf : nullptr;
 }
 
+struct gbm_device* GbmSurfaceSource::native_device() const noexcept {
+  if (!impl_ || !impl_->gbm_dev.has_value()) {
+    return nullptr;
+  }
+  return impl_->gbm_dev->raw();
+}
+
 drm::expected<AcquiredBuffer, std::error_code> GbmSurfaceSource::acquire() {
   if (!impl_ || impl_->session_paused || impl_->surf == nullptr || impl_->drm_fd < 0) {
     return drm::unexpected<std::error_code>(

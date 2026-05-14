@@ -162,6 +162,20 @@ if(DRM_CXX_HAS_EGL_STREAMS)
   endif()
 endif()
 
+# egl_scene — minimal EGL/GLES 3 producer fronting a GbmSurfaceSource.
+# Same EGL + glesv2 gate as stream_demo; the library never links them
+# itself.
+pkg_check_modules(egl_scene_egl IMPORTED_TARGET egl)
+pkg_check_modules(egl_scene_gles IMPORTED_TARGET glesv2)
+if(TARGET PkgConfig::egl_scene_egl AND TARGET PkgConfig::egl_scene_gles)
+  add_executable(egl_scene advanced/egl_scene/main.cpp)
+  target_link_libraries(egl_scene PRIVATE
+    drm-cxx::drm-cxx
+    PkgConfig::egl_scene_egl
+    PkgConfig::egl_scene_gles)
+  target_include_directories(egl_scene PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 # capture_demo — libinput-driven snapshot demo for drm::capture.
 # Only built when Blend2D is on (same gate as the library module it exercises).
 if(DRM_CXX_HAS_BLEND2D)
@@ -182,6 +196,12 @@ if(DRM_CXX_VULKAN)
   add_executable(vulkan_display advanced/vulkan_display/main.cpp)
   target_link_libraries(vulkan_display PRIVATE drm-cxx::drm-cxx)
   target_include_directories(vulkan_display PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # vulkan_scene — minimal Vulkan-rendered scene layer over
+  # VK_EXT_image_drm_format_modifier + ExternalDmaBufSource.
+  add_executable(vulkan_scene advanced/vulkan_scene/main.cpp)
+  target_link_libraries(vulkan_scene PRIVATE drm-cxx::drm-cxx PkgConfig::vulkan)
+  target_include_directories(vulkan_scene PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 add_subdirectory(scene/signage_player)

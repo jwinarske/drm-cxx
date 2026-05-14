@@ -92,6 +92,7 @@
 #include <memory>
 #include <system_error>
 
+struct gbm_device;
 struct gbm_surface;
 
 namespace drm {
@@ -157,6 +158,16 @@ class GbmSurfaceSource : public LayerBufferSource {
   /// Vulkan. Identity changes across `on_session_resumed` — callers
   /// must re-query after a resume.
   [[nodiscard]] struct gbm_surface* native_surface() const noexcept;
+
+  /// The raw `gbm_device*` the source allocated. Hand this to
+  /// `eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm_dev, nullptr)`
+  /// for EGL or wherever the producer's stack needs the gbm_device
+  /// backing the surface. EGL/Vulkan tie surfaces to the gbm_device
+  /// they were created on — the producer must use the same instance
+  /// returned here, not a sibling gbm_device created against the same
+  /// DRM fd. Identity changes across `on_session_resumed` — callers
+  /// must re-query after a resume.
+  [[nodiscard]] struct gbm_device* native_device() const noexcept;
 
   // ── LayerBufferSource ────────────────────────────────────────────────
 

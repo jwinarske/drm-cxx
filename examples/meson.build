@@ -251,6 +251,18 @@ if has_egl_streams
   endif
 endif
 
+# egl_scene — minimal EGL/GLES 3 producer fronting a GbmSurfaceSource.
+# Gated on libEGL + glesv2 like stream_demo; the library itself doesn't
+# link them.
+egl_scene_egl_dep = dependency('egl', required : false)
+egl_scene_gles_dep = dependency('glesv2', required : false)
+if egl_scene_egl_dep.found() and egl_scene_gles_dep.found()
+  executable('egl_scene',
+    'advanced/egl_scene/main.cpp',
+    dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep],
+  )
+endif
+
 # capture_demo — libinput-driven snapshot demo for drm::capture. Gated
 # on blend2d since it #includes drm-cxx/capture/*.hpp.
 if has_blend2d
@@ -280,5 +292,13 @@ if get_option('vulkan')
     'advanced/vulkan_display/main.cpp',
     dependencies : [drm_cxx_dep],
     override_options : ['b_asneeded=false'],
+  )
+
+  # vulkan_scene — minimal Vulkan-rendered scene layer over
+  # VK_EXT_image_drm_format_modifier + ExternalDmaBufSource. Links
+  # libvulkan directly (no dlsym shenanigans here).
+  executable('vulkan_scene',
+    'advanced/vulkan_scene/main.cpp',
+    dependencies : [drm_cxx_dep, vk_dep],
   )
 endif
