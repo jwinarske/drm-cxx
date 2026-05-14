@@ -344,11 +344,36 @@ void EglStreamSource::on_session_paused() noexcept {
 
 drm::expected<void, std::error_code> EglStreamSource::on_session_resumed(
     const drm::Device& /*new_dev*/) {
-  // The EGLDisplay typically survives session pause (it's bound to
-  // the EGLDeviceEXT, not the DRM fd). Recreate the stream only;
-  // the producer surface gets created when the scene re-calls
-  // bind_to_plane on the new fd, since NVIDIA requires the consumer
-  // to be in place first.
+  // Honest contract: the source's EGLDisplay was created by the
+  // builder against the *original* DRM fd via EGL_DRM_MASTER_FD_EXT
+  // (see [[reference_nvidia_egl_drm_master_fd]]). libseat closes that
+  // fd on pause and hands the scene a new one on resume, so the
+  // display's internal master-fd reference is now stale on every
+  // driver that honors the attribute (NVIDIA proprietary; Mesa
+  // ignores it). The source doesn't own the display and can't
+  // rebuild it in place — the EGLDeviceEXT match lives in the
+  // builder, and the caller retains display ownership per the
+  // `Config` doc.
+  //
+  // Probe the display with a cheap eglQueryString(EGL_VENDOR). When
+  // the underlying device fd is dead, NVIDIA returns null with
+  // EGL_BAD_DISPLAY. Mesa keeps the display alive across fd
+  // turnover, so the probe passes there. On probe failure we surface
+  // a clear error so the caller knows to destroy this source and let
+  // the builder construct a fresh one against the new fd; the source
+  // remains in a paused-equivalent state (stream torn down, acquire
+  // returns EAGAIN) so a subsequent commit doesn't crash inside
+  // mesa.
+  const auto& rt = egl_runtime();
+  if (rt.query_string != nullptr) {
+    if (rt.query_string(config_.display, EGL_VENDOR) == nullptr) {
+      drm::log_warn(
+          "EglStreamSource: EGLDisplay is unusable after session resume — the display was bound to "
+          "the original DRM master fd, which libseat has closed. Caller must destroy this source "
+          "and rebuild via EglStreamBuilder against the new device.");
+      return drm::unexpected<std::error_code>(make_errc(std::errc::not_connected));
+    }
+  }
   session_paused_ = false;
   if (auto r = create_stream(); !r) {
     return drm::unexpected<std::error_code>(r.error());

@@ -34,7 +34,15 @@
 //     reassign once the allocator has converged.
 //
 //   * `on_session_paused()` tears the stream down (the DRM fd is
-//     going away); `on_session_resumed()` rebuilds it lazily. While
+//     going away); `on_session_resumed()` probes the EGLDisplay and
+//     rebuilds the stream lazily when the display is still usable.
+//     The display itself is *not* rebuilt by the source — it was
+//     created by `EglStreamBuilder` against the original DRM fd via
+//     `EGL_DRM_MASTER_FD_EXT`, and NVIDIA-proprietary drivers refuse
+//     subsequent EGL calls once that fd is dead. When the probe
+//     detects a stale display, `on_session_resumed()` returns
+//     `errc::not_connected` so the caller can destroy the source
+//     and rebuild it via the builder against the new device. While
 //     paused, `acquire()` returns EAGAIN so the scene drops this
 //     layer for the duration.
 //
