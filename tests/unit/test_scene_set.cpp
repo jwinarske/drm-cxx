@@ -213,6 +213,103 @@ TEST(SceneSetCommit, AllNullScenesSkipsKernelCommit) {
   EXPECT_TRUE(reports->empty());
 }
 
+// ─── NarrowPolicy partition planner ────────────────────────────────
+//
+// Pure-logic tests for drm::scene::detail::partition_for_policy. They
+// exercise the three policies (Combined / AutoOnModeset / PerCrtc)
+// over hand-built slot vectors without needing a real LayerScene.
+
+namespace {
+
+using SlotVec = std::vector<drm::scene::detail::SceneSlotState>;
+
+drm::scene::detail::SceneSlotState slot_engaged(bool wants_modeset) noexcept {
+  return {.is_hole = false, .wants_modeset = wants_modeset};
+}
+drm::scene::detail::SceneSlotState slot_hole() noexcept {
+  return {.is_hole = true, .wants_modeset = false};
+}
+
+}  // namespace
+
+TEST(SceneSetPartition, EmptySlotsYieldsNoGroups) {
+  EXPECT_TRUE(
+      drm::scene::detail::partition_for_policy({}, drm::scene::NarrowPolicy::Combined).empty());
+  EXPECT_TRUE(drm::scene::detail::partition_for_policy({}, drm::scene::NarrowPolicy::AutoOnModeset)
+                  .empty());
+  EXPECT_TRUE(
+      drm::scene::detail::partition_for_policy({}, drm::scene::NarrowPolicy::PerCrtc).empty());
+}
+
+TEST(SceneSetPartition, AllHolesYieldsNoGroups) {
+  const SlotVec slots{slot_hole(), slot_hole(), slot_hole()};
+  EXPECT_TRUE(
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::Combined).empty());
+  EXPECT_TRUE(
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::AutoOnModeset)
+          .empty());
+  EXPECT_TRUE(
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::PerCrtc).empty());
+}
+
+TEST(SceneSetPartition, CombinedAlwaysOneGroupWithEveryNonHoleSlot) {
+  const SlotVec slots{slot_engaged(true), slot_hole(), slot_engaged(false), slot_engaged(true)};
+  const auto groups =
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::Combined);
+  ASSERT_EQ(groups.size(), 1U);
+  EXPECT_EQ(groups[0], (std::vector<std::size_t>{0, 2, 3}));
+}
+
+TEST(SceneSetPartition, PerCrtcOneGroupPerNonHoleSlot) {
+  const SlotVec slots{slot_engaged(false), slot_hole(), slot_engaged(true), slot_engaged(false)};
+  const auto groups =
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::PerCrtc);
+  ASSERT_EQ(groups.size(), 3U);
+  EXPECT_EQ(groups[0], (std::vector<std::size_t>{0}));
+  EXPECT_EQ(groups[1], (std::vector<std::size_t>{2}));
+  EXPECT_EQ(groups[2], (std::vector<std::size_t>{3}));
+}
+
+TEST(SceneSetPartition, AutoOnModesetUniformAllSteadyYieldsOneGroup) {
+  const SlotVec slots{slot_engaged(false), slot_engaged(false), slot_engaged(false)};
+  const auto groups =
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::AutoOnModeset);
+  ASSERT_EQ(groups.size(), 1U);
+  EXPECT_EQ(groups[0], (std::vector<std::size_t>{0, 1, 2}));
+}
+
+TEST(SceneSetPartition, AutoOnModesetUniformAllModesetYieldsOneGroup) {
+  const SlotVec slots{slot_engaged(true), slot_engaged(true)};
+  const auto groups =
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::AutoOnModeset);
+  ASSERT_EQ(groups.size(), 1U);
+  EXPECT_EQ(groups[0], (std::vector<std::size_t>{0, 1}));
+}
+
+TEST(SceneSetPartition, AutoOnModesetMixedSplitsWithModesetFirst) {
+  // Slot 1 + 3 want modeset; 0 + 2 are steady. Expect two groups,
+  // modeset-needing one first, each carrying its scenes' indices in
+  // ascending order.
+  const SlotVec slots{slot_engaged(false), slot_engaged(true), slot_engaged(false),
+                      slot_engaged(true)};
+  const auto groups =
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::AutoOnModeset);
+  ASSERT_EQ(groups.size(), 2U);
+  EXPECT_EQ(groups[0], (std::vector<std::size_t>{1, 3}));
+  EXPECT_EQ(groups[1], (std::vector<std::size_t>{0, 2}));
+}
+
+TEST(SceneSetPartition, AutoOnModesetIgnoresHolesInModesetClassification) {
+  // Hole at slot 1 should not contribute to either group; the
+  // surrounding slots still classify correctly.
+  const SlotVec slots{slot_engaged(true), slot_hole(), slot_engaged(false)};
+  const auto groups =
+      drm::scene::detail::partition_for_policy(slots, drm::scene::NarrowPolicy::AutoOnModeset);
+  ASSERT_EQ(groups.size(), 2U);
+  EXPECT_EQ(groups[0], (std::vector<std::size_t>{0}));
+  EXPECT_EQ(groups[1], (std::vector<std::size_t>{2}));
+}
+
 TEST(SceneSetRemoveLayer, StaleHandleIsNoOp) {
   const NullFd nfd;
   ASSERT_GE(nfd.fd(), 0);
