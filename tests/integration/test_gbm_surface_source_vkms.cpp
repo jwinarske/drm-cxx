@@ -23,16 +23,17 @@
 #include <drm-cxx/scene/layer_scene.hpp>
 
 #include <drm_fourcc.h>
-#include <fcntl.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
-#include <gtest/gtest.h>
-#include <unistd.h>
 #include <cstdint>
+#include <fcntl.h>
+#include <gtest/gtest.h>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unistd.h>
+#include <utility>
 
 namespace {
 
@@ -79,8 +80,7 @@ struct PickedOutput {
     if (conn == nullptr) {
       continue;
     }
-    if (conn->connection != DRM_MODE_CONNECTED || conn->count_modes == 0 ||
-        conn->encoder_id == 0) {
+    if (conn->connection != DRM_MODE_CONNECTED || conn->count_modes == 0 || conn->encoder_id == 0) {
       drmModeFreeConnector(conn);
       continue;
     }
@@ -115,8 +115,7 @@ class GbmSurfaceSourceVkms : public ::testing::Test {
       GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
     }
     auto dev_r = drm::Device::open(*path);
-    ASSERT_TRUE(dev_r.has_value())
-        << "Device::open(" << *path << "): " << dev_r.error().message();
+    ASSERT_TRUE(dev_r.has_value()) << "Device::open(" << *path << "): " << dev_r.error().message();
     dev = std::make_unique<drm::Device>(std::move(*dev_r));
 
     auto picked = pick_vkms_output(dev->fd());

@@ -9,17 +9,17 @@
 // gbm_surface_source.hpp.
 
 #include "core/device.hpp"
+#include "drm-cxx/buffer_mapping.hpp"
+#include "drm-cxx/detail/expected.hpp"
 
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/gbm_surface_source.hpp>
 
 #include <drm_fourcc.h>
 
+#include <cstdint>
 #include <fcntl.h>
 #include <gtest/gtest.h>
-#include <unistd.h>
-#include <cerrno>
-#include <cstdint>
 #include <system_error>
 
 namespace {
@@ -45,7 +45,8 @@ drm::scene::GbmSurfaceConfig good_config() noexcept {
     }
     return drm::Device::from_fd(fd);
   }
-  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_file_or_directory));
+  return drm::unexpected<std::error_code>(
+      std::make_error_code(std::errc::no_such_file_or_directory));
 }
 
 }  // namespace
@@ -101,7 +102,7 @@ TEST(SceneGbmSurfaceSource, RejectsZeroDimsAndZeroFormatAsInvalidArg) {
   // dims first — pin the ordering so callers see a stable error when
   // they pass partially-zeroed configs.
   auto dev = drm::Device::from_fd(-1);
-  drm::scene::GbmSurfaceConfig cfg{};
+  drm::scene::GbmSurfaceConfig const cfg{};
   auto r = drm::scene::GbmSurfaceSource::create(dev, cfg);
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error(), std::make_error_code(std::errc::invalid_argument));
@@ -178,7 +179,7 @@ TEST(SceneGbmSurfaceSource, ReleaseWithNullOpaqueIsSafe) {
   // The scene's cleanup path may call release() with a zero-init
   // AcquiredBuffer on shutdown after a failed acquire. Must not
   // crash; not even a debug-build assertion.
-  drm::scene::AcquiredBuffer dummy;
+  drm::scene::AcquiredBuffer const dummy;
   (*src)->release(dummy);
 }
 

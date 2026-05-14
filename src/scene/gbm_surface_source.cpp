@@ -71,7 +71,7 @@ constexpr std::uint32_t k_default_usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDER
   struct gbm_surface* surf = nullptr;
 
   if (cfg.modifier != DRM_FORMAT_MOD_INVALID) {
-#if defined(HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
+#ifdef HAVE_GBM_BO_CREATE_WITH_MODIFIERS2
     const std::uint64_t mod = cfg.modifier;
     surf = gbm_surface_create_with_modifiers2(gdev, cfg.width, cfg.height, cfg.drm_format, &mod, 1,
                                               usage);
@@ -101,10 +101,10 @@ constexpr std::uint32_t k_default_usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDER
   const bool use_modifiers = modifier != DRM_FORMAT_MOD_INVALID;
 
   std::uint32_t fb_id = 0;
-  const int rc = drmModeAddFB2WithModifiers(
-      drm_fd, width, height, drm_format, handles.data(), strides.data(), offsets.data(),
-      use_modifiers ? modifiers.data() : nullptr, &fb_id,
-      use_modifiers ? DRM_MODE_FB_MODIFIERS : 0U);
+  const int rc =
+      drmModeAddFB2WithModifiers(drm_fd, width, height, drm_format, handles.data(), strides.data(),
+                                 offsets.data(), use_modifiers ? modifiers.data() : nullptr, &fb_id,
+                                 use_modifiers ? DRM_MODE_FB_MODIFIERS : 0U);
   if (rc != 0 || fb_id == 0) {
     const int err = errno;
     return drm::unexpected<std::error_code>(make_errno(err != 0 ? err : EIO));
@@ -119,7 +119,7 @@ struct GbmSurfaceSource::Impl {
   // device, so teardown must release surf before resetting gbm_dev.
   // Optional so Impl can default-construct cleanly; populated by
   // GbmSurfaceSource::create after the device is built successfully.
-  std::optional<drm::gbm::GbmDevice> gbm_dev{};
+  std::optional<drm::gbm::GbmDevice> gbm_dev;
   struct gbm_surface* surf{nullptr};
   int drm_fd{-1};
 
@@ -129,12 +129,12 @@ struct GbmSurfaceSource::Impl {
 
   // fb_id per gbm_bo*. A gbm_surface rotates among 2–3 BOs in
   // practice; reusing the registration avoids RmFB/AddFB2 churn.
-  std::unordered_map<struct gbm_bo*, std::uint32_t> fb_cache{};
+  std::unordered_map<struct gbm_bo*, std::uint32_t> fb_cache;
 
   // BOs that have been locked via acquire() and not yet retired via
   // release(). On destruction or pause we release them back to the
   // surface (drop_locked_buffers) before dropping the cache.
-  std::unordered_set<struct gbm_bo*> live_bos{};
+  std::unordered_set<struct gbm_bo*> live_bos;
 
   bool session_paused{false};
 
@@ -228,8 +228,7 @@ drm::expected<std::unique_ptr<GbmSurfaceSource>, std::error_code> GbmSurfaceSour
   src->impl_->drm_fd = drm_fd;
   src->impl_->cfg = cfg;
   src->impl_->resolved_usage = usage;
-  src->impl_->fmt =
-      SourceFormat{cfg.drm_format, cfg.modifier, cfg.width, cfg.height};
+  src->impl_->fmt = SourceFormat{cfg.drm_format, cfg.modifier, cfg.width, cfg.height};
   return src;
 }
 

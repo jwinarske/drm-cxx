@@ -36,7 +36,6 @@
 
 #include "common/open_output.hpp"
 
-#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/gbm/device.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
@@ -45,20 +44,19 @@
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES3/gl3.h>
 #include <drm_fourcc.h>
 #include <gbm.h>
 
-#include <algorithm>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <EGL/eglplatform.h>
+#include <GLES3/gl3.h>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -102,8 +100,8 @@ struct Args {
   using PfnQueryDmaBufModifiers =
       EGLBoolean (*)(EGLDisplay, EGLint, EGLint, EGLuint64KHR*, EGLBoolean*, EGLint*);
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  auto query_modifiers = reinterpret_cast<PfnQueryDmaBufModifiers>(
-      eglGetProcAddress("eglQueryDmaBufModifiersEXT"));
+  auto query_modifiers =
+      reinterpret_cast<PfnQueryDmaBufModifiers>(eglGetProcAddress("eglQueryDmaBufModifiersEXT"));
   if (query_modifiers == nullptr) {
     return DRM_FORMAT_MOD_INVALID;
   }
@@ -138,21 +136,36 @@ struct Args {
 
 [[nodiscard]] const char* gl_strerror(EGLint err) noexcept {
   switch (err) {
-    case EGL_SUCCESS: return "EGL_SUCCESS";
-    case EGL_NOT_INITIALIZED: return "EGL_NOT_INITIALIZED";
-    case EGL_BAD_ACCESS: return "EGL_BAD_ACCESS";
-    case EGL_BAD_ALLOC: return "EGL_BAD_ALLOC";
-    case EGL_BAD_ATTRIBUTE: return "EGL_BAD_ATTRIBUTE";
-    case EGL_BAD_CONFIG: return "EGL_BAD_CONFIG";
-    case EGL_BAD_CONTEXT: return "EGL_BAD_CONTEXT";
-    case EGL_BAD_DISPLAY: return "EGL_BAD_DISPLAY";
-    case EGL_BAD_MATCH: return "EGL_BAD_MATCH";
-    case EGL_BAD_NATIVE_PIXMAP: return "EGL_BAD_NATIVE_PIXMAP";
-    case EGL_BAD_NATIVE_WINDOW: return "EGL_BAD_NATIVE_WINDOW";
-    case EGL_BAD_PARAMETER: return "EGL_BAD_PARAMETER";
-    case EGL_BAD_SURFACE: return "EGL_BAD_SURFACE";
-    case EGL_CONTEXT_LOST: return "EGL_CONTEXT_LOST";
-    default: return "(unknown EGL error)";
+    case EGL_SUCCESS:
+      return "EGL_SUCCESS";
+    case EGL_NOT_INITIALIZED:
+      return "EGL_NOT_INITIALIZED";
+    case EGL_BAD_ACCESS:
+      return "EGL_BAD_ACCESS";
+    case EGL_BAD_ALLOC:
+      return "EGL_BAD_ALLOC";
+    case EGL_BAD_ATTRIBUTE:
+      return "EGL_BAD_ATTRIBUTE";
+    case EGL_BAD_CONFIG:
+      return "EGL_BAD_CONFIG";
+    case EGL_BAD_CONTEXT:
+      return "EGL_BAD_CONTEXT";
+    case EGL_BAD_DISPLAY:
+      return "EGL_BAD_DISPLAY";
+    case EGL_BAD_MATCH:
+      return "EGL_BAD_MATCH";
+    case EGL_BAD_NATIVE_PIXMAP:
+      return "EGL_BAD_NATIVE_PIXMAP";
+    case EGL_BAD_NATIVE_WINDOW:
+      return "EGL_BAD_NATIVE_WINDOW";
+    case EGL_BAD_PARAMETER:
+      return "EGL_BAD_PARAMETER";
+    case EGL_BAD_SURFACE:
+      return "EGL_BAD_SURFACE";
+    case EGL_CONTEXT_LOST:
+      return "EGL_CONTEXT_LOST";
+    default:
+      return "(unknown EGL error)";
   }
 }
 
@@ -222,8 +235,8 @@ int main(int argc, char* argv[]) {
 
   using PfnGetPlatformDisplay = EGLDisplay (*)(EGLenum, void*, const EGLAttrib*);
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  auto get_platform_display = reinterpret_cast<PfnGetPlatformDisplay>(
-      eglGetProcAddress("eglGetPlatformDisplay"));
+  auto get_platform_display =
+      reinterpret_cast<PfnGetPlatformDisplay>(eglGetProcAddress("eglGetPlatformDisplay"));
   if (get_platform_display == nullptr) {
     drm::println(stderr, "egl_scene: eglGetPlatformDisplay not exported by libEGL");
     return EXIT_FAILURE;
@@ -263,7 +276,8 @@ int main(int argc, char* argv[]) {
   }
   auto* src_ptr = (*src_r).get();
 
-  EGLDisplay display = get_platform_display(EGL_PLATFORM_GBM_KHR, src_ptr->native_device(), nullptr);
+  EGLDisplay display =
+      get_platform_display(EGL_PLATFORM_GBM_KHR, src_ptr->native_device(), nullptr);
   if (display == EGL_NO_DISPLAY) {
     drm::println(stderr, "egl_scene: eglGetPlatformDisplay failed: {}", gl_strerror(eglGetError()));
     return EXIT_FAILURE;
@@ -280,12 +294,18 @@ int main(int argc, char* argv[]) {
 
   // ARGB8888 EGLConfig matching the GBM surface format.
   const EGLint cfg_attrs[] = {
-      EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
-      EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-      EGL_RED_SIZE,        8,
-      EGL_GREEN_SIZE,      8,
-      EGL_BLUE_SIZE,       8,
-      EGL_ALPHA_SIZE,      8,
+      EGL_SURFACE_TYPE,
+      EGL_WINDOW_BIT,
+      EGL_RENDERABLE_TYPE,
+      EGL_OPENGL_ES2_BIT,
+      EGL_RED_SIZE,
+      8,
+      EGL_GREEN_SIZE,
+      8,
+      EGL_BLUE_SIZE,
+      8,
+      EGL_ALPHA_SIZE,
+      8,
       EGL_NONE,
   };
   EGLConfig egl_config = nullptr;
@@ -295,14 +315,15 @@ int main(int argc, char* argv[]) {
   // pick one whose native visual matches our DRM format. Common
   // mistake: skipping this and ending up with a config that EGL will
   // accept but whose framebuffer layout doesn't match the gbm_surface.
-  if (eglChooseConfig(display, cfg_attrs, nullptr, 0, &num_configs) != EGL_TRUE || num_configs == 0) {
+  if (eglChooseConfig(display, cfg_attrs, nullptr, 0, &num_configs) != EGL_TRUE ||
+      num_configs == 0) {
     drm::println(stderr, "egl_scene: no matching EGLConfig");
     eglTerminate(display);
     return EXIT_FAILURE;
   }
   std::vector<EGLConfig> configs(static_cast<std::size_t>(num_configs));
   eglChooseConfig(display, cfg_attrs, configs.data(), num_configs, &num_configs);
-  for (const auto cfg : configs) {
+  for (auto* const cfg : configs) {
     EGLint visual_id = 0;
     if (eglGetConfigAttrib(display, cfg, EGL_NATIVE_VISUAL_ID, &visual_id) == EGL_TRUE &&
         static_cast<std::uint32_t>(visual_id) == DRM_FORMAT_ARGB8888) {
@@ -336,11 +357,10 @@ int main(int argc, char* argv[]) {
   if (egl_surface == EGL_NO_SURFACE) {
     // Pre-EGL-1.5 fallback. Mesa supports both entry points but some
     // older runtimes only ship the EXT.
-    egl_surface = eglCreateWindowSurface(display, egl_config,
-                                          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-                                          reinterpret_cast<EGLNativeWindowType>(
-                                              src_ptr->native_surface()),
-                                          nullptr);
+    egl_surface = eglCreateWindowSurface(
+        display, egl_config,
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        reinterpret_cast<EGLNativeWindowType>(src_ptr->native_surface()), nullptr);
   }
   if (egl_surface == EGL_NO_SURFACE) {
     drm::println(stderr, "egl_scene: eglCreate{Platform,}WindowSurface: {}",
@@ -411,7 +431,6 @@ int main(int argc, char* argv[]) {
       break;
     }
     ++frames;
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
   }
   drm::println("egl_scene: {} frames in {}s", frames, args.seconds);
 

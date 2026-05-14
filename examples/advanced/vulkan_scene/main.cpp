@@ -47,8 +47,8 @@
 
 #include "common/open_output.hpp"
 
-#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/format.hpp>
+#include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
@@ -56,19 +56,16 @@
 #include <drm-cxx/scene/layer_scene.hpp>
 
 #include <drm_fourcc.h>
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string_view>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
-#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -101,7 +98,7 @@ struct Args {
 // imported by the KMS device that scans them out — cross-device
 // import works on some platforms but isn't portable.
 [[nodiscard]] VkPhysicalDevice pick_physical_device(VkInstance instance, int drm_fd) {
-  struct stat st {};
+  struct stat st{};
   if (fstat(drm_fd, &st) != 0) {
     return VK_NULL_HANDLE;
   }
@@ -116,14 +113,14 @@ struct Args {
   std::vector<VkPhysicalDevice> devices(count);
   vkEnumeratePhysicalDevices(instance, &count, devices.data());
 
-  auto get_drm_props =
-      reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-          vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
+  auto get_drm_props = reinterpret_cast<
+      PFN_vkGetPhysicalDeviceProperties2>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
   if (get_drm_props == nullptr) {
     return devices.front();  // No properties2 — fall back to first.
   }
 
-  for (auto pd : devices) {
+  for (auto* pd : devices) {
     VkPhysicalDeviceDrmPropertiesEXT drm_props{};
     drm_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
     VkPhysicalDeviceProperties2 props2{};
@@ -147,9 +144,12 @@ struct Args {
                                              VkMemoryPropertyFlags flags) {
   VkPhysicalDeviceMemoryProperties mp{};
   vkGetPhysicalDeviceMemoryProperties(pd, &mp);
-  for (std::uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
-    if (((type_bits >> i) & 1U) != 0U &&
-        (mp.memoryTypes[i].propertyFlags & flags) == flags) {  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+  const drm::span<const VkMemoryType> types{mp.memoryTypes, mp.memoryTypeCount};
+  for (std::uint32_t i = 0; i < types.size(); ++i) {
+    if (((type_bits >> i) & 1U) == 0U) {
+      continue;
+    }
+    if ((types[i].propertyFlags & flags) == flags) {
       return i;
     }
   }
@@ -344,9 +344,9 @@ int main(int argc, char* argv[]) {
   vkBindImageMemory(vk_device, vk_image, vk_mem, 0);
 
   // Export the memory as a DMA-BUF fd.
-  auto get_memory_fd =
-      reinterpret_cast<PFN_vkGetMemoryFdKHR>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-          vkGetDeviceProcAddr(vk_device, "vkGetMemoryFdKHR"));
+  auto get_memory_fd = reinterpret_cast<
+      PFN_vkGetMemoryFdKHR>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      vkGetDeviceProcAddr(vk_device, "vkGetMemoryFdKHR"));
   if (get_memory_fd == nullptr) {
     drm::println(stderr, "vulkan_scene: vkGetMemoryFdKHR not exported");
     vkFreeMemory(vk_device, vk_mem, nullptr);
@@ -383,7 +383,7 @@ int main(int argc, char* argv[]) {
   std::array<drm::scene::ExternalPlaneInfo, 1> planes{plane_info};
 
   auto vk_source = drm::scene::ExternalDmaBufSource::create(device, fb_w, fb_h, DRM_FORMAT_ARGB8888,
-                                                              modifier, planes);
+                                                            modifier, planes);
   // ExternalDmaBufSource dups the fd; we close ours now.
   ::close(dmabuf_fd);
   if (!vk_source) {
@@ -466,7 +466,7 @@ int main(int argc, char* argv[]) {
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &b);
 
-    VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageSubresourceRange const range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdClearColorImage(cmd, vk_image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
 
     vkEndCommandBuffer(cmd);
@@ -487,7 +487,6 @@ int main(int argc, char* argv[]) {
     }
     ++frames;
     first = false;
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
   }
   drm::println("vulkan_scene: {} frames in {}s", frames, args.seconds);
 
