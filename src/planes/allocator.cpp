@@ -5,7 +5,6 @@
 
 #include "../core/device.hpp"
 #include "../modeset/atomic.hpp"
-#include "matching.hpp"
 #include "planes/layer.hpp"
 #include "planes/output.hpp"
 #include "planes/plane_registry.hpp"
@@ -336,17 +335,20 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // already have a plane and the scene writes their properties
   // directly. Strip them once here so split_independent_groups,
   // place_group, and the per-group TEST commits don't see them.
-  std::vector<Layer*> placeable_layers;
-  placeable_layers.reserve(output.layers().size());
+  // Reused scratch — capacity carries forward across frames, so a
+  // steady-state caller pays one allocation total instead of one
+  // per apply().
+  scratch_placeable_.clear();
+  scratch_placeable_.reserve(output.layers().size());
   for (auto* l : output.layers()) {
     if (l->is_externally_bound() || l->is_transient_composited()) {
       continue;
     }
-    placeable_layers.push_back(l);
+    scratch_placeable_.push_back(l);
   }
 
   // §13.7 Spatial intersection splitting
-  auto groups = split_independent_groups(placeable_layers);
+  auto groups = split_independent_groups(scratch_placeable_);
 
   auto available_planes = registry_.for_crtc(crtc_index);
   // Externally reserved planes are off-limits for placement *and*
@@ -532,13 +534,13 @@ std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_pr
     return result;
   }
 
-  BipartiteMatching matching(layers.size(), planes.size());
+  scratch_matching_.reset(layers.size(), planes.size());
 
   for (std::size_t i = 0; i < layers.size(); ++i) {
     for (std::size_t j = 0; j < planes.size(); ++j) {
       if (plane_statically_compatible(*planes.at(j), *layers.at(i), crtc_index)) {
         int const s = score_pair(*planes.at(j), *layers.at(i));
-        matching.add_edge(i, j, s);
+        scratch_matching_.add_edge(i, j, s);
         if (alloc_debug()) {
           const auto& p = *planes.at(j);
           const auto& lay = *layers.at(i);
@@ -559,10 +561,10 @@ std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_pr
     }
   }
 
-  matching.solve();
+  scratch_matching_.solve();
 
   for (std::size_t i = 0; i < layers.size(); ++i) {
-    auto m = matching.match_for_left(i);
+    auto m = scratch_matching_.match_for_left(i);
     if (m.has_value()) {
       result.emplace_back(layers.at(i), planes.at(*m));
       if (alloc_debug()) {

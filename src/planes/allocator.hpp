@@ -5,6 +5,7 @@
 
 #include "../core/property_store.hpp"
 #include "layer.hpp"
+#include "matching.hpp"
 #include "plane_registry.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
@@ -281,6 +282,15 @@ class Allocator {
   // True to disable per-property minimization. See
   // set_force_full_property_writes.
   bool force_full_writes_{false};
+
+  // Per-frame scratch reused across apply() calls. Capacity carries
+  // forward, but contents are reset / cleared at the top of each
+  // user of these so a fresh call sees the same invariants as a
+  // local. Mutable so the const bipartite_preseed_group path can
+  // still re-shape scratch_matching_ without giving up its
+  // const-correctness contract.
+  mutable BipartiteMatching scratch_matching_;
+  std::vector<Layer*> scratch_placeable_;
 
   // Reset at the top of every apply() and bumped from
   // apply_layer_to_plane_real / the real-commit disable_unused_planes
