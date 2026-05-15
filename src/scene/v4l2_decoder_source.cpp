@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 #include <linux/videodev2.h>
 #include <memory>
 #include <sys/ioctl.h>
@@ -95,6 +96,15 @@ constexpr int k_max_ioctl_retries = 8;
 
 // DRM AddFB2 takes up to 4 plane handles/pitches/offsets.
 constexpr std::size_t k_drm_max_planes = 4;
+
+// Ceilings on V4L2-echoed image dims and per-row byte counts. The
+// kernel V4L2 ABI exposes plain u32 dims with no upper bound; a
+// quirky / malicious decoder echo can return absurd values that
+// (a) make `bpl * h` math wrap in u32 and (b) point AddFB2 offsets
+// at attacker-controlled byte ranges. 16K is past every realistic
+// decoder + above every shipping display max.
+constexpr std::uint32_t k_max_image_dim = 16384U;
+constexpr std::uint32_t k_max_bytes_per_line = 65536U;
 
 // Per-CAPTURE-buffer state. RAII-cleaned: the destructor releases the
 // per-buffer DRM framebuffer + GEM handles, munmaps the per-plane CPU
@@ -203,14 +213,23 @@ struct DrmPlaneLayout {
   if (is_semiplanar_420 && !is_mplane) {
     std::uint32_t const bpl = cap_fmt.fmt.pix.bytesperline;
     std::uint32_t const h = cap_fmt.fmt.pix.height;
-    if (bpl == 0 || h == 0) {
+    // Caps + u64-promoted multiply so a hostile / quirky driver
+    // can't wrap `bpl * h` in u32. AddFB2's offset field is u32; we
+    // reject if the chroma-plane offset would truncate, and clamp
+    // h / bpl at sane ceilings to keep the check from coming up at
+    // every shipping resolution.
+    if (bpl == 0 || h == 0 || h > k_max_image_dim || bpl > k_max_bytes_per_line) {
       return std::make_error_code(std::errc::invalid_argument);
+    }
+    const auto y_size = static_cast<std::uint64_t>(bpl) * static_cast<std::uint64_t>(h);
+    if (y_size > std::numeric_limits<std::uint32_t>::max()) {
+      return std::make_error_code(std::errc::value_too_large);
     }
     out.num_drm_planes = 2;
     out.pitch.at(0) = bpl;
     out.pitch.at(1) = bpl;
     out.offset.at(0) = 0;
-    out.offset.at(1) = bpl * h;
+    out.offset.at(1) = static_cast<std::uint32_t>(y_size);
     out.v4l2_plane_idx.at(0) = 0;
     out.v4l2_plane_idx.at(1) = 0;
     return {};
