@@ -76,18 +76,23 @@ struct SourceFormat {
 /// For `BindingModel::SceneSubmitsFbId` sources:
 ///   * `fb_id` is a DRM framebuffer ID the scene will write to the
 ///     plane's `FB_ID` property. Must be non-zero.
-///   * `acquire_fence_fd` is an optional sync_file fd the scene will
-///     write to `IN_FENCE_FD`; `-1` means no fence. The scene takes
-///     ownership and closes it after the commit lands.
 ///   * `opaque` is a source-private token echoed back verbatim to
 ///     `release()` — typically the slot index in a buffer ring.
 ///
 /// For `BindingModel::DriverOwnsBinding` sources (v2, unimplemented):
 ///   * `fb_id` must be 0 — the scene skips FB_ID writes.
-///   * `acquire_fence_fd` still applies if the producer supplies one.
+///
+/// Fence import (`IN_FENCE_FD` plane property) is deliberately not part
+/// of this contract today. Every shipped source produces ready buffers
+/// synchronously (V4L2 stateful decoders, GBM front-buffer queues,
+/// dumb buffers, libcamera-imported DMA-BUFs), so no caller is owed a
+/// sync_file plumb. When a fence-producing source lands — Vulkan
+/// OUT_FENCE export, a real V4L2 fence-aware decoder, etc. — wire
+/// `IN_FENCE_FD` through `LayerScene::lower_layer` together with a
+/// retire-side close path; do not add a field here without a consumer
+/// + test rig to validate the close discipline.
 struct AcquiredBuffer {
   std::uint32_t fb_id{0};
-  int acquire_fence_fd{-1};
   void* opaque{nullptr};
 };
 

@@ -20,8 +20,6 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
-#include <fcntl.h>  // F_DUPFD_CLOEXEC
-
 // Specific GStreamer subsystem headers — chosen per-symbol so tidy's
 // misc-include-cleaner can trace usage. The `<gst/gst.h>` umbrella
 // would also work but is opaque to the lint, which then fires at every
@@ -565,7 +563,7 @@ drm::expected<AcquiredBuffer, std::error_code> GstAppsinkSource::acquire() {
       return drm::unexpected<std::error_code>(
           std::make_error_code(std::errc::resource_unavailable_try_again));
     }
-    return AcquiredBuffer{impl_->current_fb_id, -1, nullptr};
+    return AcquiredBuffer{impl_->current_fb_id, nullptr};
   }
 
   // First sample: latch caps. Caps change mid-stream tears down the
@@ -606,17 +604,7 @@ drm::expected<AcquiredBuffer, std::error_code> GstAppsinkSource::acquire() {
     gst_sample_unref(impl_->current_sample);
   }
   impl_->current_sample = sample;
-
-  // Producer-supplied fence: dup so the source-owned fd survives past
-  // the GstSample's lifetime; the scene closes it post-commit.
-  int fence_fd = -1;
-  if (impl_->cfg.fence_extractor) {
-    const int raw = impl_->cfg.fence_extractor(sample);
-    if (raw >= 0) {
-      fence_fd = ::fcntl(raw, F_DUPFD_CLOEXEC, 0);
-    }
-  }
-  return AcquiredBuffer{impl_->current_fb_id, fence_fd, nullptr};
+  return AcquiredBuffer{impl_->current_fb_id, nullptr};
 }
 
 void GstAppsinkSource::release(AcquiredBuffer /*acquired*/) noexcept {

@@ -179,7 +179,6 @@ drm::expected<drm::scene::AcquiredBuffer, std::error_code> LibcameraNv12Source::
   }
   drm::scene::AcquiredBuffer out{};
   out.fb_id = current_fb_id_;
-  out.acquire_fence_fd = -1;
   out.opaque = nullptr;
   return out;
 }

@@ -1049,7 +1049,6 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2DecoderSource::acquire() {
   impl_->capture_ready_idx = -1;
   AcquiredBuffer acq;
   acq.fb_id = fb_id;
-  acq.acquire_fence_fd = -1;
   acq.opaque = nullptr;  // capture_acquired_idx is the source-side bookkeeping
   return acq;
 }

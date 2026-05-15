@@ -51,14 +51,11 @@
 // on the post-change call, but the layer's display rect (in
 // `LayerDesc`) is the caller's responsibility to update.
 //
-// Fence import: producer-specific elements may attach a sync_file fd
-// to the GstBuffer via custom meta; the GStreamer ecosystem has no
-// universal extractor for this, so the caller supplies one through
-// `GstAppsinkConfig::fence_extractor`. When present, its return value
-// (an fd to a sync_file) is dup'd and surfaced as
-// `AcquiredBuffer::acquire_fence_fd`. Default: no-op (no fence —
-// produces fence_fd == -1, which is what V4L2 → drm-cxx scanout
-// already runs without).
+// Fence import: out of scope until a fence-producing source lands +
+// the scene side gains an IN_FENCE_FD plumb (`LayerScene::lower_layer`
+// emission + retire-side close). Today the source acquires buffers
+// only when the upstream sample is ready, so synchronous handoff is
+// correct for every consumer drm-cxx ships with.
 //
 // Appsink ownership: the caller builds the pipeline and passes the
 // appsink `GstElement*` in. The source ref's the element on `create`
@@ -72,7 +69,6 @@
 #include <drm-cxx/detail/expected.hpp>
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <system_error>
 
@@ -113,15 +109,6 @@ struct GstAppsinkConfig {
   /// themselves (e.g. via `g_object_set` before `create`); the source
   /// leaves the relevant properties alone.
   bool configure_drop_oldest{true};
-
-  /// Optional callback the source uses to pull a sync_file fd off a
-  /// freshly-acquired sample. Producer-specific (e.g. a Vulkan-render
-  /// pipeline element that stashes its OUT_FENCE in a custom GstMeta);
-  /// when null the source surfaces `acquire_fence_fd = -1`. Returning
-  /// `-1` from the callback is also treated as "no fence." The source
-  /// dups the returned fd via `F_DUPFD_CLOEXEC`, so the callback may
-  /// return a borrowed fd whose lifetime is bound to the GstSample.
-  std::function<int(GstSample*)> fence_extractor;
 };
 
 /// `LayerBufferSource` that bridges a GStreamer `appsink` element to

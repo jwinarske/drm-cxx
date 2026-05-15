@@ -179,7 +179,6 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufSource::acquire() {
   }
   AcquiredBuffer acq;
   acq.fb_id = fb_id_;
-  acq.acquire_fence_fd = -1;
   acq.opaque = nullptr;
   return acq;
 }
