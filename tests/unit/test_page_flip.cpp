@@ -161,3 +161,55 @@ TEST(PageFlipForeignSource, MoveTransfersDispatcher) {
   moved.remove_source(efd);
   ::close(efd);
 }
+
+TEST(PageFlipRebind, RejectsInvalidNewFd) {
+  auto dev = make_device_with_fd(-1);
+  drm::PageFlip pf(dev);
+  auto new_dev = make_device_with_fd(-1);
+  auto r = pf.rebind(new_dev);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::bad_file_descriptor));
+}
+
+TEST(PageFlipRebind, SwapsDrmFdRegistration) {
+  // Stand in for a real DRM fd with a plain eventfd. PageFlip's
+  // dispatcher cares only that the fd is epoll-addable and EPOLLIN-
+  // readable for the registration / removal paths. We deliberately
+  // don't push events on these — drmHandleEvent against eventfd
+  // payload would parse garbage as a drm_event header and hang.
+  const int first = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  const int second = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  if (first < 0 || second < 0) {
+    if (first >= 0) {
+      ::close(first);
+    }
+    if (second >= 0) {
+      ::close(second);
+    }
+    GTEST_SKIP() << "eventfd unavailable";
+  }
+  auto first_dev = drm::Device::from_fd(first);
+  drm::PageFlip pf(first_dev);
+
+  // dispatch(0) on no-ready-fds returns timed_out — confirms the
+  // initial registration is live.
+  auto initial = pf.dispatch(0);
+  ASSERT_FALSE(initial.has_value());
+  EXPECT_EQ(initial.error(), std::make_error_code(std::errc::timed_out));
+
+  auto second_dev = drm::Device::from_fd(second);
+  auto r = pf.rebind(second_dev);
+  ASSERT_TRUE(r.has_value()) << r.error().message();
+
+  // After rebind the second fd is the live registration. dispatch(0)
+  // still returns timed_out (no events queued) — that's the success
+  // signal: the epoll set isn't half-registered. A failed rebind that
+  // left the kernel without any source registered would return
+  // bad_file_descriptor here instead.
+  auto after = pf.dispatch(0);
+  ASSERT_FALSE(after.has_value());
+  EXPECT_EQ(after.error(), std::make_error_code(std::errc::timed_out));
+
+  ::close(first);
+  ::close(second);
+}
