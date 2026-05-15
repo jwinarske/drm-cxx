@@ -91,7 +91,14 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
 
   auto src = std::unique_ptr<ExternalDmaBufSource>(new ExternalDmaBufSource());
   src->fd_ = fd;
-  src->plane_count_ = planes.size();
+  // Note: plane_count_ stays at its default-initialized 0 and is
+  // bumped inside the dup loop after each successful F_DUPFD_CLOEXEC.
+  // Previously this was set to planes.size() up front, which only
+  // happens to be safe today because every per-plane `duped_fd`
+  // default-inits to -1 and `close_duped_fds()` skips those — change
+  // that default to 0 (a legitimate stdin fd!) and the early-failure
+  // path becomes a close-of-stdin. Bumping incrementally removes the
+  // hazard regardless of the default.
   src->format_.drm_fourcc = drm_format;
   src->format_.modifier = modifier;
   src->format_.width = width;
@@ -110,6 +117,7 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
     dst.duped_fd = duped;
     dst.offset = planes[i].offset;
     dst.pitch = planes[i].pitch;
+    src->plane_count_ = i + 1;
   }
 
   // Step 2: drmPrimeFDToHandle for each plane. The kernel deduplicates
