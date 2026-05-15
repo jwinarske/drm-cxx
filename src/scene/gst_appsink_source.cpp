@@ -208,6 +208,28 @@ void teardown_drm_state(GstAppsinkSource::Impl& impl) noexcept {
   impl.current_fb_id = 0;
 }
 
+// Pause-time variant: drop the cached DRM state WITHOUT issuing
+// drmModeRmFB / drmCloseBufferHandle against the dying master fd.
+// The kernel reclaims FBs and GEM handles when libseat closes that
+// fd, so the ioctls would at best be a no-op (EACCES from a non-
+// master fd) and at worst hit somebody else's resources if libseat
+// pauses again and the fd gets recycled before this returns. Matches
+// the GbmSurfaceSource::forget_for_pause posture.
+void forget_drm_state_for_pause(GstAppsinkSource::Impl& impl) noexcept {
+  for (auto& entry : impl.fb_cache) {
+    entry.fb_id = 0;
+    entry.handles.fill(0);
+    entry.n_handles = 0;
+  }
+  impl.fb_cache.clear();
+  if (impl.sysmem_buffer.has_value()) {
+    impl.sysmem_buffer->forget();
+    impl.sysmem_buffer.reset();
+  }
+  impl.sysmem_fb_id = 0;
+  impl.current_fb_id = 0;
+}
+
 [[nodiscard]] std::error_code resolve_format_from_caps(GstAppsinkSource::Impl& impl,
                                                        GstSample* sample) noexcept {
   const GstCaps* caps = gst_sample_get_caps(sample);
@@ -638,10 +660,13 @@ void GstAppsinkSource::on_session_paused() noexcept {
   if (!impl_) {
     return;
   }
-  // Drop every FB ID and GEM handle bound to the dying drm fd. The
-  // cached GstSample stays — on resume the next acquire() re-imports
-  // the same buffer against the new fd.
-  teardown_drm_state(*impl_);
+  // Drop every FB ID and GEM handle bound to the dying drm fd, but
+  // WITHOUT issuing ioctls against that fd — libseat has revoked
+  // master and the kernel reclaims everything on fd close. See
+  // forget_drm_state_for_pause for the rationale. The cached
+  // GstSample stays — on resume the next acquire() re-imports the
+  // same buffer against the new fd.
+  forget_drm_state_for_pause(*impl_);
   impl_->drm_fd = -1;
 }
 
