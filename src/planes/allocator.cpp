@@ -868,11 +868,15 @@ std::vector<std::vector<Layer*>> Allocator::split_independent_groups(std::vector
     return {layers};
   }
 
-  // Union-find
+  // Union-find. `find` was previously a `std::function` even though
+  // it's not actually recursive (the inner loop does iterative path
+  // compression). That cost one heap allocation per split call for
+  // no real reason — `auto` collapses the closure into a stack
+  // object the compiler inlines.
   std::vector<std::size_t> parent(layers.size());
   std::iota(parent.begin(), parent.end(), static_cast<std::size_t>(0));
 
-  const std::function find = [&](std::size_t x) -> std::size_t {
+  auto find = [&](std::size_t x) -> std::size_t {
     while (parent.at(x) != x) {
       parent.at(x) = parent.at(parent.at(x));
       x = parent.at(x);
