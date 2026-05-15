@@ -140,13 +140,15 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   // can run. apply_layer_to_plane_real and disable_unused_planes both
   // bump the same counters.
   diagnostics_ = {};
-  // Stash for the duration of this apply() — disable_unused_planes
+  // Owning copy for the duration of this apply() — disable_unused_planes
   // consumes it. Cleared on every exit path so a later apply() call
-  // never picks up stale state from a previous frame.
-  external_reserved_ = external_reserved;
+  // never picks up stale state from a previous frame. Copy rather than
+  // span so future refactors that move apply() across thread / suspend
+  // boundaries can't see the caller's storage reallocate underneath us.
+  external_reserved_.assign(external_reserved.begin(), external_reserved.end());
   struct ResetReserved {
     Allocator* self;
-    ~ResetReserved() { self->external_reserved_ = {}; }
+    ~ResetReserved() { self->external_reserved_.clear(); }
   };
   const ResetReserved reset_reserved{this};
 

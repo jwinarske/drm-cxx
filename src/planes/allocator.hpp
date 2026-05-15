@@ -255,11 +255,16 @@ class Allocator {
 
   TestPreparer test_preparer_;
 
-  // Transient view set at the top of apply() and cleared on exit.
-  // Consumed by disable_unused_planes to keep caller-armed planes
-  // (composition canvas, etc.) from being written FB_ID=0 / CRTC_ID=0
-  // on every commit. Empty span outside an active apply() call.
-  drm::span<const uint32_t> external_reserved_;
+  // Owning copy of the caller's external_reserved set, populated at
+  // the top of apply() and cleared on exit. Previously held as a
+  // `drm::span` aliasing caller storage — fine in the current call
+  // shape, but the contract wasn't enforceable: any future refactor
+  // that moved apply() onto a coroutine or threadpool could see the
+  // caller's vector reallocate between span capture and span read.
+  // Reserved planes are O(1) per scene (typically 0–2), so the copy
+  // cost is negligible. Vector picked over fixed-size array so a
+  // caller passing >N reserved planes doesn't silently truncate.
+  std::vector<uint32_t> external_reserved_;
 
   // Per-plane snapshot of the layer + property map that was committed
   // last time this plane was armed. apply_layer_to_plane_real diffs
