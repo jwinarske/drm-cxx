@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -270,7 +271,14 @@ drm::expected<Buffer, std::error_code> Buffer::create_planar(const drm::Device& 
                                                              std::uint32_t drm_format,
                                                              std::uint32_t width,
                                                              std::uint32_t height) {
-  if (width == 0 || height == 0 || drm_format == 0) {
+  // 16K is past every shipping camera + display max; rejecting beyond
+  // that keeps the `height * extra_rows_num`, `stride * height`, and
+  // CREATE_DUMB total-byte computations from wrapping u32 on hostile
+  // / quirky dims fed in from driver-controlled V4L2 format echoes.
+  // Callers controlling dims directly hit the same gate.
+  constexpr std::uint32_t k_max_image_dim = 16384U;
+  if (width == 0 || height == 0 || drm_format == 0 || width > k_max_image_dim ||
+      height > k_max_image_dim) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
   const auto geom = planar_geometry(drm_format);
@@ -285,7 +293,21 @@ drm::expected<Buffer, std::error_code> Buffer::create_planar(const drm::Device& 
   // Over-allocate so the UV plane fits in the same linear region.
   // The kernel's CREATE_DUMB sees one tall buffer; AddFB2 below
   // points the chroma plane at the second half via per-plane offset.
-  const std::uint32_t total_rows = height + (height * geom->extra_rows_num / geom->extra_rows_den);
+  // 64-bit arithmetic and a `__builtin_mul_overflow` guard so a
+  // hostile geom (or future planar format with a larger ratio) can't
+  // wrap u32; CREATE_DUMB takes a u32 height, so we reject if the
+  // result would truncate.
+  std::uint64_t extra_rows = 0;
+  if (__builtin_mul_overflow(static_cast<std::uint64_t>(height),
+                             static_cast<std::uint64_t>(geom->extra_rows_num), &extra_rows)) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::value_too_large));
+  }
+  extra_rows /= geom->extra_rows_den;
+  const std::uint64_t total_rows_u64 = static_cast<std::uint64_t>(height) + extra_rows;
+  if (total_rows_u64 > std::numeric_limits<std::uint32_t>::max()) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::value_too_large));
+  }
+  const auto total_rows = static_cast<std::uint32_t>(total_rows_u64);
 
   auto cm = create_and_map_dumb(fd, width, total_rows, geom->bpp);
   if (!cm) {
@@ -299,11 +321,21 @@ drm::expected<Buffer, std::error_code> Buffer::create_planar(const drm::Device& 
   // against the kernel-reported stride to honor any alignment
   // padding the driver added — amdgpu DC's 256-byte rule applies
   // here, and using the kernel stride means we don't have to know
-  // about it).
+  // about it). The multiply runs in u64 so a wide kernel-stride
+  // can't wrap u32; AddFB2's offset field is u32, so we reject if
+  // the chroma offset would truncate.
   const std::uint32_t stride = cm->stride;
+  const auto y_size = static_cast<std::uint64_t>(stride) * static_cast<std::uint64_t>(height);
+  if (y_size > std::numeric_limits<std::uint32_t>::max()) {
+    munmap(cm->mapped, cm->size_bytes);
+    drm_mode_destroy_dumb destroy{};
+    destroy.handle = cm->gem_handle;
+    ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::value_too_large));
+  }
   std::array<std::uint32_t, 4> handles{cm->gem_handle, cm->gem_handle, 0, 0};
   std::array<std::uint32_t, 4> pitches{stride, stride, 0, 0};
-  std::array<std::uint32_t, 4> offsets{0, stride * height, 0, 0};
+  std::array<std::uint32_t, 4> offsets{0, static_cast<std::uint32_t>(y_size), 0, 0};
 
   std::uint32_t fb_id = 0;
   if (drmModeAddFB2(fd, width, height, drm_format, handles.data(), pitches.data(), offsets.data(),
