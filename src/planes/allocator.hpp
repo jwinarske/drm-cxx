@@ -18,6 +18,7 @@
 #include <optional>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -291,6 +292,14 @@ class Allocator {
   // const-correctness contract.
   mutable BipartiteMatching scratch_matching_;
   std::vector<Layer*> scratch_placeable_;
+
+  // Set of Layer*s present in the current apply() call's
+  // `output.layers()`. Populated at the top of apply(); read by the
+  // has_new_layer pre-pass and by apply_previous_allocation's stale-
+  // layer prune. Replaces the previous O(N×M) nested-loop membership
+  // checks with O(1) lookups; the set itself is O(N) to build and
+  // reuses its bucket array across frames.
+  std::unordered_set<const Layer*> scratch_current_set_;
 
   // Reset at the top of every apply() and bumped from
   // apply_layer_to_plane_real / the real-commit disable_unused_planes

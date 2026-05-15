@@ -25,6 +25,7 @@
 #include <optional>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -151,10 +152,14 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   };
   const ResetReserved reset_reserved{this};
 
-  // Reset layer assignment state
+  // Reset layer assignment state. Same pass populates the per-apply
+  // current-layers set used by has_new_layer / apply_previous_allocation
+  // below — O(1) membership instead of two O(N×M) nested-loop scans.
+  scratch_current_set_.clear();
   for (auto* layer : output.layers()) {
     layer->needs_composition_ = false;
     layer->assigned_plane_ = std::nullopt;
+    scratch_current_set_.insert(layer);
   }
 
   // Determine CRTC index once. Passed to every path that has to filter
@@ -190,18 +195,19 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   // a plane.
   bool has_new_layer = false;
   if (previous_allocation_valid_) {
+    // Build the previous-allocation membership set once, then probe
+    // it per current layer. Replaces an O(current × previous) scan
+    // with one O(previous) build + O(current) probes.
+    std::unordered_set<const Layer*> prev_set;
+    prev_set.reserve(previous_allocation_.size());
+    for (const auto& [plane_id, prev_layer] : previous_allocation_) {
+      prev_set.insert(prev_layer);
+    }
     for (const auto* layer : output.layers()) {
       if (layer->is_composition_layer() || layer->is_externally_bound()) {
         continue;
       }
-      bool seen = false;
-      for (const auto& [plane_id, prev_layer] : previous_allocation_) {
-        if (prev_layer == layer) {
-          seen = true;
-          break;
-        }
-      }
-      if (!seen) {
+      if (prev_set.count(layer) == 0) {
         has_new_layer = true;
         break;
       }
@@ -259,17 +265,12 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
     }
   }
 
-  // Validate that all layer pointers from previous allocation still exist
-  const auto& current_layers = output.layers();
+  // Validate that all layer pointers from previous allocation still
+  // exist. scratch_current_set_ was populated at the top of apply()
+  // — O(1) membership check per stale-entry probe replaces the
+  // previous O(prev × current) nested-loop scan.
   for (auto it = previous_allocation_.begin(); it != previous_allocation_.end();) {
-    bool found = false;
-    for (const auto* l : current_layers) {
-      if (l == it->second) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
+    if (scratch_current_set_.count(it->second) == 0) {
       it = previous_allocation_.erase(it);
     } else {
       ++it;
