@@ -883,34 +883,36 @@ class LayerScene::Impl {
     // guards in the allocator.
     dst.set_externally_bound(driver_owns_binding);
     if (!driver_owns_binding) {
-      dst.set_property("FB_ID", fb_id);
+      dst.set_property(drm::planes::PropTag::FbId, fb_id);
     }
     // CRTC_ID binds the plane to this scene's CRTC. Without it the
     // kernel rejects the plane commit (FB armed, but the plane is still
     // bound to nothing / to whatever the previous committed CRTC was),
     // the allocator's test commits fail for every plane, and the
     // allocator reports 0 layers assigned.
-    dst.set_property("CRTC_ID", crtc_id);
+    dst.set_property(drm::planes::PropTag::CrtcId, crtc_id);
 
     // KMS plane rectangles: CRTC_* is destination on the scanout, in
     // signed 32-bit pixels. SRC_* is source within the buffer, encoded
     // as 16.16 fixed-point (kernel expects this for subpixel blits).
-    dst.set_property("CRTC_X", static_cast<std::uint64_t>(d.dst_rect.x));
-    dst.set_property("CRTC_Y", static_cast<std::uint64_t>(d.dst_rect.y));
-    dst.set_property("CRTC_W", static_cast<std::uint64_t>(d.dst_rect.w));
-    dst.set_property("CRTC_H", static_cast<std::uint64_t>(d.dst_rect.h));
-    dst.set_property("SRC_X", to_16_16(static_cast<std::uint32_t>(d.src_rect.x)));
-    dst.set_property("SRC_Y", to_16_16(static_cast<std::uint32_t>(d.src_rect.y)));
-    dst.set_property("SRC_W", to_16_16(d.src_rect.w));
-    dst.set_property("SRC_H", to_16_16(d.src_rect.h));
+    dst.set_property(drm::planes::PropTag::CrtcX, static_cast<std::uint64_t>(d.dst_rect.x));
+    dst.set_property(drm::planes::PropTag::CrtcY, static_cast<std::uint64_t>(d.dst_rect.y));
+    dst.set_property(drm::planes::PropTag::CrtcW, static_cast<std::uint64_t>(d.dst_rect.w));
+    dst.set_property(drm::planes::PropTag::CrtcH, static_cast<std::uint64_t>(d.dst_rect.h));
+    dst.set_property(drm::planes::PropTag::SrcX,
+                     to_16_16(static_cast<std::uint32_t>(d.src_rect.x)));
+    dst.set_property(drm::planes::PropTag::SrcY,
+                     to_16_16(static_cast<std::uint32_t>(d.src_rect.y)));
+    dst.set_property(drm::planes::PropTag::SrcW, to_16_16(d.src_rect.w));
+    dst.set_property(drm::planes::PropTag::SrcH, to_16_16(d.src_rect.h));
 
     // Format + modifier let the allocator statically screen planes for
     // compatibility before any test commit. The allocator reads both
     // through planes::Layer's format()/modifier() accessors, which are
-    // backed by the "pixel_format" / "FB_MODIFIER" property keys (not
+    // backed by the PixelFormat / FbModifier PropTag entries (not
     // the KMS plane-property names — these are internal-to-Layer hints).
-    dst.set_property("pixel_format", fmt.drm_fourcc);
-    dst.set_property("FB_MODIFIER", fmt.modifier);
+    dst.set_property(drm::planes::PropTag::PixelFormat, fmt.drm_fourcc);
+    dst.set_property(drm::planes::PropTag::FbModifier, fmt.modifier);
 
     // Optional plane properties. rotation and zpos are only written when
     // the caller set a value; emitting zpos=0 unconditionally would
@@ -918,12 +920,12 @@ class LayerScene::Impl {
     // zpos (amdgpu pins PRIMARY at zpos=2), leaving the scene with
     // nowhere to put a single layer.
     if (d.rotation != 0) {
-      dst.set_property("rotation", d.rotation);
+      dst.set_property(drm::planes::PropTag::Rotation, d.rotation);
     }
     if (d.zpos.has_value()) {
-      dst.set_property("zpos", static_cast<std::uint64_t>(*d.zpos));
+      dst.set_property(drm::planes::PropTag::Zpos, static_cast<std::uint64_t>(*d.zpos));
     } else if (default_zpos_hint.has_value()) {
-      dst.set_property("zpos", *default_zpos_hint);
+      dst.set_property(drm::planes::PropTag::Zpos, *default_zpos_hint);
     }
     // Always emit the layer's intended alpha. Earlier versions skipped
     // the write when `d.alpha == 0xFFFF` and no caller had touched it,
@@ -936,7 +938,7 @@ class LayerScene::Impl {
     // expose `alpha` so the apply-time `property_id()` lookup skips
     // the write there silently, matching the earlier wedge-avoidance
     // intent without needing the conditional.
-    dst.set_property("alpha", static_cast<std::uint64_t>(d.alpha));
+    dst.set_property(drm::planes::PropTag::Alpha, static_cast<std::uint64_t>(d.alpha));
 
     dst.set_content_type(src.content_type());
     if (src.update_hint_hz() != 0) {

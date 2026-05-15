@@ -3,30 +3,119 @@
 
 #include "layer.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
-#include <string>
 #include <string_view>
 
 namespace drm::planes {
 
+namespace {
+
+// Canonical KMS-property name table, indexed by `static_cast<size_t>(PropTag)`.
+// Order must match the enum exactly — `prop_name` reads this directly.
+constexpr std::array<std::string_view, k_num_props> k_prop_names{
+    "FB_ID", "FB_MODIFIER", "CRTC_ID", "CRTC_X",   "CRTC_Y", "CRTC_W", "CRTC_H",       "SRC_X",
+    "SRC_Y", "SRC_W",       "SRC_H",   "rotation", "alpha",  "zpos",   "pixel_format",
+};
+
+}  // namespace
+
+std::string_view prop_name(PropTag tag) noexcept {
+  const auto idx = static_cast<std::size_t>(tag);
+  if (idx >= k_num_props) {
+    return {};
+  }
+  return k_prop_names.at(idx);
+}
+
+std::optional<PropTag> parse_prop_tag(std::string_view name) noexcept {
+  // Linear scan over k_num_props (currently 15). Branchless and
+  // cache-friendly; faster than std::unordered_map<string,PropTag> at
+  // this size.
+  for (std::size_t i = 0; i < k_num_props; ++i) {
+    if (k_prop_names.at(i) == name) {
+      return static_cast<PropTag>(i);
+    }
+  }
+  return std::nullopt;
+}
+
+// ── Layer::PropertyView ─────────────────────────────────────────────
+
+Layer::PropertyView::iterator::iterator(const Layer* owner, std::size_t idx) noexcept
+    : owner_(owner), idx_(idx) {
+  advance_to_set();
+}
+
+Layer::PropertyView::iterator::value_type Layer::PropertyView::iterator::operator*()
+    const noexcept {
+  return {prop_name(static_cast<PropTag>(idx_)), owner_->values_.at(idx_)};
+}
+
+Layer::PropertyView::iterator& Layer::PropertyView::iterator::operator++() noexcept {
+  ++idx_;
+  advance_to_set();
+  return *this;
+}
+
+bool Layer::PropertyView::iterator::operator==(const iterator& other) const noexcept {
+  return idx_ == other.idx_;
+}
+
+bool Layer::PropertyView::iterator::operator!=(const iterator& other) const noexcept {
+  return !(*this == other);
+}
+
+void Layer::PropertyView::iterator::advance_to_set() noexcept {
+  while (idx_ < k_num_props && !owner_->set_mask_.test(idx_)) {
+    ++idx_;
+  }
+}
+
+Layer::PropertyView::iterator Layer::PropertyView::begin() const noexcept {
+  return iterator{owner_, 0};
+}
+
+Layer::PropertyView::iterator Layer::PropertyView::end() const noexcept {
+  return iterator{owner_, k_num_props};
+}
+
+bool Layer::PropertyView::empty() const noexcept {
+  return owner_->set_mask_.none();
+}
+
+std::size_t Layer::PropertyView::size() const noexcept {
+  return owner_->set_mask_.count();
+}
+
+// ── Layer ───────────────────────────────────────────────────────────
+
 Layer& Layer::set_property(const std::string_view name, uint64_t value) {
-  if (auto [it, inserted] = properties_.emplace(std::string(name), value);
-      !inserted && it->second != value) {
-    it->second = value;
+  const auto tag = parse_prop_tag(name);
+  if (!tag.has_value()) {
+    return *this;
+  }
+  return set_property(*tag, value);
+}
+
+Layer& Layer::set_property(PropTag tag, uint64_t value) noexcept {
+  const auto idx = static_cast<std::size_t>(tag);
+  const bool was_set = set_mask_.test(idx);
+  const bool value_changed = !was_set || values_.at(idx) != value;
+  values_.at(idx) = value;
+  set_mask_.set(idx);
+  if (value_changed) {
     dirty_ = true;
-  } else if (inserted) {
-    dirty_ = true;
+    cached_hash_.reset();
   }
   return *this;
 }
 
 Layer& Layer::disable() noexcept {
-  properties_.insert_or_assign("FB_ID", uint64_t{0});
-  dirty_ = true;
-  return *this;
+  return set_property(PropTag::FbId, uint64_t{0});
 }
 
 Layer& Layer::set_composited() noexcept {
@@ -66,51 +155,57 @@ std::optional<uint32_t> Layer::assigned_plane_id() const noexcept {
 }
 
 std::optional<uint64_t> Layer::property(std::string_view name) const {
-  // Transparent heterogeneous unordered_map lookup is C++20. Under C++17
-  // we construct a temporary std::string; property() is not on the hot
-  // atomic-commit path.
-  const auto it = properties_.find(std::string(name));
-  if (it == properties_.end()) {
+  const auto tag = parse_prop_tag(name);
+  if (!tag.has_value()) {
     return std::nullopt;
   }
-  return it->second;
+  return property(*tag);
 }
 
-const Layer::PropertyMap& Layer::properties() const noexcept {
-  return properties_;
+std::optional<uint64_t> Layer::property(PropTag tag) const noexcept {
+  const auto idx = static_cast<std::size_t>(tag);
+  if (idx >= k_num_props || !set_mask_.test(idx)) {
+    return std::nullopt;
+  }
+  return values_.at(idx);
+}
+
+Layer::PropertyView Layer::properties() const noexcept {
+  return PropertyView{this};
+}
+
+Layer::PropertySnapshot Layer::snapshot() const noexcept {
+  return PropertySnapshot{values_, set_mask_};
 }
 
 std::optional<uint32_t> Layer::format() const {
-  // The format is set as a separate property hint by the compositor.
-  if (const auto fmt = property("pixel_format")) {
+  if (const auto fmt = property(PropTag::PixelFormat)) {
     return static_cast<uint32_t>(*fmt);
   }
   return std::nullopt;
 }
 
 uint64_t Layer::modifier() const {
-  const auto val = property("FB_MODIFIER");
-  return val.value_or(0);
+  return property(PropTag::FbModifier).value_or(0);
 }
 
 uint64_t Layer::rotation() const {
-  const auto val = property("rotation");
-  return val.value_or(0);  // 0 = DRM_MODE_ROTATE_0
+  return property(PropTag::Rotation).value_or(0);  // 0 = DRM_MODE_ROTATE_0
 }
 
 bool Layer::requires_scaling() const {
-  const auto src_w = property("SRC_W");
-  const auto crtc_w = property("CRTC_W");
-  const auto src_h = property("SRC_H");
-  const auto crtc_h = property("CRTC_H");
+  const auto src_w = property(PropTag::SrcW);
+  const auto crtc_w = property(PropTag::CrtcW);
+  const auto src_h = property(PropTag::SrcH);
+  const auto crtc_h = property(PropTag::CrtcH);
 
   if (!src_w || !crtc_w || !src_h || !crtc_h) {
     return false;
   }
 
   // SRC coordinates are in 16.16 fixed point
-  auto const sw = static_cast<uint32_t>(*src_w >> 16);
-  auto const sh = static_cast<uint32_t>(*src_h >> 16);
+  auto const sw = static_cast<uint32_t>(*src_w >> 16U);
+  auto const sh = static_cast<uint32_t>(*src_h >> 16U);
   auto const cw = static_cast<uint32_t>(*crtc_w);
   auto const ch = static_cast<uint32_t>(*crtc_h);
 
@@ -118,19 +213,17 @@ bool Layer::requires_scaling() const {
 }
 
 uint32_t Layer::width() const {
-  const auto val = property("CRTC_W");
-  return val ? static_cast<uint32_t>(*val) : 0;
+  return static_cast<uint32_t>(property(PropTag::CrtcW).value_or(0));
 }
 
 uint32_t Layer::height() const {
-  const auto val = property("CRTC_H");
-  return val ? static_cast<uint32_t>(*val) : 0;
+  return static_cast<uint32_t>(property(PropTag::CrtcH).value_or(0));
 }
 
 Rect Layer::crtc_rect() const {
   return Rect{
-      static_cast<int32_t>(property("CRTC_X").value_or(0)),
-      static_cast<int32_t>(property("CRTC_Y").value_or(0)),
+      static_cast<int32_t>(property(PropTag::CrtcX).value_or(0)),
+      static_cast<int32_t>(property(PropTag::CrtcY).value_or(0)),
       width(),
       height(),
   };
@@ -162,18 +255,25 @@ uint32_t Layer::update_hz() const noexcept {
 }
 
 std::size_t Layer::property_hash() const {
-  std::size_t h = 0x9e3779b97f4a7c15;  // Golden ratio seed
-  for (const auto& [name, val] : properties_) {
-    // Skip FB_ID since it changes every frame
-    if (name == "FB_ID") {
+  if (cached_hash_.has_value()) {
+    return *cached_hash_;
+  }
+  // Walk the set bits in tag order so two layers with the same logical
+  // property set always produce the same hash. FB_ID is skipped — it
+  // changes every frame and would dirty the failure cache uselessly.
+  std::size_t h = 0x9e3779b97f4a7c15ULL;  // Golden ratio seed
+  for (std::size_t i = 0; i < k_num_props; ++i) {
+    if (!set_mask_.test(i)) {
       continue;
     }
-    // Proper hash combine (boost-style) to avoid commutative collisions
-    std::size_t const name_hash = std::hash<std::string>{}(name);
-    std::size_t const val_hash = std::hash<uint64_t>{}(val);
-    h ^= name_hash + 0x9e3779b97f4a7c15 + (h << 6) + (h >> 2);
-    h ^= val_hash + 0x9e3779b97f4a7c15 + (h << 6) + (h >> 2);
+    if (static_cast<PropTag>(i) == PropTag::FbId) {
+      continue;
+    }
+    // boost-style hash_combine, order-dependent (hence the tag-order walk above).
+    h ^= std::hash<std::size_t>{}(i) + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
+    h ^= std::hash<uint64_t>{}(values_.at(i)) + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
   }
+  cached_hash_ = h;
   return h;
 }
 
