@@ -269,7 +269,7 @@ class Allocator {
   // activation), and wholesale on every plane reassignment.
   struct LastCommitted {
     const Layer* layer{nullptr};
-    Layer::PropertyMap properties;
+    Layer::PropertySnapshot properties;
   };
   std::unordered_map<uint32_t, LastCommitted> last_committed_;
 

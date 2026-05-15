@@ -1023,8 +1023,9 @@ void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_in
     if (track_state && !force_full_writes_) {
       const auto it = last_committed_.find(plane->id);
       const bool already_off = (it == last_committed_.end()) || [&] {
-        const auto fb_it = it->second.properties.find("FB_ID");
-        return fb_it == it->second.properties.end() || fb_it->second == 0U;
+        const auto& snap = it->second.properties;
+        constexpr auto fb_idx = static_cast<std::size_t>(PropTag::FbId);
+        return !snap.set_mask.test(fb_idx) || snap.values.at(fb_idx) == 0U;
       }();
       if (already_off) {
         continue;
@@ -1053,7 +1054,7 @@ void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_in
 drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer& layer,
                                                                      const uint32_t plane_id,
                                                                      AtomicRequest& req) const {
-  for (const auto& [name, value] : layer.properties()) {
+  for (auto [name, value] : layer.properties()) {
     auto prop_id = prop_store_.property_id(plane_id, name);
     if (!prop_id.has_value()) {
       // Property not advertised on this plane — not all layers set
@@ -1095,7 +1096,13 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
   const bool full_write =
       force_full_writes_ || it == last_committed_.end() || it->second.layer != &layer;
 
-  for (const auto& [name, value] : layer.properties()) {
+  for (std::size_t i = 0; i < k_num_props; ++i) {
+    if (!layer.set_mask_.test(i)) {
+      continue;
+    }
+    const auto tag = static_cast<PropTag>(i);
+    const auto name = prop_name(tag);
+    const auto value = layer.values_.at(i);
     auto prop_id = prop_store_.property_id(plane_id, name);
     if (!prop_id.has_value()) {
       continue;
@@ -1107,14 +1114,13 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
     // set up by the producer-side extension stack; suppress the
     // scene-side write defensively even if a caller has somehow
     // stuffed FB_ID into the layer's property bag.
-    if (layer.is_externally_bound() && name == "FB_ID") {
+    if (layer.is_externally_bound() && tag == PropTag::FbId) {
       continue;
     }
     bool need_write = full_write;
     if (!need_write) {
-      const auto& prev = it->second.properties;
-      const auto pit = prev.find(name);
-      need_write = (pit == prev.end()) || (pit->second != value);
+      const auto& snap = it->second.properties;
+      need_write = !snap.set_mask.test(i) || snap.values.at(i) != value;
     }
     // FB_ID always emits, regardless of the snapshot diff. KMS treats
     // FB_ID re-attachment as the "this is a new frame" signal — the
@@ -1128,7 +1134,7 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
     // properties (CRTC_*, SRC_*, alpha, zpos, rotation) still benefit
     // from the diff, which is the bulk of the per-frame property
     // traffic.
-    if (name == "FB_ID") {
+    if (tag == PropTag::FbId) {
       need_write = true;
     }
     if (!need_write) {
@@ -1138,16 +1144,17 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
       return result;
     }
     ++diagnostics_.properties_written;
-    if (name == "FB_ID") {
+    if (tag == PropTag::FbId) {
       ++diagnostics_.fbs_attached;
     }
   }
   // Update the snapshot to reflect what's now committed for this
-  // plane. Storing a copy of properties() avoids tying our snapshot
-  // to the layer's mutable property map (a future scene relayout
-  // could rewrite layer.properties() between commits, and we'd diff
-  // against the wrong baseline).
-  last_committed_[plane_id] = LastCommitted{&layer, layer.properties()};
+  // plane. The snapshot is a trivially-copyable fixed-size POD now —
+  // memcpy, no allocations. Storing a copy (rather than aliasing the
+  // layer's live state) preserves the invariant that a future
+  // relayout that rewrites layer properties can't change the
+  // baseline we diff against on the next commit.
+  last_committed_[plane_id] = LastCommitted{&layer, layer.snapshot()};
   return {};
 }
 
