@@ -2100,6 +2100,18 @@ class LayerScene::Impl {
   // Per-frame layer-display-params view used by derive_output_signaling.
   // Held as a member so the per-frame heap allocation is paid once.
   std::vector<const drm::scene::DisplayParams*> scratch_layer_params_;
+  // Per-frame "external plane reservations" list build_frame_into
+  // assembles for the allocator. Lives only inside that call; cleared
+  // + reserved at top.
+  std::vector<std::uint32_t> scratch_reserved_planes_;
+  // Per-frame acquisitions list. build_frame_into populates it via
+  // acquire_all and std::moves it into FrameBuildState::acquisitions
+  // before returning. finalize_frame moves the (now-cleared but
+  // capacity-retaining) vector back here so the next frame skips
+  // the buffer allocation. After a failed build / dropped state the
+  // capacity is lost — exception-safety insurance, not the steady
+  // state.
+  std::vector<AcquisitionSlot> scratch_acquisitions_;
 
   // HDR output metadata signaling. `desired_hdr_` carries the
   // most-recent set_output_metadata input (`nullopt` == "clear");
@@ -2205,8 +2217,12 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
 
   // Acquire every live layer's buffer up front. On any failure the
   // already-acquired buffers are handed back to their sources.
-  std::vector<AcquisitionSlot> acquisitions;
-  acquisitions.reserve(report.layers_total);
+  // scratch_acquisitions_ carries capacity across frames (see member
+  // doc); finalize_frame moves the cleared vector back to restore
+  // the buffer for the next commit.
+  scratch_acquisitions_.clear();
+  scratch_acquisitions_.reserve(report.layers_total);
+  auto& acquisitions = scratch_acquisitions_;
   if (auto r = acquire_all(acquisitions, report); !r) {
     release_all(acquisitions);
     return drm::unexpected<std::error_code>(r.error());
@@ -2307,20 +2323,20 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // allocator must leave all of these alone — the scene writes
   // their properties itself via compose_unassigned / the canvas-arm
   // path and arm_stream_layer_planes respectively.
-  std::vector<std::uint32_t> reserved_planes;
-  reserved_planes.reserve(1 + acquisitions.size());
+  scratch_reserved_planes_.clear();
+  scratch_reserved_planes_.reserve(1 + acquisitions.size());
   if (last_canvas_plane_id_.has_value()) {
-    reserved_planes.push_back(*last_canvas_plane_id_);
+    scratch_reserved_planes_.push_back(*last_canvas_plane_id_);
   }
   for (const auto& acq : acquisitions) {
     if (acq.stream_pinned_plane_id.has_value()) {
-      reserved_planes.push_back(*acq.stream_pinned_plane_id);
+      scratch_reserved_planes_.push_back(*acq.stream_pinned_plane_id);
     }
   }
-  const auto reserved_span =
-      reserved_planes.empty()
-          ? drm::span<const std::uint32_t>{}
-          : drm::span<const std::uint32_t>(reserved_planes.data(), reserved_planes.size());
+  const auto reserved_span = scratch_reserved_planes_.empty()
+                                 ? drm::span<const std::uint32_t>{}
+                                 : drm::span<const std::uint32_t>(scratch_reserved_planes_.data(),
+                                                                  scratch_reserved_planes_.size());
   auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
       allocator_->apply(output_, req, effective_flags, reserved_span);
   if (!assigned) {
@@ -2453,6 +2469,9 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
       suspended_ = true;
     }
     release_all(state->acquisitions);
+    // Return the cleared-but-capacity-retaining vector to the
+    // per-Impl scratch. Mirror in the success path below.
+    scratch_acquisitions_ = std::move(state->acquisitions);
     return drm::unexpected<std::error_code>(kernel_result.error());
   }
 
@@ -2483,6 +2502,7 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
   }
 
   release_all(state->acquisitions);
+  scratch_acquisitions_ = std::move(state->acquisitions);
   return report;
 }
 
