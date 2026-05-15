@@ -5,7 +5,6 @@
 
 #include "../core/device.hpp"
 #include "../modeset/atomic.hpp"
-#include "matching.hpp"
 #include "planes/layer.hpp"
 #include "planes/output.hpp"
 #include "planes/plane_registry.hpp"
@@ -26,6 +25,7 @@
 #include <optional>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -140,20 +140,26 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   // can run. apply_layer_to_plane_real and disable_unused_planes both
   // bump the same counters.
   diagnostics_ = {};
-  // Stash for the duration of this apply() — disable_unused_planes
+  // Owning copy for the duration of this apply() — disable_unused_planes
   // consumes it. Cleared on every exit path so a later apply() call
-  // never picks up stale state from a previous frame.
-  external_reserved_ = external_reserved;
+  // never picks up stale state from a previous frame. Copy rather than
+  // span so future refactors that move apply() across thread / suspend
+  // boundaries can't see the caller's storage reallocate underneath us.
+  external_reserved_.assign(external_reserved.begin(), external_reserved.end());
   struct ResetReserved {
     Allocator* self;
-    ~ResetReserved() { self->external_reserved_ = {}; }
+    ~ResetReserved() { self->external_reserved_.clear(); }
   };
   const ResetReserved reset_reserved{this};
 
-  // Reset layer assignment state
+  // Reset layer assignment state. Same pass populates the per-apply
+  // current-layers set used by has_new_layer / apply_previous_allocation
+  // below — O(1) membership instead of two O(N×M) nested-loop scans.
+  scratch_current_set_.clear();
   for (auto* layer : output.layers()) {
     layer->needs_composition_ = false;
     layer->assigned_plane_ = std::nullopt;
+    scratch_current_set_.insert(layer);
   }
 
   // Determine CRTC index once. Passed to every path that has to filter
@@ -189,18 +195,19 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   // a plane.
   bool has_new_layer = false;
   if (previous_allocation_valid_) {
+    // Build the previous-allocation membership set once, then probe
+    // it per current layer. Replaces an O(current × previous) scan
+    // with one O(previous) build + O(current) probes.
+    std::unordered_set<const Layer*> prev_set;
+    prev_set.reserve(previous_allocation_.size());
+    for (const auto& [plane_id, prev_layer] : previous_allocation_) {
+      prev_set.insert(prev_layer);
+    }
     for (const auto* layer : output.layers()) {
       if (layer->is_composition_layer() || layer->is_externally_bound()) {
         continue;
       }
-      bool seen = false;
-      for (const auto& [plane_id, prev_layer] : previous_allocation_) {
-        if (prev_layer == layer) {
-          seen = true;
-          break;
-        }
-      }
-      if (!seen) {
+      if (prev_set.count(layer) == 0) {
         has_new_layer = true;
         break;
       }
@@ -258,17 +265,12 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
     }
   }
 
-  // Validate that all layer pointers from previous allocation still exist
-  const auto& current_layers = output.layers();
+  // Validate that all layer pointers from previous allocation still
+  // exist. scratch_current_set_ was populated at the top of apply()
+  // — O(1) membership check per stale-entry probe replaces the
+  // previous O(prev × current) nested-loop scan.
   for (auto it = previous_allocation_.begin(); it != previous_allocation_.end();) {
-    bool found = false;
-    for (const auto* l : current_layers) {
-      if (l == it->second) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
+    if (scratch_current_set_.count(it->second) == 0) {
       it = previous_allocation_.erase(it);
     } else {
       ++it;
@@ -334,17 +336,20 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // already have a plane and the scene writes their properties
   // directly. Strip them once here so split_independent_groups,
   // place_group, and the per-group TEST commits don't see them.
-  std::vector<Layer*> placeable_layers;
-  placeable_layers.reserve(output.layers().size());
+  // Reused scratch — capacity carries forward across frames, so a
+  // steady-state caller pays one allocation total instead of one
+  // per apply().
+  scratch_placeable_.clear();
+  scratch_placeable_.reserve(output.layers().size());
   for (auto* l : output.layers()) {
     if (l->is_externally_bound() || l->is_transient_composited()) {
       continue;
     }
-    placeable_layers.push_back(l);
+    scratch_placeable_.push_back(l);
   }
 
   // §13.7 Spatial intersection splitting
-  auto groups = split_independent_groups(placeable_layers);
+  auto groups = split_independent_groups(scratch_placeable_);
 
   auto available_planes = registry_.for_crtc(crtc_index);
   // Externally reserved planes are off-limits for placement *and*
@@ -530,13 +535,13 @@ std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_pr
     return result;
   }
 
-  BipartiteMatching matching(layers.size(), planes.size());
+  scratch_matching_.reset(layers.size(), planes.size());
 
   for (std::size_t i = 0; i < layers.size(); ++i) {
     for (std::size_t j = 0; j < planes.size(); ++j) {
       if (plane_statically_compatible(*planes.at(j), *layers.at(i), crtc_index)) {
         int const s = score_pair(*planes.at(j), *layers.at(i));
-        matching.add_edge(i, j, s);
+        scratch_matching_.add_edge(i, j, s);
         if (alloc_debug()) {
           const auto& p = *planes.at(j);
           const auto& lay = *layers.at(i);
@@ -557,10 +562,10 @@ std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_pr
     }
   }
 
-  matching.solve();
+  scratch_matching_.solve();
 
   for (std::size_t i = 0; i < layers.size(); ++i) {
-    auto m = matching.match_for_left(i);
+    auto m = scratch_matching_.match_for_left(i);
     if (m.has_value()) {
       result.emplace_back(layers.at(i), planes.at(*m));
       if (alloc_debug()) {
@@ -868,11 +873,15 @@ std::vector<std::vector<Layer*>> Allocator::split_independent_groups(std::vector
     return {layers};
   }
 
-  // Union-find
+  // Union-find. `find` was previously a `std::function` even though
+  // it's not actually recursive (the inner loop does iterative path
+  // compression). That cost one heap allocation per split call for
+  // no real reason — `auto` collapses the closure into a stack
+  // object the compiler inlines.
   std::vector<std::size_t> parent(layers.size());
   std::iota(parent.begin(), parent.end(), static_cast<std::size_t>(0));
 
-  const std::function find = [&](std::size_t x) -> std::size_t {
+  auto find = [&](std::size_t x) -> std::size_t {
     while (parent.at(x) != x) {
       parent.at(x) = parent.at(parent.at(x));
       x = parent.at(x);

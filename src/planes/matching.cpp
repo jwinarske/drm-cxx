@@ -19,6 +19,24 @@ BipartiteMatching::BipartiteMatching(std::size_t n_left, std::size_t n_right)
       match_right_(n_right, nil),
       dist_(n_left + 1) {}
 
+void BipartiteMatching::reset(std::size_t n_left, std::size_t n_right) {
+  n_left_ = n_left;
+  n_right_ = n_right;
+  matched_ = 0;
+  // Resize keeps existing capacity, so a per-frame caller pays one
+  // allocation for the first frame and zero thereafter when the
+  // shape is stable. Per-node sub-vectors in adj_ are cleared
+  // individually since `adj_.resize(N)` leaves any existing slot's
+  // edges intact; we want a fresh edge list each call.
+  adj_.resize(n_left);
+  for (auto& edges : adj_) {
+    edges.clear();
+  }
+  match_left_.assign(n_left, nil);
+  match_right_.assign(n_right, nil);
+  dist_.assign(n_left + 1, 0);
+}
+
 void BipartiteMatching::add_edge(std::size_t u, std::size_t v) {
   adj_.at(u).emplace_back(v, 0);
 }

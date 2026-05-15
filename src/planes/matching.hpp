@@ -4,9 +4,8 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
-#include <functional>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace drm::planes {
@@ -22,7 +21,19 @@ namespace drm::planes {
 // Runs in O(E * sqrt(V)) — microseconds for typical counts (<=8 each).
 class BipartiteMatching {
  public:
+  // Construct empty — callers feed in dimensions via `reset(...)`
+  // before adding edges. Useful for reuse across frames without
+  // paying for vector allocations each call.
+  BipartiteMatching() = default;
   BipartiteMatching(std::size_t n_left, std::size_t n_right);
+
+  // Re-shape an existing instance to a new (n_left, n_right). The
+  // internal vectors are .resize'd, keeping their capacity across
+  // calls so a per-frame caller pays one set of allocations the
+  // first time and zero on subsequent frames with the same shape.
+  // Every per-node container is cleared / reset to its initial
+  // state so a fresh call sees the same invariants as a fresh ctor.
+  void reset(std::size_t n_left, std::size_t n_right);
 
   // Add an edge: left node u can be matched to right node v.
   void add_edge(std::size_t u, std::size_t v);
@@ -47,8 +58,8 @@ class BipartiteMatching {
   bool bfs();
   bool dfs(std::size_t u);
 
-  std::size_t n_left_;
-  std::size_t n_right_;
+  std::size_t n_left_{0};
+  std::size_t n_right_{0};
 
   // Adjacency list: adj_[u] = list of (right_node, score) pairs.
   // Sorted by score descending in solve() so DFS visits high-score

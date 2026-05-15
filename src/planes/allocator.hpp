@@ -5,6 +5,7 @@
 
 #include "../core/property_store.hpp"
 #include "layer.hpp"
+#include "matching.hpp"
 #include "plane_registry.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
@@ -17,6 +18,7 @@
 #include <optional>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -255,11 +257,16 @@ class Allocator {
 
   TestPreparer test_preparer_;
 
-  // Transient view set at the top of apply() and cleared on exit.
-  // Consumed by disable_unused_planes to keep caller-armed planes
-  // (composition canvas, etc.) from being written FB_ID=0 / CRTC_ID=0
-  // on every commit. Empty span outside an active apply() call.
-  drm::span<const uint32_t> external_reserved_;
+  // Owning copy of the caller's external_reserved set, populated at
+  // the top of apply() and cleared on exit. Previously held as a
+  // `drm::span` aliasing caller storage — fine in the current call
+  // shape, but the contract wasn't enforceable: any future refactor
+  // that moved apply() onto a coroutine or threadpool could see the
+  // caller's vector reallocate between span capture and span read.
+  // Reserved planes are O(1) per scene (typically 0–2), so the copy
+  // cost is negligible. Vector picked over fixed-size array so a
+  // caller passing >N reserved planes doesn't silently truncate.
+  std::vector<uint32_t> external_reserved_;
 
   // Per-plane snapshot of the layer + property map that was committed
   // last time this plane was armed. apply_layer_to_plane_real diffs
@@ -276,6 +283,23 @@ class Allocator {
   // True to disable per-property minimization. See
   // set_force_full_property_writes.
   bool force_full_writes_{false};
+
+  // Per-frame scratch reused across apply() calls. Capacity carries
+  // forward, but contents are reset / cleared at the top of each
+  // user of these so a fresh call sees the same invariants as a
+  // local. Mutable so the const bipartite_preseed_group path can
+  // still re-shape scratch_matching_ without giving up its
+  // const-correctness contract.
+  mutable BipartiteMatching scratch_matching_;
+  std::vector<Layer*> scratch_placeable_;
+
+  // Set of Layer*s present in the current apply() call's
+  // `output.layers()`. Populated at the top of apply(); read by the
+  // has_new_layer pre-pass and by apply_previous_allocation's stale-
+  // layer prune. Replaces the previous O(N×M) nested-loop membership
+  // checks with O(1) lookups; the set itself is O(N) to build and
+  // reuses its bucket array across frames.
+  std::unordered_set<const Layer*> scratch_current_set_;
 
   // Reset at the top of every apply() and bumped from
   // apply_layer_to_plane_real / the real-commit disable_unused_planes
