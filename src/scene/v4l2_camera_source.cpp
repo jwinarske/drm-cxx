@@ -485,6 +485,14 @@ struct V4l2CameraSource::Impl {
   std::array<drm::dumb::Buffer, 2> dumb_pair{};
   std::size_t front_idx{0};
   bool any_published{false};
+
+  // First non-EAGAIN error drive() hit on a requeue (VIDIOC_QBUF). Once
+  // set, every subsequent acquire() surfaces it — the ring is past the
+  // point where another DQBUF round-trip can fix itself, so the source
+  // is effectively dead and the caller needs to tear down and rebuild.
+  // EAGAIN is excluded because the queue temporarily refusing a QBUF
+  // isn't a terminal condition.
+  std::error_code pending_error;
 };
 
 V4l2CameraSource::V4l2CameraSource() : impl_(std::make_unique<Impl>()) {}
@@ -726,9 +734,13 @@ drm::expected<void, std::error_code> V4l2CameraSource::drive() noexcept {
         continue;
       }
       if (impl_->ready_idx >= 0) {
-        auto const requeue_ec = queue_capture_buffer(
-            fd, is_mplane, static_cast<std::uint32_t>(impl_->ready_idx), impl_->capture_num_planes);
-        (void)requeue_ec;
+        if (auto const requeue_ec =
+                queue_capture_buffer(fd, is_mplane, static_cast<std::uint32_t>(impl_->ready_idx),
+                                     impl_->capture_num_planes);
+            requeue_ec && requeue_ec != std::errc::resource_unavailable_try_again &&
+            !impl_->pending_error) {
+          impl_->pending_error = requeue_ec;
+        }
       }
       impl_->ready_idx = static_cast<int>(buf.index);
     }
@@ -770,8 +782,11 @@ drm::expected<void, std::error_code> V4l2CameraSource::drive() noexcept {
     dq_indices.push_back(latest_idx.value());
   }
   for (auto idx : dq_indices) {
-    auto const requeue_ec = queue_capture_buffer(fd, is_mplane, idx, impl_->capture_num_planes);
-    (void)requeue_ec;
+    if (auto const requeue_ec = queue_capture_buffer(fd, is_mplane, idx, impl_->capture_num_planes);
+        requeue_ec && requeue_ec != std::errc::resource_unavailable_try_again &&
+        !impl_->pending_error) {
+      impl_->pending_error = requeue_ec;
+    }
   }
   return {};
 }
@@ -783,6 +798,13 @@ V4l2CameraBufferMode V4l2CameraSource::active_mode() const noexcept {
 drm::expected<AcquiredBuffer, std::error_code> V4l2CameraSource::acquire() {
   if (!impl_) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  // Sticky error from drive(): once a requeue failed terminally the
+  // ring is past self-recovery; surface it on every acquire() so the
+  // caller sees a real error code instead of an indefinite EAGAIN
+  // stall waiting for frames that will never come.
+  if (impl_->pending_error) {
+    return drm::unexpected<std::error_code>(impl_->pending_error);
   }
 
   if (impl_->active_mode == V4l2CameraBufferMode::DmaBufZeroCopy) {

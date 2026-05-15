@@ -130,6 +130,33 @@ void PageFlip::remove_source(int fd) noexcept {
   sources_.erase(it);
 }
 
+drm::expected<void, std::error_code> PageFlip::rebind(const Device& new_dev) {
+  if (epfd_ < 0) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+  const int new_fd = new_dev.fd();
+  if (new_fd < 0) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+  // Drop the old registration best-effort. ENOENT is fine — the
+  // kernel reclaimed the fd on close, so epoll already lost the slot.
+  if (drm_fd_ >= 0) {
+    (void)::epoll_ctl(epfd_, EPOLL_CTL_DEL, drm_fd_, nullptr);
+    drm_fd_ = -1;
+  }
+  epoll_event ev{};
+  ev.events = EPOLLIN;
+  ev.data.fd = new_fd;
+  if (::epoll_ctl(epfd_, EPOLL_CTL_ADD, new_fd, &ev) < 0) {
+    // Leave drm_fd_ at -1 so dispatch() surfaces bad_file_descriptor
+    // rather than blocking on a half-registered epoll. Caller can
+    // retry rebind() once the underlying issue is resolved.
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
+  }
+  drm_fd_ = new_fd;
+  return {};
+}
+
 drm::expected<void, std::error_code> PageFlip::dispatch(const int timeout_ms) {
   if (epfd_ < 0) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));

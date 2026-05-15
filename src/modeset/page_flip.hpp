@@ -48,6 +48,31 @@ class PageFlip {
   /// never-added fd is a no-op, and calling twice is safe.
   void remove_source(int fd) noexcept;
 
+  /// Re-bind to a new DRM device after libseat / VT pause+resume.
+  /// `PageFlip` caches the DRM fd at construction and registers it with
+  /// the internal epoll instance; libseat closes that fd on pause and
+  /// hands the caller a fresh one on resume, leaving this object's
+  /// epoll registration pointing at a dead (or kernel-recycled) fd. The
+  /// dispatcher would then either silently miss flip events or fire
+  /// against a stranger's fd. Call `rebind(new_dev)` from the same
+  /// resume hook that rebinds the rest of your DRM state.
+  ///
+  /// Behavior:
+  ///   * EPOLL_CTL_DEL on the old `drm_fd_` is best-effort (the kernel
+  ///     drops the registration when the fd closes anyway, so an ENOENT
+  ///     here is not an error).
+  ///   * EPOLL_CTL_ADD on `new_dev.fd()` is required; failure surfaces
+  ///     the errno and leaves `drm_fd_` at -1 so subsequent `dispatch()`
+  ///     calls return `bad_file_descriptor` rather than blocking on a
+  ///     half-registered epoll.
+  ///
+  /// Foreign sources registered via `add_source` are NOT auto-rebound —
+  /// their fds are caller-owned and may or may not survive the resume.
+  /// If they don't, callers must `remove_source(old_fd)` (already a
+  /// no-op once the kernel reclaimed the fd) and `add_source(new_fd, …)`
+  /// themselves.
+  [[nodiscard]] drm::expected<void, std::error_code> rebind(const Device& new_dev);
+
   // Wait for and dispatch a page flip event.
   // timeout_ms: -1 = block forever, 0 = non-blocking, >0 = timeout in ms.
   //
