@@ -367,7 +367,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
         available_planes.end());
   }
 
-  std::unordered_map<uint32_t, Layer*> best_assignment;
+  PlaneAssignment best_assignment;
   std::size_t total_assigned = 0;
 
   // Scene-wide plane pool, captured before the per-group loop shrinks
@@ -603,13 +603,13 @@ std::vector<CandidatePair> Allocator::rank_candidates_group(
   return pairs;
 }
 
-std::unordered_map<uint32_t, Layer*> Allocator::place_group(
-    const std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
-    const uint32_t flags, const uint32_t crtc_index) {
+PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
+                                       const std::vector<const PlaneCapabilities*>& planes,
+                                       const uint32_t flags, const uint32_t crtc_index) {
   // §13.5 Bipartite pre-solve
   auto preseed = bipartite_preseed_group(layers, planes, crtc_index);
 
-  std::unordered_map<uint32_t, Layer*> assignment;
+  PlaneAssignment assignment;
   for (auto& [layer, plane] : preseed) {
     assignment.insert_or_assign(plane->id, layer);
   }
@@ -922,8 +922,8 @@ std::vector<std::vector<Layer*>> Allocator::split_independent_groups(std::vector
 
 // ── Test commit helpers ───────────────────────────────────────
 
-std::error_code Allocator::try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment,
-                                           const uint32_t flags, const uint32_t crtc_index) {
+std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, const uint32_t flags,
+                                           const uint32_t crtc_index) {
   if (test_commits_this_frame_ >= max_test_commits_) {
     return std::make_error_code(std::errc::resource_unavailable_try_again);
   }
@@ -994,8 +994,7 @@ std::error_code Allocator::try_test_commit(const std::unordered_map<uint32_t, La
 }
 
 void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_index,
-                                      const std::unordered_map<uint32_t, Layer*>& keep,
-                                      const bool track_state) {
+                                      const PlaneAssignment& keep, const bool track_state) {
   for (const auto* plane : registry_.for_crtc(crtc_index)) {
     // Cursor planes are owned by a separate code path (the cursor
     // handler) and shouldn't be force-disabled here.
@@ -1171,7 +1170,7 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
 
 bool Allocator::backtrack(std::vector<Layer*>& layers,
                           const std::vector<const PlaneCapabilities*>& planes,
-                          std::unordered_map<uint32_t, Layer*>& assignment, const std::size_t depth,
+                          PlaneAssignment& assignment, const std::size_t depth,
                           const std::size_t best_so_far, AtomicRequest& req, const uint32_t flags,
                           uint32_t crtc_index) {
   if (depth >= layers.size()) {

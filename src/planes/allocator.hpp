@@ -11,6 +11,7 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -33,6 +34,82 @@ struct CandidatePair {
   const PlaneCapabilities* plane;
   Layer* layer;
   int score;
+};
+
+// Flat plane→layer assignment table. Backed by a sorted-by-insertion-
+// order `std::vector<pair<uint32_t, Layer*>>` with the small subset of
+// `unordered_map` API the allocator actually uses. For the ≤8-plane
+// CRTCs we see in practice, linear scan beats unordered_map's
+// bucket + node allocations, and per-frame copy-assignment becomes a
+// `vector::operator=` that reuses destination capacity instead of
+// rehashing.
+//
+// API matches the parts of `std::unordered_map<uint32_t, Layer*>` the
+// allocator hits: empty / size / clear / reserve, begin / end (so
+// range-for + structured bindings work), count / find / erase, and
+// insert_or_assign. Operator[] is deliberately absent — every caller
+// uses insert_or_assign already, and dropping the operator avoids the
+// "default-construct then assign" trap that nullable pointer values
+// would silently absorb.
+class PlaneAssignment {
+ public:
+  using value_type = std::pair<uint32_t, Layer*>;
+  using iterator = std::vector<value_type>::iterator;
+  using const_iterator = std::vector<value_type>::const_iterator;
+
+  PlaneAssignment() = default;
+  PlaneAssignment(const PlaneAssignment&) = default;
+  PlaneAssignment(PlaneAssignment&&) noexcept = default;
+  PlaneAssignment& operator=(const PlaneAssignment&) = default;
+  PlaneAssignment& operator=(PlaneAssignment&&) noexcept = default;
+  ~PlaneAssignment() = default;
+
+  [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+  [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+  void clear() noexcept { entries_.clear(); }
+  void reserve(std::size_t n) { entries_.reserve(n); }
+
+  [[nodiscard]] iterator begin() noexcept { return entries_.begin(); }
+  [[nodiscard]] iterator end() noexcept { return entries_.end(); }
+  [[nodiscard]] const_iterator begin() const noexcept { return entries_.begin(); }
+  [[nodiscard]] const_iterator end() const noexcept { return entries_.end(); }
+
+  [[nodiscard]] std::size_t count(uint32_t plane_id) const noexcept {
+    return find(plane_id) != entries_.end() ? 1U : 0U;
+  }
+
+  [[nodiscard]] iterator find(uint32_t plane_id) noexcept {
+    return std::find_if(entries_.begin(), entries_.end(),
+                        [plane_id](const value_type& e) { return e.first == plane_id; });
+  }
+
+  [[nodiscard]] const_iterator find(uint32_t plane_id) const noexcept {
+    return std::find_if(entries_.begin(), entries_.end(),
+                        [plane_id](const value_type& e) { return e.first == plane_id; });
+  }
+
+  void insert_or_assign(uint32_t plane_id, Layer* layer) {
+    auto it = find(plane_id);
+    if (it != entries_.end()) {
+      it->second = layer;
+    } else {
+      entries_.emplace_back(plane_id, layer);
+    }
+  }
+
+  iterator erase(const_iterator it) noexcept { return entries_.erase(it); }
+
+  std::size_t erase(uint32_t plane_id) noexcept {
+    auto it = find(plane_id);
+    if (it == entries_.end()) {
+      return 0;
+    }
+    entries_.erase(it);
+    return 1;
+  }
+
+ private:
+  std::vector<value_type> entries_;
 };
 
 // Test-commit failure cache: memoize (plane_id, property_hash) -> pass/fail
@@ -171,8 +248,8 @@ class Allocator {
 
   // Backtracking search
   bool backtrack(std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
-                 std::unordered_map<uint32_t, Layer*>& assignment, std::size_t depth,
-                 std::size_t best_so_far, AtomicRequest& req, uint32_t flags, uint32_t crtc_index);
+                 PlaneAssignment& assignment, std::size_t depth, std::size_t best_so_far,
+                 AtomicRequest& req, uint32_t flags, uint32_t crtc_index);
 
   // Place a single layer set on a single plane set. Runs preseed →
   // greedy → backtrack-drop-one (lowest priority first) and returns
@@ -180,9 +257,9 @@ class Allocator {
   // non-empty subset survives or the per-frame TEST budget is hit.
   // Used both by the per-group pass and by the scene-wide partial
   // fallback in full_search.
-  std::unordered_map<uint32_t, Layer*> place_group(
-      const std::vector<Layer*>& layers, const std::vector<const PlaneCapabilities*>& planes,
-      uint32_t flags, uint32_t crtc_index);
+  PlaneAssignment place_group(const std::vector<Layer*>& layers,
+                              const std::vector<const PlaneCapabilities*>& planes, uint32_t flags,
+                              uint32_t crtc_index);
 
   // Pick the layer with the fewest statically compatible planes among
   // `planes` (lowest layer_priority breaks ties). Returns the
@@ -206,8 +283,8 @@ class Allocator {
   // `apply_previous_allocation`, which propagates EACCES upward so the
   // caller can soft-pause on master loss instead of seeing every test
   // failure flattened into EAGAIN.
-  std::error_code try_test_commit(const std::unordered_map<uint32_t, Layer*>& assignment,
-                                  uint32_t flags, uint32_t crtc_index);
+  std::error_code try_test_commit(const PlaneAssignment& assignment, uint32_t flags,
+                                  uint32_t crtc_index);
 
   // Apply layer properties to a plane in the atomic request — full
   // write path, no minimization. Used by try_test_commit (its
@@ -238,8 +315,8 @@ class Allocator {
   // try_test_commit, whose AtomicRequest is throwaway and whose
   // assignment is speculative. Non-const because true-mode mutates
   // last_committed_ and diagnostics_.
-  void disable_unused_planes(AtomicRequest& req, uint32_t crtc_index,
-                             const std::unordered_map<uint32_t, Layer*>& keep, bool track_state);
+  void disable_unused_planes(AtomicRequest& req, uint32_t crtc_index, const PlaneAssignment& keep,
+                             bool track_state);
 
   const Device& dev_;
   PlaneRegistry& registry_;
@@ -247,7 +324,7 @@ class Allocator {
 
   // §13.3 Previous allocation state
   bool previous_allocation_valid_{false};
-  std::unordered_map<uint32_t, Layer*> previous_allocation_;
+  PlaneAssignment previous_allocation_;
 
   // §13.4 Test-commit failure cache
   TestCache failure_cache_;
