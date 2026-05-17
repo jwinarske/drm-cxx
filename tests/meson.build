@@ -307,6 +307,16 @@ test('test_layer_scene_rebind_vkms',
   ),
 )
 
+# LayerScene deferred-release contract tests against VKMS. Pins the
+# release timing for LayerBufferSource so the tearing bug fixed by
+# the prev/prev_prev acquisition ring doesn't regress.
+test('test_layer_scene_release_vkms',
+  executable('test_layer_scene_release_vkms',
+    'integration/test_layer_scene_release_vkms.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # SceneSet combined-commit + mirrored-layer tests against a vkms
 # instance with >=2 connected outputs. Skips when no qualifying
 # vkms is present (see the test source header for the configfs

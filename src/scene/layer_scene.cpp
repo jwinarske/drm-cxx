@@ -232,7 +232,12 @@ class LayerScene::Impl {
     return stream_capability_.mixing;
   }
 
-  ~Impl() { destroy_mode_blob(); }
+  ~Impl() {
+    // Drain the deferred-release ring first so sources see their
+    // buffers returned before they get destroyed via slots_.
+    release_pending_acquisitions();
+    destroy_mode_blob();
+  }
 
   Impl(const Impl&) = delete;
   Impl& operator=(const Impl&) = delete;
@@ -529,6 +534,11 @@ class LayerScene::Impl {
   // is rebuilt against the new Device.
 
   void on_session_paused() noexcept {
+    // Drain the deferred-release ring before sources tear down their
+    // producer-side state in on_session_paused. The held buffers
+    // belong to those sources; release()ing here returns them while
+    // the source is still in a state to accept a release.
+    release_pending_acquisitions();
     for (auto& slot : slots_) {
       if (slot.alive && slot.scene_layer) {
         slot.scene_layer->source().on_session_paused();
@@ -640,6 +650,13 @@ class LayerScene::Impl {
   drm::expected<CompatibilityReport, std::error_code> rebind(std::uint32_t new_crtc_id,
                                                              std::uint32_t new_connector_id,
                                                              drmModeModeInfo new_mode) {
+    // Drain the deferred-release ring before swapping bindings. The
+    // held buffers were committed against the OLD crtc/connector and
+    // any in-flight scanout there is now moot; releasing them here
+    // also avoids leaking buffer references when the planes::Layer
+    // twins are reconstructed below.
+    release_pending_acquisitions();
+
     // Tear down state tied to the old binding before swapping in the
     // new ids. The old MODE_ID blob is owned by the kernel and freed
     // explicitly here — leaking it would accumulate one blob per
@@ -862,6 +879,15 @@ class LayerScene::Impl {
       }
     }
     acquisitions.clear();
+  }
+
+  // Drain the deferred-release ring synchronously. Called from
+  // on_session_paused / rebind / Impl destruction — paths where no flip
+  // is in flight, so holding buffers back from their sources would just
+  // leak. Order matches finalize_frame's release order (oldest first).
+  void release_pending_acquisitions() noexcept {
+    release_all(prev_prev_acquisitions_);
+    release_all(prev_acquisitions_);
   }
 
   // Copy scene::Layer state into the planes::Layer property bag. The
@@ -2113,6 +2139,24 @@ class LayerScene::Impl {
   // state.
   std::vector<AcquisitionSlot> scratch_acquisitions_;
 
+  // Two-deep ring of in-flight acquisitions for the deferred-release
+  // contract documented on `LayerBufferSource::release`: source
+  // release() must not be called until the buffer has been replaced
+  // on screen by a subsequent commit's flip. With NONBLOCK + page-flip-
+  // event commits, the safe release point for buf_N is the kernel
+  // commit at frame N+2 — by then buf_N's vblank has fired and buf_(N+1)
+  // is on screen. Releasing earlier (e.g. immediately at finalize_frame
+  // of commit N, the prior implementation) lets producers like
+  // V4l2CameraSource QBUF the just-committed buffer back to the kernel
+  // for re-capture while DRM is still scanning it out — visible as
+  // tearing during motion on hardware whose producer driver doesn't
+  // attach reservation fences (uvcvideo, most V4L2 capture drivers).
+  // Test commits, failed real commits, on_session_paused, and rebind
+  // bypass the ring and release immediately — no flip happened in
+  // those paths, so the deferral isn't needed and could leak buffers.
+  std::vector<AcquisitionSlot> prev_acquisitions_;
+  std::vector<AcquisitionSlot> prev_prev_acquisitions_;
+
   // HDR output metadata signaling. `desired_hdr_` carries the
   // most-recent set_output_metadata input (`nullopt` == "clear");
   // `hdr_user_set_` flips true on the first call so connectors that
@@ -2499,8 +2543,31 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
     }
     record_layer_placements(state->acquisitions);
     output_.mark_clean();
+
+    // Deferred release: rotate the in-flight ring. See
+    // prev_acquisitions_ / prev_prev_acquisitions_ member docs for the
+    // why. Sequence (state on entry → state on exit):
+    //   prev_prev = buf_(N-2)  → released back to its source (now empty)
+    //   prev      = buf_(N-1)  → moves to prev_prev (still in flight,
+    //                            on screen until commit N+1's vblank)
+    //   state     = buf_N      → moves to prev (just queued for next
+    //                            vblank, will be on screen between
+    //                            event N and event N+1)
+    // The empty vector that was prev_prev becomes the new prev's
+    // backing storage on its way through. The ex-state vector goes
+    // back to scratch for next frame's build to fill.
+    release_all(prev_prev_acquisitions_);
+    std::swap(prev_prev_acquisitions_, prev_acquisitions_);
+    std::swap(prev_acquisitions_, state->acquisitions);
+    scratch_acquisitions_ = std::move(state->acquisitions);
+    return report;
   }
 
+  // Test-only commits and (above) failed real commits release
+  // immediately — no flip happened, so nothing in the kernel's
+  // scanout pipeline is referencing these buffers and deferral
+  // would just stall the source's buffer ring. Mirrors the
+  // failure path early-return above.
   release_all(state->acquisitions);
   scratch_acquisitions_ = std::move(state->acquisitions);
   return report;
