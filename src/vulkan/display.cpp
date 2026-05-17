@@ -56,7 +56,20 @@ Display& Display::operator=(Display&& other) noexcept {
 }
 
 drm::expected<Display, std::error_code> Display::create() {
-  // Dynamically load Vulkan
+  // Dynamically load Vulkan. The library is referenced ONLY via dlsym,
+  // so the linker's --as-needed pass strips libvulkan from libdrm-cxx's
+  // DT_NEEDED even when meson resolves `dependency('vulkan')`. As a
+  // result `dlsym(RTLD_DEFAULT, ...)` won't find Vulkan symbols unless
+  // the consumer happens to link libvulkan directly. dlopen the SONAME
+  // on demand so callers (e.g. `examples/advanced/vulkan_display`) don't
+  // have to know about this. RTLD_GLOBAL makes the loaded symbols
+  // visible to subsequent RTLD_DEFAULT lookups, including the ones in
+  // ~Display below. Intentional one-shot leak — dlclose would yank the
+  // symbols out from under any still-live Display instance and the
+  // load is process-lifetime anyway.
+  if (dlsym(RTLD_DEFAULT, "vkCreateInstance") == nullptr) {
+    (void)dlopen("libvulkan.so.1", RTLD_LAZY | RTLD_GLOBAL);
+  }
   auto* vk_create_instance =
       reinterpret_cast<PFN_vkCreateInstance>(dlsym(RTLD_DEFAULT, "vkCreateInstance"));
   if (vk_create_instance == nullptr) {
