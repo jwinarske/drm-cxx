@@ -92,8 +92,11 @@ struct Args {
   bool show_help{false};
 };
 
-Args parse_args(int argc, char* argv[]) {
+// Consumed flags are stripped from argv so the remainder (e.g. the
+// DRM card path) is what `open_and_pick_output` sees in argv[1].
+Args parse_args(int& argc, char**& argv) {
   Args out;
+  int write = 1;
   for (int i = 1; i < argc; ++i) {
     std::string_view const a(argv[i]);
     if (a == "--help" || a == "-h") {
@@ -113,8 +116,11 @@ Args parse_args(int argc, char* argv[]) {
       out.requested_width = static_cast<std::uint32_t>(std::stoul(argv[++i]));
     } else if (a == "--height" && i + 1 < argc) {
       out.requested_height = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+    } else {
+      argv[write++] = argv[i];
     }
   }
+  argc = write;
   return out;
 }
 
@@ -506,10 +512,12 @@ int main(int argc, char* argv[]) {
 
   bool error_exit = false;
   while (!quit && !g_quit.load(std::memory_order_relaxed)) {
-    int timeout_ms = 0;
-    if (session_state.paused) {
-      timeout_ms = -1;
-    } else if (session_state.flip_pending) {
+    // Default: block until a slot fires (camera frame, input event,
+    // page-flip event, session change). Busy-spinning at timeout=0
+    // would burn CPU between camera frames; with the slots wired
+    // above, every interesting event already has an fd that wakes us.
+    int timeout_ms = -1;
+    if (session_state.flip_pending) {
       timeout_ms = 16;
     }
     if (!loop.tick(timeout_ms)) {
@@ -532,8 +540,8 @@ int main(int argc, char* argv[]) {
       continue;
     }
 
-    if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
-        !r) {
+    auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
+    if (!r) {
       if (r.error() == std::errc::permission_denied) {
         session_state.paused = true;
         session_state.flip_pending = false;
@@ -547,7 +555,14 @@ int main(int argc, char* argv[]) {
       error_exit = true;
       break;
     }
-    session_state.flip_pending = true;
+    // Only mark flip_pending when the commit actually attached a new
+    // FB the kernel will scan out — otherwise no page-flip event will
+    // arrive and the loop would deadlock waiting for it. A commit
+    // where every source returned EAGAIN from acquire() returns
+    // success but updates no plane state.
+    if (r->fbs_attached > 0) {
+      session_state.flip_pending = true;
+    }
   }
 
   scene.reset();
