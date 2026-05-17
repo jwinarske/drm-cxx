@@ -493,9 +493,18 @@ struct V4l2CameraSource::Impl {
   bool streaming{false};
 
   // DMABUF-mode latest-frame-wins state. The dequeued slot index is
-  // parked here until acquire() claims it; release() re-QBUFs.
+  // parked here until acquire() claims it. ready_idx is at most one
+  // (drive() drops older un-acquired ready frames in favor of fresher
+  // ones — see the requeue branch in drive()).
   int ready_idx{-1};
-  int acquired_idx{-1};
+  // Tracks which buffers are currently acquired by the scene (bit
+  // set per buffer index). A scene with deferred-release semantics
+  // (LayerScene's prev/prev_prev ring) can hold multiple in flight
+  // simultaneously, so a single int won't do — release(buf) uses
+  // buf.opaque to identify the specific buffer to QBUF, and this
+  // bitset guards against double-release. Sized at REQBUFS time to
+  // match impl_->buffers.size().
+  std::vector<bool> acquired_mask;
 
   // MMAP-mode double-buffered dumb-buffer state. front_idx selects
   // which dumb buffer scans out; the other is the producer's write
@@ -717,6 +726,7 @@ drm::expected<std::unique_ptr<V4l2CameraSource>, std::error_code> V4l2CameraSour
   src->impl_->fmt = SourceFormat{drm_fourcc, advertised_modifier, w, h};
   src->impl_->format_echo = fmt;
   src->impl_->buffers = std::move(buffers);
+  src->impl_->acquired_mask.assign(src->impl_->buffers.size(), false);
   src->impl_->dumb_pair = std::move(dumb_pair);
   src->impl_->streaming = true;
   return src;
@@ -827,10 +837,6 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2CameraSource::acquire() {
   }
 
   if (impl_->active_mode == V4l2CameraBufferMode::DmaBufZeroCopy) {
-    if (impl_->acquired_idx >= 0) {
-      return drm::unexpected<std::error_code>(
-          std::make_error_code(std::errc::device_or_resource_busy));
-    }
     if (impl_->ready_idx < 0) {
       return drm::unexpected<std::error_code>(
           std::make_error_code(std::errc::resource_unavailable_try_again));
@@ -844,11 +850,15 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2CameraSource::acquire() {
       return drm::unexpected<std::error_code>(
           std::make_error_code(std::errc::resource_unavailable_try_again));
     }
-    impl_->acquired_idx = impl_->ready_idx;
+    impl_->acquired_mask.at(idx) = true;
     impl_->ready_idx = -1;
     AcquiredBuffer acq;
     acq.fb_id = fb_id;
-    acq.opaque = nullptr;
+    // Encode the V4L2 buffer index in opaque so release() can QBUF
+    // the specific buffer the caller is returning. Offset by 1 so
+    // index 0 is distinguishable from a default-constructed
+    // (nullptr) opaque.
+    acq.opaque = reinterpret_cast<void*>(static_cast<std::uintptr_t>(idx) + 1U);
     return acq;
   }
 
@@ -868,16 +878,23 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2CameraSource::acquire() {
   return acq;
 }
 
-void V4l2CameraSource::release(AcquiredBuffer /*acquired*/) noexcept {
+void V4l2CameraSource::release(AcquiredBuffer acquired) noexcept {
   if (!impl_) {
     return;
   }
   if (impl_->active_mode == V4l2CameraBufferMode::DmaBufZeroCopy) {
-    if (impl_->acquired_idx < 0) {
+    // Decode the V4L2 buffer index encoded by acquire() in opaque
+    // (index + 1; nullptr means "no buffer"). Defensive against
+    // double-release and out-of-range opaque values.
+    auto const raw = reinterpret_cast<std::uintptr_t>(acquired.opaque);
+    if (raw == 0) {
       return;
     }
-    auto const idx = static_cast<std::uint32_t>(impl_->acquired_idx);
-    impl_->acquired_idx = -1;
+    auto const idx = static_cast<std::uint32_t>(raw - 1U);
+    if (idx >= impl_->buffers.size() || !impl_->acquired_mask.at(idx)) {
+      return;
+    }
+    impl_->acquired_mask.at(idx) = false;
     auto const requeue_ec =
         queue_capture_buffer(impl_->v4l2_fd, impl_->is_mplane, idx, impl_->capture_num_planes);
     (void)requeue_ec;
