@@ -30,6 +30,7 @@
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <array>
+#include <vector>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -170,6 +171,15 @@ class CompositeCanvas {
   void blend(const CompositeSrc& src, const CompositeRect& src_rect,
              const CompositeRect& dst_rect) noexcept;
 
+  /// Copy this frame's painted shadow buffer into the back dumb buffer
+  /// in one bulk memcpy. clear() / blend() write into a cached
+  /// userspace shadow; the dumb buffer is typically mapped
+  /// write-combined by the kernel, so per-pixel writes inside the blend
+  /// loop are slow but a single linear memcpy hits the WC write
+  /// streaming bandwidth ceiling. Call once per frame after the last
+  /// blend(), before arming the canvas plane.
+  void flush() noexcept;
+
   // ── Frame lifecycle ─────────────────────────────────────────────────
   //
   // The canvas owns two ARGB8888 dumb buffers and ping-pongs between
@@ -251,12 +261,41 @@ class CompositeCanvas {
   /// content is not. Caller's responsibility to repaint.
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(const drm::Device& new_dev);
 
+  /// Half-open axis-aligned rect, in canvas pixels. Used internally by
+  /// clear/blend/flush to amortize the per-frame WC memcpy down to just
+  /// the touched region; declared public because the cpp-local helpers
+  /// (dirty_union, clip_to_canvas) live in an anonymous namespace and
+  /// reach the type via fully-qualified name.
+  struct DirtyRect {
+    std::int32_t x{0};
+    std::int32_t y{0};
+    std::int32_t w{0};
+    std::int32_t h{0};
+    [[nodiscard]] bool empty() const noexcept { return w <= 0 || h <= 0; }
+  };
+
  private:
   CompositeCanvas(drm::dumb::Buffer back, drm::dumb::Buffer front, std::uint32_t width,
                   std::uint32_t height) noexcept
       : buffers_{std::move(back), std::move(front)}, width_(width), height_(height) {}
 
   std::array<drm::dumb::Buffer, 2> buffers_;
+  // Cached userspace shadow buffer. clear() / blend() write here
+  // instead of into the WC dumb buffer; flush() memcpys it out in one
+  // sequential write per frame. Allocated lazily on first paint op so
+  // we don't pay for it before composition is needed; stride matches
+  // the dumb buffer's stride so the memcpy lines up byte-for-byte.
+  std::vector<std::uint8_t> shadow_;
+  std::uint32_t shadow_stride_bytes_{0};
+
+  // Accumulates blend() dst_rects (and full canvas on clear()) for the
+  // frame currently being painted. flush() reads + clears this.
+  DirtyRect current_dirty_{};
+  // Per-back-buffer record of what the previous flush wrote into each
+  // dumb buffer. flush memcpys union(current_dirty_, prev_flush_[idx])
+  // so stale pixels left over from the previous use of this same back
+  // are overwritten with the shadow's now-zero content.
+  std::array<DirtyRect, 2> prev_flush_{};
   // Index of the back buffer (the one currently being painted).
   // `begin_frame` flips this between 0 and 1; the front is
   // `1 - back_index_`. Initialized to 1 so the very first
@@ -265,6 +304,11 @@ class CompositeCanvas {
   std::size_t back_index_{1};
   std::uint32_t width_{0};
   std::uint32_t height_{0};
+
+  // Ensure the shadow buffer is allocated and sized to match the
+  // current back buffer's stride. Returns false if the buffer pair
+  // isn't usable (e.g. post-session-pause); callers degrade to a no-op.
+  [[nodiscard]] bool ensure_shadow() noexcept;
 };
 
 }  // namespace drm::scene

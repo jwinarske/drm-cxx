@@ -21,6 +21,13 @@
 #include <system_error>
 #include <utility>
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#define DRM_CXX_HAS_NEON 1
+#else
+#define DRM_CXX_HAS_NEON 0
+#endif
+
 namespace drm::scene {
 
 namespace {
@@ -211,6 +218,100 @@ bool checked_byte_extent(std::uint32_t height, std::uint32_t stride_bytes,
   return true;
 }
 
+#if DRM_CXX_HAS_NEON
+// Pure-opaque copy: dst[i] = src[i] | 0xFF000000. 16 pixels per outer
+// iteration to amortize per-cache-line WC write setup; the no-vector
+// scalar tail handles 0..15 leftover pixels. The dst on this codebase's
+// hot path is a write-combined dumb buffer mapping, where vector stores
+// are dramatically faster than the same byte count via scalar `stp`.
+inline void neon_row_pure_opaque(std::uint32_t* dst, const std::uint32_t* src,
+                                 std::uint32_t n) noexcept {
+  const uint32x4_t alpha = vdupq_n_u32(0xFF000000U);
+  std::uint32_t i = 0;
+  for (; i + 16U <= n; i += 16U) {
+    uint32x4_t s0 = vld1q_u32(src + i);
+    uint32x4_t s1 = vld1q_u32(src + i + 4U);
+    uint32x4_t s2 = vld1q_u32(src + i + 8U);
+    uint32x4_t s3 = vld1q_u32(src + i + 12U);
+    vst1q_u32(dst + i, vorrq_u32(s0, alpha));
+    vst1q_u32(dst + i + 4U, vorrq_u32(s1, alpha));
+    vst1q_u32(dst + i + 8U, vorrq_u32(s2, alpha));
+    vst1q_u32(dst + i + 12U, vorrq_u32(s3, alpha));
+  }
+  for (; i + 4U <= n; i += 4U) {
+    vst1q_u32(dst + i, vorrq_u32(vld1q_u32(src + i), alpha));
+  }
+  for (; i < n; ++i) {
+    dst[i] = src[i] | 0xFF000000U;
+  }
+}
+
+// SRC_OVER blend, 8 pixels per iteration. `force_opaque_src` mirrors the
+// scalar `opaque_src` branch that OR's 0xFF000000 onto the source before
+// blending. `blend_pixel_over`'s premultiplied formula:
+//   out_c = src_c + (dst_c * (255 - src_a) + 127) / 255
+//   out_a = src_a + (dst_a * (255 - src_a) + 127) / 255  (saturated)
+// implemented per-channel on widened u16 lanes. Saturation falls out of
+// vqmovn_u16 (which saturates to 0xFF on overflow).
+inline void neon_row_blend_over(std::uint32_t* dst, const std::uint32_t* src, std::uint32_t n,
+                                bool force_opaque_src) noexcept {
+  const uint8x8_t opaque_a = vdup_n_u8(0xFFU);
+  const uint16x8_t round_127 = vdupq_n_u16(127U);
+  std::uint32_t i = 0;
+  for (; i + 8U <= n; i += 8U) {
+    // De-interleave src and dst into planar B/G/R/A vectors of 8 bytes.
+    uint8x8x4_t s = vld4_u8(reinterpret_cast<const std::uint8_t*>(src + i));
+    uint8x8x4_t d = vld4_u8(reinterpret_cast<const std::uint8_t*>(dst + i));
+    if (force_opaque_src) {
+      s.val[3] = opaque_a;
+    }
+    // inv = 255 - src_a, widened to u16 for the multiply.
+    const uint8x8_t inv8 = vsub_u8(opaque_a, s.val[3]);
+    const uint16x8_t inv = vmovl_u8(inv8);
+    // For each channel c: dst_scaled = (d_c * inv + 127) / 255.
+    // The /255 approximation `(x + (x>>8) + 257>>1) >> 8` is exact for
+    // x in [0, 65279] (the only range we hit: 255 * 255 = 65025).
+    // Use vrshrq_n_u16(vmlal+... ) sequence with a careful constant.
+    // Simpler: do a multiply then shift right by 8 with round.
+    auto div255 = [](uint16x8_t x) noexcept -> uint16x8_t {
+      // (x + (x >> 8) + 1) >> 8 — common /255 trick, exact for u8*u8.
+      const uint16x8_t shifted = vshrq_n_u16(x, 8);
+      return vshrq_n_u16(vaddq_u16(vaddq_u16(x, shifted), vdupq_n_u16(1U)), 8);
+    };
+    uint16x8_t bp = vmlal_u8(round_127, d.val[0], inv8);
+    uint16x8_t gp = vmlal_u8(round_127, d.val[1], inv8);
+    uint16x8_t rp = vmlal_u8(round_127, d.val[2], inv8);
+    uint16x8_t ap = vmlal_u8(round_127, d.val[3], inv8);
+    (void)inv;  // computed above; vmlal_u8 took inv8 directly.
+    bp = div255(bp);
+    gp = div255(gp);
+    rp = div255(rp);
+    ap = div255(ap);
+    // Add src on top.
+    bp = vaddq_u16(bp, vmovl_u8(s.val[0]));
+    gp = vaddq_u16(gp, vmovl_u8(s.val[1]));
+    rp = vaddq_u16(rp, vmovl_u8(s.val[2]));
+    ap = vaddq_u16(ap, vmovl_u8(s.val[3]));
+    // Saturate-narrow back to u8.
+    uint8x8x4_t out;
+    out.val[0] = vqmovn_u16(bp);
+    out.val[1] = vqmovn_u16(gp);
+    out.val[2] = vqmovn_u16(rp);
+    out.val[3] = vqmovn_u16(ap);
+    vst4_u8(reinterpret_cast<std::uint8_t*>(dst + i), out);
+  }
+  // Scalar tail for the last 0..7 pixels. `blend_pixel_over` is in the
+  // anonymous-namespace context above.
+  for (; i < n; ++i) {
+    std::uint32_t s32 = src[i];
+    if (force_opaque_src) {
+      s32 |= 0xFF000000U;
+    }
+    dst[i] = blend_pixel_over(s32, dst[i]);
+  }
+}
+#endif  // DRM_CXX_HAS_NEON
+
 }  // namespace
 
 drm::expected<std::unique_ptr<CompositeCanvas>, std::error_code> CompositeCanvas::create(
@@ -243,13 +344,122 @@ void CompositeCanvas::begin_frame() noexcept {
   back_index_ = 1U - back_index_;
 }
 
+bool CompositeCanvas::ensure_shadow() noexcept {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+  auto& buf = buffers_[back_index_];
+  if (buf.empty() || buf.data() == nullptr) {
+    return false;
+  }
+  const std::uint32_t stride = buf.stride();
+  const std::size_t bytes = buf.size_bytes();
+  if (stride != shadow_stride_bytes_ || shadow_.size() != bytes) {
+    shadow_.assign(bytes, 0U);
+    shadow_stride_bytes_ = stride;
+    // Stride / size changed → existing prev_flush_ rects are stale.
+    prev_flush_[0] = {};
+    prev_flush_[1] = {};
+    current_dirty_ = {};
+  }
+  return true;
+}
+
+namespace {
+
+// Clip a half-open rect to [0, width) × [0, height). Returns false if
+// the clipped rect is degenerate. Used by the shadow clear / flush
+// paths.
+bool clip_to_canvas(const CompositeCanvas::DirtyRect& r, std::int32_t width, std::int32_t height,
+                    CompositeCanvas::DirtyRect& out) noexcept {
+  if (r.w <= 0 || r.h <= 0 || width <= 0 || height <= 0) {
+    return false;
+  }
+  const std::int32_t x0 = std::max<std::int32_t>(0, r.x);
+  const std::int32_t y0 = std::max<std::int32_t>(0, r.y);
+  // r.x + r.w can overflow if r.x is near INT32_MAX and r.w is large.
+  // Promote to int64 for the bound math.
+  const std::int32_t x1 = static_cast<std::int32_t>(std::min<std::int64_t>(
+      static_cast<std::int64_t>(width), static_cast<std::int64_t>(r.x) + r.w));
+  const std::int32_t y1 = static_cast<std::int32_t>(std::min<std::int64_t>(
+      static_cast<std::int64_t>(height), static_cast<std::int64_t>(r.y) + r.h));
+  if (x1 <= x0 || y1 <= y0) {
+    return false;
+  }
+  out.x = x0;
+  out.y = y0;
+  out.w = x1 - x0;
+  out.h = y1 - y0;
+  return true;
+}
+
+// Union two half-open rects. Empty operand short-circuits to the other.
+CompositeCanvas::DirtyRect dirty_union(const CompositeCanvas::DirtyRect& a,
+                                       const CompositeCanvas::DirtyRect& b) noexcept {
+  if (a.empty()) {
+    return b;
+  }
+  if (b.empty()) {
+    return a;
+  }
+  const std::int32_t x0 = std::min(a.x, b.x);
+  const std::int32_t y0 = std::min(a.y, b.y);
+  const std::int32_t x1 = std::max(a.x + a.w, b.x + b.w);
+  const std::int32_t y1 = std::max(a.y + a.h, b.y + b.h);
+  return {x0, y0, x1 - x0, y1 - y0};
+}
+
+}  // namespace
+
 void CompositeCanvas::clear() noexcept {
+  if (!ensure_shadow()) {
+    return;
+  }
+  // Zero only what we wrote last frame. The shadow is zero everywhere
+  // else by invariant — the very first frame after `ensure_shadow`
+  // reallocated the vector inherited zero-init from `assign`, and
+  // subsequent frames stay zero outside `current_dirty_` because we
+  // never wrote there.
+  DirtyRect to_clear;
+  if (!clip_to_canvas(current_dirty_, static_cast<std::int32_t>(width_),
+                      static_cast<std::int32_t>(height_), to_clear)) {
+    current_dirty_ = {};
+    return;
+  }
+  // Row-by-row memset of the dirty band, in shadow_stride_bytes_-pixel
+  // strides. Inner span is `to_clear.w * 4` bytes.
+  const std::size_t row_bytes = static_cast<std::size_t>(to_clear.w) * 4U;
+  for (std::int32_t row = to_clear.y; row < to_clear.y + to_clear.h; ++row) {
+    auto* p = shadow_.data() + (static_cast<std::size_t>(row) * shadow_stride_bytes_) +
+              (static_cast<std::size_t>(to_clear.x) * 4U);
+    std::memset(p, 0, row_bytes);
+  }
+  current_dirty_ = {};
+}
+
+void CompositeCanvas::flush() noexcept {
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
   auto& buf = buffers_[back_index_];
   if (buf.empty() || buf.data() == nullptr) {
     return;
   }
-  std::memset(buf.data(), 0, buf.size_bytes());
+  if (shadow_.empty() || shadow_.size() != buf.size_bytes()) {
+    return;
+  }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+  const DirtyRect flush_rect_unclipped = dirty_union(current_dirty_, prev_flush_[back_index_]);
+  DirtyRect flush_rect;
+  if (clip_to_canvas(flush_rect_unclipped, static_cast<std::int32_t>(width_),
+                     static_cast<std::int32_t>(height_), flush_rect)) {
+    const std::size_t row_bytes = static_cast<std::size_t>(flush_rect.w) * 4U;
+    for (std::int32_t row = flush_rect.y; row < flush_rect.y + flush_rect.h; ++row) {
+      const auto src_off = (static_cast<std::size_t>(row) * shadow_stride_bytes_) +
+                           (static_cast<std::size_t>(flush_rect.x) * 4U);
+      const auto dst_off = (static_cast<std::size_t>(row) * buf.stride()) +
+                           (static_cast<std::size_t>(flush_rect.x) * 4U);
+      std::memcpy(buf.data() + dst_off, shadow_.data() + src_off, row_bytes);
+    }
+  }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+  prev_flush_[back_index_] = current_dirty_;
 }
 
 void CompositeCanvas::clear_into(drm::span<std::uint8_t> dst, std::uint32_t dst_stride_bytes,
@@ -294,13 +504,15 @@ void CompositeCanvas::clear_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
 
 void CompositeCanvas::clear_rect(std::int32_t x, std::int32_t y, std::int32_t w,
                                  std::int32_t h) noexcept {
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-  auto& buf = buffers_[back_index_];
-  if (buf.empty() || buf.data() == nullptr) {
+  if (!ensure_shadow()) {
     return;
   }
-  clear_into(drm::span<std::uint8_t>(buf.data(), buf.size_bytes()), buf.stride(), width_, height_,
-             x, y, w, h);
+  clear_into(drm::span<std::uint8_t>(shadow_.data(), shadow_.size()), shadow_stride_bytes_, width_,
+             height_, x, y, w, h);
+  // Track the cleared rect as dirty so flush() copies zeros over any
+  // formerly-non-zero pixels in the back buffer that this clear
+  // overwrote in the shadow.
+  current_dirty_ = dirty_union(current_dirty_, DirtyRect{x, y, w, h});
 }
 
 void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_stride_bytes,
@@ -407,11 +619,24 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
       const auto* src_px = src_row + xr.src_start;
       auto* dst_px = dst_row + xr.dst_start;
       if (pure_opaque_copy) {
+#if DRM_CXX_HAS_NEON
+        neon_row_pure_opaque(dst_px, src_px, dst_visible_x);
+#else
         for (std::uint32_t dx = 0; dx < dst_visible_x; ++dx) {
           dst_px[dx] = src_px[dx] | 0xFF000000U;
         }
+#endif
         continue;
       }
+#if DRM_CXX_HAS_NEON
+      // NEON fast path covers the common SRC_OVER case (no tone mapper,
+      // no plane-alpha modulation). The premultiplied SRC_OVER recipe
+      // matches `blend_pixel_over` per-channel; the tail is scalar.
+      if (tm == nullptr && !modulate_alpha) {
+        neon_row_blend_over(dst_px, src_px, dst_visible_x, opaque_src);
+        continue;
+      }
+#endif
       for (std::uint32_t dx = 0; dx < dst_visible_x; ++dx) {
         std::uint32_t s = src_px[dx];
         if (opaque_src) {
@@ -454,13 +679,20 @@ void CompositeCanvas::blend_into(drm::span<std::uint8_t> dst, std::uint32_t dst_
 
 void CompositeCanvas::blend(const CompositeSrc& src, const CompositeRect& src_rect,
                             const CompositeRect& dst_rect) noexcept {
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-  auto& buf = buffers_[back_index_];
-  if (buf.empty() || buf.data() == nullptr) {
+  if (!ensure_shadow()) {
     return;
   }
-  blend_into(drm::span<std::uint8_t>(buf.data(), buf.size_bytes()), buf.stride(), width_, height_,
-             src, src_rect, dst_rect);
+  blend_into(drm::span<std::uint8_t>(shadow_.data(), shadow_.size()), shadow_stride_bytes_, width_,
+             height_, src, src_rect, dst_rect);
+  // Conservative dirty-rect accumulation: extend by the caller's
+  // dst_rect (clipped against the canvas in flush()/clear()). blend_into
+  // does its own clip and may degrade to a no-op, but tracking the
+  // unclipped rect is fine — the flush path clips before memcpying and
+  // an over-estimate just costs a slightly larger memcpy.
+  current_dirty_ = dirty_union(
+      current_dirty_,
+      DirtyRect{dst_rect.x, dst_rect.y, static_cast<std::int32_t>(dst_rect.w),
+                static_cast<std::int32_t>(dst_rect.h)});
 }
 
 std::uint32_t CompositeCanvas::drm_fourcc() noexcept {

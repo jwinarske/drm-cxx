@@ -1608,6 +1608,12 @@ class LayerScene::Impl {
       const CompositeRect dst_rect{d.dst_rect.x, d.dst_rect.y, d.dst_rect.w, d.dst_rect.h};
       composition_canvas_->blend(src, src_rect, dst_rect);
     }
+    // One bulk memcpy from the cached userspace shadow into the WC
+    // dumb buffer. The shadow tracks a per-frame dirty rect (union of
+    // clear+blend regions), so the flush only writes the touched area
+    // rather than the full canvas — typically a few percent of the
+    // canvas size for dashboard-style scenes.
+    composition_canvas_->flush();
 
     const std::int32_t canvas_zpos = choose_canvas_zpos(acquisitions, scratch_composited_);
     if (auto r = arm_composition_canvas(req, *target_plane, canvas_zpos, report); !r) {
