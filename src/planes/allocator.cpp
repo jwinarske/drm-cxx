@@ -738,15 +738,31 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
   // leaving whatever was on primary before (typically the fbcon console
   // fb) on scanout — blank screen / console text visible.
   if (!layer.is_composition_layer() && plane.type == DRMPlaneType::PRIMARY) {
-    if (const auto z = layer.property("zpos");
-        z.has_value() && plane.zpos_min.has_value() && *z == *plane.zpos_min) {
-      s += 10;
+    if (const auto z = layer.property("zpos"); z.has_value()) {
+      if (plane.zpos_min.has_value() && *z == *plane.zpos_min) {
+        s += 10;
+      } else if (!plane.zpos_min.has_value() && *z == 0) {
+        // Platforms without a kernel-side zpos property (Tegra Orin
+        // display, some other SoCs) can't honor per-plane zpos values,
+        // so the caller convention is layer.zpos=0 == "bottom-most"
+        // (PRIMARY) and any positive zpos == "above primary" (OVERLAY).
+        // Mirrors the +10 above for the zpos-aware path.
+        s += 10;
+      }
     }
   }
 
   // Non-composition layers prefer overlay planes
   if (!layer.is_composition_layer() && plane.type == DRMPlaneType::OVERLAY) {
     s += 2;
+    // Pair with the "zpos=0 means PRIMARY" hack above: when planes have
+    // no kernel zpos and the layer requests a positive zpos, the
+    // OVERLAY-as-natural-top convention applies, so bump the score
+    // enough to win against the bare PRIMARY base score.
+    if (const auto z = layer.property("zpos");
+        z.has_value() && !plane.zpos_min.has_value() && *z > 0) {
+      s += 8;
+    }
   }
 
   // §13.6 Content-type priority
