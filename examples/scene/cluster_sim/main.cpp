@@ -70,7 +70,9 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/input/seat.hpp>
+#include <drm-cxx/modeset/mode.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
@@ -117,6 +119,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/poll.h>
@@ -1234,6 +1237,55 @@ void drive_rearview(RearViewState& rv) noexcept {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Parse --mode WxH[@Hz] and STRIP the flag + its value from argv so
+  // select_device (which uses argv[1] verbatim) sees the device path
+  // first. Default (no flag) keeps the existing pick-preferred-mode
+  // behavior.
+  std::optional<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> mode_override;
+  {
+    int write = 1;
+    for (int i = 1; i < argc; ++i) {
+      const std::string_view a{argv[i]};
+      if (a == "--mode" && i + 1 < argc) {
+        const std::string spec{argv[++i]};
+        std::uint32_t w = 0;
+        std::uint32_t h = 0;
+        std::uint32_t hz = 0;
+        auto* end = spec.data() + spec.size();
+        auto* p = spec.data();
+        auto consume_u32 = [&](std::uint32_t& out) {
+          std::uint32_t v = 0;
+          bool any = false;
+          while (p < end && *p >= '0' && *p <= '9') {
+            v = (v * 10U) + static_cast<std::uint32_t>(*p++ - '0');
+            any = true;
+          }
+          if (any) {
+            out = v;
+          }
+          return any;
+        };
+        if (!consume_u32(w)) {
+          continue;
+        }
+        if (p < end) {
+          ++p;  // 'x'
+        }
+        if (!consume_u32(h)) {
+          continue;
+        }
+        if (p < end && *p == '@') {
+          ++p;
+          (void)consume_u32(hz);
+        }
+        mode_override.emplace(w, h, hz);
+      } else {
+        argv[write++] = argv[i];
+      }
+    }
+    argc = write;
+  }
+
   auto ctx_opt = drm::examples::open_and_pick_output(argc, argv);
   if (!ctx_opt.has_value()) {
     return EXIT_FAILURE;
@@ -1241,8 +1293,26 @@ int main(int argc, char** argv) {
   auto& ctx = *ctx_opt;
   auto& dev = ctx.device;
   auto& seat = ctx.seat;
+
+  if (mode_override.has_value()) {
+    const auto [tw, th, thz] = *mode_override;
+    auto conn = drm::get_connector(dev.fd(), ctx.connector_id);
+    if (!conn) {
+      drm::println(stderr, "--mode: failed to re-query connector {}", ctx.connector_id);
+      return EXIT_FAILURE;
+    }
+    auto picked = drm::select_mode(
+        drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes), tw, th, thz);
+    if (!picked) {
+      drm::println(stderr, "--mode: no mode close to {}x{}@{}Hz on connector {}", tw, th, thz,
+                   ctx.connector_id);
+      return EXIT_FAILURE;
+    }
+    ctx.mode = picked->drm_mode;
+  }
   std::uint32_t const fb_w = ctx.mode.hdisplay;
   std::uint32_t const fb_h = ctx.mode.vdisplay;
+  drm::println(stderr, "cluster_sim: mode = {}x{}@{}Hz", fb_w, fb_h, ctx.mode.vrefresh);
 
   // Bg layer — painted once, scanned out forever.
   auto bg_src_r = drm::scene::DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
