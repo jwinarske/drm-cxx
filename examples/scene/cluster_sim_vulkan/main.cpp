@@ -537,6 +537,25 @@ struct NeedlePushConstants {
   float r_needle;
   float r_hub;
   float half_thickness;
+  float redline_intensity;  // 0..1; tach pushes >0 above ~80% sweep
+};
+
+// dial_fx pipeline push constants — same dst+uv as the textured
+// pipeline (matches textured.vert) plus a fragment-only fx_params
+// vec4 whose .x is the redline intensity. 48 bytes.
+struct DialFxPushConstants {
+  float dst_x0;
+  float dst_y0;
+  float dst_x1;
+  float dst_y1;
+  float uv_x0;
+  float uv_y0;
+  float uv_x1;
+  float uv_y1;
+  float fx_x;  // redline intensity 0..1
+  float fx_y;
+  float fx_z;
+  float fx_w;
 };
 
 // Push-constant block for the sampler2DArray (info / warn) pipeline.
@@ -1658,9 +1677,9 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
   VkPushConstantRange dfx_pcr{};
-  dfx_pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+  dfx_pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
   dfx_pcr.offset = 0;
-  dfx_pcr.size = sizeof(TexturedPushConstants);
+  dfx_pcr.size = sizeof(DialFxPushConstants);
   VkPipelineLayoutCreateInfo dfx_plci{};
   dfx_plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   dfx_plci.pushConstantRangeCount = 1;
@@ -1943,6 +1962,24 @@ int main(int argc, char* argv[]) {
     // Subpass 1: two textured dial templates side by side, then the
     // matching SDF needles + hubs on top of each.
     vkCmdNextSubpass(cmd, VK_SUBPASS_CONTENTS_INLINE);
+    // Sweep values are needed by dial_fx (redline intensity) and the
+    // needle pipeline (angle), so compute them up front.
+    const double speedo_norm =
+        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_speedo_period_s);
+    const double tach_norm =
+        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_tach_period_s);
+    const float speedo_angle = static_cast<float>(
+        k_dial_start_angle + (std::clamp(speedo_norm, 0.0, 1.0) * k_dial_sweep_angle));
+    const float tach_angle = static_cast<float>(
+        k_dial_start_angle + (std::clamp(tach_norm, 0.0, 1.0) * k_dial_sweep_angle));
+    // smoothstep(0.80, 1.0, x): 0 below 80% of sweep, ramps to 1 at full.
+    auto smoothstep01 = [](double a, double b, double x) {
+      double t01 = std::clamp((x - a) / (b - a), 0.0, 1.0);
+      return t01 * t01 * (3.0 - 2.0 * t01);
+    };
+    const float speedo_redline = 0.0F;  // speedo never goes "redline"
+    const float tach_redline = static_cast<float>(smoothstep01(0.80, 1.0, tach_norm));
+
     if (!skip_dial) {
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline_layout, 0, 1,
@@ -1954,24 +1991,29 @@ int main(int argc, char* argv[]) {
                          sizeof(tach_pc), &tach_pc);
       vkCmdDraw(cmd, 6, 1, 0, 0);
 
-      // Metallic rim highlight + top-half gloss over each dial.
+      // Metallic rim highlight + top-half gloss over each dial; the
+      // tach also gets a redline tint that ramps up as the needle
+      // climbs past 80% of its sweep.
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dial_fx_pipeline);
-      vkCmdPushConstants(cmd, dial_fx_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                         sizeof(speedo_pc), &speedo_pc);
+      const DialFxPushConstants speedo_dfx{
+          speedo_pc.dst_x0, speedo_pc.dst_y0, speedo_pc.dst_x1, speedo_pc.dst_y1,
+          speedo_pc.uv_x0,  speedo_pc.uv_y0,  speedo_pc.uv_x1,  speedo_pc.uv_y1,
+          speedo_redline, 0.0F, 0.0F, 0.0F,
+      };
+      vkCmdPushConstants(cmd, dial_fx_pipeline_layout,
+                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                         sizeof(speedo_dfx), &speedo_dfx);
       vkCmdDraw(cmd, 6, 1, 0, 0);
-      vkCmdPushConstants(cmd, dial_fx_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                         sizeof(tach_pc), &tach_pc);
+      const DialFxPushConstants tach_dfx{
+          tach_pc.dst_x0, tach_pc.dst_y0, tach_pc.dst_x1, tach_pc.dst_y1,
+          tach_pc.uv_x0,  tach_pc.uv_y0,  tach_pc.uv_x1,  tach_pc.uv_y1,
+          tach_redline, 0.0F, 0.0F, 0.0F,
+      };
+      vkCmdPushConstants(cmd, dial_fx_pipeline_layout,
+                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                         sizeof(tach_dfx), &tach_dfx);
       vkCmdDraw(cmd, 6, 1, 0, 0);
     }
-
-    const double speedo_norm =
-        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_speedo_period_s);
-    const double tach_norm =
-        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_tach_period_s);
-    const float speedo_angle = static_cast<float>(
-        k_dial_start_angle + (std::clamp(speedo_norm, 0.0, 1.0) * k_dial_sweep_angle));
-    const float tach_angle = static_cast<float>(
-        k_dial_start_angle + (std::clamp(tach_norm, 0.0, 1.0) * k_dial_sweep_angle));
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, needle_pipeline);
 
@@ -1981,6 +2023,7 @@ int main(int argc, char* argv[]) {
         k_speedo_needle_rgba[0], k_speedo_needle_rgba[1], k_speedo_needle_rgba[2],
         k_speedo_needle_rgba[3],
         speedo_angle, k_r_needle_norm, k_r_hub_norm, k_half_thickness_norm,
+        speedo_redline,
     };
     vkCmdPushConstants(cmd, needle_pipeline_layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -1993,6 +2036,7 @@ int main(int argc, char* argv[]) {
         k_tach_needle_rgba[0], k_tach_needle_rgba[1], k_tach_needle_rgba[2],
         k_tach_needle_rgba[3],
         tach_angle, k_r_needle_norm, k_r_hub_norm, k_half_thickness_norm,
+        tach_redline,
     };
     vkCmdPushConstants(cmd, needle_pipeline_layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,

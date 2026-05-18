@@ -24,6 +24,7 @@ layout(push_constant) uniform PC {
   float r_needle;
   float r_hub;
   float half_thickness;
+  float redline_intensity;  // 0..1, amplifies glow + shifts color toward hot red
 } pc;
 
 void main() {
@@ -59,16 +60,22 @@ void main() {
   // center over ~5x the half-thickness; capped at glow_strength to
   // stay subtle. Suppressed wherever the solid already covers
   // (so the glow only contributes outside the solid silhouette and
-  // around the hub).
-  const float glow_strength = 0.45;
-  const float glow_radius_mul = 5.0;
+  // around the hub). At redline, the glow radius widens and the
+  // strength roughly doubles — pushed by the runtime when the
+  // tach passes ~80% of its sweep.
+  float glow_strength = 0.45 + (0.45 * pc.redline_intensity);
+  float glow_radius_mul = 5.0 + (4.0 * pc.redline_intensity);
   float glow_falloff = dist_to_line / (pc.half_thickness * glow_radius_mul);
   float glow_alpha = exp(-glow_falloff * glow_falloff) * glow_strength;
   glow_alpha = clamp(glow_alpha * (1.0 - solid_alpha), 0.0, 1.0);
 
-  // Compose solid + glow, both in the needle color. Hub doesn't glow.
+  // Compose solid + glow. The solid keeps its pushed needle color;
+  // the glow shifts warmer at redline (toward a hot orange-red) so
+  // an amber tach glows red as it approaches the limit.
+  vec3 hot_rgb = vec3(1.0, 0.20, 0.10);
+  vec3 glow_rgb = mix(pc.needle_color.rgb, hot_rgb, pc.redline_intensity);
   float final_alpha = clamp(solid_alpha + glow_alpha, 0.0, 1.0);
-  vec3 final_rgb = (solid_rgb * solid_alpha) + (pc.needle_color.rgb * glow_alpha);
+  vec3 final_rgb = (solid_rgb * solid_alpha) + (glow_rgb * glow_alpha);
 
   // Premultiplied RGBA so the pipeline's
   //   src = ONE, dst = ONE_MINUS_SRC_ALPHA

@@ -16,6 +16,7 @@ layout(push_constant) uniform PC {
   float r_needle;       // tip distance, normalized (1.0 = half-dial)
   float r_hub;          // hub radius, normalized
   float half_thickness; // line half-width, normalized
+  float redline_intensity; // 0..1, boosts glow + warms color (vertex stage ignores)
 } pc;
 
 void main() {

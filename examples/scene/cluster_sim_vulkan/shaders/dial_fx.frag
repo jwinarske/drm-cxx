@@ -18,6 +18,15 @@
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 
+// dst + uv (offset 0..31) are filled by the runtime for textured.vert;
+// fx_params (offset 32) is fragment-only — .x = redline_intensity in
+// 0..1, the rest reserved.
+layout(push_constant) uniform PC {
+  layout(offset = 0) vec4 dst;
+  layout(offset = 16) vec4 uv;
+  layout(offset = 32) vec4 fx_params;
+} pc;
+
 void main() {
   vec2 p = (v_uv - vec2(0.5)) * 2.0;
   float r = length(p);
@@ -46,13 +55,19 @@ void main() {
   float gloss_alpha = smoothstep(0.0, 1.0, gloss_t) * 0.12;
   gloss_alpha *= face_mask;
 
-  // Cool blue-white highlight color for both effects — reads as a
-  // glass + brushed-metal pairing without committing to a specific
-  // material temperature.
-  vec3 rim_rgb = vec3(0.85, 0.88, 0.95);
-  vec3 gloss_rgb = vec3(0.80, 0.85, 0.95);
+  // Cool blue-white highlight by default; at redline the rim
+  // shifts toward a warm red-orange and brightens. Gloss color
+  // tracks the rim color so the dial reads as a single material
+  // catching warmer light.
+  vec3 cool_rgb = vec3(0.85, 0.88, 0.95);
+  vec3 hot_rgb = vec3(1.00, 0.45, 0.25);
+  float redline = clamp(pc.fx_params.x, 0.0, 1.0);
+  vec3 rim_rgb = mix(cool_rgb, hot_rgb, redline);
+  vec3 gloss_rgb = mix(vec3(0.80, 0.85, 0.95), hot_rgb, redline * 0.6);
+  // Intensify the rim band a bit at redline so it visibly throbs.
+  float rim_boost = 1.0 + (redline * 0.6);
 
-  float alpha = clamp(rim_alpha + gloss_alpha, 0.0, 1.0);
-  vec3 rgb = (rim_rgb * rim_alpha) + (gloss_rgb * gloss_alpha);
+  float alpha = clamp((rim_alpha * rim_boost) + gloss_alpha, 0.0, 1.0);
+  vec3 rgb = (rim_rgb * rim_alpha * rim_boost) + (gloss_rgb * gloss_alpha);
   out_color = vec4(rgb, alpha);
 }
