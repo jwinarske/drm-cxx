@@ -76,6 +76,9 @@
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
+#if DRM_CXX_HAS_NVBUFSURFACE
+#include <drm-cxx/scene/nvbufsurface_source.hpp>
+#endif
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -1457,13 +1460,33 @@ int main(int argc, char** argv) {
   std::uint32_t const fb_h = ctx.mode.vdisplay;
   drm::println(stderr, "cluster_sim: mode = {}x{}@{}Hz", fb_w, fb_h, ctx.mode.vrefresh);
 
-  // Bg layer — painted once, scanned out forever.
-  auto bg_src_r = drm::scene::DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
-  if (!bg_src_r) {
-    drm::println(stderr, "DumbBufferSource::create (bg): {}", bg_src_r.error().message());
-    return EXIT_FAILURE;
+  // Bg layer — painted once, scanned out forever. Default is a plain
+  // DumbBufferSource. When CLUSTER_SIM_NVBUF=1 is set in the env AND
+  // the library was built with the NvBufSurface gate on, swap to an
+  // NvBufSurfaceSource: same scanout-side behavior (PRIME-imported FB
+  // on a hardware plane) but with cached CPU mmap on the producer side
+  // — useful as the building-block test for any future CPU compose
+  // path that reads from the bg.
+  std::unique_ptr<drm::scene::LayerBufferSource> bg_src;
+#if DRM_CXX_HAS_NVBUFSURFACE
+  if (std::getenv("CLUSTER_SIM_NVBUF") != nullptr) {
+    auto r = drm::scene::NvBufSurfaceSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
+    if (!r) {
+      drm::println(stderr, "NvBufSurfaceSource::create (bg): {}", r.error().message());
+      return EXIT_FAILURE;
+    }
+    bg_src = std::move(*r);
+    drm::println(stderr, "cluster_sim: bg layer via NvBufSurface");
   }
-  auto bg_src = std::move(*bg_src_r);
+#endif
+  if (!bg_src) {
+    auto r = drm::scene::DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
+    if (!r) {
+      drm::println(stderr, "DumbBufferSource::create (bg): {}", r.error().message());
+      return EXIT_FAILURE;
+    }
+    bg_src = std::move(*r);
+  }
   auto* bg_src_raw = bg_src.get();
   if (auto m = bg_src->map(drm::MapAccess::Write); m) {
     paint_bg_gradient(*m, fb_w, fb_h);
