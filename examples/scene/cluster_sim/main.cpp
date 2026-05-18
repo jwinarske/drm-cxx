@@ -1606,20 +1606,70 @@ int main(int argc, char** argv) {
     warn_template_ptrs.at((i * 2U) + 1U) = dim_buf.data();
   }
 
+  // Per-layer "last visible state" cache: skip the corresponding paint
+  // when the animation phase quantizes to the same value as last frame.
+  // The kernel still page-flips each vblank (with the same FB), so the
+  // smooth-tick budget is unchanged — only the CPU paint cost is saved
+  // for frames where the needle hasn't moved a whole pixel, the digit
+  // hasn't ticked, or no cell flipped lit/dim. Sentinel values force
+  // a paint on first call. The needle endpoint is quantized to the
+  // dial buffer's pixel grid; consecutive frames at 120 Hz often
+  // produce the same endpoint.
+  auto needle_endpoint_px = [&](double norm) -> std::pair<std::int32_t, std::int32_t> {
+    const double a_norm = std::clamp(norm, 0.0, 1.0);
+    const double needle_a = k_dial_start_angle + (a_norm * k_dial_sweep_angle);
+    const double cx = static_cast<double>(dial_size) / 2.0;
+    const double cy = static_cast<double>(dial_size) / 2.0;
+    const double r_needle = static_cast<double>(dial_size) * 0.40;
+    return {static_cast<std::int32_t>(cx + (r_needle * std::cos(needle_a))),
+            static_cast<std::int32_t>(cy + (r_needle * std::sin(needle_a)))};
+  };
+  std::pair<std::int32_t, std::int32_t> last_speedo_px{INT32_MIN, INT32_MIN};
+  std::pair<std::int32_t, std::int32_t> last_tach_px{INT32_MIN, INT32_MIN};
+  std::uint32_t last_speed_kmh = UINT32_MAX;
+  std::uint8_t last_warn_bits = 0xFFU;
+
   auto repaint_layers = [&](double speedo_norm, double tach_norm, std::uint32_t speed_kmh,
                             const std::array<double, k_warn_count>& warn_phases) {
+    const auto speedo_px = needle_endpoint_px(speedo_norm);
+    const auto tach_px = needle_endpoint_px(tach_norm);
+    std::uint8_t warn_bits = 0U;
+    for (std::size_t i = 0; i < k_warn_count; ++i) {
+      if (warn_phases.at(i) < 0.5) {
+        warn_bits |= static_cast<std::uint8_t>(1U << i);
+      }
+    }
+    const bool need_speedo = speedo_px != last_speedo_px;
+    const bool need_tach = tach_px != last_tach_px;
+    const bool need_info = speed_kmh != last_speed_kmh;
+    const bool need_warn = warn_bits != last_warn_bits;
+    if (!need_speedo && !need_tach && !need_info && !need_warn) {
+      return;
+    }
     if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
       auto* base = m->pixels().data();
       const std::uint32_t stride = m->stride();
-      paint_dial(base, stride, speedo_x_local, dial_y_local, dial_size, speedo_norm,
-                 k_speedo_needle_argb, dial_template.data(), dial_template_stride);
-      paint_dial(base, stride, tach_x_local, dial_y_local, dial_size, tach_norm,
-                 k_tach_needle_argb, dial_template.data(), dial_template_stride);
-      paint_center_info(base, stride, info_x_local, info_y_local, speed_kmh, font_face);
-      paint_warning_indicators(
-          base, stride, warn_x_local, warn_y_local, warn_phases, k_warn_cell_w,
-          drm::span<const std::uint8_t* const>(warn_template_ptrs.data(),
-                                               warn_template_ptrs.size()));
+      if (need_speedo) {
+        paint_dial(base, stride, speedo_x_local, dial_y_local, dial_size, speedo_norm,
+                   k_speedo_needle_argb, dial_template.data(), dial_template_stride);
+        last_speedo_px = speedo_px;
+      }
+      if (need_tach) {
+        paint_dial(base, stride, tach_x_local, dial_y_local, dial_size, tach_norm,
+                   k_tach_needle_argb, dial_template.data(), dial_template_stride);
+        last_tach_px = tach_px;
+      }
+      if (need_info) {
+        paint_center_info(base, stride, info_x_local, info_y_local, speed_kmh, font_face);
+        last_speed_kmh = speed_kmh;
+      }
+      if (need_warn) {
+        paint_warning_indicators(
+            base, stride, warn_x_local, warn_y_local, warn_phases, k_warn_cell_w,
+            drm::span<const std::uint8_t* const>(warn_template_ptrs.data(),
+                                                 warn_template_ptrs.size()));
+        last_warn_bits = warn_bits;
+      }
     }
   };
   std::array<double, k_warn_count> const initial_warn_phases{0.0, 0.0, 0.0, 0.0};
