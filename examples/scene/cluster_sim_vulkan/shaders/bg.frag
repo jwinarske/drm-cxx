@@ -7,10 +7,12 @@
 //   edge   color = 0xFF02040A
 //   radius (in pixels) = max(width, height) * 0.6
 //
-// Output framebuffer is VK_FORMAT_B8G8R8A8_UNORM, where component 0 is B,
-// component 1 is G, component 2 is R. The DRM consumer reads
-// DRM_FORMAT_ARGB8888 (little-endian BGRA bytes), so writing
-// out_color = vec4(B, G, R, A) lands the bytes in the right slots.
+// Fragment-shader outputs are always RGBA-semantic regardless of the
+// color attachment's format. The Vulkan implementation handles the
+// memory-layout mapping for VK_FORMAT_B8G8R8A8_UNORM — write the
+// colors in straight (R, G, B, A) order and the framebuffer encoder
+// lands them in the right bytes (which the DRM consumer then reads
+// as ARGB8888).
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
@@ -33,6 +35,5 @@ void main() {
   vec3 edge_rgb   = vec3(0x02, 0x04, 0x0A) / 255.0;
   vec3 color = mix(center_rgb, edge_rgb, t);
 
-  // BGRA byte order for VK_FORMAT_B8G8R8A8_UNORM → DRM ARGB8888.
-  out_color = vec4(color.b, color.g, color.r, 1.0);
+  out_color = vec4(color, 1.0);
 }
