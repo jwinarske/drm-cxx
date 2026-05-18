@@ -58,6 +58,7 @@
 #include "needle_frag_spv.h"     // k_needle_frag_spv
 #include "tex_array_vert_spv.h"  // k_tex_array_vert_spv
 #include "tex_array_frag_spv.h"  // k_tex_array_frag_spv
+#include "dial_fx_frag_spv.h"    // k_dial_fx_frag_spv
 
 // Blend2D umbrella: <blend2d/blend2d.h> on most distros, <blend2d.h>
 // in older drops; cover both like cluster_sim does.
@@ -1646,6 +1647,59 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
+  // ----- Dial-fx pipeline (metallic rim highlight + top gloss) -----
+  // Reuses textured.vert (push constants are dst + uv, no descriptor
+  // set needed) plus a new fragment that draws shader-computed
+  // highlights over the textured dial template.
+  VkShaderModule dial_fx_frag = make_shader_module(vk_device, k_dial_fx_frag_spv,
+                                                   sizeof(k_dial_fx_frag_spv));
+  if (dial_fx_frag == VK_NULL_HANDLE) {
+    drm::println(stderr, "vkCreateShaderModule (dial_fx) failed");
+    return EXIT_FAILURE;
+  }
+  VkPushConstantRange dfx_pcr{};
+  dfx_pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+  dfx_pcr.offset = 0;
+  dfx_pcr.size = sizeof(TexturedPushConstants);
+  VkPipelineLayoutCreateInfo dfx_plci{};
+  dfx_plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  dfx_plci.pushConstantRangeCount = 1;
+  dfx_plci.pPushConstantRanges = &dfx_pcr;
+  VkPipelineLayout dial_fx_pipeline_layout = VK_NULL_HANDLE;
+  if (vkCreatePipelineLayout(vk_device, &dfx_plci, nullptr, &dial_fx_pipeline_layout) !=
+      VK_SUCCESS) {
+    drm::println(stderr, "vkCreatePipelineLayout (dial_fx) failed");
+    return EXIT_FAILURE;
+  }
+  std::array<VkPipelineShaderStageCreateInfo, 2> dfx_stages{};
+  dfx_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  dfx_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  dfx_stages[0].module = tex_vert;  // textured.vert handles dst+uv push
+  dfx_stages[0].pName = "main";
+  dfx_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  dfx_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  dfx_stages[1].module = dial_fx_frag;
+  dfx_stages[1].pName = "main";
+  VkGraphicsPipelineCreateInfo dfx_gpci{};
+  dfx_gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  dfx_gpci.stageCount = static_cast<std::uint32_t>(dfx_stages.size());
+  dfx_gpci.pStages = dfx_stages.data();
+  dfx_gpci.pVertexInputState = &vi;
+  dfx_gpci.pInputAssemblyState = &ia;
+  dfx_gpci.pViewportState = &vp;
+  dfx_gpci.pRasterizationState = &rs;
+  dfx_gpci.pMultisampleState = &ms;
+  dfx_gpci.pColorBlendState = &tex_cb;  // premultiplied alpha
+  dfx_gpci.layout = dial_fx_pipeline_layout;
+  dfx_gpci.renderPass = render_pass;
+  dfx_gpci.subpass = 1;
+  VkPipeline dial_fx_pipeline = VK_NULL_HANDLE;
+  if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &dfx_gpci, nullptr,
+                                &dial_fx_pipeline) != VK_SUCCESS) {
+    drm::println(stderr, "vkCreateGraphicsPipelines (dial_fx) failed");
+    return EXIT_FAILURE;
+  }
+
   // Pre-computed push constants for the centered dial — the dst rect
   // doesn't change once the mode is locked.
   const TexturedPushConstants speedo_pc =
@@ -1899,6 +1953,15 @@ int main(int argc, char* argv[]) {
       vkCmdPushConstants(cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
                          sizeof(tach_pc), &tach_pc);
       vkCmdDraw(cmd, 6, 1, 0, 0);
+
+      // Metallic rim highlight + top-half gloss over each dial.
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dial_fx_pipeline);
+      vkCmdPushConstants(cmd, dial_fx_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                         sizeof(speedo_pc), &speedo_pc);
+      vkCmdDraw(cmd, 6, 1, 0, 0);
+      vkCmdPushConstants(cmd, dial_fx_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                         sizeof(tach_pc), &tach_pc);
+      vkCmdDraw(cmd, 6, 1, 0, 0);
     }
 
     const double speedo_norm =
@@ -2029,6 +2092,9 @@ int main(int argc, char* argv[]) {
   }
 
   scene.reset();
+  vkDestroyPipeline(vk_device, dial_fx_pipeline, nullptr);
+  vkDestroyPipelineLayout(vk_device, dial_fx_pipeline_layout, nullptr);
+  vkDestroyShaderModule(vk_device, dial_fx_frag, nullptr);
   vkDestroyPipeline(vk_device, tex_array_pipeline, nullptr);
   vkDestroyPipelineLayout(vk_device, tex_array_pipeline_layout, nullptr);
   vkDestroyShaderModule(vk_device, tex_array_frag, nullptr);
