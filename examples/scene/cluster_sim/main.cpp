@@ -116,6 +116,7 @@
 #include <filesystem>
 #include <linux/input-event-codes.h>
 #include <linux/videodev2.h>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1303,12 +1304,86 @@ int main(int argc, char** argv) {
     }
     auto picked = drm::select_mode(
         drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes), tw, th, thz);
-    if (!picked) {
-      drm::println(stderr, "--mode: no mode close to {}x{}@{}Hz on connector {}", tw, th, thz,
-                   ctx.connector_id);
-      return EXIT_FAILURE;
+    bool exact = false;
+    if (picked) {
+      const auto& m = picked->drm_mode;
+      exact = (m.hdisplay == tw && m.vdisplay == th && (thz == 0 || m.vrefresh == thz));
     }
-    ctx.mode = picked->drm_mode;
+    if (exact) {
+      ctx.mode = picked->drm_mode;
+    } else {
+      // No exact match in the connector's EDID-derived mode list.
+      // Synthesize a CVT-RB2 (Coordinated Video Timings, Reduced
+      // Blanking v2) modeline. CVT-RB2 fixes horizontal blanking at 80
+      // pixels and vertical blanking at >=460/h_period_us lines, which
+      // hits the timings high-refresh DP monitors advertise via
+      // Display Range Limits even when their EDID DTDs only cover
+      // lower-Hz modes. The kernel atomic ioctl accepts arbitrary
+      // drmModeModeInfo blobs, so this is enough to drive the panel
+      // at its claimed max refresh as long as link bandwidth allows.
+      if (thz == 0) {
+        drm::println(stderr,
+                     "--mode: no match for {}x{} and no refresh hint to synthesize from", tw, th);
+        return EXIT_FAILURE;
+      }
+      // CVT 1.2 Reduced Blanking v2 timings. RB v2 fixes horizontal
+      // blanking at 80 px (front 8 + sync 32 + back 40) and constrains
+      // vertical blanking to a 460us-equivalent floor for refresh<200Hz
+      // and a relaxed 80-line floor for refresh>=200Hz. The resulting
+      // pixel clock is what high-refresh DP monitors expect — `cvt -r
+      // 1920 1080 240` outputs the same modeline (530.88 MHz).
+      constexpr std::uint32_t k_h_blank_rb = 80;
+      constexpr std::uint32_t k_h_front = 8;
+      constexpr std::uint32_t k_h_sync = 32;
+      constexpr std::uint32_t k_v_sync_rb = 8;
+      constexpr std::uint32_t k_v_front_rb = 3;
+      constexpr std::uint32_t k_v_back_rb_min = 6;
+      // V blank floor: 460us at <200Hz refresh (CVT-RB v1 rule kept for
+      // back-compat with low-Hz monitors), 80 lines at >=200Hz where
+      // monitors advertise tighter timings.
+      std::uint32_t v_blank = 0;
+      if (thz >= 200U) {
+        v_blank = std::max<std::uint32_t>(80U, k_v_front_rb + k_v_sync_rb + k_v_back_rb_min);
+      } else {
+        v_blank = 32U;
+        for (int it = 0; it < 8; ++it) {
+          const double h_period_us =
+              1.0e6 / (static_cast<double>(thz) * static_cast<double>(th + v_blank));
+          const auto needed = static_cast<std::uint32_t>(
+              (static_cast<double>(460U) / h_period_us) + 0.5);
+          const std::uint32_t cand = std::max<std::uint32_t>(32, needed);
+          if (cand == v_blank) {
+            break;
+          }
+          v_blank = cand;
+        }
+      }
+      const std::uint32_t h_total = tw + k_h_blank_rb;
+      const std::uint32_t v_total = th + v_blank;
+      const std::uint64_t pclk_hz =
+          static_cast<std::uint64_t>(thz) * h_total * v_total;
+      const std::uint32_t clock_khz = static_cast<std::uint32_t>((pclk_hz + 500U) / 1000U);
+      drmModeModeInfo m{};
+      m.clock = clock_khz;
+      m.hdisplay = static_cast<std::uint16_t>(tw);
+      m.hsync_start = static_cast<std::uint16_t>(tw + k_h_front);
+      m.hsync_end = static_cast<std::uint16_t>(tw + k_h_front + k_h_sync);
+      m.htotal = static_cast<std::uint16_t>(h_total);
+      m.hskew = 0;
+      m.vdisplay = static_cast<std::uint16_t>(th);
+      m.vsync_start = static_cast<std::uint16_t>(th + k_v_front_rb);
+      m.vsync_end = static_cast<std::uint16_t>(th + k_v_front_rb + k_v_sync_rb);
+      m.vtotal = static_cast<std::uint16_t>(v_total);
+      m.vscan = 0;
+      m.vrefresh = thz;
+      m.flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC;
+      m.type = DRM_MODE_TYPE_USERDEF;
+      std::snprintf(m.name, DRM_DISPLAY_MODE_LEN, "%ux%u@%uRB", tw, th, thz);
+      drm::println(stderr,
+                   "--mode: synthesized CVT-RB2 {}x{}@{}Hz pclk={}MHz htotal={} vtotal={}",
+                   tw, th, thz, clock_khz / 1000U, h_total, v_total);
+      ctx.mode = m;
+    }
   }
   std::uint32_t const fb_w = ctx.mode.hdisplay;
   std::uint32_t const fb_h = ctx.mode.vdisplay;
