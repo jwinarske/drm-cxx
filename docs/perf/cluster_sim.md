@@ -133,10 +133,33 @@ CLUSTER_SIM_NVBUF=1 ./buildDir/examples/scene/cluster_sim/cluster_sim --mode 192
 CLUSTER_SIM_FRAME_JITTER=1 ./buildDir/examples/scene/cluster_sim/cluster_sim /dev/dri/card1
 ```
 
+## Sibling: `cluster_sim_vulkan`
+
+`examples/scene/cluster_sim_vulkan/` exists as the GPU-rendered
+sibling. Current state is MVP (`vkCmdClearColorImage` bg + one CPU
+Blend2D-painted dial, ~59 fps at 2560×1440). Feature parity with
+`cluster_sim`'s visuals — radial bg gradient, both dials, info
+readout, warning strip — needs a real render-pass + graphics-pipeline
+path that composites cluster_sim's pre-rendered CPU templates as
+Vulkan sampled images, plus shader-rendered needles. Pending after
+`glslang-tools` was installed. See in-tree commits
+`23982c0 cluster_sim_vulkan: MVP with Vulkan bg + CPU instruments`
+and the follow-up that adds the shader pipeline.
+
+The win once feature parity lands isn't "more fps" — `cluster_sim` is
+already 120 fps locked. It's:
+- Demonstrates the full Vulkan-rendered scene-layer pipeline end-to-
+  end on this Tegra (proves the path Vulkan apps would actually take).
+- Frees CPU entirely from the instruments paint (template upload
+  happens once, all per-frame composition is on the GPU).
+- Opens up cheap shader effects the CPU path can't do — subpixel-AA
+  rim, SDF-based glow on the needle, etc.
+
 ## Commits
 
 Squashed reference:
 ```
+23982c0 cluster_sim_vulkan: MVP with Vulkan bg + CPU instruments
 eb633e2 scene: NvBufSurfaceSource — LayerBufferSource backed by L4T NvBufSurface
 e42c928 cluster_sim: optional NvBufSurface bg layer (CLUSTER_SIM_NVBUF=1)
 c19ba86 cluster_sim: cache 241 center-info speed text templates
