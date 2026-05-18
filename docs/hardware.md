@@ -277,6 +277,62 @@ DRM/KMS interface. As a result the KMS-facing surface is sparse:
   cause was a `vulkan_display` linker issue, not Tegra missing
   Vulkan — see the `drm::vulkan::Display::create` note in
   `src/vulkan/display.cpp` for the dlopen-on-demand fix.)
+- **KMS planes have no `zpos` property.** All 6 planes (2 PRIMARY + 2
+  CURSOR + 2 OVERLAY, two of each per CRTC) report `zpos_min`/`zpos_max`
+  as absent. Stacking is fixed by plane type: OVERLAY above PRIMARY,
+  CURSOR above OVERLAY. The allocator's standard +10 score for
+  `layer.zpos == plane.zpos_min` can't fire here, so the bipartite
+  matcher ties on otherwise-identical layers and picks a plane
+  arbitrarily (full-screen bg can land on OVERLAY and hide an instrument
+  layer on PRIMARY). The 2026-05-17 `allocator.cpp` fix adds a
+  Tegra-style fallback: when `plane.zpos_min` is absent, `layer.zpos=0`
+  scores +10 toward PRIMARY and `layer.zpos>0` scores +8 toward
+  OVERLAY. Callers that want a specific stack order should set explicit
+  `display.zpos` values (0 = bottom, >0 = above).
+- **Mode validation is strict against EDID.** The driver rejects any
+  atomic-commit mode blob not derived from an EDID-advertised mode with
+  `EINVAL` at first commit — even when the panel's Display Range Limits
+  descriptor declares the timing is in range. CVT-RB2 modelines
+  synthesized at runtime (cluster_sim's `--mode WxH@Hz` for non-EDID
+  refresh rates) all fail, including ones well within DP bandwidth.
+  Verified with an LG UltraGear+ panel that advertises 240 Hz max V
+  rate / 1060 MHz max pclk yet only ships 1920×1080@120 and lower
+  Hz-DTDs in EDID; 1920×1080@144 / @165 / @240 synthesized modes all
+  hit EINVAL. **Escape:** `video=DP-1:WxH@Hz` on the kernel cmdline
+  injects the mode at boot before userspace ever commits. The helper
+  `scripts/jetson_force_mode.sh --apply DP-1 WxH Hz` edits
+  `/boot/extlinux/extlinux.conf` with a timestamped backup; reboot
+  required. Untested for refresh > 120 Hz pending a tolerable
+  reboot-recovery story.
+- **DPCD / AUX channel not exposed to userspace.** The proprietary
+  `nvidia_drm` / `nvidia_modeset` stack does not surface
+  `/dev/drm_dp_aux*` or the standard DRM connector debugfs. PSR
+  capability of the attached panel can't be probed, and even if the
+  panel supports PSR (rare on external DP), the proprietary driver
+  doesn't advertise or engage it. Commit-skip on all-unchanged frames
+  is therefore CPU-side only — no panel-side power benefit available
+  until the open-tegra driver path lands.
+- **DRM dumb-buffer mmap is write-combined.** NEON reads from a source
+  dumb buffer stall hard (~250 ns/px effective vs ~5 ns/px theoretical
+  cached read), confirmed empirically by swapping the load with a
+  constant in `CompositeCanvas::blend_into`'s pure_opaque_copy path
+  (blend time drops from 12 ms to 1.2 ms for the same pixel count).
+  Producer-side (Blend2D) writes hit the WC streaming-store ceiling
+  fast enough; the problem is only on the consumer side when the same
+  buffer is then read for CPU compositing. The cluster_sim refactor
+  works around this by either (a) caching pre-rendered templates in
+  userspace `std::vector<uint8_t>` and `memcpy`-blitting into the
+  layer's dumb buffer per frame, or (b) merging multiple small layers
+  into one larger layer that lands directly on a hardware plane (no
+  CPU compose). Pattern: keep CPU-write paths to dumb buffers (fine),
+  avoid CPU-read paths from them (slow).
+- **Validated cluster_sim configurations.** `cluster_sim
+  /dev/dri/card1` runs at 60 fps locked on the EDID-preferred
+  2560×1440@60 mode; `cluster_sim --mode 1920x1080@120 /dev/dri/card1`
+  runs at 120 fps locked. Zero missed vblanks over 30 s captures in
+  both modes via `CLUSTER_SIM_FRAME_JITTER=1`. Per-frame paint cost is
+  ~0.76 ms after the template-cache + skip-paint optimizations (see
+  the `cluster_sim:` commits between 2026-05-17 and 2026-05-18).
 
 ### VAAPI
 
