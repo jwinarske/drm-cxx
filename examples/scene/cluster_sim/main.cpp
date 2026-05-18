@@ -127,6 +127,7 @@
 #include <sys/mman.h>
 #include <sys/poll.h>
 #include <system_error>
+#include <sys/timerfd.h>
 #include <unistd.h>
 #include <utility>
 #include <variant>
@@ -1629,8 +1630,11 @@ int main(int argc, char** argv) {
   std::uint32_t last_speed_kmh = UINT32_MAX;
   std::uint8_t last_warn_bits = 0xFFU;
 
+  // Returns true if any section was painted (caller should commit), false
+  // if every section's visible state matched the previous frame and we
+  // can skip the commit entirely.
   auto repaint_layers = [&](double speedo_norm, double tach_norm, std::uint32_t speed_kmh,
-                            const std::array<double, k_warn_count>& warn_phases) {
+                            const std::array<double, k_warn_count>& warn_phases) -> bool {
     const auto speedo_px = needle_endpoint_px(speedo_norm);
     const auto tach_px = needle_endpoint_px(tach_norm);
     std::uint8_t warn_bits = 0U;
@@ -1644,7 +1648,7 @@ int main(int argc, char** argv) {
     const bool need_info = speed_kmh != last_speed_kmh;
     const bool need_warn = warn_bits != last_warn_bits;
     if (!need_speedo && !need_tach && !need_info && !need_warn) {
-      return;
+      return false;
     }
     if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
       auto* base = m->pixels().data();
@@ -1671,6 +1675,7 @@ int main(int argc, char** argv) {
         last_warn_bits = warn_bits;
       }
     }
+    return true;
   };
   std::array<double, k_warn_count> const initial_warn_phases{0.0, 0.0, 0.0, 0.0};
   repaint_layers(0.0, 0.0, 0U, initial_warn_phases);
@@ -1907,6 +1912,39 @@ int main(int argc, char** argv) {
       seat->dispatch();
     }
   });
+
+  // Commit-skip timer: when the per-frame repaint found nothing visibly
+  // changed AND the rear-view layer isn't pumping its own buffers, we
+  // suppress the atomic commit and re-evaluate one vblank period later.
+  // The timer is one-shot (TFD_CLOEXEC + tick at expected_frame_us).
+  // The fd is added as a slot so the EventLoop's poll wakes when it
+  // expires; the handler reads/drains the counter and sets
+  // need_repaint=true. timer_pending guards against a re-arm while one
+  // is already in flight.
+  const int timer_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+  if (timer_fd < 0) {
+    drm::println(stderr, "timerfd_create: {}", std::system_category().message(errno));
+    return EXIT_FAILURE;
+  }
+  bool timer_pending = false;
+  (void)loop.add_slot(timer_fd, [&] {
+    std::uint64_t expirations = 0;
+    (void)::read(timer_fd, &expirations, sizeof(expirations));
+    timer_pending = false;
+    need_repaint = true;
+  });
+  auto arm_skip_timer = [&]() {
+    if (timer_pending || expected_frame_us <= 0.0) {
+      return;
+    }
+    itimerspec its{};
+    const auto ns = static_cast<long>(expected_frame_us * 1000.0);
+    its.it_value.tv_sec = ns / 1'000'000'000L;
+    its.it_value.tv_nsec = ns % 1'000'000'000L;
+    if (::timerfd_settime(timer_fd, 0, &its, nullptr) == 0) {
+      timer_pending = true;
+    }
+  };
 #if CLUSTER_SIM_HAS_LIBYUV
   int const uvc_slot = loop.add_slot(-1, [&] { drive_rearview_uvc(rear_view); });
 #endif
@@ -1976,7 +2014,8 @@ int main(int argc, char** argv) {
         double const period = k_warn_specs.at(static_cast<std::size_t>(i)).period_s;
         warn_phases.at(static_cast<std::size_t>(i)) = std::fmod(elapsed / period, 1.0);
       }
-      repaint_layers(speedo_norm, tach_norm, speed_kmh, warn_phases);
+      const bool instruments_painted =
+          repaint_layers(speedo_norm, tach_norm, speed_kmh, warn_phases);
       // Rear-view is decoder-driven (vicodec) or pump-driven (UVC) so
       // those tiers don't repaint here. The synthetic tier is the
       // exception: its content lives in a dumb buffer we own and we
@@ -1987,6 +2026,19 @@ int main(int argc, char** argv) {
         }
       }
       drive_rearview(rear_view);
+      // Skip the atomic commit entirely when nothing visible changed AND
+      // the rear-view layer is fully inactive (no V4L2 source, no
+      // synthetic pattern). The kernel doesn't see this frame at all;
+      // the one-shot timerfd wakes the loop one vblank period later for
+      // re-evaluation, and most consecutive evaluations will produce a
+      // real paint+commit on the next round.
+      const bool rearview_active =
+          rear_view.layer.has_value() &&
+          (rear_view.source != nullptr || rear_view.synthetic_source != nullptr);
+      if (!instruments_painted && !rearview_active) {
+        arm_skip_timer();
+        continue;
+      }
       auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
       if (!r) {
         if (r.error() == std::errc::permission_denied) {
