@@ -279,6 +279,71 @@ struct BgPushConstants {
   float extent_y;
 };
 
+// A LayerBufferSource that owns two ExternalDmaBufSource children and
+// returns a different fb_id from acquire() per call, based on a
+// front-buffer index the caller toggles. The scene holds ONE layer
+// backed by this source; each commit's atomic page flip switches the
+// PRIMARY plane between two FB IDs. That's classical front/back
+// double-buffering at the kernel level, with no second hardware plane
+// involved — important on Tegra where the OVERLAY plane's plane-alpha
+// and dst_rect are unreliable knobs for hiding a buffer.
+//
+// The acquire/release lifecycle: the scene typically holds the
+// AcquiredBuffer across the frame, sometimes across multiple frames
+// (deferred-release ring). To make release route to the inner source
+// the original acquire came from — even after the caller has flipped
+// front_ since — we encode the inner source's index in
+// AcquiredBuffer::opaque. ExternalDmaBufSource sets opaque=nullptr on
+// acquire (verified in src/scene/external_dma_buf_source.cpp), so
+// borrowing the field is safe.
+class SwappingDmaBufSource : public drm::scene::LayerBufferSource {
+ public:
+  SwappingDmaBufSource(std::unique_ptr<drm::scene::ExternalDmaBufSource> a,
+                       std::unique_ptr<drm::scene::ExternalDmaBufSource> b)
+      : sources_{std::move(a), std::move(b)} {}
+
+  [[nodiscard]] drm::expected<drm::scene::AcquiredBuffer, std::error_code> acquire() override {
+    auto r = sources_[front_]->acquire();
+    if (!r) {
+      return r;
+    }
+    drm::scene::AcquiredBuffer buf = *r;
+    buf.opaque = reinterpret_cast<void*>(  // NOLINT(performance-no-int-to-ptr,cppcoreguidelines-pro-type-reinterpret-cast)
+        static_cast<std::uintptr_t>(front_));
+    return buf;
+  }
+
+  void release(drm::scene::AcquiredBuffer acq) noexcept override {
+    const auto idx = static_cast<std::size_t>(
+        reinterpret_cast<std::uintptr_t>(acq.opaque));  // NOLINT(performance-no-int-to-ptr,cppcoreguidelines-pro-type-reinterpret-cast)
+    if (idx < sources_.size()) {
+      drm::scene::AcquiredBuffer inner{acq.fb_id, nullptr};
+      sources_[idx]->release(inner);
+    }
+  }
+
+  [[nodiscard]] drm::scene::BindingModel binding_model() const noexcept override {
+    return sources_[0]->binding_model();
+  }
+
+  [[nodiscard]] drm::scene::SourceFormat format() const noexcept override {
+    return sources_[0]->format();
+  }
+
+  // map() inherits the base default (Function not implemented) — both
+  // children also reject map(), and we don't need composition fallback.
+
+  void set_front(int idx) noexcept {
+    if (idx >= 0 && static_cast<std::size_t>(idx) < sources_.size()) {
+      front_ = static_cast<std::size_t>(idx);
+    }
+  }
+
+ private:
+  std::array<std::unique_ptr<drm::scene::ExternalDmaBufSource>, 2> sources_;
+  std::size_t front_{0};
+};
+
 // Push-constant block for the textured-quad vertex shader. dst is in
 // NDC (x0, y0, x1, y1); uv is in [0, 1]. 32 bytes total — comfortably
 // under the 128-byte minimum guaranteed by Vulkan.
@@ -451,17 +516,16 @@ int main(int argc, char* argv[]) {
 
   // Two DRM-modifier-LINEAR ARGB8888 Vulkan images, ping-ponged each
   // frame so KMS never reads the buffer Vulkan is currently writing.
-  // bg[0] -> PRIMARY plane (zpos 0, plane-alpha left at 0xFFFF);
-  // bg[1] -> OVERLAY plane (zpos 1, plane-alpha toggles each frame:
-  //          0xFFFF when bg[1] was just rendered and should cover
-  //          bg[0]; 0 to let bg[0] show through underneath). Now that
-  //          iteration 3 dropped the CPU needle layer, the OVERLAY
-  //          slot is free for this.
+  // Both DMA-BUFs are wrapped in one SwappingDmaBufSource, which is
+  // attached to ONE scene layer on the PRIMARY plane. Each per-frame
+  // commit page-flips that plane between the two FB IDs (front /
+  // back), so KMS scans the just-rendered buffer while Vulkan renders
+  // into the other one. Single plane — no OVERLAY tricks needed.
   constexpr int k_swap_count = 2;
   const std::uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   std::array<VkImage, k_swap_count> vk_images{};
   std::array<VkDeviceMemory, k_swap_count> vk_mems{};
-  std::array<drm::scene::LayerHandle, k_swap_count> bg_handles{};
+  std::array<std::unique_ptr<drm::scene::ExternalDmaBufSource>, k_swap_count> bg_sources{};
 
   auto get_memory_fd = reinterpret_cast<
       PFN_vkGetMemoryFdKHR>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -545,18 +609,20 @@ int main(int argc, char* argv[]) {
       drm::println(stderr, "ExternalDmaBufSource::create[{}]: {}", i, src.error().message());
       return EXIT_FAILURE;
     }
-    drm::scene::LayerDesc desc;
-    desc.source = std::move(*src);
-    desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-    desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-    desc.display.zpos = i;  // 0 -> PRIMARY (Tegra affinity), 1 -> OVERLAY
-    desc.display.alpha = (i == 0) ? std::uint16_t{0xFFFF} : std::uint16_t{0};
-    auto handle = scene->add_layer(std::move(desc));
-    if (!handle) {
-      drm::println(stderr, "add_layer (Vulkan bg[{}]): {}", i, handle.error().message());
-      return EXIT_FAILURE;
-    }
-    bg_handles[i] = *handle;
+    bg_sources[i] = std::move(*src);
+  }
+
+  auto swap_source =
+      std::make_unique<SwappingDmaBufSource>(std::move(bg_sources[0]), std::move(bg_sources[1]));
+  auto* swap_source_raw = swap_source.get();
+  drm::scene::LayerDesc bg_desc;
+  bg_desc.source = std::move(swap_source);
+  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.zpos = 0;
+  if (auto r = scene->add_layer(std::move(bg_desc)); !r) {
+    drm::println(stderr, "add_layer (Vulkan bg): {}", r.error().message());
+    return EXIT_FAILURE;
   }
 
   // Square dial buffer covering the smaller framebuffer dimension —
@@ -1301,22 +1367,9 @@ int main(int argc, char* argv[]) {
     vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
-    // Show the buffer we just rendered into. Plane-alpha on this
-    // Tegra OVERLAY doesn't actually fade the plane to invisible
-    // (the user sees two ghosted gauges from both planes' contents
-    // composing), so instead we keep bg[1] (OVERLAY) on top via its
-    // zpos and move it ENTIRELY off-screen when we need bg[0]
-    // (PRIMARY) to show through. CRTC_X < 0 with the same width is
-    // the cleanest "fully clipped" off-screen position: the kernel
-    // clips it to zero visible columns.
-    if (auto* layer1 = scene->get_layer(bg_handles[1]); layer1 != nullptr) {
-      if (back_index == 1) {
-        layer1->set_dst_rect(drm::scene::Rect{0, 0, fb_w, fb_h});
-      } else {
-        layer1->set_dst_rect(drm::scene::Rect{
-            -static_cast<std::int32_t>(fb_w), 0, fb_w, fb_h});
-      }
-    }
+    // The next commit's acquire() should return the FB we just
+    // rendered into. The plane page-flips between the two FBs.
+    swap_source_raw->set_front(back_index);
 
     if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
         !r) {
