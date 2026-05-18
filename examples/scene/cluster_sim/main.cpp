@@ -529,62 +529,74 @@ void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_byte
   ctx.end();
 }
 
-// Paint the four-cell warning strip at offset (x_off, y_off) in the
-// combined instruments buffer. `phases[i]` in [0, 1) is the per-cell
-// blink phase; lit when phase < 0.5, dim otherwise. Each cell is a
-// rounded rectangle filled with the lit/dim color and a single glyph
-// centered inside. Self-clears its sub-rect because the lit/dim
-// transition would otherwise leave a "frozen" stale fill behind.
-void paint_warning_indicators(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
-                              std::uint32_t x_off, std::uint32_t y_off,
-                              const std::array<double, k_warn_count>& phases,
-                              const BLFontFace& font_face) noexcept {
-  if (base_pixels == nullptr) {
+// One cell template for the warning-indicator strip. Renders a single
+// cell of size `cell_w × cell_h` (alpha-0 outside the rounded rect) into
+// the supplied template buffer. Called twice per cell at startup (lit
+// + dim variants); per-frame paint blits one of these templates into
+// the inst buffer instead of going through Blend2D again.
+void paint_warning_cell_template(std::uint8_t* template_pixels,
+                                 std::uint32_t template_stride_bytes, std::uint32_t cell_w,
+                                 std::uint32_t cell_h, double inner_pad, std::uint32_t cell_argb,
+                                 std::uint32_t glyph_argb, std::string_view glyph,
+                                 const BLFontFace& font_face) noexcept {
+  if (cell_w == 0U || cell_h == 0U || template_pixels == nullptr) {
     return;
   }
-  std::uint8_t* sub_base = base_pixels +
-                           (static_cast<std::size_t>(y_off) * base_stride_bytes) +
-                           (static_cast<std::size_t>(x_off) * 4U);
   BLImage canvas;
-  if (canvas.create_from_data(static_cast<int>(k_warn_w), static_cast<int>(k_warn_h),
-                              BL_FORMAT_PRGB32, sub_base,
-                              static_cast<intptr_t>(base_stride_bytes), BL_DATA_ACCESS_RW, nullptr,
-                              nullptr) != BL_SUCCESS) {
+  if (canvas.create_from_data(static_cast<int>(cell_w), static_cast<int>(cell_h),
+                              BL_FORMAT_PRGB32, template_pixels,
+                              static_cast<intptr_t>(template_stride_bytes), BL_DATA_ACCESS_RW,
+                              nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
-
   BLContext ctx(canvas);
-  // alpha=0 clear so the bg gradient shows through between cells; the
-  // cell fills below paint themselves opaque on top.
   ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
   ctx.fill_all(BLRgba32(0x00000000U));
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
-
+  double const x0 = inner_pad;
+  double const y0 = inner_pad;
+  double const w = static_cast<double>(cell_w) - (2.0 * inner_pad);
+  double const h = static_cast<double>(cell_h) - (2.0 * inner_pad);
+  ctx.fill_round_rect(BLRoundRect(x0, y0, w, h, k_warn_cell_radius), BLRgba32(cell_argb));
   BLFont glyph_font;
-  bool const have_font = font_face.is_valid() &&
-                         glyph_font.create_from_face(font_face, k_warn_glyph_font_px) == BL_SUCCESS;
-
-  constexpr double cell_w = static_cast<double>(k_warn_w) / static_cast<double>(k_warn_count);
-  double const inner_pad = 6.0;
-  for (int i = 0; i < k_warn_count; ++i) {
-    bool const lit = phases.at(static_cast<std::size_t>(i)) < 0.5;
-    auto const& spec = k_warn_specs.at(static_cast<std::size_t>(i));
-    std::uint32_t const cell_argb = lit ? spec.lit_argb : k_warn_dim_argb;
-    std::uint32_t const glyph_argb = lit ? 0xFF080C18U : k_warn_glyph_dim_argb;
-
-    double const x0 = (static_cast<double>(i) * cell_w) + inner_pad;
-    double const y0 = inner_pad;
-    double const w = cell_w - (2.0 * inner_pad);
-    double const h = static_cast<double>(k_warn_h) - (2.0 * inner_pad);
-    ctx.fill_round_rect(BLRoundRect(x0, y0, w, h, k_warn_cell_radius), BLRgba32(cell_argb));
-
-    if (have_font) {
-      double const cx = x0 + (w * 0.5);
-      double const cy_baseline = y0 + (h * 0.7);
-      paint_centered_text(ctx, glyph_font, spec.glyph, cx, cy_baseline, glyph_argb);
-    }
+  if (font_face.is_valid() &&
+      glyph_font.create_from_face(font_face, k_warn_glyph_font_px) == BL_SUCCESS) {
+    double const cx = x0 + (w * 0.5);
+    double const cy_baseline = y0 + (h * 0.7);
+    paint_centered_text(ctx, glyph_font, std::string(glyph), cx, cy_baseline, glyph_argb);
   }
   ctx.end();
+}
+
+// Per-frame: blit each cell's pre-rendered template (lit or dim) into
+// the inst buffer at (x_off + i*cell_w, y_off). Templates are owned by
+// the caller; `templates` is a flat span: cell 0 lit, cell 0 dim, cell
+// 1 lit, cell 1 dim, ... — 2 * k_warn_count entries, each pointing at
+// a (cell_w * k_warn_h * 4)-byte buffer with stride = cell_w*4.
+void paint_warning_indicators(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
+                              std::uint32_t x_off, std::uint32_t y_off,
+                              const std::array<double, k_warn_count>& phases,
+                              std::uint32_t cell_w,
+                              drm::span<const std::uint8_t* const> templates) noexcept {
+  if (base_pixels == nullptr || cell_w == 0U) {
+    return;
+  }
+  const std::size_t row_bytes = static_cast<std::size_t>(cell_w) * 4U;
+  for (std::size_t i = 0; i < k_warn_count; ++i) {
+    const bool lit = phases.at(i) < 0.5;
+    const std::uint8_t* tpl = templates.data()[(i * 2U) + (lit ? 0U : 1U)];
+    if (tpl == nullptr) {
+      continue;
+    }
+    const std::uint32_t cell_x = x_off + (static_cast<std::uint32_t>(i) * cell_w);
+    for (std::uint32_t row = 0; row < k_warn_h; ++row) {
+      std::uint8_t* dst = base_pixels +
+                          (static_cast<std::size_t>(y_off + row) * base_stride_bytes) +
+                          (static_cast<std::size_t>(cell_x) * 4U);
+      const std::uint8_t* src = tpl + (static_cast<std::size_t>(row) * row_bytes);
+      std::memcpy(dst, src, row_bytes);
+    }
+  }
 }
 
 // Synthetic rear-view paint used when neither UVC nor a viable
@@ -1567,6 +1579,33 @@ int main(int argc, char** argv) {
       static_cast<std::size_t>(dial_size) * dial_template_stride, 0U);
   paint_dial_template(dial_template.data(), dial_template_stride, dial_size);
 
+  // Pre-render lit + dim variants of each warning cell. Per-frame paint
+  // just blits the right one — Blend2D's rounded-rect fill + glyph
+  // shaping is far more expensive than a 100×80 memcpy.
+  constexpr std::uint32_t k_warn_cell_w = k_warn_w / k_warn_count;
+  constexpr double k_warn_inner_pad = 6.0;
+  const std::uint32_t warn_cell_stride = k_warn_cell_w * 4U;
+  const std::size_t warn_cell_bytes =
+      static_cast<std::size_t>(k_warn_cell_w) * k_warn_h * 4U;
+  // Flat 2*k_warn_count array: [cell0_lit, cell0_dim, cell1_lit, cell1_dim, ...].
+  std::array<std::vector<std::uint8_t>, 2U * k_warn_count> warn_templates;
+  std::array<const std::uint8_t*, 2U * k_warn_count> warn_template_ptrs{};
+  for (std::size_t i = 0; i < k_warn_count; ++i) {
+    const auto& spec = k_warn_specs.at(i);
+    auto& lit_buf = warn_templates.at(i * 2U);
+    auto& dim_buf = warn_templates.at((i * 2U) + 1U);
+    lit_buf.assign(warn_cell_bytes, 0U);
+    dim_buf.assign(warn_cell_bytes, 0U);
+    paint_warning_cell_template(lit_buf.data(), warn_cell_stride, k_warn_cell_w, k_warn_h,
+                                k_warn_inner_pad, spec.lit_argb, 0xFF080C18U, spec.glyph,
+                                font_face);
+    paint_warning_cell_template(dim_buf.data(), warn_cell_stride, k_warn_cell_w, k_warn_h,
+                                k_warn_inner_pad, k_warn_dim_argb, k_warn_glyph_dim_argb,
+                                spec.glyph, font_face);
+    warn_template_ptrs.at(i * 2U) = lit_buf.data();
+    warn_template_ptrs.at((i * 2U) + 1U) = dim_buf.data();
+  }
+
   auto repaint_layers = [&](double speedo_norm, double tach_norm, std::uint32_t speed_kmh,
                             const std::array<double, k_warn_count>& warn_phases) {
     if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
@@ -1577,7 +1616,10 @@ int main(int argc, char** argv) {
       paint_dial(base, stride, tach_x_local, dial_y_local, dial_size, tach_norm,
                  k_tach_needle_argb, dial_template.data(), dial_template_stride);
       paint_center_info(base, stride, info_x_local, info_y_local, speed_kmh, font_face);
-      paint_warning_indicators(base, stride, warn_x_local, warn_y_local, warn_phases, font_face);
+      paint_warning_indicators(
+          base, stride, warn_x_local, warn_y_local, warn_phases, k_warn_cell_w,
+          drm::span<const std::uint8_t* const>(warn_template_ptrs.data(),
+                                               warn_template_ptrs.size()));
     }
   };
   std::array<double, k_warn_count> const initial_warn_phases{0.0, 0.0, 0.0, 0.0};
