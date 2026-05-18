@@ -23,8 +23,10 @@
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include <arm_neon.h>
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage) — gates #if blocks; constexpr won't work.
 #define DRM_CXX_HAS_NEON 1
 #else
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage) — gates #if blocks; constexpr won't work.
 #define DRM_CXX_HAS_NEON 0
 #endif
 
@@ -690,9 +692,8 @@ void CompositeCanvas::blend(const CompositeSrc& src, const CompositeRect& src_re
   // unclipped rect is fine — the flush path clips before memcpying and
   // an over-estimate just costs a slightly larger memcpy.
   current_dirty_ = dirty_union(
-      current_dirty_,
-      DirtyRect{dst_rect.x, dst_rect.y, static_cast<std::int32_t>(dst_rect.w),
-                static_cast<std::int32_t>(dst_rect.h)});
+      current_dirty_, DirtyRect{dst_rect.x, dst_rect.y, static_cast<std::int32_t>(dst_rect.w),
+                                static_cast<std::int32_t>(dst_rect.h)});
 }
 
 std::uint32_t CompositeCanvas::drm_fourcc() noexcept {

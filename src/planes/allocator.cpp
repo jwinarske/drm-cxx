@@ -739,6 +739,7 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
   // fb) on scanout — blank screen / console text visible.
   if (!layer.is_composition_layer() && plane.type == DRMPlaneType::PRIMARY) {
     if (const auto z = layer.property("zpos"); z.has_value()) {
+      // NOLINTNEXTLINE(bugprone-branch-clone) — same bonus, two platform paths.
       if (plane.zpos_min.has_value() && *z == *plane.zpos_min) {
         s += 10;
       } else if (!plane.zpos_min.has_value() && *z == 0) {

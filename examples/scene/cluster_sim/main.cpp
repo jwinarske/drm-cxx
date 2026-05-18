@@ -62,20 +62,29 @@
 #include "../../common/session_pump.hpp"
 #include "../../common/uvc_capture.hpp"
 #include "../../common/vt_switch.hpp"
+#include "drm-cxx/scene/buffer_source.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/capture/png.hpp>
 #include <drm-cxx/capture/snapshot.hpp>
 #include <drm-cxx/core/device.hpp>
-#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
-#include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/input/seat.hpp>
 #include <drm-cxx/modeset/mode.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
+
+#include <xf86drmMode.h>
+
+#include <algorithm>
+#include <bits/time.h>
+#include <bits/types/struct_itimerspec.h>
+#include <cstddef>
+#include <memory>
+#include <ratio>
 #if DRM_CXX_HAS_NVBUFSURFACE
 #include <drm-cxx/scene/nvbufsurface_source.hpp>
 #endif
@@ -107,30 +116,29 @@
 #include <drm_fourcc.h>
 #include <drm_mode.h>
 
-#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <linux/input-event-codes.h>
 #include <linux/videodev2.h>
-#include <atomic>
-#include <csignal>
-#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/poll.h>
-#include <system_error>
 #include <sys/timerfd.h>
+#include <system_error>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 #include <variant>
@@ -142,8 +150,12 @@ namespace {
 // main loop. Atomic for the cross-thread / handler-context visibility
 // guarantee; relaxed loads are sufficient here because we only need
 // eventual consistency.
+// Signal handler needs file scope.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<bool> g_quit{false};
-void on_sigint(int /*signo*/) noexcept { g_quit.store(true, std::memory_order_relaxed); }
+void on_sigint(int /*signo*/) noexcept {
+  g_quit.store(true, std::memory_order_relaxed);
+}
 
 // Cluster-aesthetic palette. Center is near-black with a subtle blue
 // cast (matches the "deep instrument" look most automotive clusters
@@ -169,7 +181,7 @@ constexpr std::uint32_t k_speedo_needle_argb = 0xFFFF3B30U;  // red
 constexpr std::uint32_t k_dial_bg_fill_argb = 0xFF0A0F1AU;
 constexpr std::uint32_t k_info_bg_fill_argb = k_bg_center_argb;
 constexpr std::uint32_t k_warn_bg_fill_argb = k_bg_center_argb;
-constexpr std::uint32_t k_tach_needle_argb = 0xFFFFB300U;    // amber
+constexpr std::uint32_t k_tach_needle_argb = 0xFFFFB300U;  // amber
 
 // Idle animation periods (seconds). Out of phase so the two dials
 // don't sweep in lockstep -- a real cluster's dials are decorrelated
@@ -339,8 +351,7 @@ void paint_dial_template(std::uint8_t* template_pixels, std::uint32_t template_s
   }
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(size), static_cast<int>(size), BL_FORMAT_PRGB32,
-                              template_pixels,
-                              static_cast<intptr_t>(template_stride_bytes),
+                              template_pixels, static_cast<intptr_t>(template_stride_bytes),
                               BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
@@ -382,9 +393,8 @@ void paint_dial_template(std::uint8_t* template_pixels, std::uint32_t template_s
 // here and lives in cached userspace memory, so the memcpy is a fast
 // sequential WC write rather than the rmw of a full Blend2D pass.
 void paint_dial(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes, std::uint32_t x_off,
-                std::uint32_t y_off, std::uint32_t size, double norm,
-                std::uint32_t needle_argb, const std::uint8_t* template_pixels,
-                std::uint32_t template_stride_bytes) noexcept {
+                std::uint32_t y_off, std::uint32_t size, double norm, std::uint32_t needle_argb,
+                const std::uint8_t* template_pixels, std::uint32_t template_stride_bytes) noexcept {
   if (size == 0U || base_pixels == nullptr || template_pixels == nullptr) {
     return;
   }
@@ -402,13 +412,12 @@ void paint_dial(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes, std:
   }
 
   // Now overlay just the needle + hub.
-  std::uint8_t* sub_base = base_pixels +
-                           (static_cast<std::size_t>(y_off) * base_stride_bytes) +
+  std::uint8_t* sub_base = base_pixels + (static_cast<std::size_t>(y_off) * base_stride_bytes) +
                            (static_cast<std::size_t>(x_off) * 4U);
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(size), static_cast<int>(size), BL_FORMAT_PRGB32,
-                              sub_base, static_cast<intptr_t>(base_stride_bytes),
-                              BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
+                              sub_base, static_cast<intptr_t>(base_stride_bytes), BL_DATA_ACCESS_RW,
+                              nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
   BLContext ctx(canvas);
@@ -486,9 +495,8 @@ void paint_centered_text(BLContext& ctx, BLFont& font, std::string_view text, do
 // caller builds 241 of these at startup (0..240 km/h) and the
 // per-frame paint just blits the matching one — no Blend2D BLFont
 // shaping + BLTextMetrics centering on the hot path.
-void paint_center_info_template(std::uint8_t* template_pixels,
-                                std::uint32_t template_stride_bytes, std::uint32_t speed_kmh,
-                                const BLFontFace& font_face) noexcept {
+void paint_center_info_template(std::uint8_t* template_pixels, std::uint32_t template_stride_bytes,
+                                std::uint32_t speed_kmh, const BLFontFace& font_face) noexcept {
   if (template_pixels == nullptr) {
     return;
   }
@@ -530,16 +538,14 @@ void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_byte
   if (base_pixels == nullptr || templates.empty()) {
     return;
   }
-  const std::size_t idx =
-      std::min<std::size_t>(speed_kmh, templates.size() - 1U);
+  const std::size_t idx = std::min<std::size_t>(speed_kmh, templates.size() - 1U);
   const std::uint8_t* src = templates.data()[idx];
   if (src == nullptr) {
     return;
   }
   const std::size_t row_bytes = static_cast<std::size_t>(k_info_w) * 4U;
   for (std::uint32_t row = 0; row < k_info_h; ++row) {
-    std::uint8_t* dst = base_pixels +
-                        (static_cast<std::size_t>(y_off + row) * base_stride_bytes) +
+    std::uint8_t* dst = base_pixels + (static_cast<std::size_t>(y_off + row) * base_stride_bytes) +
                         (static_cast<std::size_t>(x_off) * 4U);
     std::memcpy(dst, src + (static_cast<std::size_t>(row) * row_bytes), row_bytes);
   }
@@ -550,19 +556,17 @@ void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_byte
 // the supplied template buffer. Called twice per cell at startup (lit
 // + dim variants); per-frame paint blits one of these templates into
 // the inst buffer instead of going through Blend2D again.
-void paint_warning_cell_template(std::uint8_t* template_pixels,
-                                 std::uint32_t template_stride_bytes, std::uint32_t cell_w,
-                                 std::uint32_t cell_h, double inner_pad, std::uint32_t cell_argb,
-                                 std::uint32_t glyph_argb, std::string_view glyph,
-                                 const BLFontFace& font_face) noexcept {
+void paint_warning_cell_template(std::uint8_t* template_pixels, std::uint32_t template_stride_bytes,
+                                 std::uint32_t cell_w, std::uint32_t cell_h, double inner_pad,
+                                 std::uint32_t cell_argb, std::uint32_t glyph_argb,
+                                 std::string_view glyph, const BLFontFace& font_face) noexcept {
   if (cell_w == 0U || cell_h == 0U || template_pixels == nullptr) {
     return;
   }
   BLImage canvas;
-  if (canvas.create_from_data(static_cast<int>(cell_w), static_cast<int>(cell_h),
-                              BL_FORMAT_PRGB32, template_pixels,
-                              static_cast<intptr_t>(template_stride_bytes), BL_DATA_ACCESS_RW,
-                              nullptr, nullptr) != BL_SUCCESS) {
+  if (canvas.create_from_data(static_cast<int>(cell_w), static_cast<int>(cell_h), BL_FORMAT_PRGB32,
+                              template_pixels, static_cast<intptr_t>(template_stride_bytes),
+                              BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
   BLContext ctx(canvas);
@@ -591,8 +595,7 @@ void paint_warning_cell_template(std::uint8_t* template_pixels,
 // a (cell_w * k_warn_h * 4)-byte buffer with stride = cell_w*4.
 void paint_warning_indicators(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
                               std::uint32_t x_off, std::uint32_t y_off,
-                              const std::array<double, k_warn_count>& phases,
-                              std::uint32_t cell_w,
+                              const std::array<double, k_warn_count>& phases, std::uint32_t cell_w,
                               drm::span<const std::uint8_t* const> templates) noexcept {
   if (base_pixels == nullptr || cell_w == 0U) {
     return;
@@ -1323,8 +1326,8 @@ int main(int argc, char** argv) {
         std::uint32_t w = 0;
         std::uint32_t h = 0;
         std::uint32_t hz = 0;
-        auto* end = spec.data() + spec.size();
-        auto* p = spec.data();
+        const auto* end = spec.data() + spec.size();
+        const auto* p = spec.data();
         auto consume_u32 = [&](std::uint32_t& out) {
           std::uint32_t v = 0;
           bool any = false;
@@ -1373,8 +1376,8 @@ int main(int argc, char** argv) {
       drm::println(stderr, "--mode: failed to re-query connector {}", ctx.connector_id);
       return EXIT_FAILURE;
     }
-    auto picked = drm::select_mode(
-        drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes), tw, th, thz);
+    auto picked = drm::select_mode(drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes),
+                                   tw, th, thz);
     bool exact = false;
     if (picked) {
       const auto& m = picked->drm_mode;
@@ -1393,8 +1396,8 @@ int main(int argc, char** argv) {
       // drmModeModeInfo blobs, so this is enough to drive the panel
       // at its claimed max refresh as long as link bandwidth allows.
       if (thz == 0) {
-        drm::println(stderr,
-                     "--mode: no match for {}x{} and no refresh hint to synthesize from", tw, th);
+        drm::println(stderr, "--mode: no match for {}x{} and no refresh hint to synthesize from",
+                     tw, th);
         return EXIT_FAILURE;
       }
       // CVT 1.2 Reduced Blanking v2 timings. RB v2 fixes horizontal
@@ -1420,8 +1423,8 @@ int main(int argc, char** argv) {
         for (int it = 0; it < 8; ++it) {
           const double h_period_us =
               1.0e6 / (static_cast<double>(thz) * static_cast<double>(th + v_blank));
-          const auto needed = static_cast<std::uint32_t>(
-              (static_cast<double>(460U) / h_period_us) + 0.5);
+          const auto needed =
+              static_cast<std::uint32_t>(std::lround(static_cast<double>(460U) / h_period_us));
           const std::uint32_t cand = std::max<std::uint32_t>(32, needed);
           if (cand == v_blank) {
             break;
@@ -1431,9 +1434,8 @@ int main(int argc, char** argv) {
       }
       const std::uint32_t h_total = tw + k_h_blank_rb;
       const std::uint32_t v_total = th + v_blank;
-      const std::uint64_t pclk_hz =
-          static_cast<std::uint64_t>(thz) * h_total * v_total;
-      const std::uint32_t clock_khz = static_cast<std::uint32_t>((pclk_hz + 500U) / 1000U);
+      const std::uint64_t pclk_hz = static_cast<std::uint64_t>(thz) * h_total * v_total;
+      const auto clock_khz = static_cast<std::uint32_t>((pclk_hz + 500U) / 1000U);
       drmModeModeInfo m{};
       m.clock = clock_khz;
       m.hdisplay = static_cast<std::uint16_t>(tw);
@@ -1450,8 +1452,7 @@ int main(int argc, char** argv) {
       m.flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC;
       m.type = DRM_MODE_TYPE_USERDEF;
       std::snprintf(m.name, DRM_DISPLAY_MODE_LEN, "%ux%u@%uRB", tw, th, thz);
-      drm::println(stderr,
-                   "--mode: synthesized CVT-RB2 {}x{}@{}Hz pclk={}MHz htotal={} vtotal={}",
+      drm::println(stderr, "--mode: synthesized CVT-RB2 {}x{}@{}Hz pclk={}MHz htotal={} vtotal={}",
                    tw, th, thz, clock_khz / 1000U, h_total, v_total);
       ctx.mode = m;
     }
@@ -1549,8 +1550,7 @@ int main(int argc, char** argv) {
   // accepts ARGB but rejects XRGB in caps probing, which would force a
   // composition fallback and re-introduce the slow CPU path. We fill
   // every pixel with alpha=0xFF, so the visual result matches XRGB.
-  auto inst_src_r =
-      drm::scene::DumbBufferSource::create(dev, inst_w, inst_h, DRM_FORMAT_ARGB8888);
+  auto inst_src_r = drm::scene::DumbBufferSource::create(dev, inst_w, inst_h, DRM_FORMAT_ARGB8888);
   if (!inst_src_r) {
     drm::println(stderr, "DumbBufferSource::create (instruments): {}",
                  inst_src_r.error().message());
@@ -1623,11 +1623,9 @@ int main(int argc, char** argv) {
   // (one-time). Acceptable on Jetson Orin (16/32/64 GB RAM); on a more
   // constrained host the right answer would be per-digit slicing
   // instead, but that requires re-implementing the centering math.
-  constexpr std::size_t k_info_template_count =
-      static_cast<std::size_t>(k_info_speed_max_kmh) + 1U;
+  constexpr std::size_t k_info_template_count = static_cast<std::size_t>(k_info_speed_max_kmh) + 1U;
   const std::uint32_t info_template_stride = k_info_w * 4U;
-  const std::size_t info_template_bytes =
-      static_cast<std::size_t>(k_info_h) * info_template_stride;
+  const std::size_t info_template_bytes = static_cast<std::size_t>(k_info_h) * info_template_stride;
   std::vector<std::vector<std::uint8_t>> info_templates(k_info_template_count);
   std::vector<const std::uint8_t*> info_template_ptrs(k_info_template_count, nullptr);
   for (std::size_t i = 0; i < k_info_template_count; ++i) {
@@ -1643,11 +1641,10 @@ int main(int argc, char** argv) {
   constexpr std::uint32_t k_warn_cell_w = k_warn_w / k_warn_count;
   constexpr double k_warn_inner_pad = 6.0;
   const std::uint32_t warn_cell_stride = k_warn_cell_w * 4U;
-  const std::size_t warn_cell_bytes =
-      static_cast<std::size_t>(k_warn_cell_w) * k_warn_h * 4U;
+  const std::size_t warn_cell_bytes = static_cast<std::size_t>(k_warn_cell_w) * k_warn_h * 4U;
   // Flat 2*k_warn_count array: [cell0_lit, cell0_dim, cell1_lit, cell1_dim, ...].
-  std::array<std::vector<std::uint8_t>, 2U * k_warn_count> warn_templates;
-  std::array<const std::uint8_t*, 2U * k_warn_count> warn_template_ptrs{};
+  std::array<std::vector<std::uint8_t>, static_cast<std::size_t>(2U * k_warn_count)> warn_templates;
+  std::array<const std::uint8_t*, static_cast<std::size_t>(2U * k_warn_count)> warn_template_ptrs{};
   for (std::size_t i = 0; i < k_warn_count; ++i) {
     const auto& spec = k_warn_specs.at(i);
     auto& lit_buf = warn_templates.at(i * 2U);
@@ -1721,17 +1718,16 @@ int main(int argc, char** argv) {
         last_tach_px = tach_px;
       }
       if (need_info) {
-        paint_center_info(
-            base, stride, info_x_local, info_y_local, speed_kmh,
-            drm::span<const std::uint8_t* const>(info_template_ptrs.data(),
-                                                 info_template_ptrs.size()));
+        paint_center_info(base, stride, info_x_local, info_y_local, speed_kmh,
+                          drm::span<const std::uint8_t* const>(info_template_ptrs.data(),
+                                                               info_template_ptrs.size()));
         last_speed_kmh = speed_kmh;
       }
       if (need_warn) {
-        paint_warning_indicators(
-            base, stride, warn_x_local, warn_y_local, warn_phases, k_warn_cell_w,
-            drm::span<const std::uint8_t* const>(warn_template_ptrs.data(),
-                                                 warn_template_ptrs.size()));
+        paint_warning_indicators(base, stride, warn_x_local, warn_y_local, warn_phases,
+                                 k_warn_cell_w,
+                                 drm::span<const std::uint8_t* const>(warn_template_ptrs.data(),
+                                                                      warn_template_ptrs.size()));
         last_warn_bits = warn_bits;
       }
     }
@@ -1854,31 +1850,27 @@ int main(int argc, char** argv) {
     std::uint64_t missed{0};  // delta > 1.5 * expected
     double max_us{0.0};
     double sum_us{0.0};
-    std::chrono::steady_clock::time_point prev{};
+    std::chrono::steady_clock::time_point prev;
   } jitter;
 
   drm::PageFlip page_flip(dev);
-  page_flip.set_handler(
-      [&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
-        session_state.flip_pending = false;
-        need_repaint = true;
-        if (jitter_enabled) {
-          auto const now = std::chrono::steady_clock::now();
-          if (jitter.frames > 0 && expected_frame_us > 0.0) {
-            const double dt_us =
-                std::chrono::duration<double, std::micro>(now - jitter.prev).count();
-            jitter.sum_us += dt_us;
-            if (dt_us > jitter.max_us) {
-              jitter.max_us = dt_us;
-            }
-            if (dt_us > 1.5 * expected_frame_us) {
-              ++jitter.missed;
-            }
-          }
-          jitter.prev = now;
-          ++jitter.frames;
+  page_flip.set_handler([&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
+    session_state.flip_pending = false;
+    need_repaint = true;
+    if (jitter_enabled) {
+      auto const now = std::chrono::steady_clock::now();
+      if (jitter.frames > 0 && expected_frame_us > 0.0) {
+        const double dt_us = std::chrono::duration<double, std::micro>(now - jitter.prev).count();
+        jitter.sum_us += dt_us;
+        jitter.max_us = std::max(dt_us, jitter.max_us);
+        if (dt_us > 1.5 * expected_frame_us) {
+          ++jitter.missed;
         }
-      });
+      }
+      jitter.prev = now;
+      ++jitter.frames;
+    }
+  });
 
   // libinput keyboard + VT-switch chord forwarding. libseat puts the
   // TTY in KD_GRAPHICS where the kernel suppresses Ctrl-C signal

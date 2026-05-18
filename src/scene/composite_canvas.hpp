@@ -30,12 +30,12 @@
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <array>
-#include <vector>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace drm {
 class Device;

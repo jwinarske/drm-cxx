@@ -30,13 +30,12 @@
 // Self-skips when VKMS isn't loaded — same pattern as the other
 // tests/integration files.
 
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
-#include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
-#include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
 #include <drm_fourcc.h>
@@ -144,10 +143,11 @@ drm::expected<ActiveCrtc, std::error_code> pick_crtc(int fd) {
 // transcript can pair release calls with the specific acquire that
 // produced them. `+1` so the first acquire (counter=0) doesn't collide
 // with a default-constructed (nullptr) opaque.
-constexpr void* encode_id(std::uint64_t id) noexcept {
+inline void* encode_id(std::uint64_t id) noexcept {
+  // NOLINTNEXTLINE(performance-no-int-to-ptr) — opaque cookie, not a real address.
   return reinterpret_cast<void*>(static_cast<std::uintptr_t>(id) + 1U);
 }
-constexpr std::uint64_t decode_id(void* opaque) noexcept {
+inline std::uint64_t decode_id(void* opaque) noexcept {
   const auto raw = reinterpret_cast<std::uintptr_t>(opaque);
   return raw == 0 ? 0 : static_cast<std::uint64_t>(raw - 1U);
 }
@@ -390,6 +390,7 @@ TEST(LayerSceneReleaseVkms, TestCommitsReleaseImmediately) {
   // scanout to gate the release on, so they MUST release immediately.
   // Holding buffers across test commits would just stall the source's
   // ring (visible as EAGAIN-loop in V4L2-style pull-mode sources).
+  // NOLINTNEXTLINE(misc-confusable-identifiers)
   auto t1 = fx.scene->test();
   ASSERT_TRUE(t1.has_value()) << t1.error().message();
   EXPECT_EQ(count_acquires(transcript), 1U);

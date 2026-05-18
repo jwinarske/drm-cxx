@@ -11,17 +11,16 @@
 
 #include <drm_fourcc.h>
 #include <drm_mode.h>
-#include <unistd.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include <cerrno>
 #include <cstdint>
 #include <memory>
-#include <system_error>
-#include <utility>
-
 #include <nvbufsurface.h>
+#include <system_error>
+#include <unistd.h>
+#include <utility>
 
 namespace drm::scene {
 

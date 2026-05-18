@@ -858,6 +858,7 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2CameraSource::acquire() {
     // the specific buffer the caller is returning. Offset by 1 so
     // index 0 is distinguishable from a default-constructed
     // (nullptr) opaque.
+    // NOLINTNEXTLINE(performance-no-int-to-ptr) — opaque cookie, not a real address.
     acq.opaque = reinterpret_cast<void*>(static_cast<std::uintptr_t>(idx) + 1U);
     return acq;
   }

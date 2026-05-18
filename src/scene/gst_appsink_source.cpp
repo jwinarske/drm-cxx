@@ -7,6 +7,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 
+#include <gst/gstversion.h>
 #include <memory>
 #include <system_error>
 
@@ -69,31 +70,56 @@ namespace {
 // operation_not_supported.
 [[nodiscard]] std::uint32_t gst_video_dma_drm_fourcc_from_format(GstVideoFormat fmt) noexcept {
   switch (fmt) {
-    case GST_VIDEO_FORMAT_NV12:    return DRM_FORMAT_NV12;
-    case GST_VIDEO_FORMAT_NV21:    return DRM_FORMAT_NV21;
-    case GST_VIDEO_FORMAT_NV16:    return DRM_FORMAT_NV16;
-    case GST_VIDEO_FORMAT_NV24:    return DRM_FORMAT_NV24;
-    case GST_VIDEO_FORMAT_I420:    return DRM_FORMAT_YUV420;
-    case GST_VIDEO_FORMAT_YV12:    return DRM_FORMAT_YVU420;
-    case GST_VIDEO_FORMAT_Y42B:    return DRM_FORMAT_YUV422;
-    case GST_VIDEO_FORMAT_Y444:    return DRM_FORMAT_YUV444;
-    case GST_VIDEO_FORMAT_YUY2:    return DRM_FORMAT_YUYV;
-    case GST_VIDEO_FORMAT_YVYU:    return DRM_FORMAT_YVYU;
-    case GST_VIDEO_FORMAT_UYVY:    return DRM_FORMAT_UYVY;
-    case GST_VIDEO_FORMAT_VYUY:    return DRM_FORMAT_VYUY;
-    case GST_VIDEO_FORMAT_BGRA:    return DRM_FORMAT_ARGB8888;
-    case GST_VIDEO_FORMAT_BGRx:    return DRM_FORMAT_XRGB8888;
-    case GST_VIDEO_FORMAT_RGBA:    return DRM_FORMAT_ABGR8888;
-    case GST_VIDEO_FORMAT_RGBx:    return DRM_FORMAT_XBGR8888;
-    case GST_VIDEO_FORMAT_ARGB:    return DRM_FORMAT_BGRA8888;
-    case GST_VIDEO_FORMAT_xRGB:    return DRM_FORMAT_BGRX8888;
-    case GST_VIDEO_FORMAT_ABGR:    return DRM_FORMAT_RGBA8888;
-    case GST_VIDEO_FORMAT_xBGR:    return DRM_FORMAT_RGBX8888;
-    case GST_VIDEO_FORMAT_RGB16:   return DRM_FORMAT_RGB565;
-    case GST_VIDEO_FORMAT_BGR16:   return DRM_FORMAT_BGR565;
-    case GST_VIDEO_FORMAT_RGB:     return DRM_FORMAT_BGR888;
-    case GST_VIDEO_FORMAT_BGR:     return DRM_FORMAT_RGB888;
-    default:                       return DRM_FORMAT_INVALID;
+    case GST_VIDEO_FORMAT_NV12:
+      return DRM_FORMAT_NV12;
+    case GST_VIDEO_FORMAT_NV21:
+      return DRM_FORMAT_NV21;
+    case GST_VIDEO_FORMAT_NV16:
+      return DRM_FORMAT_NV16;
+    case GST_VIDEO_FORMAT_NV24:
+      return DRM_FORMAT_NV24;
+    case GST_VIDEO_FORMAT_I420:
+      return DRM_FORMAT_YUV420;
+    case GST_VIDEO_FORMAT_YV12:
+      return DRM_FORMAT_YVU420;
+    case GST_VIDEO_FORMAT_Y42B:
+      return DRM_FORMAT_YUV422;
+    case GST_VIDEO_FORMAT_Y444:
+      return DRM_FORMAT_YUV444;
+    case GST_VIDEO_FORMAT_YUY2:
+      return DRM_FORMAT_YUYV;
+    case GST_VIDEO_FORMAT_YVYU:
+      return DRM_FORMAT_YVYU;
+    case GST_VIDEO_FORMAT_UYVY:
+      return DRM_FORMAT_UYVY;
+    case GST_VIDEO_FORMAT_VYUY:
+      return DRM_FORMAT_VYUY;
+    case GST_VIDEO_FORMAT_BGRA:
+      return DRM_FORMAT_ARGB8888;
+    case GST_VIDEO_FORMAT_BGRx:
+      return DRM_FORMAT_XRGB8888;
+    case GST_VIDEO_FORMAT_RGBA:
+      return DRM_FORMAT_ABGR8888;
+    case GST_VIDEO_FORMAT_RGBx:
+      return DRM_FORMAT_XBGR8888;
+    case GST_VIDEO_FORMAT_ARGB:
+      return DRM_FORMAT_BGRA8888;
+    case GST_VIDEO_FORMAT_xRGB:
+      return DRM_FORMAT_BGRX8888;
+    case GST_VIDEO_FORMAT_ABGR:
+      return DRM_FORMAT_RGBA8888;
+    case GST_VIDEO_FORMAT_xBGR:
+      return DRM_FORMAT_RGBX8888;
+    case GST_VIDEO_FORMAT_RGB16:
+      return DRM_FORMAT_RGB565;
+    case GST_VIDEO_FORMAT_BGR16:
+      return DRM_FORMAT_BGR565;
+    case GST_VIDEO_FORMAT_RGB:
+      return DRM_FORMAT_BGR888;
+    case GST_VIDEO_FORMAT_BGR:
+      return DRM_FORMAT_RGB888;
+    default:
+      return DRM_FORMAT_INVALID;
   }
 }
 #endif
