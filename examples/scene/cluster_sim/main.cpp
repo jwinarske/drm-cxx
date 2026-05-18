@@ -142,6 +142,16 @@ constexpr std::uint32_t k_dial_face_argb = 0xFF080C18U;
 constexpr std::uint32_t k_dial_tick_argb = 0xFFC0C8D0U;
 constexpr std::uint32_t k_dial_hub_argb = 0xFF1A1F2CU;
 constexpr std::uint32_t k_speedo_needle_argb = 0xFFFF3B30U;  // red
+
+// Approximate bg gradient color at the layer positions. paint_dial /
+// paint_center_info / paint_warning_indicators fill their buffers with
+// these so the XRGB layer (treated opaque by the compositor's fast
+// path) blends seamlessly with the canvas-painted bg gradient below.
+// Dials sit roughly half-radius from center; info + warnings sit near
+// center so they get the brighter center color.
+constexpr std::uint32_t k_dial_bg_fill_argb = 0xFF0A0F1AU;
+constexpr std::uint32_t k_info_bg_fill_argb = k_bg_center_argb;
+constexpr std::uint32_t k_warn_bg_fill_argb = k_bg_center_argb;
 constexpr std::uint32_t k_tach_needle_argb = 0xFFFFB300U;    // amber
 
 // Idle animation periods (seconds). Out of phase so the two dials
@@ -279,7 +289,7 @@ void paint_bg_gradient(drm::BufferMapping& mapping, std::uint32_t width,
   }
 
   BLImage canvas;
-  if (canvas.create_from_data(static_cast<int>(width), static_cast<int>(height), BL_FORMAT_XRGB32,
+  if (canvas.create_from_data(static_cast<int>(width), static_cast<int>(height), BL_FORMAT_PRGB32,
                               pixels.data(), static_cast<intptr_t>(stride), BL_DATA_ACCESS_RW,
                               nullptr, nullptr) != BL_SUCCESS) {
     return;
@@ -298,35 +308,35 @@ void paint_bg_gradient(drm::BufferMapping& mapping, std::uint32_t width,
   ctx.end();
 }
 
-// Paint a dial face + animated needle into an ARGB8888 dumb buffer.
+// Paint a dial face + animated needle at offset (x_off, y_off) within a
+// larger XRGB8888 buffer described by (base_pixels, base_stride_bytes).
 // `norm` in [0, 1] maps onto the dial's 270° sweep range; `needle_argb`
-// distinguishes speedo (red) from tach (amber). Painting clears the
-// buffer to transparent first so the dial's circular face renders
-// against the bg layer beneath.
-void paint_dial(drm::BufferMapping& mapping, std::uint32_t size, double norm,
+// distinguishes speedo (red) from tach (amber).
+//
+// No self-clear: the caller owns the buffer's initial background fill
+// (matched to the bg gradient at the layer's screen position). This
+// dial paints rim/face/ticks/needle on top of that background; the
+// four corners outside the rim circle keep whatever the caller painted
+// there, which keeps the layer visually continuous with the bg plane
+// when the kernel composes them on hardware.
+void paint_dial(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes, std::uint32_t x_off,
+                std::uint32_t y_off, std::uint32_t size, double norm,
                 std::uint32_t needle_argb) noexcept {
-  if (size == 0U) {
+  if (size == 0U || base_pixels == nullptr) {
     return;
   }
-  drm::span<std::uint8_t> const pixels = mapping.pixels();
-  std::uint32_t const stride = mapping.stride();
-  if (pixels.size() < static_cast<std::size_t>(size) * stride) {
-    return;
-  }
+  std::uint8_t* sub_base = base_pixels +
+                           (static_cast<std::size_t>(y_off) * base_stride_bytes) +
+                           (static_cast<std::size_t>(x_off) * 4U);
 
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(size), static_cast<int>(size), BL_FORMAT_PRGB32,
-                              pixels.data(), static_cast<intptr_t>(stride), BL_DATA_ACCESS_RW,
-                              nullptr, nullptr) != BL_SUCCESS) {
+                              sub_base, static_cast<intptr_t>(base_stride_bytes),
+                              BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
 
   BLContext ctx(canvas);
-  // Clear to transparent first so the dial reads as a circular cut-out
-  // against the bg layer underneath. Subsequent paint ops use SRC_OVER
-  // for proper alpha blending of the rim, face, ticks, and needle.
-  ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
-  ctx.fill_all(BLRgba32(0x00000000U));
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
 
   double const cx = static_cast<double>(size) / 2.0;
@@ -426,25 +436,34 @@ void paint_centered_text(BLContext& ctx, BLFont& font, std::string_view text, do
   ctx.fill_utf8_text(BLPoint(x, cy_baseline), font, text.data(), text.size(), BLRgba32(argb));
 }
 
-// Paint the speed readout: one big numeric value (0-240) with a
-// "km/h" label beneath. `font_face` may be empty when the host had no
-// usable system font -- in that case the layer is left transparent
-// rather than emitting a placeholder, since a wrong-looking text
-// fallback reads worse than a missing one.
-void paint_center_info(drm::BufferMapping& mapping, std::uint32_t speed_kmh,
+// Paint the speed readout at offset (x_off, y_off) in the combined
+// instruments buffer: one big numeric value (0-240) with a "km/h"
+// label beneath. Clears its own sub-rect each frame (text changes
+// frame-to-frame; without a clear digits would smear). `font_face` may
+// be empty when the host had no usable system font — the layer then
+// remains just the bg-matching fill.
+void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
+                       std::uint32_t x_off, std::uint32_t y_off, std::uint32_t speed_kmh,
                        const BLFontFace& font_face) noexcept {
-  drm::span<std::uint8_t> const pixels = mapping.pixels();
-  std::uint32_t const stride = mapping.stride();
-  if (pixels.size() < static_cast<std::size_t>(k_info_h) * stride) {
+  if (base_pixels == nullptr) {
     return;
   }
+  std::uint8_t* sub_base = base_pixels +
+                           (static_cast<std::size_t>(y_off) * base_stride_bytes) +
+                           (static_cast<std::size_t>(x_off) * 4U);
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(k_info_w), static_cast<int>(k_info_h),
-                              BL_FORMAT_PRGB32, pixels.data(), static_cast<intptr_t>(stride),
-                              BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
+                              BL_FORMAT_PRGB32, sub_base,
+                              static_cast<intptr_t>(base_stride_bytes), BL_DATA_ACCESS_RW, nullptr,
+                              nullptr) != BL_SUCCESS) {
     return;
   }
   BLContext ctx(canvas);
+  // Clear to fully transparent (alpha=0) each frame. The previous
+  // frame's text would otherwise smear under the new digits; clearing
+  // with opaque-bg-color works too but covers the gradient with a
+  // solid rectangle. alpha=0 lets the bg plane show through wherever
+  // text isn't drawn, keeping the gradient continuous.
   ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
   ctx.fill_all(BLRgba32(0x00000000U));
   if (!font_face.is_valid()) {
@@ -470,26 +489,33 @@ void paint_center_info(drm::BufferMapping& mapping, std::uint32_t speed_kmh,
   ctx.end();
 }
 
-// Paint the four-cell warning strip. `phases[i]` in [0, 1) is the
-// per-cell blink phase; lit when phase < 0.5, dim otherwise. Each
-// cell is a rounded rectangle filled with the lit/dim color and a
-// single glyph centered inside.
-void paint_warning_indicators(drm::BufferMapping& mapping,
+// Paint the four-cell warning strip at offset (x_off, y_off) in the
+// combined instruments buffer. `phases[i]` in [0, 1) is the per-cell
+// blink phase; lit when phase < 0.5, dim otherwise. Each cell is a
+// rounded rectangle filled with the lit/dim color and a single glyph
+// centered inside. Self-clears its sub-rect because the lit/dim
+// transition would otherwise leave a "frozen" stale fill behind.
+void paint_warning_indicators(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
+                              std::uint32_t x_off, std::uint32_t y_off,
                               const std::array<double, k_warn_count>& phases,
                               const BLFontFace& font_face) noexcept {
-  drm::span<std::uint8_t> const pixels = mapping.pixels();
-  std::uint32_t const stride = mapping.stride();
-  if (pixels.size() < static_cast<std::size_t>(k_warn_h) * stride) {
+  if (base_pixels == nullptr) {
     return;
   }
+  std::uint8_t* sub_base = base_pixels +
+                           (static_cast<std::size_t>(y_off) * base_stride_bytes) +
+                           (static_cast<std::size_t>(x_off) * 4U);
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(k_warn_w), static_cast<int>(k_warn_h),
-                              BL_FORMAT_PRGB32, pixels.data(), static_cast<intptr_t>(stride),
-                              BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
+                              BL_FORMAT_PRGB32, sub_base,
+                              static_cast<intptr_t>(base_stride_bytes), BL_DATA_ACCESS_RW, nullptr,
+                              nullptr) != BL_SUCCESS) {
     return;
   }
 
   BLContext ctx(canvas);
+  // alpha=0 clear so the bg gradient shows through between cells; the
+  // cell fills below paint themselves opaque on top.
   ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
   ctx.fill_all(BLRgba32(0x00000000U));
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
@@ -537,7 +563,7 @@ void paint_rearview_synthetic(drm::BufferMapping& mapping, double elapsed_s,
   }
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(k_rear_w), static_cast<int>(k_rear_h),
-                              BL_FORMAT_XRGB32, pixels.data(), static_cast<intptr_t>(stride),
+                              BL_FORMAT_PRGB32, pixels.data(), static_cast<intptr_t>(stride),
                               BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
@@ -1244,107 +1270,81 @@ int main(int argc, char** argv) {
   }
   auto scene = std::move(*scene_r);
 
-  drm::scene::LayerDesc bg_desc;
-  bg_desc.source = std::move(bg_src);
-  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  if (auto h = scene->add_layer(std::move(bg_desc)); !h) {
-    drm::println(stderr, "add_layer (bg): {}", h.error().message());
-    return EXIT_FAILURE;
-  }
-
   // Dial sizing: 4/9 of screen height capped at 400 px gives ~400 on
   // 1080p, 320 on 720p, scales down sensibly for smaller outputs.
   // Centered vertically; speedo at 1/4-screen, tach at 3/4-screen.
   std::uint32_t const dial_size = std::min<std::uint32_t>(fb_h * 4U / 9U, 400U);
-  auto const dial_y = static_cast<std::int32_t>((fb_h - dial_size) / 2U);
-  auto const speedo_x =
+  auto const dial_y_world = static_cast<std::int32_t>((fb_h - dial_size) / 2U);
+  auto const speedo_x_world =
       static_cast<std::int32_t>(fb_w / 4U) - static_cast<std::int32_t>(dial_size / 2U);
-  auto const tach_x =
+  auto const tach_x_world =
       static_cast<std::int32_t>((fb_w * 3U) / 4U) - static_cast<std::int32_t>(dial_size / 2U);
-
-  auto make_dial_layer =
-      [&](std::int32_t x,
-          std::int32_t y) -> drm::expected<drm::scene::DumbBufferSource*, std::error_code> {
-    auto src_r =
-        drm::scene::DumbBufferSource::create(dev, dial_size, dial_size, DRM_FORMAT_ARGB8888);
-    if (!src_r) {
-      return drm::unexpected<std::error_code>(src_r.error());
-    }
-    auto src = std::move(*src_r);
-    auto* raw = src.get();
-    drm::scene::LayerDesc desc;
-    desc.source = std::move(src);
-    desc.display.src_rect = drm::scene::Rect{0, 0, dial_size, dial_size};
-    desc.display.dst_rect = drm::scene::Rect{x, y, dial_size, dial_size};
-    // amdgpu pins PRIMARY at zpos=2; the dials need to sit above the
-    // bg, so anchor them at zpos>=3 explicitly to avoid silent
-    // collision with the primary plane.
-    desc.display.zpos = 3;
-    if (auto h = scene->add_layer(std::move(desc)); !h) {
-      return drm::unexpected<std::error_code>(h.error());
-    }
-    return raw;
-  };
-
-  auto speedo_r = make_dial_layer(speedo_x, dial_y);
-  if (!speedo_r) {
-    drm::println(stderr, "add_layer (speedo): {}", speedo_r.error().message());
-    return EXIT_FAILURE;
-  }
-  auto tach_r = make_dial_layer(tach_x, dial_y);
-  if (!tach_r) {
-    drm::println(stderr, "add_layer (tach): {}", tach_r.error().message());
-    return EXIT_FAILURE;
-  }
-  auto* speedo_src_raw = *speedo_r;
-  auto* tach_src_raw = *tach_r;
-
-  // Center info layer: ARGB8888 between the dials, vertically
-  // centered against the dial midline. Uses the same zpos as the
-  // dials -- it's a sibling UI layer, not a priority overlay.
-  auto info_src_r =
-      drm::scene::DumbBufferSource::create(dev, k_info_w, k_info_h, DRM_FORMAT_ARGB8888);
-  if (!info_src_r) {
-    drm::println(stderr, "DumbBufferSource::create (info): {}", info_src_r.error().message());
-    return EXIT_FAILURE;
-  }
-  auto* info_src_raw = info_src_r->get();
-  drm::scene::LayerDesc info_desc;
-  info_desc.source = std::move(*info_src_r);
-  info_desc.display.src_rect = drm::scene::Rect{0, 0, k_info_w, k_info_h};
-  auto const info_x =
+  auto const info_x_world =
       static_cast<std::int32_t>(fb_w / 2U) - static_cast<std::int32_t>(k_info_w / 2U);
-  auto const info_y =
-      dial_y + static_cast<std::int32_t>(dial_size / 2U) - static_cast<std::int32_t>(k_info_h / 2U);
-  info_desc.display.dst_rect = drm::scene::Rect{info_x, info_y, k_info_w, k_info_h};
-  info_desc.display.zpos = 3;
-  if (auto h = scene->add_layer(std::move(info_desc)); !h) {
-    drm::println(stderr, "add_layer (info): {}", h.error().message());
-    return EXIT_FAILURE;
-  }
-
-  // Warning indicators: 4-cell ARGB strip below the dials. zpos=4
-  // (above the dials) so the allocator pins it on a hardware plane
-  // even when the dials had to composite -- a real cluster never
-  // lets a warning indicator drop frames.
-  auto warn_src_r =
-      drm::scene::DumbBufferSource::create(dev, k_warn_w, k_warn_h, DRM_FORMAT_ARGB8888);
-  if (!warn_src_r) {
-    drm::println(stderr, "DumbBufferSource::create (warn): {}", warn_src_r.error().message());
-    return EXIT_FAILURE;
-  }
-  auto* warn_src_raw = warn_src_r->get();
-  drm::scene::LayerDesc warn_desc;
-  warn_desc.source = std::move(*warn_src_r);
-  warn_desc.display.src_rect = drm::scene::Rect{0, 0, k_warn_w, k_warn_h};
-  auto const warn_x =
+  auto const info_y_world = dial_y_world + static_cast<std::int32_t>(dial_size / 2U) -
+                            static_cast<std::int32_t>(k_info_h / 2U);
+  auto const warn_x_world =
       static_cast<std::int32_t>(fb_w / 2U) - static_cast<std::int32_t>(k_warn_w / 2U);
-  auto const warn_y = dial_y + static_cast<std::int32_t>(dial_size) + 40;
-  warn_desc.display.dst_rect = drm::scene::Rect{warn_x, warn_y, k_warn_w, k_warn_h};
-  warn_desc.display.zpos = 4;
-  if (auto h = scene->add_layer(std::move(warn_desc)); !h) {
-    drm::println(stderr, "add_layer (warn): {}", h.error().message());
+  auto const warn_y_world = dial_y_world + static_cast<std::int32_t>(dial_size) + 40;
+
+  // Combined instruments layer: one ARGB8888 buffer at full screen
+  // size. With only 2 content layers (bg + this one) and both at full
+  // screen, both fit cleanly on hardware planes (PRIMARY + OVERLAY).
+  // Outside the dial / info / warning sub-rects the buffer stays at
+  // alpha=0 so the kernel's hardware compositor blends bg through; the
+  // small rects we paint each frame have alpha=0xFF and overwrite bg.
+  // Full-screen sizing avoids Tegra-specific position/size constraints
+  // some planes apply to non-full-screen dst rects.
+  auto const inst_x_world = 0;
+  auto const inst_y_world = 0;
+  auto const inst_w = fb_w;
+  auto const inst_h = fb_h;
+  // Sub-layer offsets within the combined buffer == world coords.
+  auto const speedo_x_local = static_cast<std::uint32_t>(speedo_x_world);
+  auto const dial_y_local = static_cast<std::uint32_t>(dial_y_world);
+  auto const tach_x_local = static_cast<std::uint32_t>(tach_x_world);
+  auto const info_x_local = static_cast<std::uint32_t>(info_x_world);
+  auto const info_y_local = static_cast<std::uint32_t>(info_y_world);
+  auto const warn_x_local = static_cast<std::uint32_t>(warn_x_world);
+  auto const warn_y_local = static_cast<std::uint32_t>(warn_y_world);
+
+  // ARGB8888 (not XRGB) so the layer's alpha channel is honored by the
+  // OVERLAY plane on every driver. On Tegra Orin specifically, OVERLAY
+  // accepts ARGB but rejects XRGB in caps probing, which would force a
+  // composition fallback and re-introduce the slow CPU path. We fill
+  // every pixel with alpha=0xFF, so the visual result matches XRGB.
+  auto inst_src_r =
+      drm::scene::DumbBufferSource::create(dev, inst_w, inst_h, DRM_FORMAT_ARGB8888);
+  if (!inst_src_r) {
+    drm::println(stderr, "DumbBufferSource::create (instruments): {}",
+                 inst_src_r.error().message());
+    return EXIT_FAILURE;
+  }
+  auto* inst_src_raw = inst_src_r->get();
+  drm::scene::LayerDesc inst_desc;
+  inst_desc.source = std::move(*inst_src_r);
+  inst_desc.display.src_rect = drm::scene::Rect{0, 0, inst_w, inst_h};
+  inst_desc.display.dst_rect = drm::scene::Rect{inst_x_world, inst_y_world, inst_w, inst_h};
+  // Explicit zpos on both layers so the allocator picks the right
+  // plane on every driver:
+  //   * zpos-aware drivers (amdgpu, i915): bg.zpos=0 maps to PRIMARY's
+  //     zpos_min (PRIMARY pinned at 0/1/2 depending on driver), inst.zpos=4
+  //     puts the layer onto a higher OVERLAY slot.
+  //   * zpos-less drivers (Tegra): the allocator treats zpos=0 as
+  //     "wants PRIMARY (bottom)" and zpos>0 as "wants OVERLAY (top)"
+  //     via the matching score-pair extension in src/planes/allocator.cpp.
+  drm::scene::LayerDesc bg_desc;
+  bg_desc.source = std::move(bg_src);
+  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.zpos = 0;
+  if (auto h = scene->add_layer(std::move(bg_desc)); !h) {
+    drm::println(stderr, "add_layer (bg): {}", h.error().message());
+    return EXIT_FAILURE;
+  }
+  inst_desc.display.zpos = 4;
+  if (auto h = scene->add_layer(std::move(inst_desc)); !h) {
+    drm::println(stderr, "add_layer (instruments): {}", h.error().message());
     return EXIT_FAILURE;
   }
 
@@ -1362,19 +1362,26 @@ int main(int argc, char** argv) {
   // commit has valid pixel content everywhere. repaint_layers is the
   // shared per-frame paint path called from the main loop and from
   // the session-resume cleanup.
+  // Init the full-screen inst buffer to fully transparent. Hardware
+  // composes inst SRC_OVER bg per pixel: alpha=0 pixels let bg through
+  // unchanged. Sub-rect paints below light up only the dial / readout
+  // / warning regions at alpha=0xFF (premultiplied opaque).
+  if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
+    auto pixels = m->pixels();
+    std::memset(pixels.data(), 0, pixels.size_bytes());
+  }
+
   auto repaint_layers = [&](double speedo_norm, double tach_norm, std::uint32_t speed_kmh,
                             const std::array<double, k_warn_count>& warn_phases) {
-    if (auto m = speedo_src_raw->map(drm::MapAccess::Write); m) {
-      paint_dial(*m, dial_size, speedo_norm, k_speedo_needle_argb);
-    }
-    if (auto m = tach_src_raw->map(drm::MapAccess::Write); m) {
-      paint_dial(*m, dial_size, tach_norm, k_tach_needle_argb);
-    }
-    if (auto m = info_src_raw->map(drm::MapAccess::Write); m) {
-      paint_center_info(*m, speed_kmh, font_face);
-    }
-    if (auto m = warn_src_raw->map(drm::MapAccess::Write); m) {
-      paint_warning_indicators(*m, warn_phases, font_face);
+    if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
+      auto* base = m->pixels().data();
+      const std::uint32_t stride = m->stride();
+      paint_dial(base, stride, speedo_x_local, dial_y_local, dial_size, speedo_norm,
+                 k_speedo_needle_argb);
+      paint_dial(base, stride, tach_x_local, dial_y_local, dial_size, tach_norm,
+                 k_tach_needle_argb);
+      paint_center_info(base, stride, info_x_local, info_y_local, speed_kmh, font_face);
+      paint_warning_indicators(base, stride, warn_x_local, warn_y_local, warn_phases, font_face);
     }
   };
   std::array<double, k_warn_count> const initial_warn_phases{0.0, 0.0, 0.0, 0.0};
