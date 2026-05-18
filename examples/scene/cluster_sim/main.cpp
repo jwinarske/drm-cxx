@@ -116,6 +116,8 @@
 #include <filesystem>
 #include <linux/input-event-codes.h>
 #include <linux/videodev2.h>
+#include <atomic>
+#include <csignal>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -131,6 +133,13 @@
 #include <vector>
 
 namespace {
+
+// SIGINT / SIGTERM exit flag. Set by the signal handler, polled by the
+// main loop. Atomic for the cross-thread / handler-context visibility
+// guarantee; relaxed loads are sufficient here because we only need
+// eventual consistency.
+std::atomic<bool> g_quit{false};
+void on_sigint(int /*signo*/) noexcept { g_quit.store(true, std::memory_order_relaxed); }
 
 // Cluster-aesthetic palette. Center is near-black with a subtle blue
 // cast (matches the "deep instrument" look most automotive clusters
@@ -1265,6 +1274,13 @@ void drive_rearview(RearViewState& rv) noexcept {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Graceful exit on SIGINT/SIGTERM so the main loop can drain its
+  // last commit + run the jitter-summary block at the bottom. Without
+  // this, `timeout`'s SIGTERM kills the process between repaint and
+  // shutdown and any end-of-run telemetry is lost.
+  std::signal(SIGINT, on_sigint);
+  std::signal(SIGTERM, on_sigint);
+
   // Parse --mode WxH[@Hz] and STRIP the flag + its value from argv so
   // select_device (which uses argv[1] verbatim) sees the device path
   // first. Default (no flag) keeps the existing pick-preferred-mode
@@ -1669,11 +1685,43 @@ int main(int argc, char** argv) {
   // cadence without a wall-clock timer.
   drm::examples::SessionPumpState session_state;
   bool need_repaint = false;
+  // Frame-time jitter capture: set CLUSTER_SIM_FRAME_JITTER=1 in the env
+  // to track per-flip delta against the chosen mode's expected period
+  // (1 / vrefresh). Reports count, mean, max delta, and missed-vblank
+  // ratio on exit. Off by default so a normal run prints nothing.
+  const bool jitter_enabled = std::getenv("CLUSTER_SIM_FRAME_JITTER") != nullptr;
+  const double expected_frame_us =
+      (ctx.mode.vrefresh > 0) ? (1.0e6 / static_cast<double>(ctx.mode.vrefresh)) : 0.0;
+  struct JitterStats {
+    std::uint64_t frames{0};
+    std::uint64_t missed{0};  // delta > 1.5 * expected
+    double max_us{0.0};
+    double sum_us{0.0};
+    std::chrono::steady_clock::time_point prev{};
+  } jitter;
+
   drm::PageFlip page_flip(dev);
-  page_flip.set_handler([&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
-    session_state.flip_pending = false;
-    need_repaint = true;
-  });
+  page_flip.set_handler(
+      [&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
+        session_state.flip_pending = false;
+        need_repaint = true;
+        if (jitter_enabled) {
+          auto const now = std::chrono::steady_clock::now();
+          if (jitter.frames > 0 && expected_frame_us > 0.0) {
+            const double dt_us =
+                std::chrono::duration<double, std::micro>(now - jitter.prev).count();
+            jitter.sum_us += dt_us;
+            if (dt_us > jitter.max_us) {
+              jitter.max_us = dt_us;
+            }
+            if (dt_us > 1.5 * expected_frame_us) {
+              ++jitter.missed;
+            }
+          }
+          jitter.prev = now;
+          ++jitter.frames;
+        }
+      });
 
   // libinput keyboard + VT-switch chord forwarding. libseat puts the
   // TTY in KD_GRAPHICS where the kernel suppresses Ctrl-C signal
@@ -1771,7 +1819,7 @@ int main(int argc, char** argv) {
   int const uvc_slot = loop.add_slot(-1, [&] { drive_rearview_uvc(rear_view); });
 #endif
 
-  while (!quit) {
+  while (!quit && !g_quit.load(std::memory_order_relaxed)) {
 #if CLUSTER_SIM_HAS_LIBYUV
     loop.set_fd(uvc_slot, (rear_view.layer.has_value() && rear_view.uvc_capture.has_value())
                               ? rear_view.uvc_capture->fd()
@@ -1866,5 +1914,15 @@ int main(int argc, char** argv) {
 
   // UvcCapture's destructor STREAMOFF + REQBUFS=0 + munmap + close, so
   // no explicit teardown call is needed at exit.
+
+  if (jitter_enabled && jitter.frames > 1) {
+    const std::uint64_t sample_n = jitter.frames - 1U;  // first flip had no prev
+    const double mean_us = jitter.sum_us / static_cast<double>(sample_n);
+    drm::println(stderr,
+                 "frame-jitter: frames={} expected={:.1f}us mean={:.1f}us max={:.1f}us "
+                 "missed_vblanks={} ({:.2f}%)",
+                 jitter.frames, expected_frame_us, mean_us, jitter.max_us, jitter.missed,
+                 100.0 * static_cast<double>(jitter.missed) / static_cast<double>(sample_n));
+  }
   return EXIT_SUCCESS;
 }
