@@ -1,27 +1,28 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 //
-// cluster_sim_vulkan — instrument-cluster sibling of `cluster_sim`.
-// The bg + static dial face are rendered through Vulkan onto one
-// DMA-BUF-exported VkImage scanning out on the PRIMARY plane; a thin
-// CPU OVERLAY layer carries the moving needle + hub on top. One
-// render pass, two Vulkan graphics pipelines:
+// cluster_sim_vulkan — instrument-cluster sibling of `cluster_sim`,
+// rendered entirely through Vulkan. Two DMA-BUF-exported VkImages
+// scan out on the PRIMARY + OVERLAY planes (double-buffered, ping-
+// ponged each frame to avoid the single-buffered tearing earlier
+// iterations had). One render pass, three Vulkan graphics pipelines:
 //
-//   1. bg pipeline      — full-screen triangle + bg.vert/bg.frag, paints
-//                         cluster_sim's radial gradient (center #101626,
-//                         edge #02040A, radius max(w,h)*0.6).
+//   1. bg pipeline       — full-screen triangle + bg.vert/bg.frag,
+//                          paints cluster_sim's radial gradient
+//                          (center #101626, edge #02040A, radius
+//                          max(w,h)*0.6).
 //   2. textured pipeline — UV-mapped quad + textured.vert/textured.frag,
-//                         samples a Blend2D-painted dial template (rim
-//                         + face + ticks) that's been uploaded once at
-//                         startup, alpha-blended over the bg.
+//                          samples a Blend2D-painted dial template
+//                          (rim + face + ticks) uploaded once at
+//                          startup, alpha-blended over the bg.
+//   3. needle pipeline   — UV-mapped quad + needle.vert/needle.frag,
+//                          SDF line segment with rounded caps + hub
+//                          disc + fwidth-AA, premultiplied output.
+//                          No descriptor set, no texture sample —
+//                          pure shader math.
 //
 // Output is DRM_FORMAT_MOD_LINEAR ARGB8888, exported as a DMA-BUF, and
-// wrapped in ExternalDmaBufSource like the MVP. The CPU OVERLAY layer
-// is a square dial-sized dumb buffer that Blend2D-paints a single red
-// needle + dark hub into each frame; rim/face/ticks come from the
-// Vulkan textured dial template underneath. The needle moves to a
-// follow-up SDF pipeline in a later iteration so the CPU overlay can
-// go away entirely.
+// wrapped in ExternalDmaBufSource. No CPU layer.
 //
 // CLI mirrors `cluster_sim`:
 //   cluster_sim_vulkan [--seconds N] [--mode WxH[@Hz]] [/dev/dri/cardN]
@@ -53,6 +54,8 @@
 #include "bg_frag_spv.h"        // k_bg_frag_spv
 #include "textured_vert_spv.h"  // k_textured_vert_spv
 #include "textured_frag_spv.h"  // k_textured_frag_spv
+#include "needle_vert_spv.h"    // k_needle_vert_spv
+#include "needle_frag_spv.h"    // k_needle_frag_spv
 
 // Blend2D umbrella: <blend2d/blend2d.h> on most distros, <blend2d.h>
 // in older drops; cover both like cluster_sim does.
@@ -257,46 +260,6 @@ void paint_dial_template(std::uint8_t* pixels, std::uint32_t dial_size) noexcept
   ctx.end();
 }
 
-// Per-frame CPU overlay: paint only the needle + hub on a fully
-// transparent buffer. The Vulkan-side textured dial template provides
-// the rim + face + ticks underneath; the OVERLAY plane lands the
-// moving parts on top.
-void paint_needle_only(drm::BufferMapping& mapping, std::uint32_t width, std::uint32_t height,
-                       double norm) noexcept {
-  if (width == 0U || height == 0U) {
-    return;
-  }
-  drm::span<std::uint8_t> const pixels = mapping.pixels();
-  std::uint32_t const stride = mapping.stride();
-  if (pixels.size() < static_cast<std::size_t>(height) * stride) {
-    return;
-  }
-  BLImage canvas;
-  if (canvas.create_from_data(static_cast<int>(width), static_cast<int>(height), BL_FORMAT_PRGB32,
-                              pixels.data(), static_cast<intptr_t>(stride), BL_DATA_ACCESS_RW,
-                              nullptr, nullptr) != BL_SUCCESS) {
-    return;
-  }
-  BLContext ctx(canvas);
-  ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
-  ctx.fill_all(BLRgba32(0x00000000U));
-  ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
-
-  const double size = static_cast<double>(std::min(width, height));
-  const double cx = size / 2.0;
-  const double cy = size / 2.0;
-  const double r_needle = size * 0.40;
-  const double r_hub = size * 0.06;
-  const double a = k_dial_start_angle + (std::clamp(norm, 0.0, 1.0) * k_dial_sweep_angle);
-  const double nx = cx + (r_needle * std::cos(a));
-  const double ny = cy + (r_needle * std::sin(a));
-  ctx.set_stroke_width(std::max(3.0, size * 0.008));
-  ctx.set_stroke_caps(BL_STROKE_CAP_ROUND);
-  ctx.stroke_line(BLPoint(cx, cy), BLPoint(nx, ny), BLRgba32(0xFFFF3B30U));
-  ctx.fill_circle(BLCircle(cx, cy, r_hub), BLRgba32(0xFF1A1F2CU));
-  ctx.end();
-}
-
 [[nodiscard]] VkShaderModule make_shader_module(VkDevice dev, const std::uint32_t* code,
                                                 std::size_t code_bytes) {
   VkShaderModuleCreateInfo info{};
@@ -328,6 +291,26 @@ struct TexturedPushConstants {
   float uv_y0;
   float uv_x1;
   float uv_y1;
+};
+
+// Push-constant block for the SDF-needle pipeline. Same dst+uv as the
+// textured pipeline plus the needle's animated state. 48 bytes total.
+// All radii / thicknesses are in the dial's normalized [-1, 1] frame
+// (1.0 = half-dial-size); the fragment shader re-centers v_uv into
+// that frame.
+struct NeedlePushConstants {
+  float dst_x0;
+  float dst_y0;
+  float dst_x1;
+  float dst_y1;
+  float uv_x0;
+  float uv_y0;
+  float uv_x1;
+  float uv_y1;
+  float angle;
+  float r_needle;
+  float r_hub;
+  float half_thickness;
 };
 
 // Pixel rectangle → NDC. Vulkan NDC y is +1 at the bottom and -1 at
@@ -466,18 +449,28 @@ int main(int argc, char* argv[]) {
   VkQueue queue = VK_NULL_HANDLE;
   vkGetDeviceQueue(vk_device, qf_index, 0, &queue);
 
-  // Single-buffered Vulkan-allocated DRM-modifier-LINEAR ARGB8888
-  // image for the bg + textured dial. KNOWN ISSUE: KMS continuously
-  // scans this buffer while Vulkan re-renders it each frame, so
-  // pixels near the top of the dial occasionally come from a partial
-  // mid-render write and produce a faint horizontal tear band. The
-  // proper fix is double-buffering, which requires two DMA-BUF
-  // planes — and on this Tegra CRTC the plane budget is one PRIMARY
-  // plus one OVERLAY (consumed by the CPU needle layer), so we can't
-  // fit both. Iteration 3+ moves the needle into Vulkan (an SDF
-  // shader on the same render pass) so the CPU OVERLAY can be
-  // dropped, freeing a plane for the second bg buffer.
+  // Two DRM-modifier-LINEAR ARGB8888 Vulkan images, ping-ponged each
+  // frame so KMS never reads the buffer Vulkan is currently writing.
+  // bg[0] -> PRIMARY plane (zpos 0, plane-alpha left at 0xFFFF);
+  // bg[1] -> OVERLAY plane (zpos 1, plane-alpha toggles each frame:
+  //          0xFFFF when bg[1] was just rendered and should cover
+  //          bg[0]; 0 to let bg[0] show through underneath). Now that
+  //          iteration 3 dropped the CPU needle layer, the OVERLAY
+  //          slot is free for this.
+  constexpr int k_swap_count = 2;
   const std::uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+  std::array<VkImage, k_swap_count> vk_images{};
+  std::array<VkDeviceMemory, k_swap_count> vk_mems{};
+  std::array<drm::scene::LayerHandle, k_swap_count> bg_handles{};
+
+  auto get_memory_fd = reinterpret_cast<
+      PFN_vkGetMemoryFdKHR>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      vkGetDeviceProcAddr(vk_device, "vkGetMemoryFdKHR"));
+  if (get_memory_fd == nullptr) {
+    drm::println(stderr, "vkGetMemoryFdKHR missing");
+    return EXIT_FAILURE;
+  }
+
   std::array<std::uint64_t, 1> modifiers{modifier};
   VkImageDrmFormatModifierListCreateInfoEXT drm_list{};
   drm_list.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
@@ -487,122 +480,91 @@ int main(int argc, char* argv[]) {
   ext_img.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
   ext_img.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
   ext_img.pNext = &drm_list;
-  VkImageCreateInfo iic{};
-  iic.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-  iic.pNext = &ext_img;
-  iic.imageType = VK_IMAGE_TYPE_2D;
-  iic.format = VK_FORMAT_B8G8R8A8_UNORM;
-  iic.extent = {fb_w, fb_h, 1};
-  iic.mipLevels = 1;
-  iic.arrayLayers = 1;
-  iic.samples = VK_SAMPLE_COUNT_1_BIT;
-  iic.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-  iic.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-  iic.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  iic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  VkImage vk_image = VK_NULL_HANDLE;
-  if (vkCreateImage(vk_device, &iic, nullptr, &vk_image) != VK_SUCCESS) {
-    drm::println(stderr, "vkCreateImage failed");
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
-  VkMemoryRequirements mr{};
-  vkGetImageMemoryRequirements(vk_device, vk_image, &mr);
-  VkExportMemoryAllocateInfo emai{};
-  emai.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-  emai.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-  VkMemoryAllocateInfo mai{};
-  mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  mai.pNext = &emai;
-  mai.allocationSize = mr.size;
-  mai.memoryTypeIndex = find_memory_type(pd, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  if (mai.memoryTypeIndex == 0xFFFFFFFFU) {
-    drm::println(stderr, "no DEVICE_LOCAL memory type");
-    return EXIT_FAILURE;
-  }
-  VkDeviceMemory vk_mem = VK_NULL_HANDLE;
-  if (vkAllocateMemory(vk_device, &mai, nullptr, &vk_mem) != VK_SUCCESS) {
-    drm::println(stderr, "vkAllocateMemory failed");
-    return EXIT_FAILURE;
-  }
-  vkBindImageMemory(vk_device, vk_image, vk_mem, 0);
 
-  auto get_memory_fd = reinterpret_cast<
-      PFN_vkGetMemoryFdKHR>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-      vkGetDeviceProcAddr(vk_device, "vkGetMemoryFdKHR"));
-  if (get_memory_fd == nullptr) {
-    drm::println(stderr, "vkGetMemoryFdKHR missing");
-    return EXIT_FAILURE;
-  }
-  VkMemoryGetFdInfoKHR mgfi{};
-  mgfi.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-  mgfi.memory = vk_mem;
-  mgfi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-  int dmabuf_fd = -1;
-  if (get_memory_fd(vk_device, &mgfi, &dmabuf_fd) != VK_SUCCESS || dmabuf_fd < 0) {
-    drm::println(stderr, "vkGetMemoryFdKHR failed");
-    return EXIT_FAILURE;
-  }
-  VkImageSubresource sub{};
-  sub.aspectMask = VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
-  VkSubresourceLayout layout{};
-  vkGetImageSubresourceLayout(vk_device, vk_image, &sub, &layout);
-  drm::scene::ExternalPlaneInfo plane_info{};
-  plane_info.fd = dmabuf_fd;
-  plane_info.pitch = static_cast<std::uint32_t>(layout.rowPitch);
-  plane_info.offset = static_cast<std::uint32_t>(layout.offset);
-  std::array<drm::scene::ExternalPlaneInfo, 1> planes{plane_info};
-  auto bg_source =
-      drm::scene::ExternalDmaBufSource::create(device, fb_w, fb_h, DRM_FORMAT_ARGB8888, modifier,
-                                                planes);
-  ::close(dmabuf_fd);
-  if (!bg_source) {
-    drm::println(stderr, "ExternalDmaBufSource::create: {}", bg_source.error().message());
-    return EXIT_FAILURE;
-  }
-  drm::scene::LayerDesc bg_desc;
-  bg_desc.source = std::move(*bg_source);
-  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  bg_desc.display.zpos = 0;
-  if (auto r = scene->add_layer(std::move(bg_desc)); !r) {
-    drm::println(stderr, "add_layer (Vulkan bg): {}", r.error().message());
-    return EXIT_FAILURE;
+  for (int i = 0; i < k_swap_count; ++i) {
+    VkImageCreateInfo iic{};
+    iic.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    iic.pNext = &ext_img;
+    iic.imageType = VK_IMAGE_TYPE_2D;
+    iic.format = VK_FORMAT_B8G8R8A8_UNORM;
+    iic.extent = {fb_w, fb_h, 1};
+    iic.mipLevels = 1;
+    iic.arrayLayers = 1;
+    iic.samples = VK_SAMPLE_COUNT_1_BIT;
+    iic.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    iic.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    iic.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    iic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(vk_device, &iic, nullptr, &vk_images[i]) != VK_SUCCESS) {
+      drm::println(stderr, "vkCreateImage[{}] failed", i);
+      return EXIT_FAILURE;
+    }
+    VkMemoryRequirements mr{};
+    vkGetImageMemoryRequirements(vk_device, vk_images[i], &mr);
+    VkExportMemoryAllocateInfo emai{};
+    emai.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    emai.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkMemoryAllocateInfo mai{};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.pNext = &emai;
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex =
+        find_memory_type(pd, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mai.memoryTypeIndex == 0xFFFFFFFFU) {
+      drm::println(stderr, "no DEVICE_LOCAL memory type for bg image {}", i);
+      return EXIT_FAILURE;
+    }
+    if (vkAllocateMemory(vk_device, &mai, nullptr, &vk_mems[i]) != VK_SUCCESS) {
+      drm::println(stderr, "vkAllocateMemory[{}] failed", i);
+      return EXIT_FAILURE;
+    }
+    vkBindImageMemory(vk_device, vk_images[i], vk_mems[i], 0);
+
+    VkMemoryGetFdInfoKHR mgfi{};
+    mgfi.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+    mgfi.memory = vk_mems[i];
+    mgfi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    int dmabuf_fd = -1;
+    if (get_memory_fd(vk_device, &mgfi, &dmabuf_fd) != VK_SUCCESS || dmabuf_fd < 0) {
+      drm::println(stderr, "vkGetMemoryFdKHR[{}] failed", i);
+      return EXIT_FAILURE;
+    }
+    VkImageSubresource sub{};
+    sub.aspectMask = VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
+    VkSubresourceLayout layout{};
+    vkGetImageSubresourceLayout(vk_device, vk_images[i], &sub, &layout);
+    drm::scene::ExternalPlaneInfo plane_info{};
+    plane_info.fd = dmabuf_fd;
+    plane_info.pitch = static_cast<std::uint32_t>(layout.rowPitch);
+    plane_info.offset = static_cast<std::uint32_t>(layout.offset);
+    std::array<drm::scene::ExternalPlaneInfo, 1> planes{plane_info};
+    auto src = drm::scene::ExternalDmaBufSource::create(device, fb_w, fb_h, DRM_FORMAT_ARGB8888,
+                                                        modifier, planes);
+    ::close(dmabuf_fd);
+    if (!src) {
+      drm::println(stderr, "ExternalDmaBufSource::create[{}]: {}", i, src.error().message());
+      return EXIT_FAILURE;
+    }
+    drm::scene::LayerDesc desc;
+    desc.source = std::move(*src);
+    desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+    desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+    desc.display.zpos = i;  // 0 -> PRIMARY (Tegra affinity), 1 -> OVERLAY
+    desc.display.alpha = (i == 0) ? std::uint16_t{0xFFFF} : std::uint16_t{0};
+    auto handle = scene->add_layer(std::move(desc));
+    if (!handle) {
+      drm::println(stderr, "add_layer (Vulkan bg[{}]): {}", i, handle.error().message());
+      return EXIT_FAILURE;
+    }
+    bg_handles[i] = *handle;
   }
 
   // Square dial buffer covering the smaller framebuffer dimension —
-  // both the Vulkan dial-template texture and the CPU needle overlay
-  // use this size, and the centered dst rect lines them up exactly.
+  // dictates both the Vulkan dial-template texture size and the dst
+  // rect of the textured-quad + needle draws.
   const std::uint32_t dial_size = std::min(fb_w, fb_h);
   const std::int32_t dial_x = static_cast<std::int32_t>((fb_w - dial_size) / 2U);
   const std::int32_t dial_y = static_cast<std::int32_t>((fb_h - dial_size) / 2U);
-
-  // Instruments layer — CPU-painted ARGB on a dumb buffer. Iteration 2
-  // has it carrying only the needle + hub; the rim/face/ticks are
-  // drawn from the Vulkan textured dial template below.
-  auto inst_source =
-      drm::scene::DumbBufferSource::create(device, dial_size, dial_size, DRM_FORMAT_ARGB8888);
-  if (!inst_source) {
-    drm::println(stderr, "DumbBufferSource::create (instruments): {}",
-                 inst_source.error().message());
-    return EXIT_FAILURE;
-  }
-  auto inst_src = std::move(*inst_source);
-  auto* inst_src_raw = inst_src.get();
-  // Initial transparent fill.
-  if (auto m = inst_src->map(drm::MapAccess::Write); m) {
-    std::memset(m->pixels().data(), 0, m->pixels().size_bytes());
-  }
-  drm::scene::LayerDesc inst_desc;
-  inst_desc.source = std::move(inst_src);
-  inst_desc.display.src_rect = drm::scene::Rect{0, 0, dial_size, dial_size};
-  inst_desc.display.dst_rect = drm::scene::Rect{dial_x, dial_y, dial_size, dial_size};
-  inst_desc.display.zpos = 4;  // Tegra-style affinity: > 0 → OVERLAY
-  if (auto r = scene->add_layer(std::move(inst_desc)); !r) {
-    drm::println(stderr, "add_layer (instruments): {}", r.error().message());
-    return EXIT_FAILURE;
-  }
 
   // -------- Vulkan render-pass plumbing (bg pipeline) -----------------
   // Single color attachment, format matches the image (B8G8R8A8_UNORM).
@@ -678,31 +640,33 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  VkImageViewCreateInfo ivci{};
-  ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-  ivci.image = vk_image;
-  ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  ivci.format = VK_FORMAT_B8G8R8A8_UNORM;
-  ivci.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                     VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-  ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  VkImageView image_view = VK_NULL_HANDLE;
-  if (vkCreateImageView(vk_device, &ivci, nullptr, &image_view) != VK_SUCCESS) {
-    drm::println(stderr, "vkCreateImageView failed");
-    return EXIT_FAILURE;
-  }
-  VkFramebufferCreateInfo fbci{};
-  fbci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-  fbci.renderPass = render_pass;
-  fbci.attachmentCount = 1;
-  fbci.pAttachments = &image_view;
-  fbci.width = fb_w;
-  fbci.height = fb_h;
-  fbci.layers = 1;
-  VkFramebuffer framebuffer = VK_NULL_HANDLE;
-  if (vkCreateFramebuffer(vk_device, &fbci, nullptr, &framebuffer) != VK_SUCCESS) {
-    drm::println(stderr, "vkCreateFramebuffer failed");
-    return EXIT_FAILURE;
+  std::array<VkImageView, k_swap_count> image_views{};
+  std::array<VkFramebuffer, k_swap_count> framebuffers{};
+  for (int i = 0; i < k_swap_count; ++i) {
+    VkImageViewCreateInfo ivci{};
+    ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ivci.image = vk_images[i];
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = VK_FORMAT_B8G8R8A8_UNORM;
+    ivci.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+    ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(vk_device, &ivci, nullptr, &image_views[i]) != VK_SUCCESS) {
+      drm::println(stderr, "vkCreateImageView[{}] failed", i);
+      return EXIT_FAILURE;
+    }
+    VkFramebufferCreateInfo fbci{};
+    fbci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbci.renderPass = render_pass;
+    fbci.attachmentCount = 1;
+    fbci.pAttachments = &image_views[i];
+    fbci.width = fb_w;
+    fbci.height = fb_h;
+    fbci.layers = 1;
+    if (vkCreateFramebuffer(vk_device, &fbci, nullptr, &framebuffers[i]) != VK_SUCCESS) {
+      drm::println(stderr, "vkCreateFramebuffer[{}] failed", i);
+      return EXIT_FAILURE;
+    }
   }
 
   // Shader modules.
@@ -1122,6 +1086,75 @@ int main(int argc, char* argv[]) {
   const TexturedPushConstants dial_pc =
       make_quad_pc(dial_x, dial_y, dial_size, dial_size, fb_w, fb_h);
 
+  // ----- Needle pipeline (SDF in fragment shader) -----------------
+  // Same vertex geometry as the textured-quad pipeline. The
+  // fragment shader resolves a line segment + hub disc analytically
+  // and writes premultiplied alpha. No descriptor set — pure push-
+  // constant + shader math.
+  VkShaderModule needle_vert = make_shader_module(vk_device, k_needle_vert_spv,
+                                                  sizeof(k_needle_vert_spv));
+  VkShaderModule needle_frag = make_shader_module(vk_device, k_needle_frag_spv,
+                                                  sizeof(k_needle_frag_spv));
+  if (needle_vert == VK_NULL_HANDLE || needle_frag == VK_NULL_HANDLE) {
+    drm::println(stderr, "vkCreateShaderModule (needle) failed");
+    return EXIT_FAILURE;
+  }
+  VkPushConstantRange needle_pcr{};
+  needle_pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  needle_pcr.offset = 0;
+  needle_pcr.size = sizeof(NeedlePushConstants);
+  VkPipelineLayoutCreateInfo needle_plci{};
+  needle_plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  needle_plci.pushConstantRangeCount = 1;
+  needle_plci.pPushConstantRanges = &needle_pcr;
+  VkPipelineLayout needle_pipeline_layout = VK_NULL_HANDLE;
+  if (vkCreatePipelineLayout(vk_device, &needle_plci, nullptr, &needle_pipeline_layout) !=
+      VK_SUCCESS) {
+    drm::println(stderr, "vkCreatePipelineLayout (needle) failed");
+    return EXIT_FAILURE;
+  }
+  std::array<VkPipelineShaderStageCreateInfo, 2> needle_stages{};
+  needle_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  needle_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  needle_stages[0].module = needle_vert;
+  needle_stages[0].pName = "main";
+  needle_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  needle_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  needle_stages[1].module = needle_frag;
+  needle_stages[1].pName = "main";
+  VkGraphicsPipelineCreateInfo needle_gpci{};
+  needle_gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  needle_gpci.stageCount = static_cast<std::uint32_t>(needle_stages.size());
+  needle_gpci.pStages = needle_stages.data();
+  needle_gpci.pVertexInputState = &vi;             // empty
+  needle_gpci.pInputAssemblyState = &ia;           // triangle list
+  needle_gpci.pViewportState = &vp;                // full fb
+  needle_gpci.pRasterizationState = &rs;
+  needle_gpci.pMultisampleState = &ms;
+  needle_gpci.pColorBlendState = &tex_cb;          // premultiplied alpha, same as textured
+  needle_gpci.layout = needle_pipeline_layout;
+  needle_gpci.renderPass = render_pass;
+  needle_gpci.subpass = 1;
+  VkPipeline needle_pipeline = VK_NULL_HANDLE;
+  if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &needle_gpci, nullptr,
+                                &needle_pipeline) != VK_SUCCESS) {
+    drm::println(stderr, "vkCreateGraphicsPipelines (needle) failed");
+    return EXIT_FAILURE;
+  }
+
+  // Needle proportions in the dial's normalized [-1, 1] frame.
+  // The dial template's r_outer (rim) is at 0.96 (=size*0.48 / (size/2));
+  // r_needle = 0.40 / 0.50 = 0.80; r_hub = 0.06 / 0.50 = 0.12.
+  // Half-thickness = 0.5 * 0.008 = 0.004 in the same frame — but the
+  // fragment uses pre-doubled coords (the dial is 2 units across),
+  // so feed half_thickness = (stroke_width/2) / (size/2) = 0.008/2 = 0.004
+  // ... actually since paint_dial_template's stroke width was 11.52
+  // pixels in a 1440-px dial, half-thickness in normalized [-1, 1]
+  // (where 1.0 == 720 px) is (11.52/2) / 720 = 0.008.
+  constexpr float k_r_needle_norm = 0.80F;
+  constexpr float k_r_hub_norm = 0.12F;
+  constexpr float k_half_thickness_norm = 0.008F;
+
   drm::PageFlip page_flip(device);
   bool flip_pending = false;
   page_flip.set_handler([&](std::uint32_t, std::uint64_t, std::uint64_t) {
@@ -1129,9 +1162,8 @@ int main(int argc, char* argv[]) {
   });
 
   // First commit: scene comes up with the (zero-initialized) Vulkan
-  // image on PRIMARY and the (transparent) instruments dumb buffer on
-  // OVERLAY. The visible result is plain black for one frame; the
-  // first render loop iteration immediately overwrites it.
+  // image on PRIMARY. The visible result is plain black for one
+  // frame; the first render loop iteration immediately overwrites it.
   if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip); !r) {
     drm::println(stderr, "first commit: {}", r.error().message());
     return EXIT_FAILURE;
@@ -1157,6 +1189,10 @@ int main(int argc, char* argv[]) {
   std::uint64_t jitter_samples = 0;
 
   const BgPushConstants bg_pc{static_cast<float>(fb_w), static_cast<float>(fb_h)};
+  // Ping-pong index. Render into vk_images[back_index] while KMS scans
+  // the other one. Start at 1 so bg[0] (PRIMARY, initial-commit
+  // visible) stays untouched on the first iteration.
+  int back_index = 1;
 
   while (clk::now() < deadline && !g_quit.load(std::memory_order_relaxed)) {
     // Wait for previous flip.
@@ -1190,7 +1226,7 @@ int main(int argc, char* argv[]) {
     VkRenderPassBeginInfo rpbi{};
     rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpbi.renderPass = render_pass;
-    rpbi.framebuffer = framebuffer;
+    rpbi.framebuffer = framebuffers[back_index];
     rpbi.renderArea.offset = {0, 0};
     rpbi.renderArea.extent = {fb_w, fb_h};
     rpbi.clearValueCount = 0;
@@ -1203,7 +1239,8 @@ int main(int argc, char* argv[]) {
                        &bg_pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
-    // Subpass 1: centered dial template alpha-blended over the bg.
+    // Subpass 1: centered dial template alpha-blended over the bg,
+    // then the SDF needle/hub on top.
     vkCmdNextSubpass(cmd, VK_SUBPASS_CONTENTS_INLINE);
     if (!skip_dial) {
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline);
@@ -1213,6 +1250,24 @@ int main(int argc, char* argv[]) {
                          &dial_pc);
       vkCmdDraw(cmd, 6, 1, 0, 0);
     }
+
+    const double speedo_norm =
+        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_speedo_period_s);
+    const float needle_angle = static_cast<float>(
+        k_dial_start_angle + (std::clamp(speedo_norm, 0.0, 1.0) * k_dial_sweep_angle));
+    NeedlePushConstants needle_pc{
+        dial_pc.dst_x0, dial_pc.dst_y0, dial_pc.dst_x1, dial_pc.dst_y1,
+        dial_pc.uv_x0,  dial_pc.uv_y0,  dial_pc.uv_x1,  dial_pc.uv_y1,
+        needle_angle,
+        k_r_needle_norm,
+        k_r_hub_norm,
+        k_half_thickness_norm,
+    };
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, needle_pipeline);
+    vkCmdPushConstants(cmd, needle_pipeline_layout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(needle_pc), &needle_pc);
+    vkCmdDraw(cmd, 6, 1, 0, 0);
 
     vkCmdEndRenderPass(cmd);
 
@@ -1231,7 +1286,7 @@ int main(int argc, char* argv[]) {
     release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     release.srcQueueFamilyIndex = qf_index;
     release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
-    release.image = vk_image;
+    release.image = vk_images[back_index];
     release.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
@@ -1246,12 +1301,21 @@ int main(int argc, char* argv[]) {
     vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
-    // CPU-side overlay: just the moving needle + hub. Rim/face/ticks
-    // are baked into the Vulkan dial template above.
-    const double speedo_norm =
-        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_speedo_period_s);
-    if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
-      paint_needle_only(*m, dial_size, dial_size, speedo_norm);
+    // Show the buffer we just rendered into. Plane-alpha on this
+    // Tegra OVERLAY doesn't actually fade the plane to invisible
+    // (the user sees two ghosted gauges from both planes' contents
+    // composing), so instead we keep bg[1] (OVERLAY) on top via its
+    // zpos and move it ENTIRELY off-screen when we need bg[0]
+    // (PRIMARY) to show through. CRTC_X < 0 with the same width is
+    // the cleanest "fully clipped" off-screen position: the kernel
+    // clips it to zero visible columns.
+    if (auto* layer1 = scene->get_layer(bg_handles[1]); layer1 != nullptr) {
+      if (back_index == 1) {
+        layer1->set_dst_rect(drm::scene::Rect{0, 0, fb_w, fb_h});
+      } else {
+        layer1->set_dst_rect(drm::scene::Rect{
+            -static_cast<std::int32_t>(fb_w), 0, fb_w, fb_h});
+      }
     }
 
     if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
@@ -1260,6 +1324,7 @@ int main(int argc, char* argv[]) {
       break;
     }
     flip_pending = true;
+    back_index = 1 - back_index;
     ++frames;
   }
   drm::println(stderr, "cluster_sim_vulkan: {} frames in {}s", frames, args.seconds);
@@ -1275,6 +1340,10 @@ int main(int argc, char* argv[]) {
   }
 
   scene.reset();
+  vkDestroyPipeline(vk_device, needle_pipeline, nullptr);
+  vkDestroyPipelineLayout(vk_device, needle_pipeline_layout, nullptr);
+  vkDestroyShaderModule(vk_device, needle_frag, nullptr);
+  vkDestroyShaderModule(vk_device, needle_vert, nullptr);
   vkDestroyPipeline(vk_device, tex_pipeline, nullptr);
   vkDestroyPipelineLayout(vk_device, tex_pipeline_layout, nullptr);
   vkDestroyShaderModule(vk_device, tex_frag, nullptr);
@@ -1289,12 +1358,16 @@ int main(int argc, char* argv[]) {
   vkDestroyPipelineLayout(vk_device, pipeline_layout, nullptr);
   vkDestroyShaderModule(vk_device, bg_frag, nullptr);
   vkDestroyShaderModule(vk_device, bg_vert, nullptr);
-  vkDestroyFramebuffer(vk_device, framebuffer, nullptr);
-  vkDestroyImageView(vk_device, image_view, nullptr);
+  for (int i = 0; i < k_swap_count; ++i) {
+    vkDestroyFramebuffer(vk_device, framebuffers[i], nullptr);
+    vkDestroyImageView(vk_device, image_views[i], nullptr);
+  }
   vkDestroyRenderPass(vk_device, render_pass, nullptr);
   vkDestroyCommandPool(vk_device, cmd_pool, nullptr);
-  vkFreeMemory(vk_device, vk_mem, nullptr);
-  vkDestroyImage(vk_device, vk_image, nullptr);
+  for (int i = 0; i < k_swap_count; ++i) {
+    vkFreeMemory(vk_device, vk_mems[i], nullptr);
+    vkDestroyImage(vk_device, vk_images[i], nullptr);
+  }
   vkDestroyDevice(vk_device, nullptr);
   vkDestroyInstance(instance, nullptr);
   return EXIT_SUCCESS;

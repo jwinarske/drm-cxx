@@ -56,10 +56,23 @@ textured_frag_spv = custom_target('cluster_sim_vulkan_textured_frag_spv',
   command : [glslang_validator, '-V', '--vn', 'k_textured_frag_spv',
              '@INPUT@', '-o', '@OUTPUT@'],
 )
+needle_vert_spv = custom_target('cluster_sim_vulkan_needle_vert_spv',
+  input : 'shaders/needle.vert',
+  output : 'needle_vert_spv.h',
+  command : [glslang_validator, '-V', '--vn', 'k_needle_vert_spv',
+             '@INPUT@', '-o', '@OUTPUT@'],
+)
+needle_frag_spv = custom_target('cluster_sim_vulkan_needle_frag_spv',
+  input : 'shaders/needle.frag',
+  output : 'needle_frag_spv.h',
+  command : [glslang_validator, '-V', '--vn', 'k_needle_frag_spv',
+             '@INPUT@', '-o', '@OUTPUT@'],
+)
 
 executable('cluster_sim_vulkan',
   'main.cpp',
   bg_vert_spv, bg_frag_spv, textured_vert_spv, textured_frag_spv,
+  needle_vert_spv, needle_frag_spv,
   dependencies : [drm_cxx_dep, vk_dep, blend2d_dep],
   include_directories : [include_directories('..'),
                          include_directories('.')],
