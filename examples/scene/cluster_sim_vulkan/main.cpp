@@ -439,11 +439,17 @@ int main(int argc, char* argv[]) {
   qci.queueFamilyIndex = qf_index;
   qci.queueCount = 1;
   qci.pQueuePriorities = &qp;
-  const std::array<const char*, 4> dev_exts{
+  const std::array<const char*, 5> dev_exts{
       "VK_KHR_external_memory",
       "VK_KHR_external_memory_fd",
       "VK_EXT_external_memory_dma_buf",
       "VK_EXT_image_drm_format_modifier",
+      // Lets the end-of-frame barrier transfer queue-family ownership
+      // of the DMA-BUF image to VK_QUEUE_FAMILY_FOREIGN_EXT (the KMS
+      // scanout consumer), which on this Tegra driver is what
+      // actually flushes the color-attachment writes out of the
+      // GPU's cache so KMS sees them.
+      "VK_EXT_queue_family_foreign",
   };
   VkDeviceCreateInfo dci{};
   dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -460,10 +466,17 @@ int main(int argc, char* argv[]) {
   VkQueue queue = VK_NULL_HANDLE;
   vkGetDeviceQueue(vk_device, qf_index, 0, &queue);
 
-  // Vulkan-allocated DRM-modifier-LINEAR ARGB8888 image for the bg.
-  // Render pass needs COLOR_ATTACHMENT_BIT; TRANSFER_DST_BIT stays in
-  // the usage list as a guard (some drivers fold both in image-format
-  // queries on the DRM-modifier path).
+  // Single-buffered Vulkan-allocated DRM-modifier-LINEAR ARGB8888
+  // image for the bg + textured dial. KNOWN ISSUE: KMS continuously
+  // scans this buffer while Vulkan re-renders it each frame, so
+  // pixels near the top of the dial occasionally come from a partial
+  // mid-render write and produce a faint horizontal tear band. The
+  // proper fix is double-buffering, which requires two DMA-BUF
+  // planes — and on this Tegra CRTC the plane budget is one PRIMARY
+  // plus one OVERLAY (consumed by the CPU needle layer), so we can't
+  // fit both. Iteration 3+ moves the needle into Vulkan (an SDF
+  // shader on the same render pass) so the CPU OVERLAY can be
+  // dropped, freeing a plane for the second bg buffer.
   const std::uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   std::array<std::uint64_t, 1> modifiers{modifier};
   VkImageDrmFormatModifierListCreateInfoEXT drm_list{};
@@ -478,7 +491,7 @@ int main(int argc, char* argv[]) {
   iic.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   iic.pNext = &ext_img;
   iic.imageType = VK_IMAGE_TYPE_2D;
-  iic.format = VK_FORMAT_B8G8R8A8_UNORM;  // matches DRM_FORMAT_ARGB8888 byte order
+  iic.format = VK_FORMAT_B8G8R8A8_UNORM;
   iic.extent = {fb_w, fb_h, 1};
   iic.mipLevels = 1;
   iic.arrayLayers = 1;
@@ -506,17 +519,11 @@ int main(int argc, char* argv[]) {
   mai.memoryTypeIndex = find_memory_type(pd, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if (mai.memoryTypeIndex == 0xFFFFFFFFU) {
     drm::println(stderr, "no DEVICE_LOCAL memory type");
-    vkDestroyImage(vk_device, vk_image, nullptr);
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
     return EXIT_FAILURE;
   }
   VkDeviceMemory vk_mem = VK_NULL_HANDLE;
   if (vkAllocateMemory(vk_device, &mai, nullptr, &vk_mem) != VK_SUCCESS) {
     drm::println(stderr, "vkAllocateMemory failed");
-    vkDestroyImage(vk_device, vk_image, nullptr);
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
     return EXIT_FAILURE;
   }
   vkBindImageMemory(vk_device, vk_image, vk_mem, 0);
@@ -558,7 +565,7 @@ int main(int argc, char* argv[]) {
   bg_desc.source = std::move(*bg_source);
   bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  bg_desc.display.zpos = 0;  // Tegra-style affinity: 0 → PRIMARY
+  bg_desc.display.zpos = 0;
   if (auto r = scene->add_layer(std::move(bg_desc)); !r) {
     drm::println(stderr, "add_layer (Vulkan bg): {}", r.error().message());
     return EXIT_FAILURE;
@@ -614,15 +621,23 @@ int main(int argc, char* argv[]) {
   VkAttachmentReference color_ref{};
   color_ref.attachment = 0;
   color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-  VkSubpassDescription subpass{};
-  subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-  subpass.colorAttachmentCount = 1;
-  subpass.pColorAttachments = &color_ref;
-  // External dependency: defer writes until the previous frame's
-  // scanout reader has finished — important because the image is
-  // single-buffered and the DMA-BUF consumer (KMS) may still be reading
-  // when we record the next render.
-  std::array<VkSubpassDependency, 2> deps{};
+  // Two subpasses: bg writes the full attachment in subpass 0, then
+  // the textured-quad pipeline reads-modifies-writes it in subpass 1.
+  // Splitting the draws across subpasses with an explicit dependency
+  // forces the bg's color-attachment writes to be visible to the
+  // textured pipeline's blend reads — on this Tegra GPU's tile-based
+  // rasterizer, a single subpass leaves a stale-read window at the
+  // top of the dial.
+  std::array<VkSubpassDescription, 2> subpasses{};
+  subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  subpasses[0].colorAttachmentCount = 1;
+  subpasses[0].pColorAttachments = &color_ref;
+  subpasses[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  subpasses[1].colorAttachmentCount = 1;
+  subpasses[1].pColorAttachments = &color_ref;
+  std::array<VkSubpassDependency, 3> deps{};
+  // External -> subpass 0: defer writes until the previous frame's
+  // scanout reader has finished.
   deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
   deps[0].dstSubpass = 0;
   deps[0].srcStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
@@ -630,19 +645,31 @@ int main(int argc, char* argv[]) {
   deps[0].srcAccessMask = 0;
   deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
   deps[0].dependencyFlags = 0;
+  // Subpass 0 -> subpass 1: bg writes must be visible to textured's
+  // blend reads. BY_REGION because the textured pipeline only reads
+  // back the pixels it's about to write.
   deps[1].srcSubpass = 0;
-  deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+  deps[1].dstSubpass = 1;
   deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-  deps[1].dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+  deps[1].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
   deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-  deps[1].dstAccessMask = 0;
-  deps[1].dependencyFlags = 0;
+  deps[1].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  deps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+  // Subpass 1 -> external: release for the KMS scanout read.
+  deps[2].srcSubpass = 1;
+  deps[2].dstSubpass = VK_SUBPASS_EXTERNAL;
+  deps[2].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  deps[2].dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+  deps[2].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  deps[2].dstAccessMask = 0;
+  deps[2].dependencyFlags = 0;
   VkRenderPassCreateInfo rpci{};
   rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
   rpci.attachmentCount = 1;
   rpci.pAttachments = &attach;
-  rpci.subpassCount = 1;
-  rpci.pSubpasses = &subpass;
+  rpci.subpassCount = static_cast<std::uint32_t>(subpasses.size());
+  rpci.pSubpasses = subpasses.data();
   rpci.dependencyCount = static_cast<std::uint32_t>(deps.size());
   rpci.pDependencies = deps.data();
   VkRenderPass render_pass = VK_NULL_HANDLE;
@@ -664,7 +691,6 @@ int main(int argc, char* argv[]) {
     drm::println(stderr, "vkCreateImageView failed");
     return EXIT_FAILURE;
   }
-
   VkFramebufferCreateInfo fbci{};
   fbci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
   fbci.renderPass = render_pass;
@@ -806,7 +832,13 @@ int main(int argc, char* argv[]) {
   dial_ici.mipLevels = 1;
   dial_ici.arrayLayers = 1;
   dial_ici.samples = VK_SAMPLE_COUNT_1_BIT;
-  dial_ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+  // LINEAR (not OPTIMAL) tiling for the dial template: the texture is
+  // sampled once per fragment at 1:1 scale, so the tile-cache wins
+  // from OPTIMAL are small, and OPTIMAL at non-power-of-2 widths
+  // (e.g. 1440) on this Tegra driver appears to produce a dithered
+  // band at the top of the dial. LINEAR's row-major layout
+  // sidesteps it.
+  dial_ici.tiling = VK_IMAGE_TILING_LINEAR;
   dial_ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   dial_ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   dial_ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1077,7 +1109,7 @@ int main(int argc, char* argv[]) {
   tex_gpci.pColorBlendState = &tex_cb;
   tex_gpci.layout = tex_pipeline_layout;
   tex_gpci.renderPass = render_pass;
-  tex_gpci.subpass = 0;
+  tex_gpci.subpass = 1;
   VkPipeline tex_pipeline = VK_NULL_HANDLE;
   if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &tex_gpci, nullptr,
                                 &tex_pipeline) != VK_SUCCESS) {
@@ -1113,6 +1145,12 @@ int main(int argc, char* argv[]) {
 
   // Optional jitter capture, env-gated to match cluster_sim.
   const bool jitter_enabled = std::getenv("CLUSTER_SIM_FRAME_JITTER") != nullptr;
+  // Diagnostic: pin the needle to a fixed position so motion-correlated
+  // artifacts can be distinguished from static rendering artifacts.
+  const bool freeze_needle = std::getenv("CLUSTER_SIM_VULKAN_FREEZE_NEEDLE") != nullptr;
+  // Diagnostic: skip the textured-quad draw so only the bg gradient
+  // renders. Helps narrow down where rendering artifacts come from.
+  const bool skip_dial = std::getenv("CLUSTER_SIM_VULKAN_SKIP_DIAL") != nullptr;
   auto last_flip = clk::now();
   double max_dt_us = 0.0;
   double sum_dt_us = 0.0;
@@ -1159,21 +1197,46 @@ int main(int argc, char* argv[]) {
     rpbi.pClearValues = nullptr;
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Pass 1: bg radial gradient via full-screen triangle.
+    // Subpass 0: bg radial gradient via full-screen triangle.
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(bg_pc),
                        &bg_pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
-    // Pass 2: centered dial template alpha-blended over the bg.
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline_layout, 0, 1,
-                            &dset, 0, nullptr);
-    vkCmdPushConstants(cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(dial_pc),
-                       &dial_pc);
-    vkCmdDraw(cmd, 6, 1, 0, 0);
+    // Subpass 1: centered dial template alpha-blended over the bg.
+    vkCmdNextSubpass(cmd, VK_SUBPASS_CONTENTS_INLINE);
+    if (!skip_dial) {
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline_layout, 0, 1,
+                              &dset, 0, nullptr);
+      vkCmdPushConstants(cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(dial_pc),
+                         &dial_pc);
+      vkCmdDraw(cmd, 6, 1, 0, 0);
+    }
 
     vkCmdEndRenderPass(cmd);
+
+    // Release the image to the foreign queue family (the KMS scanout
+    // consumer). The subpass dependency above already ordered the
+    // color-attachment writes to BOTTOM_OF_PIPE, but on this Tegra
+    // driver that's not sufficient to make the writes visible to the
+    // display controller through the DMA-BUF view — without this
+    // explicit ownership transfer KMS occasionally scans out tiles
+    // that still have unflushed cache contents.
+    VkImageMemoryBarrier release{};
+    release.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    release.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    release.dstAccessMask = 0;
+    release.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    release.srcQueueFamilyIndex = qf_index;
+    release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
+    release.image = vk_image;
+    release.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &release);
+
     vkEndCommandBuffer(cmd);
 
     VkSubmitInfo si{};
@@ -1185,7 +1248,8 @@ int main(int argc, char* argv[]) {
 
     // CPU-side overlay: just the moving needle + hub. Rim/face/ticks
     // are baked into the Vulkan dial template above.
-    const double speedo_norm = dial_norm_from_phase(t / k_speedo_period_s);
+    const double speedo_norm =
+        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_speedo_period_s);
     if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
       paint_needle_only(*m, dial_size, dial_size, speedo_norm);
     }
