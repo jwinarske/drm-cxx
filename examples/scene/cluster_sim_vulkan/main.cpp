@@ -54,8 +54,10 @@
 #include "bg_frag_spv.h"        // k_bg_frag_spv
 #include "textured_vert_spv.h"  // k_textured_vert_spv
 #include "textured_frag_spv.h"  // k_textured_frag_spv
-#include "needle_vert_spv.h"    // k_needle_vert_spv
-#include "needle_frag_spv.h"    // k_needle_frag_spv
+#include "needle_vert_spv.h"     // k_needle_vert_spv
+#include "needle_frag_spv.h"     // k_needle_frag_spv
+#include "tex_array_vert_spv.h"  // k_tex_array_vert_spv
+#include "tex_array_frag_spv.h"  // k_tex_array_frag_spv
 
 // Blend2D umbrella: <blend2d/blend2d.h> on most distros, <blend2d.h>
 // in older drops; cover both like cluster_sim does.
@@ -95,6 +97,42 @@ constexpr double k_dial_start_angle = 3.0 * k_pi / 4.0;
 constexpr double k_dial_sweep_angle = 3.0 * k_pi / 2.0;
 constexpr double k_speedo_period_s = 6.0;
 constexpr double k_tach_period_s = 4.0;
+
+// Info-text geometry — matches cluster_sim's k_info_w / k_info_h /
+// k_info_speed_max_kmh. Each layer in the info texture array is one
+// pre-rendered "<speed> km/h" template; the runtime pushes the
+// current speed as the layer index.
+constexpr std::uint32_t k_info_w = 320U;
+constexpr std::uint32_t k_info_h = 140U;
+constexpr std::uint32_t k_info_speed_max_kmh = 240U;
+constexpr std::uint32_t k_info_layer_count = k_info_speed_max_kmh + 1U;
+constexpr float k_info_speed_font_px = 96.0F;
+constexpr float k_info_unit_font_px = 22.0F;
+constexpr std::uint32_t k_info_text_argb = 0xFFE6E8EEU;
+constexpr std::uint32_t k_info_unit_argb = 0xFF7C8090U;
+
+// Warning-cell geometry — matches cluster_sim. 4 cells along the
+// bottom, each with a lit and dim variant (8 templates total).
+constexpr std::uint32_t k_warn_w = 400U;
+constexpr std::uint32_t k_warn_h = 80U;
+constexpr int k_warn_count = 4;
+constexpr std::uint32_t k_warn_layer_count = k_warn_count * 2;
+constexpr float k_warn_glyph_font_px = 36.0F;
+constexpr std::uint32_t k_warn_dim_argb = 0xFF14181FU;
+constexpr std::uint32_t k_warn_glyph_dim_argb = 0xFF38404CU;
+constexpr std::uint32_t k_warn_cell_radius = 12U;
+
+struct WarningSpec {
+  const char* glyph;
+  std::uint32_t lit_argb;
+  std::uint32_t glyph_lit_argb;
+};
+constexpr std::array<WarningSpec, k_warn_count> k_warn_specs{{
+    {"!", 0xFFB02A1AU, 0xFFFFE0D0U},  // brake / generic alert (red)
+    {"E", 0xFFD08A1FU, 0xFFFFEFC0U},  // engine (amber)
+    {"O", 0xFFB02A1AU, 0xFFFFE0D0U},  // oil
+    {"H", 0xFFD08A1FU, 0xFFFFEFC0U},  // high-beam (amber)
+}};
 
 struct Args {
   int seconds{k_default_seconds};
@@ -261,6 +299,123 @@ void paint_dial_template(std::uint8_t* pixels, std::uint32_t dial_size) noexcept
   ctx.end();
 }
 
+// Try a handful of well-known Linux font paths in priority order.
+// Mirrors cluster_sim's load_default_font_face: returns
+// BL_ERROR_FONT_NOT_INITIALIZED when none of the candidates exist on
+// this host (callers fall back to shape-less output).
+[[nodiscard]] BLResult load_default_font_face(BLFontFace& face) noexcept {
+  static constexpr std::array<const char*, 10> k_candidates = {
+      "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+      "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+      "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+      "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+      "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf",
+      "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+      "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+      "/usr/share/fonts/google-noto/NotoSans-Bold.ttf",
+      "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+      "/usr/share/fonts/TTF/Vera.ttf",
+  };
+  for (const char* path : k_candidates) {
+    if (face.create_from_file(path) == BL_SUCCESS) {
+      return BL_SUCCESS;
+    }
+  }
+  return BL_ERROR_FONT_NOT_INITIALIZED;
+}
+
+void paint_centered_text(BLContext& ctx, BLFont& font, std::string_view text, double cx,
+                         double cy_baseline, std::uint32_t argb) noexcept {
+  if (text.empty()) {
+    return;
+  }
+  BLGlyphBuffer gb;
+  gb.set_utf8_text(text.data(), text.size());
+  if (font.shape(gb) != BL_SUCCESS) {
+    return;
+  }
+  BLTextMetrics tm{};
+  if (font.get_text_metrics(gb, tm) != BL_SUCCESS) {
+    return;
+  }
+  double const text_w = tm.bounding_box.x1 - tm.bounding_box.x0;
+  double const x = cx - (text_w * 0.5) - tm.bounding_box.x0;
+  ctx.fill_utf8_text(BLPoint(x, cy_baseline), font, text.data(), text.size(), BLRgba32(argb));
+}
+
+// Paint one layer of the info-text texture array: a k_info_w x k_info_h
+// transparent buffer with the speed digit string + "km/h" label
+// painted on top. Caller fills 241 such layers (speed_kmh = 0..240) at
+// startup.
+void paint_center_info_template(std::uint8_t* template_pixels, std::uint32_t speed_kmh,
+                                const BLFontFace& font_face) noexcept {
+  if (template_pixels == nullptr) {
+    return;
+  }
+  BLImage canvas;
+  if (canvas.create_from_data(static_cast<int>(k_info_w), static_cast<int>(k_info_h),
+                              BL_FORMAT_PRGB32, template_pixels,
+                              static_cast<intptr_t>(k_info_w) * 4, BL_DATA_ACCESS_RW,
+                              nullptr, nullptr) != BL_SUCCESS) {
+    return;
+  }
+  BLContext ctx(canvas);
+  ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
+  ctx.fill_all(BLRgba32(0x00000000U));
+  if (!font_face.is_valid()) {
+    ctx.end();
+    return;
+  }
+  ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
+  std::string const speed_text = std::to_string(std::clamp<std::uint32_t>(speed_kmh, 0, 999));
+  BLFont speed_font;
+  if (speed_font.create_from_face(font_face, k_info_speed_font_px) == BL_SUCCESS) {
+    paint_centered_text(ctx, speed_font, speed_text, static_cast<double>(k_info_w) * 0.5,
+                        static_cast<double>(k_info_h) * 0.72, k_info_text_argb);
+  }
+  BLFont unit_font;
+  if (unit_font.create_from_face(font_face, k_info_unit_font_px) == BL_SUCCESS) {
+    paint_centered_text(ctx, unit_font, "km/h", static_cast<double>(k_info_w) * 0.5,
+                        static_cast<double>(k_info_h) * 0.95, k_info_unit_argb);
+  }
+  ctx.end();
+}
+
+// Paint one layer of the warning-cell texture array: a rounded-rect
+// cell with a centered glyph. Caller fills 2 * k_warn_count = 8
+// layers at startup (per-cell lit + dim variants).
+void paint_warning_cell_template(std::uint8_t* template_pixels, std::uint32_t cell_argb,
+                                 std::uint32_t glyph_argb, std::string_view glyph,
+                                 const BLFontFace& font_face) noexcept {
+  if (template_pixels == nullptr) {
+    return;
+  }
+  BLImage canvas;
+  if (canvas.create_from_data(static_cast<int>(k_warn_w), static_cast<int>(k_warn_h),
+                              BL_FORMAT_PRGB32, template_pixels,
+                              static_cast<intptr_t>(k_warn_w) * 4, BL_DATA_ACCESS_RW,
+                              nullptr, nullptr) != BL_SUCCESS) {
+    return;
+  }
+  BLContext ctx(canvas);
+  ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
+  ctx.fill_all(BLRgba32(0x00000000U));
+  ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
+  constexpr double k_inner_pad = 4.0;
+  double const w = static_cast<double>(k_warn_w) - (2.0 * k_inner_pad);
+  double const h = static_cast<double>(k_warn_h) - (2.0 * k_inner_pad);
+  ctx.fill_round_rect(BLRoundRect(k_inner_pad, k_inner_pad, w, h, k_warn_cell_radius),
+                      BLRgba32(cell_argb));
+  BLFont glyph_font;
+  if (font_face.is_valid() &&
+      glyph_font.create_from_face(font_face, k_warn_glyph_font_px) == BL_SUCCESS) {
+    double const cx = k_inner_pad + (w * 0.5);
+    double const cy_baseline = k_inner_pad + (h * 0.7);
+    paint_centered_text(ctx, glyph_font, std::string(glyph), cx, cy_baseline, glyph_argb);
+  }
+  ctx.end();
+}
+
 [[nodiscard]] VkShaderModule make_shader_module(VkDevice dev, const std::uint32_t* code,
                                                 std::size_t code_bytes) {
   VkShaderModuleCreateInfo info{};
@@ -381,6 +536,24 @@ struct NeedlePushConstants {
   float r_needle;
   float r_hub;
   float half_thickness;
+};
+
+// Push-constant block for the sampler2DArray (info / warn) pipeline.
+// dst + uv match the textured-quad pipeline; layer_info.x is the
+// array layer the fragment shader samples. 48 bytes.
+struct TexArrayPushConstants {
+  float dst_x0;
+  float dst_y0;
+  float dst_x1;
+  float dst_y1;
+  float uv_x0;
+  float uv_y0;
+  float uv_x1;
+  float uv_y1;
+  std::int32_t layer;
+  std::int32_t pad0;
+  std::int32_t pad1;
+  std::int32_t pad2;
 };
 
 // Pixel rectangle → NDC. Vulkan NDC y is +1 at the bottom and -1 at
@@ -691,16 +864,25 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Speedo + tach laid out side by side, each occupying half the
-  // framebuffer width. Both dials share the same Blend2D-painted
-  // dial template texture; the textured + needle pipelines just
-  // push different dst rects (and needle angle / color) per draw.
-  const std::uint32_t dial_size = std::min(fb_w / 2U, fb_h);
-  const std::int32_t speedo_x =
-      static_cast<std::int32_t>((fb_w / 2U - dial_size) / 2U);
-  const std::int32_t tach_x =
-      static_cast<std::int32_t>(fb_w / 2U + ((fb_w / 2U - dial_size) / 2U));
+  // Layout matches cluster_sim: dials capped at 400 px (or 4/9 of
+  // fb_h, whichever is smaller), centered in their left/right halves;
+  // the info readout floats in the middle column (overlapping the
+  // dial centers vertically); the 4 warning cells sit 40 px below
+  // the dials.
+  const std::uint32_t dial_size = std::min<std::uint32_t>(fb_h * 4U / 9U, 400U);
   const std::int32_t dial_y = static_cast<std::int32_t>((fb_h - dial_size) / 2U);
+  const std::int32_t speedo_x =
+      static_cast<std::int32_t>(fb_w / 4U) - static_cast<std::int32_t>(dial_size / 2U);
+  const std::int32_t tach_x =
+      static_cast<std::int32_t>((fb_w * 3U) / 4U) - static_cast<std::int32_t>(dial_size / 2U);
+  const std::int32_t info_x =
+      static_cast<std::int32_t>(fb_w / 2U) - static_cast<std::int32_t>(k_info_w / 2U);
+  const std::int32_t info_y = dial_y + static_cast<std::int32_t>(dial_size / 2U) -
+                              static_cast<std::int32_t>(k_info_h / 2U);
+  const std::int32_t warn_strip_w = static_cast<std::int32_t>(k_warn_w) * k_warn_count;
+  const std::int32_t warn_x0 =
+      static_cast<std::int32_t>(fb_w / 2U) - (warn_strip_w / 2);
+  const std::int32_t warn_y = dial_y + static_cast<std::int32_t>(dial_size) + 40;
 
   // -------- Vulkan render-pass plumbing (bg pipeline) -----------------
   // Single color attachment, format matches the image (B8G8R8A8_UNORM).
@@ -1106,12 +1288,15 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
+  // Pool sized for three sets: dial (sampler2D), info-text array
+  // (sampler2DArray, 241 layers), warn-cell array (sampler2DArray,
+  // 8 layers). One combined-image-sampler descriptor per set.
   VkDescriptorPoolSize dps{};
   dps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-  dps.descriptorCount = 1;
+  dps.descriptorCount = 3;
   VkDescriptorPoolCreateInfo dpci{};
   dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-  dpci.maxSets = 1;
+  dpci.maxSets = 3;
   dpci.poolSizeCount = 1;
   dpci.pPoolSizes = &dps;
   VkDescriptorPool dpool = VK_NULL_HANDLE;
@@ -1141,6 +1326,250 @@ int main(int argc, char* argv[]) {
   wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
   wds.pImageInfo = &dii;
   vkUpdateDescriptorSets(vk_device, 1, &wds, 0, nullptr);
+
+  // -------- Info-text + warn-cell texture arrays ---------------------
+  // 241 info-text templates (0..240 km/h, k_info_w x k_info_h each) and
+  // 8 warn-cell templates (4 cells x lit/dim, k_warn_w x k_warn_h each)
+  // get Blend2D-painted into staging buffers and uploaded into two
+  // 2D-array VkImages. A single shared sampler2DArray pipeline samples
+  // both at runtime; the runtime pushes layer = current_speed_kmh for
+  // the info quad and layer = cell*2 + lit ? 0 : 1 for each warn cell.
+
+  BLFontFace font_face;
+  if (load_default_font_face(font_face) != BL_SUCCESS) {
+    drm::println(stderr,
+                 "cluster_sim_vulkan: warning — no system font found, info/warn templates "
+                 "will be blank rectangles");
+  }
+
+  auto make_array_image = [&](std::uint32_t w, std::uint32_t h, std::uint32_t layers,
+                              VkImage& img, VkDeviceMemory& mem) -> bool {
+    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_B8G8R8A8_UNORM;
+    ici.extent = {w, h, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = layers;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(vk_device, &ici, nullptr, &img) != VK_SUCCESS) {
+      return false;
+    }
+    VkMemoryRequirements mr{};
+    vkGetImageMemoryRequirements(vk_device, img, &mr);
+    VkMemoryAllocateInfo mai{};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex =
+        find_memory_type(pd, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(vk_device, &mai, nullptr, &mem) != VK_SUCCESS) {
+      return false;
+    }
+    vkBindImageMemory(vk_device, img, mem, 0);
+    return true;
+  };
+
+  VkImage info_image = VK_NULL_HANDLE;
+  VkDeviceMemory info_mem = VK_NULL_HANDLE;
+  if (!make_array_image(k_info_w, k_info_h, k_info_layer_count, info_image, info_mem)) {
+    drm::println(stderr, "info texture array create failed");
+    return EXIT_FAILURE;
+  }
+  VkImage warn_image = VK_NULL_HANDLE;
+  VkDeviceMemory warn_mem = VK_NULL_HANDLE;
+  if (!make_array_image(k_warn_w, k_warn_h, k_warn_layer_count, warn_image, warn_mem)) {
+    drm::println(stderr, "warn texture array create failed");
+    return EXIT_FAILURE;
+  }
+
+  // Staging buffer big enough for the info array + warn array.
+  // Layered images are tightly packed in staging: layer N's pixels
+  // start at offset (info_bytes_per_layer * N), then warn array
+  // follows the info data.
+  const VkDeviceSize info_layer_bytes =
+      static_cast<VkDeviceSize>(k_info_w) * k_info_h * 4U;
+  const VkDeviceSize warn_layer_bytes =
+      static_cast<VkDeviceSize>(k_warn_w) * k_warn_h * 4U;
+  const VkDeviceSize info_bytes = info_layer_bytes * k_info_layer_count;
+  const VkDeviceSize warn_bytes = warn_layer_bytes * k_warn_layer_count;
+  const VkDeviceSize array_staging_bytes = info_bytes + warn_bytes;
+
+  VkBufferCreateInfo astg_bci{};
+  astg_bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  astg_bci.size = array_staging_bytes;
+  astg_bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  astg_bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VkBuffer array_staging_buf = VK_NULL_HANDLE;
+  if (vkCreateBuffer(vk_device, &astg_bci, nullptr, &array_staging_buf) != VK_SUCCESS) {
+    drm::println(stderr, "vkCreateBuffer (info+warn staging) failed");
+    return EXIT_FAILURE;
+  }
+  VkMemoryRequirements astg_mr{};
+  vkGetBufferMemoryRequirements(vk_device, array_staging_buf, &astg_mr);
+  VkMemoryAllocateInfo astg_mai{};
+  astg_mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  astg_mai.allocationSize = astg_mr.size;
+  astg_mai.memoryTypeIndex = find_memory_type(
+      pd, astg_mr.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  VkDeviceMemory array_staging_mem = VK_NULL_HANDLE;
+  if (vkAllocateMemory(vk_device, &astg_mai, nullptr, &array_staging_mem) != VK_SUCCESS) {
+    drm::println(stderr, "vkAllocateMemory (info+warn staging) failed");
+    return EXIT_FAILURE;
+  }
+  vkBindBufferMemory(vk_device, array_staging_buf, array_staging_mem, 0);
+
+  void* astg_ptr = nullptr;
+  vkMapMemory(vk_device, array_staging_mem, 0, array_staging_bytes, 0, &astg_ptr);
+  std::memset(astg_ptr, 0, static_cast<std::size_t>(array_staging_bytes));
+  // Info layers: speed_kmh = 0..240.
+  for (std::uint32_t i = 0; i < k_info_layer_count; ++i) {
+    auto* layer_ptr = static_cast<std::uint8_t*>(astg_ptr) +
+                      static_cast<std::size_t>(info_layer_bytes) * i;
+    paint_center_info_template(layer_ptr, i, font_face);
+  }
+  // Warn layers: per cell, lit first then dim.
+  for (int cell = 0; cell < k_warn_count; ++cell) {
+    const auto& spec = k_warn_specs[static_cast<std::size_t>(cell)];
+    auto* lit_ptr = static_cast<std::uint8_t*>(astg_ptr) + static_cast<std::size_t>(info_bytes) +
+                    static_cast<std::size_t>(warn_layer_bytes) * (cell * 2);
+    auto* dim_ptr = static_cast<std::uint8_t*>(astg_ptr) + static_cast<std::size_t>(info_bytes) +
+                    static_cast<std::size_t>(warn_layer_bytes) * ((cell * 2) + 1);
+    paint_warning_cell_template(lit_ptr, spec.lit_argb, spec.glyph_lit_argb, spec.glyph, font_face);
+    paint_warning_cell_template(dim_ptr, k_warn_dim_argb, k_warn_glyph_dim_argb, spec.glyph,
+                                font_face);
+  }
+  vkUnmapMemory(vk_device, array_staging_mem);
+
+  // One-shot upload command buffer for both arrays.
+  {
+    VkCommandBufferBeginInfo upload_cbi{};
+    upload_cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    upload_cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &upload_cbi);
+
+    auto barrier_to = [&](VkImage img, std::uint32_t layers, VkImageLayout old_layout,
+                          VkImageLayout new_layout, VkAccessFlags src_access,
+                          VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
+                          VkPipelineStageFlags dst_stage) {
+      VkImageMemoryBarrier b{};
+      b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+      b.oldLayout = old_layout;
+      b.newLayout = new_layout;
+      b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      b.image = img;
+      b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+      b.srcAccessMask = src_access;
+      b.dstAccessMask = dst_access;
+      vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+
+    barrier_to(info_image, k_info_layer_count, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    barrier_to(warn_image, k_warn_layer_count, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    std::vector<VkBufferImageCopy> info_regions(k_info_layer_count);
+    for (std::uint32_t i = 0; i < k_info_layer_count; ++i) {
+      info_regions[i].bufferOffset = info_layer_bytes * i;
+      info_regions[i].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, i, 1};
+      info_regions[i].imageExtent = {k_info_w, k_info_h, 1};
+    }
+    vkCmdCopyBufferToImage(cmd, array_staging_buf, info_image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<std::uint32_t>(info_regions.size()), info_regions.data());
+
+    std::vector<VkBufferImageCopy> warn_regions(k_warn_layer_count);
+    for (std::uint32_t i = 0; i < k_warn_layer_count; ++i) {
+      warn_regions[i].bufferOffset = info_bytes + warn_layer_bytes * i;
+      warn_regions[i].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, i, 1};
+      warn_regions[i].imageExtent = {k_warn_w, k_warn_h, 1};
+    }
+    vkCmdCopyBufferToImage(cmd, array_staging_buf, warn_image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<std::uint32_t>(warn_regions.size()), warn_regions.data());
+
+    barrier_to(info_image, k_info_layer_count, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    barrier_to(warn_image, k_warn_layer_count, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+  }
+  vkDestroyBuffer(vk_device, array_staging_buf, nullptr);
+  vkFreeMemory(vk_device, array_staging_mem, nullptr);
+
+  auto make_array_view = [&](VkImage img, std::uint32_t layers) -> VkImageView {
+    VkImageViewCreateInfo ivci{};
+    ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ivci.image = img;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    ivci.format = VK_FORMAT_B8G8R8A8_UNORM;
+    ivci.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+    ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+    VkImageView v = VK_NULL_HANDLE;
+    if (vkCreateImageView(vk_device, &ivci, nullptr, &v) != VK_SUCCESS) {
+      return VK_NULL_HANDLE;
+    }
+    return v;
+  };
+  VkImageView info_view = make_array_view(info_image, k_info_layer_count);
+  VkImageView warn_view = make_array_view(warn_image, k_warn_layer_count);
+  if (info_view == VK_NULL_HANDLE || warn_view == VK_NULL_HANDLE) {
+    drm::println(stderr, "vkCreateImageView (info/warn array) failed");
+    return EXIT_FAILURE;
+  }
+
+  // Allocate info + warn descriptor sets from the pool (the dial set
+  // was allocated above; pool was sized for three sets total).
+  auto alloc_array_set = [&](VkImageView view) -> VkDescriptorSet {
+    VkDescriptorSetAllocateInfo a{};
+    a.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    a.descriptorPool = dpool;
+    a.descriptorSetCount = 1;
+    a.pSetLayouts = &dsl;
+    VkDescriptorSet s = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(vk_device, &a, &s) != VK_SUCCESS) {
+      return VK_NULL_HANDLE;
+    }
+    VkDescriptorImageInfo dii_arr{};
+    dii_arr.sampler = dial_sampler;
+    dii_arr.imageView = view;
+    dii_arr.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{};
+    w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.dstSet = s;
+    w.dstBinding = 0;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii_arr;
+    vkUpdateDescriptorSets(vk_device, 1, &w, 0, nullptr);
+    return s;
+  };
+  VkDescriptorSet info_dset = alloc_array_set(info_view);
+  VkDescriptorSet warn_dset = alloc_array_set(warn_view);
+  if (info_dset == VK_NULL_HANDLE || warn_dset == VK_NULL_HANDLE) {
+    drm::println(stderr, "vkAllocateDescriptorSets (info/warn) failed");
+    return EXIT_FAILURE;
+  }
 
   // Textured shader modules.
   VkShaderModule tex_vert = make_shader_module(vk_device, k_textured_vert_spv,
@@ -1297,6 +1726,82 @@ int main(int argc, char* argv[]) {
   constexpr float k_r_hub_norm = 0.12F;
   constexpr float k_half_thickness_norm = 0.008F;
 
+  // ----- Texture-array pipeline (info text + warn cells) -----------
+  // Single graphics pipeline; the runtime swaps which descriptor set
+  // is bound (info vs warn) and pushes the layer index per draw.
+  VkShaderModule tex_array_vert = make_shader_module(
+      vk_device, k_tex_array_vert_spv, sizeof(k_tex_array_vert_spv));
+  VkShaderModule tex_array_frag = make_shader_module(
+      vk_device, k_tex_array_frag_spv, sizeof(k_tex_array_frag_spv));
+  if (tex_array_vert == VK_NULL_HANDLE || tex_array_frag == VK_NULL_HANDLE) {
+    drm::println(stderr, "vkCreateShaderModule (tex_array) failed");
+    return EXIT_FAILURE;
+  }
+  VkPushConstantRange ta_pcr{};
+  ta_pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  ta_pcr.offset = 0;
+  ta_pcr.size = sizeof(TexArrayPushConstants);
+  VkPipelineLayoutCreateInfo ta_plci{};
+  ta_plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  ta_plci.setLayoutCount = 1;
+  ta_plci.pSetLayouts = &dsl;
+  ta_plci.pushConstantRangeCount = 1;
+  ta_plci.pPushConstantRanges = &ta_pcr;
+  VkPipelineLayout tex_array_pipeline_layout = VK_NULL_HANDLE;
+  if (vkCreatePipelineLayout(vk_device, &ta_plci, nullptr, &tex_array_pipeline_layout) !=
+      VK_SUCCESS) {
+    drm::println(stderr, "vkCreatePipelineLayout (tex_array) failed");
+    return EXIT_FAILURE;
+  }
+  std::array<VkPipelineShaderStageCreateInfo, 2> ta_stages{};
+  ta_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  ta_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  ta_stages[0].module = tex_array_vert;
+  ta_stages[0].pName = "main";
+  ta_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  ta_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  ta_stages[1].module = tex_array_frag;
+  ta_stages[1].pName = "main";
+  VkGraphicsPipelineCreateInfo ta_gpci{};
+  ta_gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  ta_gpci.stageCount = static_cast<std::uint32_t>(ta_stages.size());
+  ta_gpci.pStages = ta_stages.data();
+  ta_gpci.pVertexInputState = &vi;
+  ta_gpci.pInputAssemblyState = &ia;
+  ta_gpci.pViewportState = &vp;
+  ta_gpci.pRasterizationState = &rs;
+  ta_gpci.pMultisampleState = &ms;
+  ta_gpci.pColorBlendState = &tex_cb;  // premultiplied alpha, same as textured / needle
+  ta_gpci.layout = tex_array_pipeline_layout;
+  ta_gpci.renderPass = render_pass;
+  ta_gpci.subpass = 1;
+  VkPipeline tex_array_pipeline = VK_NULL_HANDLE;
+  if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &ta_gpci, nullptr,
+                                &tex_array_pipeline) != VK_SUCCESS) {
+    drm::println(stderr, "vkCreateGraphicsPipelines (tex_array) failed");
+    return EXIT_FAILURE;
+  }
+
+  // Pre-computed dst rects for the info readout + warn cells.
+  const TexArrayPushConstants info_pc{
+      make_quad_pc(info_x, info_y, k_info_w, k_info_h, fb_w, fb_h).dst_x0,
+      make_quad_pc(info_x, info_y, k_info_w, k_info_h, fb_w, fb_h).dst_y0,
+      make_quad_pc(info_x, info_y, k_info_w, k_info_h, fb_w, fb_h).dst_x1,
+      make_quad_pc(info_x, info_y, k_info_w, k_info_h, fb_w, fb_h).dst_y1,
+      0.0F, 0.0F, 1.0F, 1.0F,
+      0, 0, 0, 0,
+  };
+  std::array<TexArrayPushConstants, k_warn_count> warn_pcs{};
+  for (int cell = 0; cell < k_warn_count; ++cell) {
+    const std::int32_t cx0 = warn_x0 + (cell * static_cast<std::int32_t>(k_warn_w));
+    const auto q = make_quad_pc(cx0, warn_y, k_warn_w, k_warn_h, fb_w, fb_h);
+    warn_pcs[static_cast<std::size_t>(cell)] = TexArrayPushConstants{
+        q.dst_x0, q.dst_y0, q.dst_x1, q.dst_y1,
+        0.0F, 0.0F, 1.0F, 1.0F,
+        0, 0, 0, 0,  // layer filled per-frame
+    };
+  }
+
   drm::PageFlip page_flip(device);
   bool flip_pending = false;
   page_flip.set_handler([&](std::uint32_t, std::uint64_t, std::uint64_t) {
@@ -1431,6 +1936,41 @@ int main(int argc, char* argv[]) {
                        sizeof(tach_needle_pc), &tach_needle_pc);
     vkCmdDraw(cmd, 6, 1, 0, 0);
 
+    // Info readout: current speed-derived layer index into the
+    // 241-layer info texture array, drawn between the dials.
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_array_pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_array_pipeline_layout, 0,
+                            1, &info_dset, 0, nullptr);
+    {
+      const std::uint32_t speed_kmh = static_cast<std::uint32_t>(
+          std::clamp(speedo_norm * static_cast<double>(k_info_speed_max_kmh), 0.0,
+                     static_cast<double>(k_info_speed_max_kmh)) +
+          0.5);
+      TexArrayPushConstants pc = info_pc;
+      pc.layer = static_cast<std::int32_t>(
+          std::min<std::uint32_t>(speed_kmh, k_info_layer_count - 1U));
+      vkCmdPushConstants(cmd, tex_array_pipeline_layout,
+                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                         sizeof(pc), &pc);
+      vkCmdDraw(cmd, 6, 1, 0, 0);
+    }
+
+    // Warn cells: each cell's "lit" state cycles on a 1-Hz schedule
+    // offset per-cell so something is always changing — the texture
+    // array layer = (cell * 2) for lit, (cell * 2) + 1 for dim.
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_array_pipeline_layout, 0,
+                            1, &warn_dset, 0, nullptr);
+    for (int cell = 0; cell < k_warn_count; ++cell) {
+      const double phase = t + (cell * 0.37);
+      const bool lit = (static_cast<int>(std::floor(phase)) & 1) == 0;
+      TexArrayPushConstants pc = warn_pcs[static_cast<std::size_t>(cell)];
+      pc.layer = static_cast<std::int32_t>((cell * 2) + (lit ? 0 : 1));
+      vkCmdPushConstants(cmd, tex_array_pipeline_layout,
+                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                         sizeof(pc), &pc);
+      vkCmdDraw(cmd, 6, 1, 0, 0);
+    }
+
     vkCmdEndRenderPass(cmd);
 
     // Release the image to the foreign queue family (the KMS scanout
@@ -1489,6 +2029,16 @@ int main(int argc, char* argv[]) {
   }
 
   scene.reset();
+  vkDestroyPipeline(vk_device, tex_array_pipeline, nullptr);
+  vkDestroyPipelineLayout(vk_device, tex_array_pipeline_layout, nullptr);
+  vkDestroyShaderModule(vk_device, tex_array_frag, nullptr);
+  vkDestroyShaderModule(vk_device, tex_array_vert, nullptr);
+  vkDestroyImageView(vk_device, warn_view, nullptr);
+  vkDestroyImageView(vk_device, info_view, nullptr);
+  vkFreeMemory(vk_device, warn_mem, nullptr);
+  vkDestroyImage(vk_device, warn_image, nullptr);
+  vkFreeMemory(vk_device, info_mem, nullptr);
+  vkDestroyImage(vk_device, info_image, nullptr);
   vkDestroyPipeline(vk_device, needle_pipeline, nullptr);
   vkDestroyPipelineLayout(vk_device, needle_pipeline_layout, nullptr);
   vkDestroyShaderModule(vk_device, needle_frag, nullptr);
