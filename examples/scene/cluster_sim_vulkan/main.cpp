@@ -250,6 +250,30 @@ void on_sigint(int /*signo*/) noexcept { g_quit.store(true, std::memory_order_re
   return 0.5 * (1.0 - std::cos(2.0 * k_pi * phase01));
 }
 
+// Engine-revving curve for the tach: quadratic acceleration to
+// redline through the first 85% of the period, then a quick snap
+// back to idle over the last 15% — reads as "rev up, shift, drop."
+// Distinct from the speedo's smooth cosine so the two dials never
+// feel synchronized.
+[[nodiscard]] double tach_revs_from_phase(double phase01) noexcept {
+  double const wrapped = phase01 - std::floor(phase01);
+  if (wrapped < 0.85) {
+    double const t = wrapped / 0.85;
+    return std::clamp(t * t, 0.0, 1.0);
+  }
+  double const t = (wrapped - 0.85) / 0.15;
+  return std::clamp(1.0 - t, 0.0, 1.0);
+}
+
+// Self-test triangle sweep used during the first k_startup_sweep_s
+// seconds after launch: 0 -> 1 -> 0 over the duration. Mimics the
+// instrument-cluster "wake-up animation" real cars do.
+constexpr double k_startup_sweep_s = 2.0;
+[[nodiscard]] double startup_sweep_norm(double t_sec) noexcept {
+  double const phase = std::clamp(t_sec / k_startup_sweep_s, 0.0, 1.0);
+  return 1.0 - std::abs((phase * 2.0) - 1.0);
+}
+
 // Paint the static parts of a dial — rim + face + ticks — into a
 // dial_size × dial_size buffer. Pixel format is PRGB32 (premultiplied
 // BGRA bytes), which lines up with VK_FORMAT_B8G8R8A8_UNORM when the
@@ -1963,11 +1987,24 @@ int main(int argc, char* argv[]) {
     // matching SDF needles + hubs on top of each.
     vkCmdNextSubpass(cmd, VK_SUBPASS_CONTENTS_INLINE);
     // Sweep values are needed by dial_fx (redline intensity) and the
-    // needle pipeline (angle), so compute them up front.
-    const double speedo_norm =
-        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_speedo_period_s);
-    const double tach_norm =
-        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_tach_period_s);
+    // needle pipeline (angle), so compute them up front. The first
+    // k_startup_sweep_s seconds both needles do a "self-test" 0→1→0
+    // triangle ramp; after that the speedo uses its smooth cosine
+    // and the tach uses an engine-rev curve.
+    double speedo_norm;
+    double tach_norm;
+    if (freeze_needle) {
+      speedo_norm = 0.0;
+      tach_norm = 0.0;
+    } else if (t < k_startup_sweep_s) {
+      const double s = startup_sweep_norm(t);
+      speedo_norm = s;
+      tach_norm = s;
+    } else {
+      const double t_anim = t - k_startup_sweep_s;
+      speedo_norm = dial_norm_from_phase(t_anim / k_speedo_period_s);
+      tach_norm = tach_revs_from_phase(t_anim / k_tach_period_s);
+    }
     const float speedo_angle = static_cast<float>(
         k_dial_start_angle + (std::clamp(speedo_norm, 0.0, 1.0) * k_dial_sweep_angle));
     const float tach_angle = static_cast<float>(

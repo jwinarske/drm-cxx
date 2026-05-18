@@ -77,6 +77,31 @@ void main() {
   float final_alpha = clamp(solid_alpha + glow_alpha, 0.0, 1.0);
   vec3 final_rgb = (solid_rgb * solid_alpha) + (glow_rgb * glow_alpha);
 
+  // Sector glow: a soft wedge of needle-tinted light inside the
+  // dial face, centered on the needle's angle. Reads as "the needle
+  // illuminates the dial in the direction it points." Falls off
+  // angularly (Gaussian in delta-θ) and radially (only inside the
+  // face, fading away from the rim toward the hub).
+  const float k_face_inner = 0.84;
+  if (length(p) < k_face_inner) {
+    float theta = atan(p.y, p.x);
+    float delta = theta - pc.angle;
+    const float two_pi = 6.2831853;
+    delta = mod(delta + 3.1415927, two_pi) - 3.1415927;
+    float ang = abs(delta);
+    // Sigma=0.35 rad ≈ 20°; sector roughly spans the nearest 2-3
+    // tick marks of the cluster_sim 22.5°-step layout.
+    float sector_a = exp(-(ang * ang) / (2.0 * 0.35 * 0.35));
+    // Radial weight: brightest near the rim (r ≈ k_face_inner),
+    // tapering toward the center so the hub stays clean.
+    float radial = clamp((length(p) - 0.30) / (k_face_inner - 0.30), 0.0, 1.0);
+    float sector_alpha = sector_a * radial * 0.18 *
+                          (1.0 + 1.5 * pc.redline_intensity);
+    sector_alpha = clamp(sector_alpha * (1.0 - final_alpha), 0.0, 1.0);
+    final_rgb += pc.needle_color.rgb * sector_alpha;
+    final_alpha = clamp(final_alpha + sector_alpha, 0.0, 1.0);
+  }
+
   // Premultiplied RGBA so the pipeline's
   //   src = ONE, dst = ONE_MINUS_SRC_ALPHA
   // blend matches: result = color + bg*(1-final_alpha).
