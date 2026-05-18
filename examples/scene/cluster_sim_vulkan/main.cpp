@@ -94,6 +94,7 @@ constexpr double k_pi = 3.141592653589793;
 constexpr double k_dial_start_angle = 3.0 * k_pi / 4.0;
 constexpr double k_dial_sweep_angle = 3.0 * k_pi / 2.0;
 constexpr double k_speedo_period_s = 6.0;
+constexpr double k_tach_period_s = 4.0;
 
 struct Args {
   int seconds{k_default_seconds};
@@ -359,10 +360,10 @@ struct TexturedPushConstants {
 };
 
 // Push-constant block for the SDF-needle pipeline. Same dst+uv as the
-// textured pipeline plus the needle's animated state. 48 bytes total.
-// All radii / thicknesses are in the dial's normalized [-1, 1] frame
-// (1.0 = half-dial-size); the fragment shader re-centers v_uv into
-// that frame.
+// textured pipeline plus a needle color and the animated state. 64
+// bytes total. All radii / thicknesses are in the dial's normalized
+// [-1, 1] frame (1.0 = half-dial-size); the fragment shader re-centers
+// v_uv into that frame.
 struct NeedlePushConstants {
   float dst_x0;
   float dst_y0;
@@ -372,6 +373,10 @@ struct NeedlePushConstants {
   float uv_y0;
   float uv_x1;
   float uv_y1;
+  float needle_r;
+  float needle_g;
+  float needle_b;
+  float needle_a;
   float angle;
   float r_needle;
   float r_hub;
@@ -409,16 +414,77 @@ int main(int argc, char* argv[]) {
 
   if (args.mode_override.has_value()) {
     const auto [tw, th, thz] = *args.mode_override;
+    bool exact = false;
     auto conn = drm::get_connector(device.fd(), out->connector_id);
     if (conn) {
       auto picked = drm::select_mode(
           drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes), tw, th, thz);
       if (picked) {
         const auto& m = picked->drm_mode;
-        if (m.hdisplay == tw && m.vdisplay == th && (thz == 0 || m.vrefresh == thz)) {
+        exact = (m.hdisplay == tw && m.vdisplay == th && (thz == 0 || m.vrefresh == thz));
+        if (exact) {
           out->mode = m;
         }
       }
+    }
+    if (!exact) {
+      // No exact match in the connector's EDID-derived mode list —
+      // synthesize a CVT-RB2 (Coordinated Video Timings, Reduced
+      // Blanking v2) modeline. Same fallback cluster_sim uses; the
+      // kernel atomic ioctl accepts arbitrary drmModeModeInfo blobs.
+      if (thz == 0) {
+        drm::println(stderr,
+                     "--mode: no match for {}x{} and no refresh hint to synthesize from", tw, th);
+        return EXIT_FAILURE;
+      }
+      constexpr std::uint32_t k_h_blank_rb = 80;
+      constexpr std::uint32_t k_h_front = 8;
+      constexpr std::uint32_t k_h_sync = 32;
+      constexpr std::uint32_t k_v_sync_rb = 8;
+      constexpr std::uint32_t k_v_front_rb = 3;
+      constexpr std::uint32_t k_v_back_rb_min = 6;
+      std::uint32_t v_blank = 0;
+      if (thz >= 200U) {
+        v_blank = std::max<std::uint32_t>(80U, k_v_front_rb + k_v_sync_rb + k_v_back_rb_min);
+      } else {
+        v_blank = 32U;
+        for (int it = 0; it < 8; ++it) {
+          const double h_period_us =
+              1.0e6 / (static_cast<double>(thz) * static_cast<double>(th + v_blank));
+          const auto needed = static_cast<std::uint32_t>(
+              (static_cast<double>(460U) / h_period_us) + 0.5);
+          const std::uint32_t cand = std::max<std::uint32_t>(32U, needed);
+          if (cand == v_blank) {
+            break;
+          }
+          v_blank = cand;
+        }
+      }
+      const std::uint32_t h_total = tw + k_h_blank_rb;
+      const std::uint32_t v_total = th + v_blank;
+      const std::uint64_t pclk_hz =
+          static_cast<std::uint64_t>(thz) * h_total * v_total;
+      const std::uint32_t clock_khz = static_cast<std::uint32_t>((pclk_hz + 500U) / 1000U);
+      drmModeModeInfo m{};
+      m.clock = clock_khz;
+      m.hdisplay = static_cast<std::uint16_t>(tw);
+      m.hsync_start = static_cast<std::uint16_t>(tw + k_h_front);
+      m.hsync_end = static_cast<std::uint16_t>(tw + k_h_front + k_h_sync);
+      m.htotal = static_cast<std::uint16_t>(h_total);
+      m.hskew = 0;
+      m.vdisplay = static_cast<std::uint16_t>(th);
+      m.vsync_start = static_cast<std::uint16_t>(th + k_v_front_rb);
+      m.vsync_end = static_cast<std::uint16_t>(th + k_v_front_rb + k_v_sync_rb);
+      m.vtotal = static_cast<std::uint16_t>(v_total);
+      m.vscan = 0;
+      m.vrefresh = thz;
+      m.flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC;
+      m.type = DRM_MODE_TYPE_USERDEF;
+      std::snprintf(m.name, DRM_DISPLAY_MODE_LEN, "%ux%u@%uRB", tw, th, thz);
+      drm::println(stderr,
+                   "--mode: synthesized CVT-RB2 {}x{}@{}Hz pclk={}MHz htotal={} vtotal={}",
+                   tw, th, thz, clock_khz / 1000U, h_total, v_total);
+      out->mode = m;
     }
   }
 
@@ -625,11 +691,15 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Square dial buffer covering the smaller framebuffer dimension —
-  // dictates both the Vulkan dial-template texture size and the dst
-  // rect of the textured-quad + needle draws.
-  const std::uint32_t dial_size = std::min(fb_w, fb_h);
-  const std::int32_t dial_x = static_cast<std::int32_t>((fb_w - dial_size) / 2U);
+  // Speedo + tach laid out side by side, each occupying half the
+  // framebuffer width. Both dials share the same Blend2D-painted
+  // dial template texture; the textured + needle pipelines just
+  // push different dst rects (and needle angle / color) per draw.
+  const std::uint32_t dial_size = std::min(fb_w / 2U, fb_h);
+  const std::int32_t speedo_x =
+      static_cast<std::int32_t>((fb_w / 2U - dial_size) / 2U);
+  const std::int32_t tach_x =
+      static_cast<std::int32_t>(fb_w / 2U + ((fb_w / 2U - dial_size) / 2U));
   const std::int32_t dial_y = static_cast<std::int32_t>((fb_h - dial_size) / 2U);
 
   // -------- Vulkan render-pass plumbing (bg pipeline) -----------------
@@ -1149,8 +1219,14 @@ int main(int argc, char* argv[]) {
 
   // Pre-computed push constants for the centered dial — the dst rect
   // doesn't change once the mode is locked.
-  const TexturedPushConstants dial_pc =
-      make_quad_pc(dial_x, dial_y, dial_size, dial_size, fb_w, fb_h);
+  const TexturedPushConstants speedo_pc =
+      make_quad_pc(speedo_x, dial_y, dial_size, dial_size, fb_w, fb_h);
+  const TexturedPushConstants tach_pc =
+      make_quad_pc(tach_x, dial_y, dial_size, dial_size, fb_w, fb_h);
+  constexpr std::array<float, 4> k_speedo_needle_rgba{
+      0xFF / 255.0F, 0x3B / 255.0F, 0x30 / 255.0F, 1.0F};  // cluster_sim 0xFFFF3B30
+  constexpr std::array<float, 4> k_tach_needle_rgba{
+      0xFF / 255.0F, 0xB3 / 255.0F, 0x00 / 255.0F, 1.0F};  // cluster_sim 0xFFFFB300
 
   // ----- Needle pipeline (SDF in fragment shader) -----------------
   // Same vertex geometry as the textured-quad pipeline. The
@@ -1305,34 +1381,54 @@ int main(int argc, char* argv[]) {
                        &bg_pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
 
-    // Subpass 1: centered dial template alpha-blended over the bg,
-    // then the SDF needle/hub on top.
+    // Subpass 1: two textured dial templates side by side, then the
+    // matching SDF needles + hubs on top of each.
     vkCmdNextSubpass(cmd, VK_SUBPASS_CONTENTS_INLINE);
     if (!skip_dial) {
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline_layout, 0, 1,
                               &dset, 0, nullptr);
-      vkCmdPushConstants(cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(dial_pc),
-                         &dial_pc);
+      vkCmdPushConstants(cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                         sizeof(speedo_pc), &speedo_pc);
+      vkCmdDraw(cmd, 6, 1, 0, 0);
+      vkCmdPushConstants(cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                         sizeof(tach_pc), &tach_pc);
       vkCmdDraw(cmd, 6, 1, 0, 0);
     }
 
     const double speedo_norm =
         freeze_needle ? 0.0 : dial_norm_from_phase(t / k_speedo_period_s);
-    const float needle_angle = static_cast<float>(
+    const double tach_norm =
+        freeze_needle ? 0.0 : dial_norm_from_phase(t / k_tach_period_s);
+    const float speedo_angle = static_cast<float>(
         k_dial_start_angle + (std::clamp(speedo_norm, 0.0, 1.0) * k_dial_sweep_angle));
-    NeedlePushConstants needle_pc{
-        dial_pc.dst_x0, dial_pc.dst_y0, dial_pc.dst_x1, dial_pc.dst_y1,
-        dial_pc.uv_x0,  dial_pc.uv_y0,  dial_pc.uv_x1,  dial_pc.uv_y1,
-        needle_angle,
-        k_r_needle_norm,
-        k_r_hub_norm,
-        k_half_thickness_norm,
-    };
+    const float tach_angle = static_cast<float>(
+        k_dial_start_angle + (std::clamp(tach_norm, 0.0, 1.0) * k_dial_sweep_angle));
+
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, needle_pipeline);
+
+    NeedlePushConstants speedo_needle_pc{
+        speedo_pc.dst_x0, speedo_pc.dst_y0, speedo_pc.dst_x1, speedo_pc.dst_y1,
+        speedo_pc.uv_x0,  speedo_pc.uv_y0,  speedo_pc.uv_x1,  speedo_pc.uv_y1,
+        k_speedo_needle_rgba[0], k_speedo_needle_rgba[1], k_speedo_needle_rgba[2],
+        k_speedo_needle_rgba[3],
+        speedo_angle, k_r_needle_norm, k_r_hub_norm, k_half_thickness_norm,
+    };
     vkCmdPushConstants(cmd, needle_pipeline_layout,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                       sizeof(needle_pc), &needle_pc);
+                       sizeof(speedo_needle_pc), &speedo_needle_pc);
+    vkCmdDraw(cmd, 6, 1, 0, 0);
+
+    NeedlePushConstants tach_needle_pc{
+        tach_pc.dst_x0, tach_pc.dst_y0, tach_pc.dst_x1, tach_pc.dst_y1,
+        tach_pc.uv_x0,  tach_pc.uv_y0,  tach_pc.uv_x1,  tach_pc.uv_y1,
+        k_tach_needle_rgba[0], k_tach_needle_rgba[1], k_tach_needle_rgba[2],
+        k_tach_needle_rgba[3],
+        tach_angle, k_r_needle_norm, k_r_hub_norm, k_half_thickness_norm,
+    };
+    vkCmdPushConstants(cmd, needle_pipeline_layout,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(tach_needle_pc), &tach_needle_pc);
     vkCmdDraw(cmd, 6, 1, 0, 0);
 
     vkCmdEndRenderPass(cmd);

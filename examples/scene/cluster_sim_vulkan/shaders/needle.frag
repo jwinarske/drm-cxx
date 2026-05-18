@@ -19,6 +19,7 @@ layout(location = 0) out vec4 out_color;
 layout(push_constant) uniform PC {
   vec4 dst;
   vec4 uv;
+  vec4 needle_color;  // R, G, B in [0, 1]; A unused (SDF drives alpha)
   float angle;
   float r_needle;
   float r_hub;
@@ -48,9 +49,8 @@ void main() {
   // pivot point). Matches cluster_sim's "stroke needle, then fill
   // hub on top" paint order.
   bool needle_wins = d_needle < d_hub;
-  vec3 needle_rgb = vec3(0xFF, 0x3B, 0x30) / 255.0;  // cluster_sim 0xFFFF3B30
-  vec3 hub_rgb    = vec3(0x1A, 0x1F, 0x2C) / 255.0;  // cluster_sim 0xFF1A1F2C
-  vec3 color = needle_wins ? needle_rgb : hub_rgb;
+  vec3 hub_rgb = vec3(0x1A, 0x1F, 0x2C) / 255.0;  // cluster_sim 0xFF1A1F2C
+  vec3 color = needle_wins ? pc.needle_color.rgb : hub_rgb;
   float d = min(d_needle, d_hub);
 
   // AA over roughly one fragment.

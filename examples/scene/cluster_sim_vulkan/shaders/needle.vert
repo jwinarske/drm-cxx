@@ -11,6 +11,7 @@ layout(location = 0) out vec2 v_uv;
 layout(push_constant) uniform PC {
   vec4 dst;             // NDC: x0, y0, x1, y1
   vec4 uv;              // u0, v0, u1, v1
+  vec4 needle_color;    // unused in the vertex stage; declared for layout parity
   float angle;          // radians (Blend2D math convention: y-down sin)
   float r_needle;       // tip distance, normalized (1.0 = half-dial)
   float r_hub;          // hub radius, normalized
