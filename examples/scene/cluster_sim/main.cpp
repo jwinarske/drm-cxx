@@ -477,34 +477,26 @@ void paint_centered_text(BLContext& ctx, BLFont& font, std::string_view text, do
   ctx.fill_utf8_text(BLPoint(x, cy_baseline), font, text.data(), text.size(), BLRgba32(argb));
 }
 
-// Paint the speed readout at offset (x_off, y_off) in the combined
-// instruments buffer: one big numeric value (0-240) with a "km/h"
-// label beneath. Clears its own sub-rect each frame (text changes
-// frame-to-frame; without a clear digits would smear). `font_face` may
-// be empty when the host had no usable system font — the layer then
-// remains just the bg-matching fill.
-void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
-                       std::uint32_t x_off, std::uint32_t y_off, std::uint32_t speed_kmh,
-                       const BLFontFace& font_face) noexcept {
-  if (base_pixels == nullptr) {
+// One pre-rendered center-info template: a `k_info_w × k_info_h`
+// transparent buffer with the speed digit string (centered ~70%) and
+// the "km/h" label (centered ~95%) painted on top in opaque text. The
+// caller builds 241 of these at startup (0..240 km/h) and the
+// per-frame paint just blits the matching one — no Blend2D BLFont
+// shaping + BLTextMetrics centering on the hot path.
+void paint_center_info_template(std::uint8_t* template_pixels,
+                                std::uint32_t template_stride_bytes, std::uint32_t speed_kmh,
+                                const BLFontFace& font_face) noexcept {
+  if (template_pixels == nullptr) {
     return;
   }
-  std::uint8_t* sub_base = base_pixels +
-                           (static_cast<std::size_t>(y_off) * base_stride_bytes) +
-                           (static_cast<std::size_t>(x_off) * 4U);
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(k_info_w), static_cast<int>(k_info_h),
-                              BL_FORMAT_PRGB32, sub_base,
-                              static_cast<intptr_t>(base_stride_bytes), BL_DATA_ACCESS_RW, nullptr,
-                              nullptr) != BL_SUCCESS) {
+                              BL_FORMAT_PRGB32, template_pixels,
+                              static_cast<intptr_t>(template_stride_bytes), BL_DATA_ACCESS_RW,
+                              nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
   BLContext ctx(canvas);
-  // Clear to fully transparent (alpha=0) each frame. The previous
-  // frame's text would otherwise smear under the new digits; clearing
-  // with opaque-bg-color works too but covers the gradient with a
-  // solid rectangle. alpha=0 lets the bg plane show through wherever
-  // text isn't drawn, keeping the gradient continuous.
   ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
   ctx.fill_all(BLRgba32(0x00000000U));
   if (!font_face.is_valid()) {
@@ -512,10 +504,6 @@ void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_byte
     return;
   }
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
-
-  // Speed digits centered horizontally at ~70% height; "km/h" label
-  // sits directly below at ~95% height. Baseline-y values picked by
-  // eye to match the typical instrument-cluster layout.
   std::string const speed_text = std::to_string(std::clamp<std::uint32_t>(speed_kmh, 0, 999));
   BLFont speed_font;
   if (speed_font.create_from_face(font_face, k_info_speed_font_px) == BL_SUCCESS) {
@@ -528,6 +516,30 @@ void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_byte
                         static_cast<double>(k_info_h) * 0.95, k_info_unit_argb);
   }
   ctx.end();
+}
+
+// Per-frame center-info paint: row-by-row memcpy the speed_kmh's
+// pre-rendered template into the inst buffer's info sub-rect. Templates
+// are owned by the caller and indexed by clamped speed_kmh.
+void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
+                       std::uint32_t x_off, std::uint32_t y_off, std::uint32_t speed_kmh,
+                       drm::span<const std::uint8_t* const> templates) noexcept {
+  if (base_pixels == nullptr || templates.empty()) {
+    return;
+  }
+  const std::size_t idx =
+      std::min<std::size_t>(speed_kmh, templates.size() - 1U);
+  const std::uint8_t* src = templates.data()[idx];
+  if (src == nullptr) {
+    return;
+  }
+  const std::size_t row_bytes = static_cast<std::size_t>(k_info_w) * 4U;
+  for (std::uint32_t row = 0; row < k_info_h; ++row) {
+    std::uint8_t* dst = base_pixels +
+                        (static_cast<std::size_t>(y_off + row) * base_stride_bytes) +
+                        (static_cast<std::size_t>(x_off) * 4U);
+    std::memcpy(dst, src + (static_cast<std::size_t>(row) * row_bytes), row_bytes);
+  }
 }
 
 // One cell template for the warning-indicator strip. Renders a single
@@ -1580,6 +1592,28 @@ int main(int argc, char** argv) {
       static_cast<std::size_t>(dial_size) * dial_template_stride, 0U);
   paint_dial_template(dial_template.data(), dial_template_stride, dial_size);
 
+  // Pre-render the 241 center-info templates (0..k_info_speed_max_kmh
+  // km/h). Per-frame paint then memcpy-blits the matching template
+  // instead of going through Blend2D's BLFont shaping + text metrics
+  // every time the digit string changes. Memory cost is k_info_w *
+  // k_info_h * 4 * 241 ≈ 43 MB of RAM; startup paint cost is ~100 ms
+  // (one-time). Acceptable on Jetson Orin (16/32/64 GB RAM); on a more
+  // constrained host the right answer would be per-digit slicing
+  // instead, but that requires re-implementing the centering math.
+  constexpr std::size_t k_info_template_count =
+      static_cast<std::size_t>(k_info_speed_max_kmh) + 1U;
+  const std::uint32_t info_template_stride = k_info_w * 4U;
+  const std::size_t info_template_bytes =
+      static_cast<std::size_t>(k_info_h) * info_template_stride;
+  std::vector<std::vector<std::uint8_t>> info_templates(k_info_template_count);
+  std::vector<const std::uint8_t*> info_template_ptrs(k_info_template_count, nullptr);
+  for (std::size_t i = 0; i < k_info_template_count; ++i) {
+    info_templates[i].assign(info_template_bytes, 0U);
+    paint_center_info_template(info_templates[i].data(), info_template_stride,
+                               static_cast<std::uint32_t>(i), font_face);
+    info_template_ptrs[i] = info_templates[i].data();
+  }
+
   // Pre-render lit + dim variants of each warning cell. Per-frame paint
   // just blits the right one — Blend2D's rounded-rect fill + glyph
   // shaping is far more expensive than a 100×80 memcpy.
@@ -1664,7 +1698,10 @@ int main(int argc, char** argv) {
         last_tach_px = tach_px;
       }
       if (need_info) {
-        paint_center_info(base, stride, info_x_local, info_y_local, speed_kmh, font_face);
+        paint_center_info(
+            base, stride, info_x_local, info_y_local, speed_kmh,
+            drm::span<const std::uint8_t* const>(info_template_ptrs.data(),
+                                                 info_template_ptrs.size()));
         last_speed_kmh = speed_kmh;
       }
       if (need_warn) {
