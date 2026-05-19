@@ -142,9 +142,15 @@ class Allocator {
   // caller to overwrite those properties immediately afterward, which
   // is wasteful and depends on kernel last-write-wins semantics. The
   // span is consumed during this call and not retained.
+  // `test_only` plumbs the caller's intent to TEST vs COMMIT down to
+  // the per-plane snapshot cache (`last_committed_`). On TEST_ONLY
+  // we must NOT update the cache — the kernel hasn't actually
+  // applied the state, so a subsequent commit (or TEST) that diffs
+  // against the snapshot would suppress properties the kernel still
+  // requires (most visibly: CRTC_ID + dest/src rect under MODESET).
   drm::expected<std::size_t, std::error_code> apply(
       Output& output, AtomicRequest& req, uint32_t commit_flags,
-      drm::span<const uint32_t> external_reserved = {});
+      drm::span<const uint32_t> external_reserved = {}, bool test_only = false);
 
   // Configurable test commit budget (default: 16)
   void set_max_test_commits(std::size_t max) noexcept;
@@ -204,14 +210,13 @@ class Allocator {
 
  private:
   // §13.3 Warm-start: try previous frame's allocation
-  drm::expected<std::size_t, std::error_code> apply_previous_allocation(Output& output,
-                                                                        AtomicRequest& req,
-                                                                        uint32_t flags,
-                                                                        uint32_t crtc_index);
+  drm::expected<std::size_t, std::error_code> apply_previous_allocation(
+      Output& output, AtomicRequest& req, uint32_t flags, uint32_t crtc_index, bool test_only);
 
   // Full search with all improvements
   drm::expected<std::size_t, std::error_code> full_search(Output& output, AtomicRequest& req,
-                                                          uint32_t flags, uint32_t crtc_index);
+                                                          uint32_t flags, uint32_t crtc_index,
+                                                          bool test_only);
 
   // §13.5 Bipartite pre-solve
   std::vector<std::pair<Layer*, const PlaneCapabilities*>> bipartite_preseed(
@@ -300,7 +305,8 @@ class Allocator {
   // success and bumps the apply-time diagnostics counters.
   drm::expected<void, std::error_code> apply_layer_to_plane_real(const Layer& layer,
                                                                  uint32_t plane_id,
-                                                                 AtomicRequest& req);
+                                                                 AtomicRequest& req,
+                                                                 bool test_only);
 
   // Emit FB_ID=0 / CRTC_ID=0 on every CRTC-compatible non-cursor plane
   // that isn't in `keep`. Used both inside try_test_commit (so TESTs
@@ -316,7 +322,7 @@ class Allocator {
   // assignment is speculative. Non-const because true-mode mutates
   // last_committed_ and diagnostics_.
   void disable_unused_planes(AtomicRequest& req, uint32_t crtc_index, const PlaneAssignment& keep,
-                             bool track_state);
+                             bool track_state, bool test_only);
 
   const Device& dev_;
   PlaneRegistry& registry_;

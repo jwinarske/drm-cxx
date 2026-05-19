@@ -2383,7 +2383,7 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
                                  : drm::span<const std::uint32_t>(scratch_reserved_planes_.data(),
                                                                   scratch_reserved_planes_.size());
   auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-      allocator_->apply(output_, req, effective_flags, reserved_span);
+      allocator_->apply(output_, req, effective_flags, reserved_span, test_only);
   if (!assigned) {
     release_all(acquisitions);
     return drm::unexpected<std::error_code>(assigned.error());
