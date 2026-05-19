@@ -26,7 +26,7 @@
 #   sudo ./scripts/jetson_force_mode.sh --show
 #
 # Example:
-#   sudo ./scripts/jetson_force_mode.sh --apply DP-1 1920x1080 240
+#   cd worksp
 #
 # After --apply you must reboot for the change to take effect.
 
@@ -49,6 +49,90 @@ require_root() {
 
 require_extlinux() {
   [[ -f "$EXTLINUX" ]] || die "$EXTLINUX not found — is this a Jetson L4T system?"
+}
+
+# Refuse to force a mode the panel's EDID doesn't advertise. The
+# proprietary Tegra stack hard-validates atomic-commit modes against
+# the EDID-derived mode list, NOT the Display Range Limits
+# descriptor — a mode within the limits but not on the list will
+# boot OK (the display manager negotiates a real EDID mode) but
+# **silently blank the panel on any later mode switch** (e.g.
+# `systemctl isolate multi-user.target` killing the DM and handing
+# console back to fbcon with the cmdline mode that nvidia-drm then
+# rejects). The first time this fires you reach for a serial console
+# or a power cycle; the second time you don't get the chance.
+# Override with FORCE=1 if you genuinely want the non-EDID mode.
+check_mode_in_edid() {
+  local conn="$1" res="$2" hz="$3"
+  local edid_path=""
+  for cand in /sys/class/drm/card*-"${conn}"/edid; do
+    [[ -f "$cand" ]] && edid_path="$cand" && break
+  done
+  if [[ -z "$edid_path" ]]; then
+    printf 'warning: no /sys/class/drm/card*-%s/edid — disconnected?\n' "$conn" >&2
+    printf '  Skipping EDID validation; proceed at your own risk.\n' >&2
+    return 0
+  fi
+
+  if ! command -v di-edid-decode >/dev/null 2>&1; then
+    printf 'warning: di-edid-decode not found — skipping EDID validation.\n' >&2
+    printf '  Install with:\n' >&2
+    printf '    Ubuntu/Debian:  sudo apt install -y libdisplay-info-bin\n' >&2
+    printf '    From source:    sudo ./scripts/build-deps.sh libdisplay-info\n' >&2
+    printf '  Re-run with FORCE=1 to skip this check unconditionally.\n' >&2
+    return 0
+  fi
+
+  # Extract every "WxH  <decimal> Hz" tuple di-edid-decode emits;
+  # round the refresh to an integer so EDID's 59.94 / 119.99 / 239.97
+  # values match the user-typed 60 / 120 / 240. Deduped + sorted for
+  # the error-message pretty-print path.
+  #
+  # Critically, SKIP modes that live in a DisplayID extension block
+  # (Block 2+ on most multi-block EDIDs): the proprietary nvidia-drm
+  # Tegra stack ignores DisplayID-block modes when building the
+  # connector's mode list, so a mode present only in DisplayID
+  # (e.g. an LG UltraGear+ advertising 2560x1440@240 in DisplayID and
+  # 2560x1440@144 in CTA-861) gets the same blank-on-VT-switch
+  # failure as a mode that isn't in EDID at all. Empirically pinned
+  # by the 2026-05-19 nano-super 240Hz attempt. Only Base EDID
+  # (Block 0) and CTA-861 (Block 1, sometimes more) supply modes the
+  # Tegra DRM driver actually accepts.
+  local edid_modes
+  edid_modes=$(di-edid-decode < "$edid_path" 2>/dev/null | awk '
+    /^Block[[:space:]]+[0-9]+,[[:space:]]+Base EDID:/             { block = "ok";        next }
+    /^Block[[:space:]]+[0-9]+,[[:space:]]+CTA-861 Extension/      { block = "ok";        next }
+    /^Block[[:space:]]+[0-9]+,[[:space:]]+DisplayID Extension/    { block = "displayid"; next }
+    /^Block[[:space:]]+[0-9]+,/                                   { block = "other";     next }
+    block != "ok" { next }
+    {
+      if (match($0, /[0-9]+x[0-9]+[[:space:]]+[0-9]+\.[0-9]+[[:space:]]+Hz/)) {
+        s = substr($0, RSTART, RLENGTH)
+        n = split(s, t, /[[:space:]]+/)
+        printf "%s@%d\n", t[1], int(t[2] + 0.5)
+      }
+    }
+  ' | sort -u)
+
+  local target="${res}@${hz}"
+  if printf '%s\n' "$edid_modes" | grep -qFx "$target"; then
+    printf 'EDID check: %s is advertised by %s.\n' "$target" "$conn"
+    return 0
+  fi
+
+  printf '\nREFUSING to force %s on %s — not advertised by EDID.\n\n' "$target" "$conn" >&2
+  printf 'The Tegra L4T proprietary stack validates atomic-commit modes\n' >&2
+  printf 'against the EDID-derived mode list, not the Display Range Limits\n' >&2
+  printf 'descriptor. Forcing a non-EDID mode via video= boots OK (the DM\n' >&2
+  printf 'negotiates an EDID mode) but blanks the panel on any later VT\n' >&2
+  printf 'switch (e.g. `systemctl isolate multi-user.target`) — the only\n' >&2
+  printf 'recovery is a remote reboot + this script'"'"'s --revert path.\n\n' >&2
+  printf 'EDID-advertised modes on %s:\n' "$conn" >&2
+  printf '%s\n' "$edid_modes" | sed 's/^/  /' >&2
+  printf '\nPick one of those, or override with:\n' >&2
+  printf '  sudo FORCE=1 %s --apply %s %s %s\n' "$0" "$conn" "$res" "$hz" >&2
+  printf '(you have been warned — see reference_jetson_force_mode_silent_blank.md).\n' >&2
+  exit 2
 }
 
 cmd_show() {
@@ -104,6 +188,14 @@ cmd_apply() {
   [[ "$conn" =~ ^[A-Za-z0-9_-]+$ ]] || die "bad connector name: $conn"
   [[ "$res"  =~ ^[0-9]+x[0-9]+$ ]]  || die "bad resolution (want WxH): $res"
   [[ "$hz"   =~ ^[0-9]+$ ]]         || die "bad refresh (want integer Hz): $hz"
+
+  # Refuse modes the panel's EDID doesn't advertise unless caller
+  # explicitly opts in via FORCE=1. See check_mode_in_edid for why.
+  if [[ "${FORCE:-0}" != 1 ]]; then
+    check_mode_in_edid "$conn" "$res" "$hz"
+  else
+    printf 'FORCE=1 set — skipping EDID validation.\n'
+  fi
 
   local payload="video=${conn}:${res}@${hz}"
 
@@ -228,6 +320,17 @@ CONNECTOR is the DRM connector name (e.g. DP-1, HDMI-A-1). On Jetson L4T
 the kernel DRM driver validates atomic-commit modes strictly against
 EDID; this script adds a kernel-cmdline video= entry so a non-EDID mode
 becomes valid at boot.
+
+By default --apply refuses to force a WxH@Hz that's NOT in the panel's
+EDID-derived mode list. Such modes boot OK into a graphical session
+(the display manager picks an EDID mode) but blank the panel on any
+later VT switch (e.g. \`isolate multi-user.target\`). Set FORCE=1 to
+bypass the check:
+  sudo FORCE=1 $0 --apply DP-1 1920x1080 240
+
+The EDID check uses \`di-edid-decode\` (libdisplay-info). Install via
+\`apt install libdisplay-info-bin\` or \`scripts/build-deps.sh
+libdisplay-info\`.
 EOF
 }
 
