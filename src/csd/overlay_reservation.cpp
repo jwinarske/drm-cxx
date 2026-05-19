@@ -62,19 +62,25 @@ drm::expected<std::vector<std::uint32_t>, std::error_code> OverlayReservation::r
     if (!cap->supports_format(format)) {
       continue;
     }
-    // A plane with no zpos property at all can't be ordered
-    // meaningfully against the primary; skip it to avoid surprising
-    // the caller with an "above primary" slot they can't enforce.
+    // zpos floor enforcement. A plane without zpos_min can't honor a
+    // non-zero floor, so reject it when the caller asks for one.
+    // When min_zpos == 0 (no floor), admit no-zpos OVERLAY planes too:
+    // on driver families that don't expose per-plane zpos (Tegra DC,
+    // some other SoCs) the natural plane order is OVERLAY-above-PRIMARY
+    // and downstream consumers like PlanePresenter already handle the
+    // missing-zpos case by suppressing the write. Excluding them here
+    // would lock those callers out of the only OVERLAY hardware available.
     if (!cap->zpos_min.has_value()) {
-      continue;
-    }
-    if (*cap->zpos_min < min_zpos) {
+      if (min_zpos != 0U) {
+        continue;
+      }
+    } else if (*cap->zpos_min < min_zpos) {
       continue;
     }
     if (all_reserved_.count(cap->id) != 0U) {
       continue;
     }
-    candidates.emplace_back(*cap->zpos_min, cap->id);
+    candidates.emplace_back(cap->zpos_min.value_or(0), cap->id);
   }
 
   if (candidates.size() < count) {

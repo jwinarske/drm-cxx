@@ -45,6 +45,7 @@ drm_cxx_sources = files(
   'scene/gbm_surface_source.cpp',
   'scene/gst_appsink_source.cpp',
   'scene/layer_scene.cpp',
+  'scene/nvbufsurface_source.cpp',
   'scene/output_signaling.cpp',
   'scene/scene_set.cpp',
   'scene/stream_capability.cpp',
@@ -123,6 +124,19 @@ if has_egl_streams
   drm_cxx_deps += egl_dep.partial_dependency(compile_args : true, includes : true)
 endif
 
+# NvBufSurface — link-time dependency on libnvbufsurface.so when the
+# Jetson L4T headers + library are present. The header surface
+# (scene/nvbufsurface_source.hpp) is wrapped in
+# `#if DRM_CXX_HAS_NVBUFSURFACE`; the matching cpp_args define lets
+# callers compiled against the same toolchain see the same gate. Same
+# dual-branch shape as the GStreamer and EGL Streams gates.
+nvbufsurface_cpp_args = has_nvbufsurface \
+  ? ['-DDRM_CXX_HAS_NVBUFSURFACE=1'] \
+  : ['-DDRM_CXX_HAS_NVBUFSURFACE=0']
+if has_nvbufsurface
+  drm_cxx_deps += nvbufsurface_dep
+endif
+
 # drm::cursor is a feature: the .cpp files only compile when libxcursor
 # is present. Public headers stay in the tree but callers linking a
 # cursor-less build hit an unresolved symbol at load() / create() time.
@@ -169,7 +183,7 @@ drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
-  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args + gstreamer_cpp_args + streams_cpp_args,
+  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args + gstreamer_cpp_args + streams_cpp_args + nvbufsurface_cpp_args,
   install : true,
 )
 
@@ -344,6 +358,18 @@ if has_egl_streams
   install_headers(
     'scene/egl_stream_builder.hpp',
     'scene/egl_stream_source.hpp',
+    subdir : 'drm-cxx/scene',
+  )
+endif
+
+# NvBufSurfaceSource header — same gating: only installs on Jetson L4T
+# hosts where libnvbufsurface is available. The header itself uses
+# `#if DRM_CXX_HAS_NVBUFSURFACE` so it's safe to install unconditionally,
+# but matching the pattern keeps the public-API set honest about what's
+# actually buildable on the current host.
+if has_nvbufsurface
+  install_headers(
+    'scene/nvbufsurface_source.hpp',
     subdir : 'drm-cxx/scene',
   )
 endif

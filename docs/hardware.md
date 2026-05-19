@@ -36,7 +36,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `vkms`       | Configfs-spawned (kernel ≥6.11)     | 6.11+               | Most integration tests; multi-CRTC via `scripts/vkms_dual.sh` |
 | `vicodec`    | M2M FWHT codec endpoints            | 6.x                 | `V4l2DecoderSource` NV12 + P010 paths |
 | NVIDIA       | Quadro RTX A2000 (NVRM 535.288.01) | 6.x                 | `EglStreamSource` end-to-end (acquire, atomic test, scene wiring). Desktop driver gap noted in quirks. |
-| Tegra        | Jetson-class (NVRM kernel side)    | -                   | Producer-surface path exercised; not full visible-scanout validated. |
+| Tegra        | Jetson Orin (nvgpu)                | 5.15.148-tegra (L4T)| Visible scanout on DP-1: `atomic_modeset`, `layered_demo`, `signage_player`, `hdr_demo`, `stream_demo` (CPU fallback tier), `v4l2_camera_demo --mode mmap`, `cursor_rotate`, `vulkan_display` (display enumeration), `vulkan_scene` (60fps vblank-locked), all `overlay_planes` / `scene_*` enumeration runs. Driver gaps noted in quirks. |
 
 What's **not** validated:
 
@@ -209,10 +209,130 @@ hits the cached answer first.
   `eglStreamConsumerOutputEXT`.
 - **Mixing support is empirical-probe only.** Never trust version
   checks; one `DRM_MODE_ATOMIC_TEST_ONLY` commit is the honest signal.
-- **Desktop NVIDIA 535+ has no `EGL_NV_output_drm_atomic`.** The
-  Streams pipeline appears to wire end-to-end but no producer frames
-  reach KMS; not closable from drm-cxx. Point desktop NVIDIA users
-  at GBM.
+- **Desktop NVIDIA 535+ and Tegra L4T 5.15 have no `EGL_NV_output_drm_atomic`.**
+  The Streams pipeline appears to wire end-to-end but no producer
+  frames reach KMS; not closable from drm-cxx. `stream_demo` self-
+  detects this and falls back to a CPU-rendered background animation
+  so the rest of the configuration still demonstrates. Point desktop
+  NVIDIA users at GBM where GBM works (see Tegra L4T quirks for the
+  Tegra GBM gap).
+
+### Tegra L4T
+
+Validated on kernel `5.15.148-tegra` (Jetson L4T R35-class). NVIDIA
+runs HDR / color management / scanout-side compositing through their
+proprietary NvDisplay stack, parallel to and outside the standard
+DRM/KMS interface. As a result the KMS-facing surface is sparse:
+
+- **No KMS-side HDR signaling.** The connector exposes no
+  `HDR_OUTPUT_METADATA`, no `Colorspace`, and no `max_bpc` property.
+  `hdr_demo` correctly reports `hdr_blob=false colorspace=false
+  can_signal_hdr=false` and commits anyway with the auto-derive
+  silently degrading to SDR — the "no silent banding" path in
+  `LayerScene::set_output_metadata`. The bytes scan out; the sink
+  sees plain SDR.
+- **No CRTC color pipeline.** No `DEGAMMA_LUT`, no `CTM`, no
+  `GAMMA_LUT` on the CRTC. `probe_crtc_capabilities` returns all
+  false; the `hdr_demo --no-hw-pipeline` tier is forced regardless
+  of the flag.
+- **`gbm_surface_create_with_modifiers` returns ENOSYS.** `egl_scene`
+  fails at `GbmSurfaceSource::create` after modifier negotiation has
+  already succeeded (the format-modifier query path works; the
+  surface-allocation step does not). Use EGL Streams instead — the
+  pre-acquire / atomic-test path is fully functional even though the
+  scanout extension above is missing.
+- **V4L2 DMA-BUF zero-copy tears on motion.** Producer
+  (`uvcvideo` over USB) doesn't attach `dma_resv` reservation fences
+  to its dmabufs, and Tegra's KMS does not insert any synchronization
+  on import either. The `LayerScene` release-timing contract is
+  honored and the V4L2 buffer pool has headroom (verified at
+  `buffer_count=8`); neither moves the needle. Suspected root cause
+  is cache coherence between the USB controller's writes and the
+  Tegra display engine's reads on the V4L2-allocated buffer —
+  Tegra-specific kernel sync (NvBuf_SyncObj_Wait or equivalent)
+  would have to ship in the kernel for this to land cleanly.
+  **Workaround**: `v4l2_camera_demo --mode mmap` forces a per-frame
+  CPU memcpy into a DRM dumb buffer; clean output verified on
+  Logitech C920 and 046d:0825. The auto-mode default could
+  reasonably be switched to MmapCopy on detected Tegra hosts, but
+  that hasn't shipped.
+- **V4L2 explicit fences absent.** The `V4L2_BUF_FLAG_OUT_FENCE` /
+  `V4L2_BUF_FLAG_IN_FENCE` flags don't exist in this kernel's
+  `linux/videodev2.h`, and `uvcvideo` would not expose them either.
+  Any "real fix via V4L2 out-fence → KMS `IN_FENCE_FD`" approach to
+  the tearing above is not implementable on this stack until those
+  patches land upstream and L4T rebases.
+- **`DRM_FORMAT_NV20` missing from libdrm 2.4.113.** L4T ships an
+  older libdrm than the project's minimum. References to the
+  fourcc need `#ifdef DRM_FORMAT_NV20` guards
+  (`src/core/format.cpp`, `tests/unit/test_format.cpp`).
+- **Vulkan IS fully available on Jetson Orin (nvgpu).** NVIDIA
+  proprietary Vulkan 1.3.251 driver 540.4.0 with the ICD at
+  `/etc/vulkan/icd.d/nvidia_icd.json`. All extensions drm-cxx wants
+  are present: `VK_KHR_display`, `VK_EXT_acquire_drm_display`,
+  `VK_KHR_swapchain`, `VK_EXT_image_drm_format_modifier`,
+  `VK_EXT_external_memory_dma_buf`. `vulkan_scene` renders a
+  Vulkan-produced ARGB8888 layer onto DP-1 at locked 60 fps.
+  (Earlier validation runs misreported Vulkan as unavailable; the
+  cause was a `vulkan_display` linker issue, not Tegra missing
+  Vulkan — see the `drm::vulkan::Display::create` note in
+  `src/vulkan/display.cpp` for the dlopen-on-demand fix.)
+- **KMS planes have no `zpos` property.** All 6 planes (2 PRIMARY + 2
+  CURSOR + 2 OVERLAY, two of each per CRTC) report `zpos_min`/`zpos_max`
+  as absent. Stacking is fixed by plane type: OVERLAY above PRIMARY,
+  CURSOR above OVERLAY. The allocator's standard +10 score for
+  `layer.zpos == plane.zpos_min` can't fire here, so the bipartite
+  matcher ties on otherwise-identical layers and picks a plane
+  arbitrarily (full-screen bg can land on OVERLAY and hide an instrument
+  layer on PRIMARY). The 2026-05-17 `allocator.cpp` fix adds a
+  Tegra-style fallback: when `plane.zpos_min` is absent, `layer.zpos=0`
+  scores +10 toward PRIMARY and `layer.zpos>0` scores +8 toward
+  OVERLAY. Callers that want a specific stack order should set explicit
+  `display.zpos` values (0 = bottom, >0 = above).
+- **Mode validation is strict against EDID.** The driver rejects any
+  atomic-commit mode blob not derived from an EDID-advertised mode with
+  `EINVAL` at first commit — even when the panel's Display Range Limits
+  descriptor declares the timing is in range. CVT-RB2 modelines
+  synthesized at runtime (cluster_sim's `--mode WxH@Hz` for non-EDID
+  refresh rates) all fail, including ones well within DP bandwidth.
+  Verified with an LG UltraGear+ panel that advertises 240 Hz max V
+  rate / 1060 MHz max pclk yet only ships 1920×1080@120 and lower
+  Hz-DTDs in EDID; 1920×1080@144 / @165 / @240 synthesized modes all
+  hit EINVAL. **Escape:** `video=DP-1:WxH@Hz` on the kernel cmdline
+  injects the mode at boot before userspace ever commits. The helper
+  `scripts/jetson_force_mode.sh --apply DP-1 WxH Hz` edits
+  `/boot/extlinux/extlinux.conf` with a timestamped backup; reboot
+  required. Untested for refresh > 120 Hz pending a tolerable
+  reboot-recovery story.
+- **DPCD / AUX channel not exposed to userspace.** The proprietary
+  `nvidia_drm` / `nvidia_modeset` stack does not surface
+  `/dev/drm_dp_aux*` or the standard DRM connector debugfs. PSR
+  capability of the attached panel can't be probed, and even if the
+  panel supports PSR (rare on external DP), the proprietary driver
+  doesn't advertise or engage it. Commit-skip on all-unchanged frames
+  is therefore CPU-side only — no panel-side power benefit available
+  until the open-tegra driver path lands.
+- **DRM dumb-buffer mmap is write-combined.** NEON reads from a source
+  dumb buffer stall hard (~250 ns/px effective vs ~5 ns/px theoretical
+  cached read), confirmed empirically by swapping the load with a
+  constant in `CompositeCanvas::blend_into`'s pure_opaque_copy path
+  (blend time drops from 12 ms to 1.2 ms for the same pixel count).
+  Producer-side (Blend2D) writes hit the WC streaming-store ceiling
+  fast enough; the problem is only on the consumer side when the same
+  buffer is then read for CPU compositing. The cluster_sim refactor
+  works around this by either (a) caching pre-rendered templates in
+  userspace `std::vector<uint8_t>` and `memcpy`-blitting into the
+  layer's dumb buffer per frame, or (b) merging multiple small layers
+  into one larger layer that lands directly on a hardware plane (no
+  CPU compose). Pattern: keep CPU-write paths to dumb buffers (fine),
+  avoid CPU-read paths from them (slow).
+- **Validated cluster_sim configurations.** `cluster_sim
+  /dev/dri/card1` runs at 60 fps locked on the EDID-preferred
+  2560×1440@60 mode; `cluster_sim --mode 1920x1080@120 /dev/dri/card1`
+  runs at 120 fps locked. Zero missed vblanks over 30 s captures in
+  both modes via `CLUSTER_SIM_FRAME_JITTER=1`. Per-frame paint cost is
+  ~0.76 ms after the template-cache + skip-paint optimizations (see
+  the `cluster_sim:` commits between 2026-05-17 and 2026-05-18).
 
 ### VAAPI
 

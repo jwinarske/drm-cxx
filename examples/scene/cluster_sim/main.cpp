@@ -62,18 +62,32 @@
 #include "../../common/session_pump.hpp"
 #include "../../common/uvc_capture.hpp"
 #include "../../common/vt_switch.hpp"
+#include "drm-cxx/scene/buffer_source.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/capture/png.hpp>
 #include <drm-cxx/capture/snapshot.hpp>
 #include <drm-cxx/core/device.hpp>
-#include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/input/seat.hpp>
+#include <drm-cxx/modeset/mode.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
+
+#include <xf86drmMode.h>
+
+#include <algorithm>
+#include <bits/time.h>
+#include <bits/types/struct_itimerspec.h>
+#include <cstddef>
+#include <memory>
+#include <ratio>
+#if DRM_CXX_HAS_NVBUFSURFACE
+#include <drm-cxx/scene/nvbufsurface_source.hpp>
+#endif
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -102,12 +116,14 @@
 #include <drm_fourcc.h>
 #include <drm_mode.h>
 
-#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -120,13 +136,26 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/poll.h>
+#include <sys/timerfd.h>
 #include <system_error>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace {
+
+// SIGINT / SIGTERM exit flag. Set by the signal handler, polled by the
+// main loop. Atomic for the cross-thread / handler-context visibility
+// guarantee; relaxed loads are sufficient here because we only need
+// eventual consistency.
+// Signal handler needs file scope.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<bool> g_quit{false};
+void on_sigint(int /*signo*/) noexcept {
+  g_quit.store(true, std::memory_order_relaxed);
+}
 
 // Cluster-aesthetic palette. Center is near-black with a subtle blue
 // cast (matches the "deep instrument" look most automotive clusters
@@ -142,7 +171,17 @@ constexpr std::uint32_t k_dial_face_argb = 0xFF080C18U;
 constexpr std::uint32_t k_dial_tick_argb = 0xFFC0C8D0U;
 constexpr std::uint32_t k_dial_hub_argb = 0xFF1A1F2CU;
 constexpr std::uint32_t k_speedo_needle_argb = 0xFFFF3B30U;  // red
-constexpr std::uint32_t k_tach_needle_argb = 0xFFFFB300U;    // amber
+
+// Approximate bg gradient color at the layer positions. paint_dial /
+// paint_center_info / paint_warning_indicators fill their buffers with
+// these so the XRGB layer (treated opaque by the compositor's fast
+// path) blends seamlessly with the canvas-painted bg gradient below.
+// Dials sit roughly half-radius from center; info + warnings sit near
+// center so they get the brighter center color.
+constexpr std::uint32_t k_dial_bg_fill_argb = 0xFF0A0F1AU;
+constexpr std::uint32_t k_info_bg_fill_argb = k_bg_center_argb;
+constexpr std::uint32_t k_warn_bg_fill_argb = k_bg_center_argb;
+constexpr std::uint32_t k_tach_needle_argb = 0xFFFFB300U;  // amber
 
 // Idle animation periods (seconds). Out of phase so the two dials
 // don't sweep in lockstep -- a real cluster's dials are decorrelated
@@ -279,7 +318,7 @@ void paint_bg_gradient(drm::BufferMapping& mapping, std::uint32_t width,
   }
 
   BLImage canvas;
-  if (canvas.create_from_data(static_cast<int>(width), static_cast<int>(height), BL_FORMAT_XRGB32,
+  if (canvas.create_from_data(static_cast<int>(width), static_cast<int>(height), BL_FORMAT_PRGB32,
                               pixels.data(), static_cast<intptr_t>(stride), BL_DATA_ACCESS_RW,
                               nullptr, nullptr) != BL_SUCCESS) {
     return;
@@ -298,33 +337,28 @@ void paint_bg_gradient(drm::BufferMapping& mapping, std::uint32_t width,
   ctx.end();
 }
 
-// Paint a dial face + animated needle into an ARGB8888 dumb buffer.
-// `norm` in [0, 1] maps onto the dial's 270° sweep range; `needle_argb`
-// distinguishes speedo (red) from tach (amber). Painting clears the
-// buffer to transparent first so the dial's circular face renders
-// against the bg layer beneath.
-void paint_dial(drm::BufferMapping& mapping, std::uint32_t size, double norm,
-                std::uint32_t needle_argb) noexcept {
-  if (size == 0U) {
+// Paint the static parts of a dial — rim + face + ticks — into a
+// `size`×`size` template buffer. Called once at startup per dial size;
+// per-frame paint then memcpys this template into the instruments buffer
+// and overlays only the moving needle + hub. Splitting the static and
+// dynamic halves cuts per-frame dial cost from ~1.0ms to ~0.3ms on the
+// Tegra validation board (Blend2D's per-shape AA + WC writes dominate
+// the rim/face/tick pass; a flat memcpy hits the WC streaming ceiling).
+void paint_dial_template(std::uint8_t* template_pixels, std::uint32_t template_stride_bytes,
+                         std::uint32_t size) noexcept {
+  if (size == 0U || template_pixels == nullptr) {
     return;
   }
-  drm::span<std::uint8_t> const pixels = mapping.pixels();
-  std::uint32_t const stride = mapping.stride();
-  if (pixels.size() < static_cast<std::size_t>(size) * stride) {
-    return;
-  }
-
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(size), static_cast<int>(size), BL_FORMAT_PRGB32,
-                              pixels.data(), static_cast<intptr_t>(stride), BL_DATA_ACCESS_RW,
-                              nullptr, nullptr) != BL_SUCCESS) {
+                              template_pixels, static_cast<intptr_t>(template_stride_bytes),
+                              BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
-
   BLContext ctx(canvas);
-  // Clear to transparent first so the dial reads as a circular cut-out
-  // against the bg layer underneath. Subsequent paint ops use SRC_OVER
-  // for proper alpha blending of the rim, face, ticks, and needle.
+  // The template is going to be MEMCPY'D into the inst buffer, so the
+  // pixels we don't draw must be alpha=0 (transparent), letting the
+  // bg plane show through the dial's four corners on hardware compose.
   ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
   ctx.fill_all(BLRgba32(0x00000000U));
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
@@ -335,19 +369,10 @@ void paint_dial(drm::BufferMapping& mapping, std::uint32_t size, double norm,
   double const r_inner = static_cast<double>(size) * 0.42;
   double const r_tick_outer = static_cast<double>(size) * 0.46;
   double const r_tick_inner = static_cast<double>(size) * 0.38;
-  double const r_needle = static_cast<double>(size) * 0.40;
-  double const r_hub = static_cast<double>(size) * 0.06;
 
-  // Rim (filled circle in metallic gray) and face (slightly inset
-  // dark fill) — fill_circle layers correctly because of SRC_OVER.
   ctx.fill_circle(BLCircle(cx, cy, r_outer), BLRgba32(k_dial_rim_argb));
   ctx.fill_circle(BLCircle(cx, cy, r_inner), BLRgba32(k_dial_face_argb));
 
-  // Major ticks (12 + 1 to close the sweep range) — light gray lines
-  // running radially outward across the rim. Using set_stroke_width
-  // ahead of stroke_line because Blend2D's per-call stroke API doesn't
-  // take a width inline.
-  double const a_norm = std::clamp(norm, 0.0, 1.0);
   ctx.set_stroke_width(3.0);
   for (int i = 0; i <= k_dial_major_ticks; ++i) {
     double const t = static_cast<double>(i) / static_cast<double>(k_dial_major_ticks);
@@ -358,20 +383,58 @@ void paint_dial(drm::BufferMapping& mapping, std::uint32_t size, double norm,
     double const y2 = cy + (r_tick_outer * std::sin(a));
     ctx.stroke_line(BLPoint(x1, y1), BLPoint(x2, y2), BLRgba32(k_dial_tick_argb));
   }
+  ctx.end();
+}
 
-  // Needle: thick rounded line from center to the tip computed from
-  // the normalized position. Stroke cap is round so the tip reads as
-  // a smooth point rather than a chopped rectangle.
+// Per-frame dial paint: blit the prebuilt template (rim/face/ticks) into
+// the (x_off, y_off, size×size) sub-rect of the instruments buffer, then
+// stroke the new needle position and re-cap the hub on top. `template_*`
+// is the buffer paint_dial_template() filled at startup; it's read-only
+// here and lives in cached userspace memory, so the memcpy is a fast
+// sequential WC write rather than the rmw of a full Blend2D pass.
+void paint_dial(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes, std::uint32_t x_off,
+                std::uint32_t y_off, std::uint32_t size, double norm, std::uint32_t needle_argb,
+                const std::uint8_t* template_pixels, std::uint32_t template_stride_bytes) noexcept {
+  if (size == 0U || base_pixels == nullptr || template_pixels == nullptr) {
+    return;
+  }
+  // Blit the static template row-by-row into the dst sub-rect. Per-row
+  // memcpy keeps both strides honest: the template was allocated dense
+  // (stride = size*4), the dst is the inst buffer's full stride.
+  const std::size_t row_bytes = static_cast<std::size_t>(size) * 4U;
+  for (std::uint32_t row = 0; row < size; ++row) {
+    std::uint8_t* dst_row = base_pixels +
+                            (static_cast<std::size_t>(y_off + row) * base_stride_bytes) +
+                            (static_cast<std::size_t>(x_off) * 4U);
+    const std::uint8_t* src_row =
+        template_pixels + (static_cast<std::size_t>(row) * template_stride_bytes);
+    std::memcpy(dst_row, src_row, row_bytes);
+  }
+
+  // Now overlay just the needle + hub.
+  std::uint8_t* sub_base = base_pixels + (static_cast<std::size_t>(y_off) * base_stride_bytes) +
+                           (static_cast<std::size_t>(x_off) * 4U);
+  BLImage canvas;
+  if (canvas.create_from_data(static_cast<int>(size), static_cast<int>(size), BL_FORMAT_PRGB32,
+                              sub_base, static_cast<intptr_t>(base_stride_bytes), BL_DATA_ACCESS_RW,
+                              nullptr, nullptr) != BL_SUCCESS) {
+    return;
+  }
+  BLContext ctx(canvas);
+  ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
+
+  double const cx = static_cast<double>(size) / 2.0;
+  double const cy = static_cast<double>(size) / 2.0;
+  double const r_needle = static_cast<double>(size) * 0.40;
+  double const r_hub = static_cast<double>(size) * 0.06;
+  double const a_norm = std::clamp(norm, 0.0, 1.0);
   double const needle_a = k_dial_start_angle + (a_norm * k_dial_sweep_angle);
   double const nx = cx + (r_needle * std::cos(needle_a));
   double const ny = cy + (r_needle * std::sin(needle_a));
   ctx.set_stroke_width(5.0);
   ctx.set_stroke_caps(BL_STROKE_CAP_ROUND);
   ctx.stroke_line(BLPoint(cx, cy), BLPoint(nx, ny), BLRgba32(needle_argb));
-
-  // Hub cap covering the needle's pivot point.
   ctx.fill_circle(BLCircle(cx, cy, r_hub), BLRgba32(k_dial_hub_argb));
-
   ctx.end();
 }
 
@@ -426,22 +489,22 @@ void paint_centered_text(BLContext& ctx, BLFont& font, std::string_view text, do
   ctx.fill_utf8_text(BLPoint(x, cy_baseline), font, text.data(), text.size(), BLRgba32(argb));
 }
 
-// Paint the speed readout: one big numeric value (0-240) with a
-// "km/h" label beneath. `font_face` may be empty when the host had no
-// usable system font -- in that case the layer is left transparent
-// rather than emitting a placeholder, since a wrong-looking text
-// fallback reads worse than a missing one.
-void paint_center_info(drm::BufferMapping& mapping, std::uint32_t speed_kmh,
-                       const BLFontFace& font_face) noexcept {
-  drm::span<std::uint8_t> const pixels = mapping.pixels();
-  std::uint32_t const stride = mapping.stride();
-  if (pixels.size() < static_cast<std::size_t>(k_info_h) * stride) {
+// One pre-rendered center-info template: a `k_info_w × k_info_h`
+// transparent buffer with the speed digit string (centered ~70%) and
+// the "km/h" label (centered ~95%) painted on top in opaque text. The
+// caller builds 241 of these at startup (0..240 km/h) and the
+// per-frame paint just blits the matching one — no Blend2D BLFont
+// shaping + BLTextMetrics centering on the hot path.
+void paint_center_info_template(std::uint8_t* template_pixels, std::uint32_t template_stride_bytes,
+                                std::uint32_t speed_kmh, const BLFontFace& font_face) noexcept {
+  if (template_pixels == nullptr) {
     return;
   }
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(k_info_w), static_cast<int>(k_info_h),
-                              BL_FORMAT_PRGB32, pixels.data(), static_cast<intptr_t>(stride),
-                              BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
+                              BL_FORMAT_PRGB32, template_pixels,
+                              static_cast<intptr_t>(template_stride_bytes), BL_DATA_ACCESS_RW,
+                              nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
   BLContext ctx(canvas);
@@ -452,10 +515,6 @@ void paint_center_info(drm::BufferMapping& mapping, std::uint32_t speed_kmh,
     return;
   }
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
-
-  // Speed digits centered horizontally at ~70% height; "km/h" label
-  // sits directly below at ~95% height. Baseline-y values picked by
-  // eye to match the typical instrument-cluster layout.
   std::string const speed_text = std::to_string(std::clamp<std::uint32_t>(speed_kmh, 0, 999));
   BLFont speed_font;
   if (speed_font.create_from_face(font_face, k_info_speed_font_px) == BL_SUCCESS) {
@@ -470,55 +529,93 @@ void paint_center_info(drm::BufferMapping& mapping, std::uint32_t speed_kmh,
   ctx.end();
 }
 
-// Paint the four-cell warning strip. `phases[i]` in [0, 1) is the
-// per-cell blink phase; lit when phase < 0.5, dim otherwise. Each
-// cell is a rounded rectangle filled with the lit/dim color and a
-// single glyph centered inside.
-void paint_warning_indicators(drm::BufferMapping& mapping,
-                              const std::array<double, k_warn_count>& phases,
-                              const BLFontFace& font_face) noexcept {
-  drm::span<std::uint8_t> const pixels = mapping.pixels();
-  std::uint32_t const stride = mapping.stride();
-  if (pixels.size() < static_cast<std::size_t>(k_warn_h) * stride) {
+// Per-frame center-info paint: row-by-row memcpy the speed_kmh's
+// pre-rendered template into the inst buffer's info sub-rect. Templates
+// are owned by the caller and indexed by clamped speed_kmh.
+void paint_center_info(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
+                       std::uint32_t x_off, std::uint32_t y_off, std::uint32_t speed_kmh,
+                       drm::span<const std::uint8_t* const> templates) noexcept {
+  if (base_pixels == nullptr || templates.empty()) {
+    return;
+  }
+  const std::size_t idx = std::min<std::size_t>(speed_kmh, templates.size() - 1U);
+  const std::uint8_t* src = templates.data()[idx];
+  if (src == nullptr) {
+    return;
+  }
+  const std::size_t row_bytes = static_cast<std::size_t>(k_info_w) * 4U;
+  for (std::uint32_t row = 0; row < k_info_h; ++row) {
+    std::uint8_t* dst = base_pixels + (static_cast<std::size_t>(y_off + row) * base_stride_bytes) +
+                        (static_cast<std::size_t>(x_off) * 4U);
+    std::memcpy(dst, src + (static_cast<std::size_t>(row) * row_bytes), row_bytes);
+  }
+}
+
+// One cell template for the warning-indicator strip. Renders a single
+// cell of size `cell_w × cell_h` (alpha-0 outside the rounded rect) into
+// the supplied template buffer. Called twice per cell at startup (lit
+// + dim variants); per-frame paint blits one of these templates into
+// the inst buffer instead of going through Blend2D again.
+void paint_warning_cell_template(std::uint8_t* template_pixels, std::uint32_t template_stride_bytes,
+                                 std::uint32_t cell_w, std::uint32_t cell_h, double inner_pad,
+                                 std::uint32_t cell_argb, std::uint32_t glyph_argb,
+                                 std::string_view glyph, const BLFontFace& font_face) noexcept {
+  if (cell_w == 0U || cell_h == 0U || template_pixels == nullptr) {
     return;
   }
   BLImage canvas;
-  if (canvas.create_from_data(static_cast<int>(k_warn_w), static_cast<int>(k_warn_h),
-                              BL_FORMAT_PRGB32, pixels.data(), static_cast<intptr_t>(stride),
+  if (canvas.create_from_data(static_cast<int>(cell_w), static_cast<int>(cell_h), BL_FORMAT_PRGB32,
+                              template_pixels, static_cast<intptr_t>(template_stride_bytes),
                               BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
-
   BLContext ctx(canvas);
   ctx.set_comp_op(BL_COMP_OP_SRC_COPY);
   ctx.fill_all(BLRgba32(0x00000000U));
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
-
+  double const x0 = inner_pad;
+  double const y0 = inner_pad;
+  double const w = static_cast<double>(cell_w) - (2.0 * inner_pad);
+  double const h = static_cast<double>(cell_h) - (2.0 * inner_pad);
+  ctx.fill_round_rect(BLRoundRect(x0, y0, w, h, k_warn_cell_radius), BLRgba32(cell_argb));
   BLFont glyph_font;
-  bool const have_font = font_face.is_valid() &&
-                         glyph_font.create_from_face(font_face, k_warn_glyph_font_px) == BL_SUCCESS;
-
-  constexpr double cell_w = static_cast<double>(k_warn_w) / static_cast<double>(k_warn_count);
-  double const inner_pad = 6.0;
-  for (int i = 0; i < k_warn_count; ++i) {
-    bool const lit = phases.at(static_cast<std::size_t>(i)) < 0.5;
-    auto const& spec = k_warn_specs.at(static_cast<std::size_t>(i));
-    std::uint32_t const cell_argb = lit ? spec.lit_argb : k_warn_dim_argb;
-    std::uint32_t const glyph_argb = lit ? 0xFF080C18U : k_warn_glyph_dim_argb;
-
-    double const x0 = (static_cast<double>(i) * cell_w) + inner_pad;
-    double const y0 = inner_pad;
-    double const w = cell_w - (2.0 * inner_pad);
-    double const h = static_cast<double>(k_warn_h) - (2.0 * inner_pad);
-    ctx.fill_round_rect(BLRoundRect(x0, y0, w, h, k_warn_cell_radius), BLRgba32(cell_argb));
-
-    if (have_font) {
-      double const cx = x0 + (w * 0.5);
-      double const cy_baseline = y0 + (h * 0.7);
-      paint_centered_text(ctx, glyph_font, spec.glyph, cx, cy_baseline, glyph_argb);
-    }
+  if (font_face.is_valid() &&
+      glyph_font.create_from_face(font_face, k_warn_glyph_font_px) == BL_SUCCESS) {
+    double const cx = x0 + (w * 0.5);
+    double const cy_baseline = y0 + (h * 0.7);
+    paint_centered_text(ctx, glyph_font, std::string(glyph), cx, cy_baseline, glyph_argb);
   }
   ctx.end();
+}
+
+// Per-frame: blit each cell's pre-rendered template (lit or dim) into
+// the inst buffer at (x_off + i*cell_w, y_off). Templates are owned by
+// the caller; `templates` is a flat span: cell 0 lit, cell 0 dim, cell
+// 1 lit, cell 1 dim, ... — 2 * k_warn_count entries, each pointing at
+// a (cell_w * k_warn_h * 4)-byte buffer with stride = cell_w*4.
+void paint_warning_indicators(std::uint8_t* base_pixels, std::uint32_t base_stride_bytes,
+                              std::uint32_t x_off, std::uint32_t y_off,
+                              const std::array<double, k_warn_count>& phases, std::uint32_t cell_w,
+                              drm::span<const std::uint8_t* const> templates) noexcept {
+  if (base_pixels == nullptr || cell_w == 0U) {
+    return;
+  }
+  const std::size_t row_bytes = static_cast<std::size_t>(cell_w) * 4U;
+  for (std::size_t i = 0; i < k_warn_count; ++i) {
+    const bool lit = phases.at(i) < 0.5;
+    const std::uint8_t* tpl = templates.data()[(i * 2U) + (lit ? 0U : 1U)];
+    if (tpl == nullptr) {
+      continue;
+    }
+    const std::uint32_t cell_x = x_off + (static_cast<std::uint32_t>(i) * cell_w);
+    for (std::uint32_t row = 0; row < k_warn_h; ++row) {
+      std::uint8_t* dst = base_pixels +
+                          (static_cast<std::size_t>(y_off + row) * base_stride_bytes) +
+                          (static_cast<std::size_t>(cell_x) * 4U);
+      const std::uint8_t* src = tpl + (static_cast<std::size_t>(row) * row_bytes);
+      std::memcpy(dst, src, row_bytes);
+    }
+  }
 }
 
 // Synthetic rear-view paint used when neither UVC nor a viable
@@ -537,7 +634,7 @@ void paint_rearview_synthetic(drm::BufferMapping& mapping, double elapsed_s,
   }
   BLImage canvas;
   if (canvas.create_from_data(static_cast<int>(k_rear_w), static_cast<int>(k_rear_h),
-                              BL_FORMAT_XRGB32, pixels.data(), static_cast<intptr_t>(stride),
+                              BL_FORMAT_PRGB32, pixels.data(), static_cast<intptr_t>(stride),
                               BL_DATA_ACCESS_RW, nullptr, nullptr) != BL_SUCCESS) {
     return;
   }
@@ -1208,6 +1305,62 @@ void drive_rearview(RearViewState& rv) noexcept {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Graceful exit on SIGINT/SIGTERM so the main loop can drain its
+  // last commit + run the jitter-summary block at the bottom. Without
+  // this, `timeout`'s SIGTERM kills the process between repaint and
+  // shutdown and any end-of-run telemetry is lost.
+  std::signal(SIGINT, on_sigint);
+  std::signal(SIGTERM, on_sigint);
+
+  // Parse --mode WxH[@Hz] and STRIP the flag + its value from argv so
+  // select_device (which uses argv[1] verbatim) sees the device path
+  // first. Default (no flag) keeps the existing pick-preferred-mode
+  // behavior.
+  std::optional<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> mode_override;
+  {
+    int write = 1;
+    for (int i = 1; i < argc; ++i) {
+      const std::string_view a{argv[i]};
+      if (a == "--mode" && i + 1 < argc) {
+        const std::string spec{argv[++i]};
+        std::uint32_t w = 0;
+        std::uint32_t h = 0;
+        std::uint32_t hz = 0;
+        const auto* end = spec.data() + spec.size();
+        const auto* p = spec.data();
+        auto consume_u32 = [&](std::uint32_t& out) {
+          std::uint32_t v = 0;
+          bool any = false;
+          while (p < end && *p >= '0' && *p <= '9') {
+            v = (v * 10U) + static_cast<std::uint32_t>(*p++ - '0');
+            any = true;
+          }
+          if (any) {
+            out = v;
+          }
+          return any;
+        };
+        if (!consume_u32(w)) {
+          continue;
+        }
+        if (p < end) {
+          ++p;  // 'x'
+        }
+        if (!consume_u32(h)) {
+          continue;
+        }
+        if (p < end && *p == '@') {
+          ++p;
+          (void)consume_u32(hz);
+        }
+        mode_override.emplace(w, h, hz);
+      } else {
+        argv[write++] = argv[i];
+      }
+    }
+    argc = write;
+  }
+
   auto ctx_opt = drm::examples::open_and_pick_output(argc, argv);
   if (!ctx_opt.has_value()) {
     return EXIT_FAILURE;
@@ -1215,16 +1368,126 @@ int main(int argc, char** argv) {
   auto& ctx = *ctx_opt;
   auto& dev = ctx.device;
   auto& seat = ctx.seat;
+
+  if (mode_override.has_value()) {
+    const auto [tw, th, thz] = *mode_override;
+    auto conn = drm::get_connector(dev.fd(), ctx.connector_id);
+    if (!conn) {
+      drm::println(stderr, "--mode: failed to re-query connector {}", ctx.connector_id);
+      return EXIT_FAILURE;
+    }
+    auto picked = drm::select_mode(drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes),
+                                   tw, th, thz);
+    bool exact = false;
+    if (picked) {
+      const auto& m = picked->drm_mode;
+      exact = (m.hdisplay == tw && m.vdisplay == th && (thz == 0 || m.vrefresh == thz));
+    }
+    if (exact) {
+      ctx.mode = picked->drm_mode;
+    } else {
+      // No exact match in the connector's EDID-derived mode list.
+      // Synthesize a CVT-RB2 (Coordinated Video Timings, Reduced
+      // Blanking v2) modeline. CVT-RB2 fixes horizontal blanking at 80
+      // pixels and vertical blanking at >=460/h_period_us lines, which
+      // hits the timings high-refresh DP monitors advertise via
+      // Display Range Limits even when their EDID DTDs only cover
+      // lower-Hz modes. The kernel atomic ioctl accepts arbitrary
+      // drmModeModeInfo blobs, so this is enough to drive the panel
+      // at its claimed max refresh as long as link bandwidth allows.
+      if (thz == 0) {
+        drm::println(stderr, "--mode: no match for {}x{} and no refresh hint to synthesize from",
+                     tw, th);
+        return EXIT_FAILURE;
+      }
+      // CVT 1.2 Reduced Blanking v2 timings. RB v2 fixes horizontal
+      // blanking at 80 px (front 8 + sync 32 + back 40) and constrains
+      // vertical blanking to a 460us-equivalent floor for refresh<200Hz
+      // and a relaxed 80-line floor for refresh>=200Hz. The resulting
+      // pixel clock is what high-refresh DP monitors expect — `cvt -r
+      // 1920 1080 240` outputs the same modeline (530.88 MHz).
+      constexpr std::uint32_t k_h_blank_rb = 80;
+      constexpr std::uint32_t k_h_front = 8;
+      constexpr std::uint32_t k_h_sync = 32;
+      constexpr std::uint32_t k_v_sync_rb = 8;
+      constexpr std::uint32_t k_v_front_rb = 3;
+      constexpr std::uint32_t k_v_back_rb_min = 6;
+      // V blank floor: 460us at <200Hz refresh (CVT-RB v1 rule kept for
+      // back-compat with low-Hz monitors), 80 lines at >=200Hz where
+      // monitors advertise tighter timings.
+      std::uint32_t v_blank = 0;
+      if (thz >= 200U) {
+        v_blank = std::max<std::uint32_t>(80U, k_v_front_rb + k_v_sync_rb + k_v_back_rb_min);
+      } else {
+        v_blank = 32U;
+        for (int it = 0; it < 8; ++it) {
+          const double h_period_us =
+              1.0e6 / (static_cast<double>(thz) * static_cast<double>(th + v_blank));
+          const auto needed =
+              static_cast<std::uint32_t>(std::lround(static_cast<double>(460U) / h_period_us));
+          const std::uint32_t cand = std::max<std::uint32_t>(32, needed);
+          if (cand == v_blank) {
+            break;
+          }
+          v_blank = cand;
+        }
+      }
+      const std::uint32_t h_total = tw + k_h_blank_rb;
+      const std::uint32_t v_total = th + v_blank;
+      const std::uint64_t pclk_hz = static_cast<std::uint64_t>(thz) * h_total * v_total;
+      const auto clock_khz = static_cast<std::uint32_t>((pclk_hz + 500U) / 1000U);
+      drmModeModeInfo m{};
+      m.clock = clock_khz;
+      m.hdisplay = static_cast<std::uint16_t>(tw);
+      m.hsync_start = static_cast<std::uint16_t>(tw + k_h_front);
+      m.hsync_end = static_cast<std::uint16_t>(tw + k_h_front + k_h_sync);
+      m.htotal = static_cast<std::uint16_t>(h_total);
+      m.hskew = 0;
+      m.vdisplay = static_cast<std::uint16_t>(th);
+      m.vsync_start = static_cast<std::uint16_t>(th + k_v_front_rb);
+      m.vsync_end = static_cast<std::uint16_t>(th + k_v_front_rb + k_v_sync_rb);
+      m.vtotal = static_cast<std::uint16_t>(v_total);
+      m.vscan = 0;
+      m.vrefresh = thz;
+      m.flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC;
+      m.type = DRM_MODE_TYPE_USERDEF;
+      std::snprintf(m.name, DRM_DISPLAY_MODE_LEN, "%ux%u@%uRB", tw, th, thz);
+      drm::println(stderr, "--mode: synthesized CVT-RB2 {}x{}@{}Hz pclk={}MHz htotal={} vtotal={}",
+                   tw, th, thz, clock_khz / 1000U, h_total, v_total);
+      ctx.mode = m;
+    }
+  }
   std::uint32_t const fb_w = ctx.mode.hdisplay;
   std::uint32_t const fb_h = ctx.mode.vdisplay;
+  drm::println(stderr, "cluster_sim: mode = {}x{}@{}Hz", fb_w, fb_h, ctx.mode.vrefresh);
 
-  // Bg layer — painted once, scanned out forever.
-  auto bg_src_r = drm::scene::DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
-  if (!bg_src_r) {
-    drm::println(stderr, "DumbBufferSource::create (bg): {}", bg_src_r.error().message());
-    return EXIT_FAILURE;
+  // Bg layer — painted once, scanned out forever. Default is a plain
+  // DumbBufferSource. When CLUSTER_SIM_NVBUF=1 is set in the env AND
+  // the library was built with the NvBufSurface gate on, swap to an
+  // NvBufSurfaceSource: same scanout-side behavior (PRIME-imported FB
+  // on a hardware plane) but with cached CPU mmap on the producer side
+  // — useful as the building-block test for any future CPU compose
+  // path that reads from the bg.
+  std::unique_ptr<drm::scene::LayerBufferSource> bg_src;
+#if DRM_CXX_HAS_NVBUFSURFACE
+  if (std::getenv("CLUSTER_SIM_NVBUF") != nullptr) {
+    auto r = drm::scene::NvBufSurfaceSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
+    if (!r) {
+      drm::println(stderr, "NvBufSurfaceSource::create (bg): {}", r.error().message());
+      return EXIT_FAILURE;
+    }
+    bg_src = std::move(*r);
+    drm::println(stderr, "cluster_sim: bg layer via NvBufSurface");
   }
-  auto bg_src = std::move(*bg_src_r);
+#endif
+  if (!bg_src) {
+    auto r = drm::scene::DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
+    if (!r) {
+      drm::println(stderr, "DumbBufferSource::create (bg): {}", r.error().message());
+      return EXIT_FAILURE;
+    }
+    bg_src = std::move(*r);
+  }
   auto* bg_src_raw = bg_src.get();
   if (auto m = bg_src->map(drm::MapAccess::Write); m) {
     paint_bg_gradient(*m, fb_w, fb_h);
@@ -1244,107 +1507,80 @@ int main(int argc, char** argv) {
   }
   auto scene = std::move(*scene_r);
 
-  drm::scene::LayerDesc bg_desc;
-  bg_desc.source = std::move(bg_src);
-  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  if (auto h = scene->add_layer(std::move(bg_desc)); !h) {
-    drm::println(stderr, "add_layer (bg): {}", h.error().message());
-    return EXIT_FAILURE;
-  }
-
   // Dial sizing: 4/9 of screen height capped at 400 px gives ~400 on
   // 1080p, 320 on 720p, scales down sensibly for smaller outputs.
   // Centered vertically; speedo at 1/4-screen, tach at 3/4-screen.
   std::uint32_t const dial_size = std::min<std::uint32_t>(fb_h * 4U / 9U, 400U);
-  auto const dial_y = static_cast<std::int32_t>((fb_h - dial_size) / 2U);
-  auto const speedo_x =
+  auto const dial_y_world = static_cast<std::int32_t>((fb_h - dial_size) / 2U);
+  auto const speedo_x_world =
       static_cast<std::int32_t>(fb_w / 4U) - static_cast<std::int32_t>(dial_size / 2U);
-  auto const tach_x =
+  auto const tach_x_world =
       static_cast<std::int32_t>((fb_w * 3U) / 4U) - static_cast<std::int32_t>(dial_size / 2U);
-
-  auto make_dial_layer =
-      [&](std::int32_t x,
-          std::int32_t y) -> drm::expected<drm::scene::DumbBufferSource*, std::error_code> {
-    auto src_r =
-        drm::scene::DumbBufferSource::create(dev, dial_size, dial_size, DRM_FORMAT_ARGB8888);
-    if (!src_r) {
-      return drm::unexpected<std::error_code>(src_r.error());
-    }
-    auto src = std::move(*src_r);
-    auto* raw = src.get();
-    drm::scene::LayerDesc desc;
-    desc.source = std::move(src);
-    desc.display.src_rect = drm::scene::Rect{0, 0, dial_size, dial_size};
-    desc.display.dst_rect = drm::scene::Rect{x, y, dial_size, dial_size};
-    // amdgpu pins PRIMARY at zpos=2; the dials need to sit above the
-    // bg, so anchor them at zpos>=3 explicitly to avoid silent
-    // collision with the primary plane.
-    desc.display.zpos = 3;
-    if (auto h = scene->add_layer(std::move(desc)); !h) {
-      return drm::unexpected<std::error_code>(h.error());
-    }
-    return raw;
-  };
-
-  auto speedo_r = make_dial_layer(speedo_x, dial_y);
-  if (!speedo_r) {
-    drm::println(stderr, "add_layer (speedo): {}", speedo_r.error().message());
-    return EXIT_FAILURE;
-  }
-  auto tach_r = make_dial_layer(tach_x, dial_y);
-  if (!tach_r) {
-    drm::println(stderr, "add_layer (tach): {}", tach_r.error().message());
-    return EXIT_FAILURE;
-  }
-  auto* speedo_src_raw = *speedo_r;
-  auto* tach_src_raw = *tach_r;
-
-  // Center info layer: ARGB8888 between the dials, vertically
-  // centered against the dial midline. Uses the same zpos as the
-  // dials -- it's a sibling UI layer, not a priority overlay.
-  auto info_src_r =
-      drm::scene::DumbBufferSource::create(dev, k_info_w, k_info_h, DRM_FORMAT_ARGB8888);
-  if (!info_src_r) {
-    drm::println(stderr, "DumbBufferSource::create (info): {}", info_src_r.error().message());
-    return EXIT_FAILURE;
-  }
-  auto* info_src_raw = info_src_r->get();
-  drm::scene::LayerDesc info_desc;
-  info_desc.source = std::move(*info_src_r);
-  info_desc.display.src_rect = drm::scene::Rect{0, 0, k_info_w, k_info_h};
-  auto const info_x =
+  auto const info_x_world =
       static_cast<std::int32_t>(fb_w / 2U) - static_cast<std::int32_t>(k_info_w / 2U);
-  auto const info_y =
-      dial_y + static_cast<std::int32_t>(dial_size / 2U) - static_cast<std::int32_t>(k_info_h / 2U);
-  info_desc.display.dst_rect = drm::scene::Rect{info_x, info_y, k_info_w, k_info_h};
-  info_desc.display.zpos = 3;
-  if (auto h = scene->add_layer(std::move(info_desc)); !h) {
-    drm::println(stderr, "add_layer (info): {}", h.error().message());
-    return EXIT_FAILURE;
-  }
-
-  // Warning indicators: 4-cell ARGB strip below the dials. zpos=4
-  // (above the dials) so the allocator pins it on a hardware plane
-  // even when the dials had to composite -- a real cluster never
-  // lets a warning indicator drop frames.
-  auto warn_src_r =
-      drm::scene::DumbBufferSource::create(dev, k_warn_w, k_warn_h, DRM_FORMAT_ARGB8888);
-  if (!warn_src_r) {
-    drm::println(stderr, "DumbBufferSource::create (warn): {}", warn_src_r.error().message());
-    return EXIT_FAILURE;
-  }
-  auto* warn_src_raw = warn_src_r->get();
-  drm::scene::LayerDesc warn_desc;
-  warn_desc.source = std::move(*warn_src_r);
-  warn_desc.display.src_rect = drm::scene::Rect{0, 0, k_warn_w, k_warn_h};
-  auto const warn_x =
+  auto const info_y_world = dial_y_world + static_cast<std::int32_t>(dial_size / 2U) -
+                            static_cast<std::int32_t>(k_info_h / 2U);
+  auto const warn_x_world =
       static_cast<std::int32_t>(fb_w / 2U) - static_cast<std::int32_t>(k_warn_w / 2U);
-  auto const warn_y = dial_y + static_cast<std::int32_t>(dial_size) + 40;
-  warn_desc.display.dst_rect = drm::scene::Rect{warn_x, warn_y, k_warn_w, k_warn_h};
-  warn_desc.display.zpos = 4;
-  if (auto h = scene->add_layer(std::move(warn_desc)); !h) {
-    drm::println(stderr, "add_layer (warn): {}", h.error().message());
+  auto const warn_y_world = dial_y_world + static_cast<std::int32_t>(dial_size) + 40;
+
+  // Combined instruments layer: one ARGB8888 buffer at full screen
+  // size. With only 2 content layers (bg + this one) and both at full
+  // screen, both fit cleanly on hardware planes (PRIMARY + OVERLAY).
+  // Outside the dial / info / warning sub-rects the buffer stays at
+  // alpha=0 so the kernel's hardware compositor blends bg through; the
+  // small rects we paint each frame have alpha=0xFF and overwrite bg.
+  // Full-screen sizing avoids Tegra-specific position/size constraints
+  // some planes apply to non-full-screen dst rects.
+  auto const inst_x_world = 0;
+  auto const inst_y_world = 0;
+  auto const inst_w = fb_w;
+  auto const inst_h = fb_h;
+  // Sub-layer offsets within the combined buffer == world coords.
+  auto const speedo_x_local = static_cast<std::uint32_t>(speedo_x_world);
+  auto const dial_y_local = static_cast<std::uint32_t>(dial_y_world);
+  auto const tach_x_local = static_cast<std::uint32_t>(tach_x_world);
+  auto const info_x_local = static_cast<std::uint32_t>(info_x_world);
+  auto const info_y_local = static_cast<std::uint32_t>(info_y_world);
+  auto const warn_x_local = static_cast<std::uint32_t>(warn_x_world);
+  auto const warn_y_local = static_cast<std::uint32_t>(warn_y_world);
+
+  // ARGB8888 (not XRGB) so the layer's alpha channel is honored by the
+  // OVERLAY plane on every driver. On Tegra Orin specifically, OVERLAY
+  // accepts ARGB but rejects XRGB in caps probing, which would force a
+  // composition fallback and re-introduce the slow CPU path. We fill
+  // every pixel with alpha=0xFF, so the visual result matches XRGB.
+  auto inst_src_r = drm::scene::DumbBufferSource::create(dev, inst_w, inst_h, DRM_FORMAT_ARGB8888);
+  if (!inst_src_r) {
+    drm::println(stderr, "DumbBufferSource::create (instruments): {}",
+                 inst_src_r.error().message());
+    return EXIT_FAILURE;
+  }
+  auto* inst_src_raw = inst_src_r->get();
+  drm::scene::LayerDesc inst_desc;
+  inst_desc.source = std::move(*inst_src_r);
+  inst_desc.display.src_rect = drm::scene::Rect{0, 0, inst_w, inst_h};
+  inst_desc.display.dst_rect = drm::scene::Rect{inst_x_world, inst_y_world, inst_w, inst_h};
+  // Explicit zpos on both layers so the allocator picks the right
+  // plane on every driver:
+  //   * zpos-aware drivers (amdgpu, i915): bg.zpos=0 maps to PRIMARY's
+  //     zpos_min (PRIMARY pinned at 0/1/2 depending on driver), inst.zpos=4
+  //     puts the layer onto a higher OVERLAY slot.
+  //   * zpos-less drivers (Tegra): the allocator treats zpos=0 as
+  //     "wants PRIMARY (bottom)" and zpos>0 as "wants OVERLAY (top)"
+  //     via the matching score-pair extension in src/planes/allocator.cpp.
+  drm::scene::LayerDesc bg_desc;
+  bg_desc.source = std::move(bg_src);
+  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.zpos = 0;
+  if (auto h = scene->add_layer(std::move(bg_desc)); !h) {
+    drm::println(stderr, "add_layer (bg): {}", h.error().message());
+    return EXIT_FAILURE;
+  }
+  inst_desc.display.zpos = 4;
+  if (auto h = scene->add_layer(std::move(inst_desc)); !h) {
+    drm::println(stderr, "add_layer (instruments): {}", h.error().message());
     return EXIT_FAILURE;
   }
 
@@ -1362,20 +1598,140 @@ int main(int argc, char** argv) {
   // commit has valid pixel content everywhere. repaint_layers is the
   // shared per-frame paint path called from the main loop and from
   // the session-resume cleanup.
+  // Init the full-screen inst buffer to fully transparent. Hardware
+  // composes inst SRC_OVER bg per pixel: alpha=0 pixels let bg through
+  // unchanged. Sub-rect paints below light up only the dial / readout
+  // / warning regions at alpha=0xFF (premultiplied opaque).
+  if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
+    auto pixels = m->pixels();
+    std::memset(pixels.data(), 0, pixels.size_bytes());
+  }
+
+  // Pre-render the static dial template (rim + face + ticks) once.
+  // Both dials share it — they differ only in needle color, which the
+  // per-frame paint adds on top.
+  const std::uint32_t dial_template_stride = dial_size * 4U;
+  std::vector<std::uint8_t> dial_template(
+      static_cast<std::size_t>(dial_size) * dial_template_stride, 0U);
+  paint_dial_template(dial_template.data(), dial_template_stride, dial_size);
+
+  // Pre-render the 241 center-info templates (0..k_info_speed_max_kmh
+  // km/h). Per-frame paint then memcpy-blits the matching template
+  // instead of going through Blend2D's BLFont shaping + text metrics
+  // every time the digit string changes. Memory cost is k_info_w *
+  // k_info_h * 4 * 241 ≈ 43 MB of RAM; startup paint cost is ~100 ms
+  // (one-time). Acceptable on Jetson Orin (16/32/64 GB RAM); on a more
+  // constrained host the right answer would be per-digit slicing
+  // instead, but that requires re-implementing the centering math.
+  constexpr std::size_t k_info_template_count = static_cast<std::size_t>(k_info_speed_max_kmh) + 1U;
+  const std::uint32_t info_template_stride = k_info_w * 4U;
+  const std::size_t info_template_bytes = static_cast<std::size_t>(k_info_h) * info_template_stride;
+  std::vector<std::vector<std::uint8_t>> info_templates(k_info_template_count);
+  std::vector<const std::uint8_t*> info_template_ptrs(k_info_template_count, nullptr);
+  for (std::size_t i = 0; i < k_info_template_count; ++i) {
+    info_templates[i].assign(info_template_bytes, 0U);
+    paint_center_info_template(info_templates[i].data(), info_template_stride,
+                               static_cast<std::uint32_t>(i), font_face);
+    info_template_ptrs[i] = info_templates[i].data();
+  }
+
+  // Pre-render lit + dim variants of each warning cell. Per-frame paint
+  // just blits the right one — Blend2D's rounded-rect fill + glyph
+  // shaping is far more expensive than a 100×80 memcpy.
+  constexpr std::uint32_t k_warn_cell_w = k_warn_w / k_warn_count;
+  constexpr double k_warn_inner_pad = 6.0;
+  const std::uint32_t warn_cell_stride = k_warn_cell_w * 4U;
+  const std::size_t warn_cell_bytes = static_cast<std::size_t>(k_warn_cell_w) * k_warn_h * 4U;
+  // Flat 2*k_warn_count array: [cell0_lit, cell0_dim, cell1_lit, cell1_dim, ...].
+  std::array<std::vector<std::uint8_t>, static_cast<std::size_t>(2U * k_warn_count)> warn_templates;
+  std::array<const std::uint8_t*, static_cast<std::size_t>(2U * k_warn_count)> warn_template_ptrs{};
+  for (std::size_t i = 0; i < k_warn_count; ++i) {
+    const auto& spec = k_warn_specs.at(i);
+    auto& lit_buf = warn_templates.at(i * 2U);
+    auto& dim_buf = warn_templates.at((i * 2U) + 1U);
+    lit_buf.assign(warn_cell_bytes, 0U);
+    dim_buf.assign(warn_cell_bytes, 0U);
+    paint_warning_cell_template(lit_buf.data(), warn_cell_stride, k_warn_cell_w, k_warn_h,
+                                k_warn_inner_pad, spec.lit_argb, 0xFF080C18U, spec.glyph,
+                                font_face);
+    paint_warning_cell_template(dim_buf.data(), warn_cell_stride, k_warn_cell_w, k_warn_h,
+                                k_warn_inner_pad, k_warn_dim_argb, k_warn_glyph_dim_argb,
+                                spec.glyph, font_face);
+    warn_template_ptrs.at(i * 2U) = lit_buf.data();
+    warn_template_ptrs.at((i * 2U) + 1U) = dim_buf.data();
+  }
+
+  // Per-layer "last visible state" cache: skip the corresponding paint
+  // when the animation phase quantizes to the same value as last frame.
+  // The kernel still page-flips each vblank (with the same FB), so the
+  // smooth-tick budget is unchanged — only the CPU paint cost is saved
+  // for frames where the needle hasn't moved a whole pixel, the digit
+  // hasn't ticked, or no cell flipped lit/dim. Sentinel values force
+  // a paint on first call. The needle endpoint is quantized to the
+  // dial buffer's pixel grid; consecutive frames at 120 Hz often
+  // produce the same endpoint.
+  auto needle_endpoint_px = [&](double norm) -> std::pair<std::int32_t, std::int32_t> {
+    const double a_norm = std::clamp(norm, 0.0, 1.0);
+    const double needle_a = k_dial_start_angle + (a_norm * k_dial_sweep_angle);
+    const double cx = static_cast<double>(dial_size) / 2.0;
+    const double cy = static_cast<double>(dial_size) / 2.0;
+    const double r_needle = static_cast<double>(dial_size) * 0.40;
+    return {static_cast<std::int32_t>(cx + (r_needle * std::cos(needle_a))),
+            static_cast<std::int32_t>(cy + (r_needle * std::sin(needle_a)))};
+  };
+  std::pair<std::int32_t, std::int32_t> last_speedo_px{INT32_MIN, INT32_MIN};
+  std::pair<std::int32_t, std::int32_t> last_tach_px{INT32_MIN, INT32_MIN};
+  std::uint32_t last_speed_kmh = UINT32_MAX;
+  std::uint8_t last_warn_bits = 0xFFU;
+
+  // Returns true if any section was painted (caller should commit), false
+  // if every section's visible state matched the previous frame and we
+  // can skip the commit entirely.
   auto repaint_layers = [&](double speedo_norm, double tach_norm, std::uint32_t speed_kmh,
-                            const std::array<double, k_warn_count>& warn_phases) {
-    if (auto m = speedo_src_raw->map(drm::MapAccess::Write); m) {
-      paint_dial(*m, dial_size, speedo_norm, k_speedo_needle_argb);
+                            const std::array<double, k_warn_count>& warn_phases) -> bool {
+    const auto speedo_px = needle_endpoint_px(speedo_norm);
+    const auto tach_px = needle_endpoint_px(tach_norm);
+    std::uint8_t warn_bits = 0U;
+    for (std::size_t i = 0; i < k_warn_count; ++i) {
+      if (warn_phases.at(i) < 0.5) {
+        warn_bits |= static_cast<std::uint8_t>(1U << i);
+      }
     }
-    if (auto m = tach_src_raw->map(drm::MapAccess::Write); m) {
-      paint_dial(*m, dial_size, tach_norm, k_tach_needle_argb);
+    const bool need_speedo = speedo_px != last_speedo_px;
+    const bool need_tach = tach_px != last_tach_px;
+    const bool need_info = speed_kmh != last_speed_kmh;
+    const bool need_warn = warn_bits != last_warn_bits;
+    if (!need_speedo && !need_tach && !need_info && !need_warn) {
+      return false;
     }
-    if (auto m = info_src_raw->map(drm::MapAccess::Write); m) {
-      paint_center_info(*m, speed_kmh, font_face);
+    if (auto m = inst_src_raw->map(drm::MapAccess::Write); m) {
+      auto* base = m->pixels().data();
+      const std::uint32_t stride = m->stride();
+      if (need_speedo) {
+        paint_dial(base, stride, speedo_x_local, dial_y_local, dial_size, speedo_norm,
+                   k_speedo_needle_argb, dial_template.data(), dial_template_stride);
+        last_speedo_px = speedo_px;
+      }
+      if (need_tach) {
+        paint_dial(base, stride, tach_x_local, dial_y_local, dial_size, tach_norm,
+                   k_tach_needle_argb, dial_template.data(), dial_template_stride);
+        last_tach_px = tach_px;
+      }
+      if (need_info) {
+        paint_center_info(base, stride, info_x_local, info_y_local, speed_kmh,
+                          drm::span<const std::uint8_t* const>(info_template_ptrs.data(),
+                                                               info_template_ptrs.size()));
+        last_speed_kmh = speed_kmh;
+      }
+      if (need_warn) {
+        paint_warning_indicators(base, stride, warn_x_local, warn_y_local, warn_phases,
+                                 k_warn_cell_w,
+                                 drm::span<const std::uint8_t* const>(warn_template_ptrs.data(),
+                                                                      warn_template_ptrs.size()));
+        last_warn_bits = warn_bits;
+      }
     }
-    if (auto m = warn_src_raw->map(drm::MapAccess::Write); m) {
-      paint_warning_indicators(*m, warn_phases, font_face);
-    }
+    return true;
   };
   std::array<double, k_warn_count> const initial_warn_phases{0.0, 0.0, 0.0, 0.0};
   repaint_layers(0.0, 0.0, 0U, initial_warn_phases);
@@ -1482,10 +1838,38 @@ int main(int argc, char** argv) {
   // cadence without a wall-clock timer.
   drm::examples::SessionPumpState session_state;
   bool need_repaint = false;
+  // Frame-time jitter capture: set CLUSTER_SIM_FRAME_JITTER=1 in the env
+  // to track per-flip delta against the chosen mode's expected period
+  // (1 / vrefresh). Reports count, mean, max delta, and missed-vblank
+  // ratio on exit. Off by default so a normal run prints nothing.
+  const bool jitter_enabled = std::getenv("CLUSTER_SIM_FRAME_JITTER") != nullptr;
+  const double expected_frame_us =
+      (ctx.mode.vrefresh > 0) ? (1.0e6 / static_cast<double>(ctx.mode.vrefresh)) : 0.0;
+  struct JitterStats {
+    std::uint64_t frames{0};
+    std::uint64_t missed{0};  // delta > 1.5 * expected
+    double max_us{0.0};
+    double sum_us{0.0};
+    std::chrono::steady_clock::time_point prev;
+  } jitter;
+
   drm::PageFlip page_flip(dev);
   page_flip.set_handler([&](std::uint32_t /*c*/, std::uint64_t /*s*/, std::uint64_t /*t*/) {
     session_state.flip_pending = false;
     need_repaint = true;
+    if (jitter_enabled) {
+      auto const now = std::chrono::steady_clock::now();
+      if (jitter.frames > 0 && expected_frame_us > 0.0) {
+        const double dt_us = std::chrono::duration<double, std::micro>(now - jitter.prev).count();
+        jitter.sum_us += dt_us;
+        jitter.max_us = std::max(dt_us, jitter.max_us);
+        if (dt_us > 1.5 * expected_frame_us) {
+          ++jitter.missed;
+        }
+      }
+      jitter.prev = now;
+      ++jitter.frames;
+    }
   });
 
   // libinput keyboard + VT-switch chord forwarding. libseat puts the
@@ -1580,11 +1964,44 @@ int main(int argc, char** argv) {
       seat->dispatch();
     }
   });
+
+  // Commit-skip timer: when the per-frame repaint found nothing visibly
+  // changed AND the rear-view layer isn't pumping its own buffers, we
+  // suppress the atomic commit and re-evaluate one vblank period later.
+  // The timer is one-shot (TFD_CLOEXEC + tick at expected_frame_us).
+  // The fd is added as a slot so the EventLoop's poll wakes when it
+  // expires; the handler reads/drains the counter and sets
+  // need_repaint=true. timer_pending guards against a re-arm while one
+  // is already in flight.
+  const int timer_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+  if (timer_fd < 0) {
+    drm::println(stderr, "timerfd_create: {}", std::system_category().message(errno));
+    return EXIT_FAILURE;
+  }
+  bool timer_pending = false;
+  (void)loop.add_slot(timer_fd, [&] {
+    std::uint64_t expirations = 0;
+    (void)::read(timer_fd, &expirations, sizeof(expirations));
+    timer_pending = false;
+    need_repaint = true;
+  });
+  auto arm_skip_timer = [&]() {
+    if (timer_pending || expected_frame_us <= 0.0) {
+      return;
+    }
+    itimerspec its{};
+    const auto ns = static_cast<long>(expected_frame_us * 1000.0);
+    its.it_value.tv_sec = ns / 1'000'000'000L;
+    its.it_value.tv_nsec = ns % 1'000'000'000L;
+    if (::timerfd_settime(timer_fd, 0, &its, nullptr) == 0) {
+      timer_pending = true;
+    }
+  };
 #if CLUSTER_SIM_HAS_LIBYUV
   int const uvc_slot = loop.add_slot(-1, [&] { drive_rearview_uvc(rear_view); });
 #endif
 
-  while (!quit) {
+  while (!quit && !g_quit.load(std::memory_order_relaxed)) {
 #if CLUSTER_SIM_HAS_LIBYUV
     loop.set_fd(uvc_slot, (rear_view.layer.has_value() && rear_view.uvc_capture.has_value())
                               ? rear_view.uvc_capture->fd()
@@ -1649,7 +2066,8 @@ int main(int argc, char** argv) {
         double const period = k_warn_specs.at(static_cast<std::size_t>(i)).period_s;
         warn_phases.at(static_cast<std::size_t>(i)) = std::fmod(elapsed / period, 1.0);
       }
-      repaint_layers(speedo_norm, tach_norm, speed_kmh, warn_phases);
+      const bool instruments_painted =
+          repaint_layers(speedo_norm, tach_norm, speed_kmh, warn_phases);
       // Rear-view is decoder-driven (vicodec) or pump-driven (UVC) so
       // those tiers don't repaint here. The synthetic tier is the
       // exception: its content lives in a dumb buffer we own and we
@@ -1660,6 +2078,19 @@ int main(int argc, char** argv) {
         }
       }
       drive_rearview(rear_view);
+      // Skip the atomic commit entirely when nothing visible changed AND
+      // the rear-view layer is fully inactive (no V4L2 source, no
+      // synthetic pattern). The kernel doesn't see this frame at all;
+      // the one-shot timerfd wakes the loop one vblank period later for
+      // re-evaluation, and most consecutive evaluations will produce a
+      // real paint+commit on the next round.
+      const bool rearview_active =
+          rear_view.layer.has_value() &&
+          (rear_view.source != nullptr || rear_view.synthetic_source != nullptr);
+      if (!instruments_painted && !rearview_active) {
+        arm_skip_timer();
+        continue;
+      }
       auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK, &page_flip);
       if (!r) {
         if (r.error() == std::errc::permission_denied) {
@@ -1679,5 +2110,15 @@ int main(int argc, char** argv) {
 
   // UvcCapture's destructor STREAMOFF + REQBUFS=0 + munmap + close, so
   // no explicit teardown call is needed at exit.
+
+  if (jitter_enabled && jitter.frames > 1) {
+    const std::uint64_t sample_n = jitter.frames - 1U;  // first flip had no prev
+    const double mean_us = jitter.sum_us / static_cast<double>(sample_n);
+    drm::println(stderr,
+                 "frame-jitter: frames={} expected={:.1f}us mean={:.1f}us max={:.1f}us "
+                 "missed_vblanks={} ({:.2f}%)",
+                 jitter.frames, expected_frame_us, mean_us, jitter.max_us, jitter.missed,
+                 100.0 * static_cast<double>(jitter.missed) / static_cast<double>(sample_n));
+  }
   return EXIT_SUCCESS;
 }

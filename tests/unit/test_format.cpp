@@ -21,7 +21,9 @@ TEST(FormatTest, HighBitDepthYuvFormatsHaveNames) {
   EXPECT_EQ(drm::format_name(DRM_FORMAT_P012), "P012");
   EXPECT_EQ(drm::format_name(DRM_FORMAT_P016), "P016");
   EXPECT_EQ(drm::format_name(DRM_FORMAT_NV15), "NV15");
+#ifdef DRM_FORMAT_NV20
   EXPECT_EQ(drm::format_name(DRM_FORMAT_NV20), "NV20");
+#endif
   EXPECT_EQ(drm::format_name(DRM_FORMAT_Y210), "Y210");
   EXPECT_EQ(drm::format_name(DRM_FORMAT_Y212), "Y212");
   EXPECT_EQ(drm::format_name(DRM_FORMAT_Y216), "Y216");
@@ -58,7 +60,9 @@ TEST(FormatTest, PlanarFormatsReturnZeroBpp) {
   EXPECT_EQ(drm::format_bpp(DRM_FORMAT_NV12), 0U);
   EXPECT_EQ(drm::format_bpp(DRM_FORMAT_NV15), 0U);
   EXPECT_EQ(drm::format_bpp(DRM_FORMAT_NV16), 0U);
+#ifdef DRM_FORMAT_NV20
   EXPECT_EQ(drm::format_bpp(DRM_FORMAT_NV20), 0U);
+#endif
   EXPECT_EQ(drm::format_bpp(DRM_FORMAT_P010), 0U);
   EXPECT_EQ(drm::format_bpp(DRM_FORMAT_P012), 0U);
   EXPECT_EQ(drm::format_bpp(DRM_FORMAT_P016), 0U);

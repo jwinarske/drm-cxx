@@ -106,8 +106,10 @@ std::string_view format_name(uint32_t format) {
       return "NV15";
     case DRM_FORMAT_NV16:
       return "NV16";
+#ifdef DRM_FORMAT_NV20
     case DRM_FORMAT_NV20:
       return "NV20";
+#endif
     case DRM_FORMAT_NV61:
       return "NV61";
     case DRM_FORMAT_P010:

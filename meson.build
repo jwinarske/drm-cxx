@@ -267,6 +267,41 @@ if not has_egl_streams and not streams_feature.disabled()
   message('drm-cxx: EGL headers not found — drm::scene EGL Streams support will be a runtime no-op')
 endif
 
+# NvBufSurface probe for drm::scene::NvBufSurfaceSource. NVIDIA L4T
+# ships nvbufsurface.h under /usr/src/jetson_multimedia_api/include and
+# libnvbufsurface.so under /usr/lib/aarch64-linux-gnu/nvidia. No
+# pkg-config file upstream; we check the canonical L4T paths by hand
+# and synthesise a declared_dependency() with the right include / lib
+# arguments. Jetson-only — every other platform sees the feature
+# resolve OFF and falls back to the dumb-buffer / GBM paths.
+nvbufsurface_feature = get_option('nvbufsurface')
+if not nvbufsurface_feature.disabled()
+  nvbufsurface_header = '/usr/src/jetson_multimedia_api/include/nvbufsurface.h'
+  nvbufsurface_libdir = '/usr/lib/aarch64-linux-gnu/nvidia'
+  nvbufsurface_lib_link = cpp.find_library('nvbufsurface',
+                                            dirs : [nvbufsurface_libdir],
+                                            required : false)
+  if import('fs').is_file(nvbufsurface_header) and nvbufsurface_lib_link.found()
+    nvbufsurface_dep = declare_dependency(
+      include_directories : include_directories('/usr/src/jetson_multimedia_api/include',
+                                                is_system : true),
+      dependencies : nvbufsurface_lib_link,
+    )
+    has_nvbufsurface = true
+  elif nvbufsurface_feature.enabled()
+    error('drm-cxx: nvbufsurface=enabled requested but L4T headers / libnvbufsurface not found')
+  else
+    nvbufsurface_dep = disabler()
+    has_nvbufsurface = false
+  endif
+else
+  nvbufsurface_dep = disabler()
+  has_nvbufsurface = false
+endif
+if not has_nvbufsurface and not nvbufsurface_feature.disabled()
+  message('drm-cxx: nvbufsurface not found — drm::scene::NvBufSurfaceSource will not be built (Jetson L4T only)')
+endif
+
 #── Configuration ─────────────────────────────────────────────
 conf = configuration_data()
 conf.set('DRM_CXX_VERSION', meson.project_version())

@@ -243,11 +243,20 @@ if has_blend2d
   # VKMS smoke test. Self-skips when the vkms module isn't loaded, so
   # this stays green on boxes / CI runners that haven't modprobed it.
   # Under `meson test` the skip is reported as PASSED (skipped).
+  #
+  # `is_parallel : false` on every *_vkms test below: vkms is a
+  # single-device DRM driver and only one process can hold master at
+  # a time. Letting these run concurrently produces EACCES on every
+  # atomic commit but the master-holding test, which manifests as
+  # flaky 7-of-14 failures under `meson test`. Serializing them with
+  # each other (non-vkms tests still run in parallel) is the cheapest
+  # correctness fix.
   test('test_capture_vkms',
     executable('test_capture_vkms',
       'integration/test_capture_vkms.cpp',
       dependencies : test_deps,
     ),
+    is_parallel : false,
   )
 
   # LayerScene composition fallback against VKMS. Self-skips when vkms
@@ -258,6 +267,7 @@ if has_blend2d
       'integration/test_layer_scene_composition_vkms.cpp',
       dependencies : test_deps,
     ),
+    is_parallel : false,
   )
 endif
 
@@ -269,6 +279,7 @@ test('test_layer_scene_minimization_vkms',
     'integration/test_layer_scene_minimization_vkms.cpp',
     dependencies : test_deps,
   ),
+  is_parallel : false,
 )
 
 # Hardware-gated EGL Streams integration. All TESTs self-skip via
@@ -287,6 +298,7 @@ test('test_crtc_color_pipeline_vkms',
     'integration/test_crtc_color_pipeline_vkms.cpp',
     dependencies : test_deps,
   ),
+  is_parallel : false,
 )
 
 # Buffer::create_planar(P010) round-trip against vkms.
@@ -297,6 +309,7 @@ test('test_dumb_buffer_p010_vkms',
     'integration/test_dumb_buffer_p010_vkms.cpp',
     dependencies : test_deps,
   ),
+  is_parallel : false,
 )
 
 # LayerScene rebind tests against VKMS.
@@ -305,6 +318,18 @@ test('test_layer_scene_rebind_vkms',
     'integration/test_layer_scene_rebind_vkms.cpp',
     dependencies : test_deps,
   ),
+  is_parallel : false,
+)
+
+# LayerScene deferred-release contract tests against VKMS. Pins the
+# release timing for LayerBufferSource so the tearing bug fixed by
+# the prev/prev_prev acquisition ring doesn't regress.
+test('test_layer_scene_release_vkms',
+  executable('test_layer_scene_release_vkms',
+    'integration/test_layer_scene_release_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
 )
 
 # SceneSet combined-commit + mirrored-layer tests against a vkms
@@ -316,6 +341,7 @@ test('test_scene_set_vkms',
     'integration/test_scene_set_vkms.cpp',
     dependencies : test_deps,
   ),
+  is_parallel : false,
 )
 
 # Buffer-side coverage against the kernel's virtual GEM driver (VGEM):
@@ -400,6 +426,7 @@ if has_gstreamer
       'integration/test_gst_appsink_source_vkms.cpp',
       dependencies : test_deps + [gst_dep, gst_app_dep],
     ),
+    is_parallel : false,
   )
 endif
 
@@ -431,6 +458,7 @@ test('test_gbm_surface_source_vkms',
     'integration/test_gbm_surface_source_vkms.cpp',
     dependencies : test_deps,
   ),
+  is_parallel : false,
 )
 
 # V4l2CameraSource integration test against any /dev/video* + vkms.

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# build-deps.sh — build libcamera, blend2d, libseat, and libyuv from
-# source and install them to /usr/local (or $PREFIX).
+# build-deps.sh — build libcamera, blend2d, libseat, libyuv, and
+# libdisplay-info from source and install them to /usr/local (or $PREFIX).
 #
 # Usage:
-#   scripts/build-deps.sh [libcamera|blend2d|libseat|libyuv] ...
+#   scripts/build-deps.sh [libcamera|blend2d|libseat|libyuv|libdisplay-info] ...
 #
-# With no arguments, all four are built. Environment overrides:
+# With no arguments, all five are built. Environment overrides:
 #   PREFIX    install prefix (default: /usr/local)
 #   WORKDIR   scratch directory for clones/builds (default: /tmp/build-deps)
 #   JOBS      parallel build jobs (default: nproc)
 #   SUDO      command used for install step (default: sudo, or empty when root)
-#   LIBCAMERA_REF / BLEND2D_REF / LIBSEAT_REF / LIBYUV_REF
-#             git ref to check out (default: each project's main branch)
+#   LIBCAMERA_REF / BLEND2D_REF / LIBSEAT_REF / LIBYUV_REF / LIBDISPLAY_INFO_REF
+#             git ref to check out (default: each project's main branch / known good tag)
 
 set -euo pipefail
 
@@ -40,6 +40,13 @@ LIBSEAT_REF="${LIBSEAT_REF:-master}"
 
 LIBYUV_URL="https://chromium.googlesource.com/libyuv/libyuv"
 LIBYUV_REF="${LIBYUV_REF:-main}"
+
+# libdisplay-info >=0.2.0 is what drm-cxx's meson.build pins; Ubuntu
+# 24.04 ships 0.1.1 and Fedora 43 the same, so distros are short of
+# the requirement for a while yet. The 0.2.0 tag is the floor; bump
+# if the project ever needs a newer feature.
+LIBDISPLAY_INFO_URL="https://gitlab.freedesktop.org/emersion/libdisplay-info.git"
+LIBDISPLAY_INFO_REF="${LIBDISPLAY_INFO_REF:-0.2.0}"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -156,20 +163,45 @@ build_libyuv() {
     ${SUDO} cmake --install "${src}/build"
 }
 
+build_libdisplay_info() {
+    require git meson ninja pkg-config
+    local src="${WORKDIR}/libdisplay-info"
+    fetch_repo "${LIBDISPLAY_INFO_URL}" "${src}" "${LIBDISPLAY_INFO_REF}"
+
+    # `hwdata` (Fedora) / `hwdata` (Debian/Ubuntu) supplies the
+    # `pnp.ids` file libdisplay-info reads at build time. Both distros
+    # install it at /usr/share/hwdata; libdisplay-info's meson finds
+    # it automatically. Install the distro package if the build later
+    # complains it's missing.
+    log "configuring libdisplay-info"
+    meson setup "${src}/build" "${src}" \
+        --prefix="${PREFIX}" \
+        --buildtype=release \
+        --reconfigure \
+        -Ddefault_library=shared
+
+    log "building libdisplay-info"
+    ninja -C "${src}/build" -j "${JOBS}"
+
+    log "installing libdisplay-info to ${PREFIX}"
+    ${SUDO} ninja -C "${src}/build" install
+}
+
 main() {
     mkdir -p "${WORKDIR}"
     local targets=("$@")
     if [[ ${#targets[@]} -eq 0 ]]; then
-        targets=(libcamera blend2d libseat libyuv)
+        targets=(libcamera blend2d libseat libyuv libdisplay-info)
     fi
 
     for target in "${targets[@]}"; do
         case "${target}" in
-            libcamera) build_libcamera ;;
-            blend2d)   build_blend2d ;;
-            libseat|seatd) build_libseat ;;
-            libyuv)    build_libyuv ;;
-            *) die "unknown target: ${target} (expected libcamera|blend2d|libseat|libyuv)" ;;
+            libcamera)       build_libcamera ;;
+            blend2d)         build_blend2d ;;
+            libseat|seatd)   build_libseat ;;
+            libyuv)          build_libyuv ;;
+            libdisplay-info) build_libdisplay_info ;;
+            *) die "unknown target: ${target} (expected libcamera|blend2d|libseat|libyuv|libdisplay-info)" ;;
         esac
     done
 

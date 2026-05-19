@@ -134,7 +134,7 @@ void Allocator::forget_layer(const Layer* layer) noexcept {
 
 drm::expected<std::size_t, std::error_code> Allocator::apply(
     Output& output, AtomicRequest& req, const uint32_t commit_flags,
-    drm::span<const uint32_t> external_reserved) {
+    drm::span<const uint32_t> external_reserved, const bool test_only) {
   test_commits_this_frame_ = 0;
   // Diagnostics are per-apply; reset before any property-writing path
   // can run. apply_layer_to_plane_real and disable_unused_planes both
@@ -216,7 +216,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
 
   // Fast path: nothing changed since last frame
   if (!output.any_layer_dirty() && previous_allocation_valid_ && !has_new_layer) {
-    auto result = apply_previous_allocation(output, req, commit_flags, crtc_index);
+    auto result = apply_previous_allocation(output, req, commit_flags, crtc_index, test_only);
     if (result.has_value() || result.error() == std::errc::permission_denied) {
       // Success or master loss: return directly. EACCES has to short-
       // circuit here — every TEST that follows would also fail on the
@@ -233,7 +233,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   // Warm-start: try previous allocation first (one test commit). Skipped
   // when a new layer is present — see has_new_layer comment above.
   if (previous_allocation_valid_ && !has_new_layer) {
-    auto result = apply_previous_allocation(output, req, commit_flags, crtc_index);
+    auto result = apply_previous_allocation(output, req, commit_flags, crtc_index, test_only);
     if (result.has_value()) {
       output.mark_clean();
       return result;
@@ -244,13 +244,14 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   }
 
   // Full search
-  return full_search(output, req, commit_flags, crtc_index);
+  return full_search(output, req, commit_flags, crtc_index, test_only);
 }
 
 // ── Warm-start from previous frame ────────────────────────────
 
 drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation(
-    Output& output, AtomicRequest& req, const uint32_t flags, const uint32_t crtc_index) {
+    Output& output, AtomicRequest& req, const uint32_t flags, const uint32_t crtc_index,
+    const bool test_only) {
   // Bail to full_search when the caller's external_reserved set
   // overlaps with our remembered allocation. The previous frame's
   // assignment placed a layer where the caller now wants the canvas
@@ -302,10 +303,10 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   // the steady-state best case for property minimization: every plane
   // already has the correct layer pointer in last_committed_, so
   // unchanged properties skip the wire entirely.
-  disable_unused_planes(req, crtc_index, previous_allocation_, /*track_state=*/true);
+  disable_unused_planes(req, crtc_index, previous_allocation_, /*track_state=*/true, test_only);
   std::size_t assigned = 0;
   for (auto& [plane_id, layer] : previous_allocation_) {
-    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req); !r) {
+    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req, test_only); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
     layer->assigned_plane_ = plane_id;
@@ -328,7 +329,8 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
 drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& output,
                                                                    AtomicRequest& req,
                                                                    const uint32_t flags,
-                                                                   const uint32_t crtc_index) {
+                                                                   const uint32_t crtc_index,
+                                                                   const bool test_only) {
   output.sort_layers_by_zpos();
 
   // Externally-bound layers (e.g. EGL stream sources whose plane is
@@ -445,7 +447,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   for (auto& [plane_id, layer] : best_assignment) {
     layer->assigned_plane_ = plane_id;
     layer->needs_composition_ = false;
-    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req); !r) {
+    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req, test_only); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
   }
@@ -499,7 +501,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // never touched idle overlays on the first commit and didn't see
   // this; match that shape here.
   if (previous_allocation_valid_) {
-    disable_unused_planes(req, crtc_index, planes_in_use, /*track_state=*/true);
+    disable_unused_planes(req, crtc_index, planes_in_use, /*track_state=*/true, test_only);
   }
 
   // Save for warm-start next frame. An empty assignment is *not* valid
@@ -738,15 +740,32 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
   // leaving whatever was on primary before (typically the fbcon console
   // fb) on scanout — blank screen / console text visible.
   if (!layer.is_composition_layer() && plane.type == DRMPlaneType::PRIMARY) {
-    if (const auto z = layer.property("zpos");
-        z.has_value() && plane.zpos_min.has_value() && *z == *plane.zpos_min) {
-      s += 10;
+    if (const auto z = layer.property("zpos"); z.has_value()) {
+      // NOLINTNEXTLINE(bugprone-branch-clone) — same bonus, two platform paths.
+      if (plane.zpos_min.has_value() && *z == *plane.zpos_min) {
+        s += 10;
+      } else if (!plane.zpos_min.has_value() && *z == 0) {
+        // Platforms without a kernel-side zpos property (Tegra Orin
+        // display, some other SoCs) can't honor per-plane zpos values,
+        // so the caller convention is layer.zpos=0 == "bottom-most"
+        // (PRIMARY) and any positive zpos == "above primary" (OVERLAY).
+        // Mirrors the +10 above for the zpos-aware path.
+        s += 10;
+      }
     }
   }
 
   // Non-composition layers prefer overlay planes
   if (!layer.is_composition_layer() && plane.type == DRMPlaneType::OVERLAY) {
     s += 2;
+    // Pair with the "zpos=0 means PRIMARY" hack above: when planes have
+    // no kernel zpos and the layer requests a positive zpos, the
+    // OVERLAY-as-natural-top convention applies, so bump the score
+    // enough to win against the bare PRIMARY base score.
+    if (const auto z = layer.property("zpos");
+        z.has_value() && !plane.zpos_min.has_value() && *z > 0) {
+      s += 8;
+    }
   }
 
   // §13.6 Content-type priority
@@ -954,7 +973,10 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
   // previous frame's FB/CRTC/zpos on planes we've stopped using —
   // which typically contends with the new assignment (same zpos on
   // same CRTC → EINVAL) and hides the real reason TEST is failing.
-  disable_unused_planes(test_req, crtc_index, assignment, /*track_state=*/false);
+  // This internal TEST never reaches the caller, so test_only here is
+  // moot — track_state=false already prevents any cache writes.
+  disable_unused_planes(test_req, crtc_index, assignment, /*track_state=*/false,
+                        /*test_only=*/true);
 
   // Apply each assigned layer's properties
   for (const auto& [plane_id, layer] : assignment) {
@@ -994,7 +1016,8 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
 }
 
 void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_index,
-                                      const PlaneAssignment& keep, const bool track_state) {
+                                      const PlaneAssignment& keep, const bool track_state,
+                                      const bool test_only) {
   for (const auto* plane : registry_.for_crtc(crtc_index)) {
     // Cursor planes are owned by a separate code path (the cursor
     // handler) and shouldn't be force-disabled here.
@@ -1053,7 +1076,11 @@ void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_in
     }
     // The plane is now off. Clear its snapshot so the next assignment
     // is treated as a fresh activation (forces a full property write).
-    if (track_state) {
+    // TEST_ONLY commits don't actually disable the plane in the
+    // kernel, so the cache invariant ("snapshot reflects kernel
+    // state") would break if we erased on TEST. Same shape as the
+    // apply_layer_to_plane_real test_only guard below — kept symmetric.
+    if (track_state && !test_only) {
       last_committed_.erase(plane->id);
     }
   }
@@ -1087,7 +1114,8 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer
 
 drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const Layer& layer,
                                                                           const uint32_t plane_id,
-                                                                          AtomicRequest& req) {
+                                                                          AtomicRequest& req,
+                                                                          const bool test_only) {
   // Decide whether this is a full re-emit (every property written
   // unconditionally) or a per-property diff against last frame's
   // snapshot. Full-write triggers:
@@ -1162,7 +1190,16 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
   // layer's live state) preserves the invariant that a future
   // relayout that rewrites layer properties can't change the
   // baseline we diff against on the next commit.
-  last_committed_[plane_id] = LastCommitted{&layer, layer.snapshot()};
+  //
+  // TEST_ONLY commits don't reach the kernel's committed state, so
+  // they must NOT update the snapshot — otherwise a subsequent
+  // commit (or another TEST_ONLY) sees a poisoned cache and the
+  // diff suppresses properties the kernel still needs (most visibly:
+  // CRTC_ID + dest rect + src rect under MODESET, where the kernel
+  // rejects the partial commit with EINVAL).
+  if (!test_only) {
+    last_committed_[plane_id] = LastCommitted{&layer, layer.snapshot()};
+  }
   return {};
 }
 

@@ -25,6 +25,13 @@ if cluster_sim_libyuv.found()
   cluster_sim_args += '-DCLUSTER_SIM_HAS_LIBYUV=1'
 endif
 
+# Forward the NvBufSurface gate so the cluster_sim TU can include the
+# optional drm-cxx/scene/nvbufsurface_source.hpp header. Library-side
+# the same flag is set in src/meson.build.
+cluster_sim_args += has_nvbufsurface \
+  ? '-DDRM_CXX_HAS_NVBUFSURFACE=1' \
+  : '-DDRM_CXX_HAS_NVBUFSURFACE=0'
+
 executable('cluster_sim',
   'main.cpp',
   dependencies : cluster_sim_deps,

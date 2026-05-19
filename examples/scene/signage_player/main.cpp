@@ -228,6 +228,11 @@ drm::expected<Scene, std::error_code> build_scene(drm::Device& dev, std::uint32_
   bg_desc.source = std::move(*bg_src);
   bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  // zpos=0 pins bg to PRIMARY-affinity on boards without a kernel zpos
+  // property (Tegra DC). Without this, the allocator's bipartite preseed
+  // can't distinguish bg from the higher-zpos UI layers and may pick an
+  // assignment where bg lands on CURSOR (which then EINVALs every TEST).
+  bg_desc.display.zpos = 0;
   bg_desc.content_type = drm::planes::ContentType::Generic;
   auto bg_h = out.scene->add_layer(std::move(bg_desc));
   if (!bg_h) {

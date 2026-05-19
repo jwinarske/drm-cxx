@@ -124,6 +124,17 @@ target_link_libraries(test_layer_scene_rebind_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_rebind_vkms)
 
+# LayerScene deferred-release contract tests against VKMS. Pins the
+# release timing for LayerBufferSource so the tearing bug fixed by
+# the prev/prev_prev acquisition ring doesn't regress.
+add_executable(test_layer_scene_release_vkms
+  integration/test_layer_scene_release_vkms.cpp)
+target_link_libraries(test_layer_scene_release_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_layer_scene_release_vkms)
+
 # SceneSet combined-commit + mirrored-layer integration test against
 # a vkms instance with >= 2 connected outputs.
 add_executable(test_scene_set_vkms

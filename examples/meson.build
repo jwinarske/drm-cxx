@@ -156,6 +156,7 @@ subdir('scene/signage_player')
 subdir('scene/v4l2_camera_demo')
 subdir('scene/video_player')
 subdir('scene/cluster_sim')
+subdir('scene/cluster_sim_vulkan')
 subdir('scene/hdr_demo')
 
 # ThorVG Janitor example — scaffold only (see scene/thorvg_janitor/README.md).
