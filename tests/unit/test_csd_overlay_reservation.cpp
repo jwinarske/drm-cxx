@@ -263,11 +263,10 @@ TEST(OverlayReservationTest, FormatMismatchReducesPool) {
   EXPECT_EQ((*one)[0], 11U);
 }
 
-TEST(OverlayReservationTest, PlanesWithoutZposAreSkipped) {
-  // A plane with no zpos property at all can't be ordered against the
-  // primary. The reservation skips it rather than emitting it as an
-  // unsorted slot — callers asking for "above primary" would otherwise
-  // get a plane whose actual scanout order is driver-defined.
+TEST(OverlayReservationTest, PlanesWithoutZposAreSkippedAtNonZeroFloor) {
+  // A plane with no zpos property at all can't honor a non-zero
+  // floor — the caller asked for "above primary" and we can't prove
+  // the plane satisfies that. Skip it when min_zpos > 0.
   std::vector<PlaneCapabilities> caps;
   caps.push_back(make_primary(10, 0b1, 0));
   PlaneCapabilities no_zpos;
@@ -281,7 +280,7 @@ TEST(OverlayReservationTest, PlanesWithoutZposAreSkipped) {
   const PlaneRegistry registry = PlaneRegistry::from_capabilities(std::move(caps));
   auto res = *OverlayReservation::create(registry);
 
-  // Only one zpos-bearing overlay is visible.
+  // Only one zpos-bearing overlay is visible at min_zpos=1.
   auto out = res.reserve(0, DRM_FORMAT_ARGB8888, 1, /*min_zpos=*/1);
   ASSERT_TRUE(out.has_value());
   EXPECT_EQ((*out)[0], 12U);
@@ -290,6 +289,57 @@ TEST(OverlayReservationTest, PlanesWithoutZposAreSkipped) {
   // zpos-less plane.
   auto two = res.reserve(0, DRM_FORMAT_ARGB8888, 2, /*min_zpos=*/1);
   ASSERT_FALSE(two.has_value());
+}
+
+TEST(OverlayReservationTest, PlanesWithoutZposAdmittedAtMinZposZero) {
+  // No-floor reservations (min_zpos==0) admit OVERLAY planes without
+  // zpos_min — needed on driver families that don't expose per-plane
+  // zpos (Tegra DC, some other SoCs) where the natural plane order
+  // is OVERLAY-above-PRIMARY. The zpos-less plane sorts as if zpos=0
+  // so it sits before any explicit-zpos overlay in the returned list.
+  std::vector<PlaneCapabilities> caps;
+  caps.push_back(make_primary(10, 0b1, 0));
+  PlaneCapabilities no_zpos;
+  no_zpos.id = 11;
+  no_zpos.possible_crtcs = 0b1;
+  no_zpos.type = DRMPlaneType::OVERLAY;
+  no_zpos.formats = {DRM_FORMAT_ARGB8888};
+  // zpos_min / zpos_max left as nullopt
+  caps.push_back(std::move(no_zpos));
+  caps.push_back(make_overlay(12, 0b1, 2));
+  const PlaneRegistry registry = PlaneRegistry::from_capabilities(std::move(caps));
+  auto res = *OverlayReservation::create(registry);
+
+  // Both overlays are visible at min_zpos=0; the no-zpos one sorts first.
+  auto two = res.reserve(0, DRM_FORMAT_ARGB8888, 2, /*min_zpos=*/0);
+  ASSERT_TRUE(two.has_value());
+  EXPECT_EQ((*two)[0], 11U);  // no-zpos: sort key 0
+  EXPECT_EQ((*two)[1], 12U);  // explicit zpos=2
+}
+
+TEST(OverlayReservationTest, PlanesWithoutZposAdmittedWhenNoExplicitOverlay) {
+  // The Tegra case: only an OVERLAY plane with no kernel zpos exists.
+  // Pre-relaxation this returned EAGAIN and locked the caller out of
+  // the only hardware overlay available; now it succeeds at min_zpos=0.
+  std::vector<PlaneCapabilities> caps;
+  caps.push_back(make_primary(10, 0b1, 0));
+  PlaneCapabilities no_zpos;
+  no_zpos.id = 11;
+  no_zpos.possible_crtcs = 0b1;
+  no_zpos.type = DRMPlaneType::OVERLAY;
+  no_zpos.formats = {DRM_FORMAT_ARGB8888};
+  caps.push_back(std::move(no_zpos));
+  const PlaneRegistry registry = PlaneRegistry::from_capabilities(std::move(caps));
+  auto res = *OverlayReservation::create(registry);
+
+  auto out = res.reserve(0, DRM_FORMAT_ARGB8888, 1, /*min_zpos=*/0);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_EQ((*out)[0], 11U);
+
+  // A non-zero floor still excludes it.
+  res.release(0);
+  auto floored = res.reserve(0, DRM_FORMAT_ARGB8888, 1, /*min_zpos=*/1);
+  ASSERT_FALSE(floored.has_value());
 }
 
 // ── Diagnostic accessors ───────────────────────────────────────────────
