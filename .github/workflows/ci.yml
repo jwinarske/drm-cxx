@@ -359,7 +359,13 @@ jobs:
           # time; the runtime probe only ever reports Unsupported on
           # Mesa hosts (intentional and tested).
           # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
-          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libva-dev libegl1-mesa-dev libgles2-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata clang-19 clang-tidy-19 clang-format-19
+          # glslang-tools provides glslangValidator so cluster_sim_vulkan's
+          # SPV-header custom_targets fire and the TU lands in
+          # compile_commands.json (without it, meson hits subdir_done() and
+          # tidy's find-walk lints the file with default flags, then reports
+          # bogus "bg_frag_spv.h not found" / unused-include / uninitialized-
+          # variable cascades from the parse failure).
+          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libva-dev libegl1-mesa-dev libgles2-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata clang-19 clang-tidy-19 clang-format-19 glslang-tools
           version: 1.0
 
       # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships

@@ -504,8 +504,9 @@ class SwappingDmaBufSource : public drm::scene::LayerBufferSource {
                        std::unique_ptr<drm::scene::ExternalDmaBufSource> b)
       : sources_{std::move(a), std::move(b)} {}
 
-  [[nodiscard]] drm::expected<drm::scene::AcquiredBuffer, std::error_code> acquire()
-      override {  // NOLINT(readability-make-member-function-const) — base is non-const.
+  // Base virtual `LayerBufferSource::acquire()` is non-const, so this override must match.
+  // NOLINTNEXTLINE(readability-make-member-function-const)
+  [[nodiscard]] drm::expected<drm::scene::AcquiredBuffer, std::error_code> acquire() override {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
     auto r = sources_[front_]->acquire();
     if (!r) {
