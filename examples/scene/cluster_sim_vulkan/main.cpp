@@ -504,7 +504,8 @@ class SwappingDmaBufSource : public drm::scene::LayerBufferSource {
                        std::unique_ptr<drm::scene::ExternalDmaBufSource> b)
       : sources_{std::move(a), std::move(b)} {}
 
-  [[nodiscard]] drm::expected<drm::scene::AcquiredBuffer, std::error_code> acquire() override {
+  [[nodiscard]] drm::expected<drm::scene::AcquiredBuffer, std::error_code> acquire()
+      override {  // NOLINT(readability-make-member-function-const) — base is non-const.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
     auto r = sources_[front_]->acquire();
     if (!r) {
@@ -645,7 +646,7 @@ int main(int argc, char* argv[]) {
   std::signal(SIGINT, on_sigint);
   std::signal(SIGTERM, on_sigint);
 
-  Args args = parse_args(argc, argv);
+  const Args args = parse_args(argc, argv);
 
   auto out = drm::examples::open_and_pick_output(argc, argv);
   if (!out) {
@@ -2034,9 +2035,9 @@ int main(int argc, char* argv[]) {
       speedo_norm = dial_norm_from_phase(t_anim / k_speedo_period_s);
       tach_norm = tach_revs_from_phase(t_anim / k_tach_period_s);
     }
-    const float speedo_angle = static_cast<float>(
+    const auto speedo_angle = static_cast<float>(
         k_dial_start_angle + (std::clamp(speedo_norm, 0.0, 1.0) * k_dial_sweep_angle));
-    const float tach_angle = static_cast<float>(
+    const auto tach_angle = static_cast<float>(
         k_dial_start_angle + (std::clamp(tach_norm, 0.0, 1.0) * k_dial_sweep_angle));
     // smoothstep(0.80, 1.0, x): 0 below 80% of sweep, ramps to 1 at full.
     auto smoothstep01 = [](double a, double b, double x) {
@@ -2146,7 +2147,7 @@ int main(int argc, char* argv[]) {
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_array_pipeline_layout, 0, 1,
                             &info_dset, 0, nullptr);
     {
-      const std::uint32_t speed_kmh = static_cast<std::uint32_t>(
+      const auto speed_kmh = static_cast<std::uint32_t>(
           std::lround(std::clamp(speedo_norm * static_cast<double>(k_info_speed_max_kmh), 0.0,
                                  static_cast<double>(k_info_speed_max_kmh))));
       TexArrayPushConstants pc = info_pc;

@@ -7,7 +7,6 @@
 
 #include <drm-cxx/detail/expected.hpp>
 
-#include <gst/gstversion.h>
 #include <memory>
 #include <system_error>
 
@@ -20,6 +19,8 @@
 #include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+
+#include <gst/gstversion.h>
 
 // Specific GStreamer subsystem headers — chosen per-symbol so tidy's
 // misc-include-cleaner can trace usage. The `<gst/gst.h>` umbrella

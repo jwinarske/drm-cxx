@@ -861,13 +861,8 @@ class LayerScene::Impl {
                       slot.scene_layer->handle().id, acq.error().message());
         return drm::unexpected<std::error_code>(acq.error());
       }
-      out.push_back({
-          .scene_layer = slot.scene_layer.get(),
-          .planes_layer = slot.planes_layer,
-          .buffer = *acq,
-          .cached_mapping = std::nullopt,
-          .stream_pinned_plane_id = slot.stream_pinned_plane_id,
-      });
+      out.push_back(AcquisitionSlot{slot.scene_layer.get(), slot.planes_layer, *acq, std::nullopt,
+                                    slot.stream_pinned_plane_id});
     }
     return {};
   }
