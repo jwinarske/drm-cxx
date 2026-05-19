@@ -30,14 +30,24 @@ quantized-identical.
 ## Frame jitter capture (30 s @ 1920×1080@120, same binary)
 
 ```
-                Frames  Skipped  Mean       Max       "Missed"
-DumbBuffer bg   3453    147      8441.7us   35860us   33  (0.96%)
-NvBufSurface bg 3441    159      8460.9us   33789us   38  (1.10%)
+                       Frames  Skipped  Mean       Max       "Missed"
+DumbBuffer bg          3453    147      8441.7us   35860us   33  (0.96%)
+NvBufSurface bg        3441    159      8460.9us   33789us   38  (1.10%)
+Re-capture 2026-05-19  1672    —        8477.5us   34681.9us 21  (1.26%)
 ```
 
 "Missed" includes deliberate commit-skips (interval > 1.5× expected),
 not actual dropped frames. Both backends are indistinguishable —
 within run-to-run noise.
+
+The 2026-05-19 re-capture is a 14 s DumbBuffer run after commits
+`9e0a205` (TEST_ONLY no longer marks `last_committed_`) and `c0e0695`
+(sticky-property re-emit minimization in `arm_layer_plane_*`) landed —
+confirms no regression in the per-flip pipeline: mean inter-flip and
+missed-vblank rate stay within run-to-run noise of the original
+captures. Skipped column is "—" because today's run only logged the
+combined `missed_vblanks` counter, not the deliberate commit-skips
+separately.
 
 ## Techniques that helped
 
