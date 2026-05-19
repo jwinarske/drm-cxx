@@ -46,6 +46,7 @@
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -605,6 +606,9 @@ class LayerScene::Impl {
       // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
       allocator_->set_force_full_property_writes(true);
     }
+    // Mirror the allocator's last_committed_ wipe — sticky_props_
+    // tracks kernel state from the old fd and is now stale.
+    sticky_props_.clear();
 
     compute_primary_zpos_hint();
 
@@ -733,6 +737,9 @@ class LayerScene::Impl {
       // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
       allocator_->set_force_full_property_writes(true);
     }
+    // Same reasoning as the allocator reset above — sticky_props_
+    // tracks the old CRTC's plane state and is now stale.
+    sticky_props_.clear();
 
     primary_zpos_hint_.reset();
     compute_primary_zpos_hint();
@@ -1686,7 +1693,8 @@ class LayerScene::Impl {
   // would need allocator-side knowledge of plane enum values, which
   // doesn't belong in the per-plane assignment loop.
   void arm_layer_plane_blend_defaults(const std::vector<AcquisitionSlot>& acquisitions,
-                                      drm::AtomicRequest& req, CommitReport& report) {
+                                      drm::AtomicRequest& req, CommitReport& report,
+                                      bool test_only) {
     const auto crtc_index_opt = resolve_crtc_index();
     if (!crtc_index_opt.has_value()) {
       return;
@@ -1719,9 +1727,18 @@ class LayerScene::Impl {
       if (props_.is_immutable(*plane_id, "pixel blend mode").value_or(false)) {
         continue;
       }
-      if (auto r = req.add_property(*plane_id, *prop_id, *caps->blend_mode_premultiplied);
-          r.has_value()) {
+      const auto value = *caps->blend_mode_premultiplied;
+      // Skip the write when we've already committed this value on
+      // this plane — see sticky_props_ docs for the why. TEST_ONLY
+      // doesn't promote into the cache.
+      if (sticky_props_[*plane_id].pixel_blend_mode == value) {
+        continue;
+      }
+      if (auto r = req.add_property(*plane_id, *prop_id, value); r.has_value()) {
         ++report.properties_written;
+        if (!test_only) {
+          sticky_props_[*plane_id].pixel_blend_mode = value;
+        }
       }
     }
   }
@@ -1735,7 +1752,7 @@ class LayerScene::Impl {
   // every native plane each frame regardless of the format being
   // scanned out.
   void arm_layer_plane_color_props(const std::vector<AcquisitionSlot>& acquisitions,
-                                   drm::AtomicRequest& req, CommitReport& report) {
+                                   drm::AtomicRequest& req, CommitReport& report, bool test_only) {
     const auto crtc_index_opt = resolve_crtc_index();
     if (!crtc_index_opt.has_value()) {
       return;
@@ -1763,7 +1780,12 @@ class LayerScene::Impl {
 
       const auto& display = acq.scene_layer->display();
 
-      auto write_enum = [&](const char* prop_name, std::optional<std::uint64_t> value) {
+      // Two enum properties live in sticky_props_; same skip-when-
+      // unchanged + don't-promote-on-test_only shape as the blend
+      // mode write above. `cached` is the per-plane snapshot slot
+      // for whichever enum this call is writing.
+      auto write_enum = [&](const char* prop_name, std::optional<std::uint64_t> value,
+                            std::optional<std::uint64_t>& cached) {
         if (!value.has_value()) {
           return;
         }
@@ -1774,8 +1796,14 @@ class LayerScene::Impl {
         if (props_.is_immutable(*plane_id, prop_name).value_or(false)) {
           return;
         }
+        if (cached == *value) {
+          return;
+        }
         if (auto r = req.add_property(*plane_id, *prop_id, *value); r.has_value()) {
           ++report.properties_written;
+          if (!test_only) {
+            cached = value;
+          }
         }
       };
 
@@ -1800,7 +1828,7 @@ class LayerScene::Impl {
           raw = caps->color_encoding_bt709.has_value() ? caps->color_encoding_bt709
                                                        : caps->color_encoding_bt601;
         }
-        write_enum("COLOR_ENCODING", raw);
+        write_enum("COLOR_ENCODING", raw, sticky_props_[*plane_id].color_encoding);
       }
 
       if (caps->has_color_range) {
@@ -1816,7 +1844,7 @@ class LayerScene::Impl {
         if (!resolved.has_value()) {
           resolved = caps->color_range_full;
         }
-        write_enum("COLOR_RANGE", resolved);
+        write_enum("COLOR_RANGE", resolved, sticky_props_[*plane_id].color_range);
       }
     }
   }
@@ -2158,6 +2186,25 @@ class LayerScene::Impl {
   std::vector<AcquisitionSlot> prev_acquisitions_;
   std::vector<AcquisitionSlot> prev_prev_acquisitions_;
 
+  // Per-plane "what we last actually committed" snapshot for the
+  // properties that arm_layer_plane_blend_defaults /
+  // arm_layer_plane_color_props re-emit defensively each frame
+  // (pixel_blend_mode + COLOR_ENCODING + COLOR_RANGE — see
+  // `reference_plane_property_stickiness.md`). The defensive write
+  // was added to overwrite stale values left on the plane by a
+  // previous compositor; once we've written our intended value, the
+  // kernel preserves it across our subsequent commits, so the next
+  // frame can suppress the write when the value matches. Mirrors the
+  // allocator's `last_committed_` shape — cleared on session resume
+  // / rebind (same lifecycle the allocator gets reset under), TEST
+  // commits don't promote into the cache.
+  struct PlaneStickyProps {
+    std::optional<std::uint64_t> pixel_blend_mode;
+    std::optional<std::uint64_t> color_encoding;
+    std::optional<std::uint64_t> color_range;
+  };
+  std::unordered_map<std::uint32_t, PlaneStickyProps> sticky_props_;
+
   // HDR output metadata signaling. `desired_hdr_` carries the
   // most-recent set_output_metadata input (`nullopt` == "clear");
   // `hdr_user_set_` flips true on the first call so connectors that
@@ -2419,8 +2466,8 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // layers tally honest.
   count_stream_layers_assigned(acquisitions, report);
 
-  arm_layer_plane_blend_defaults(acquisitions, req, report);
-  arm_layer_plane_color_props(acquisitions, req, report);
+  arm_layer_plane_blend_defaults(acquisitions, req, report, test_only);
+  arm_layer_plane_color_props(acquisitions, req, report, test_only);
 
   // rescue unassigned layers via CPU composition before
   // counting them as dropped. compose_unassigned() updates
