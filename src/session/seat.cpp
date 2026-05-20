@@ -22,6 +22,7 @@ extern "C" {
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -121,6 +122,22 @@ void seat_log_trampoline(libseat_log_level level, const char* format, va_list ar
 }  // namespace
 
 struct Seat::Impl {
+  // Serializes every libseat_* call and every mutation of `devices`.
+  // libseat is documented as not thread-safe; without this mutex a
+  // concurrent dispatch thread can consume the sd-bus reply intended
+  // for a take_device call on another thread, surfacing as -EBADMSG
+  // or -ETIMEDOUT from logind.
+  //
+  // Recursive because the trampoline → user-callback → input-opener
+  // path is intentionally re-entrant on the same thread: dispatch()
+  // takes the lock, libseat_dispatch fires on_enable / on_disable,
+  // the user's resume_cb commonly drives input::Seat::resume() which
+  // calls libinput_resume(), which invokes the InputDeviceOpener
+  // open lambda this file installs — and that lambda takes the same
+  // lock to read impl->active and impl->devices. All on the same
+  // thread, so recursive_mutex is correct here; std::mutex would
+  // self-deadlock the first VT resume.
+  std::recursive_mutex mu;
   libseat* seat{nullptr};
   libseat_seat_listener listener{};
   std::unordered_map<std::string, TrackedDevice> devices;  // key = path
@@ -146,6 +163,7 @@ Seat::~Seat() {
   if (!impl_ || impl_->seat == nullptr) {
     return;
   }
+  std::lock_guard const lk(impl_->mu);
   for (auto& [path, dev] : impl_->devices) {
     if (dev.device_id >= 0) {
       libseat_close_device(impl_->seat, dev.device_id);
@@ -158,7 +176,10 @@ Seat::~Seat() {
 // --------------------------------------------------------------------------
 // libseat listener trampolines — recover the Impl from userdata and
 // dispatch into C++. libseat guarantees these fire on the thread that
-// called libseat_dispatch, so no locking is needed.
+// called libseat_dispatch, which already holds impl->mu; the
+// trampolines don't take the lock explicitly (it's already held) but
+// any user callback they invoke is free to re-enter the Seat API
+// because impl->mu is a recursive_mutex.
 // --------------------------------------------------------------------------
 void Seat::on_enable_trampoline(libseat* seat, void* userdata) {
   auto* impl = static_cast<Seat::Impl*>(userdata);
@@ -240,7 +261,11 @@ std::optional<Seat> Seat::open() {
 }
 
 std::optional<Seat::DeviceHandle> Seat::take_device(const std::string_view path) {
-  if (!impl_ || impl_->seat == nullptr || !impl_->active) {
+  if (!impl_ || impl_->seat == nullptr) {
+    return std::nullopt;
+  }
+  std::lock_guard const lk(impl_->mu);
+  if (!impl_->active) {
     return std::nullopt;
   }
   const std::string key(path);
@@ -258,6 +283,7 @@ void Seat::release_device(const std::string_view path) {
   if (!impl_ || impl_->seat == nullptr) {
     return;
   }
+  std::lock_guard const lk(impl_->mu);
   const auto it = impl_->devices.find(std::string(path));
   if (it == impl_->devices.end()) {
     return;
@@ -270,12 +296,14 @@ void Seat::release_device(const std::string_view path) {
 
 void Seat::set_pause_callback(PauseCallback fn) {
   if (impl_) {
+    std::lock_guard const lk(impl_->mu);
     impl_->pause_cb = std::move(fn);
   }
 }
 
 void Seat::set_resume_callback(ResumeCallback fn) {
   if (impl_) {
+    std::lock_guard const lk(impl_->mu);
     impl_->resume_cb = std::move(fn);
   }
 }
@@ -284,6 +312,7 @@ int Seat::poll_fd() const {
   if (!impl_ || impl_->seat == nullptr) {
     return -1;
   }
+  std::lock_guard const lk(impl_->mu);
   return libseat_get_fd(impl_->seat);
 }
 
@@ -291,7 +320,9 @@ void Seat::dispatch() {
   if (!impl_ || impl_->seat == nullptr) {
     return;
   }
-  // timeout=0: non-blocking, drain everything ready.
+  std::lock_guard const lk(impl_->mu);
+  // timeout=0: non-blocking, drain everything ready. Trampolines fire
+  // synchronously from here with the lock held — see Impl::mu doc.
   while (libseat_dispatch(impl_->seat, 0) > 0) {
     // keep draining
   }
@@ -301,6 +332,7 @@ drm::expected<void, std::error_code> Seat::switch_session(int session) {
   if (!impl_ || impl_->seat == nullptr) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
+  std::lock_guard const lk(impl_->mu);
   if (libseat_switch_session(impl_->seat, session) < 0) {
     return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }
@@ -327,7 +359,11 @@ drm::input::InputDeviceOpener Seat::input_opener() {
   Impl* impl = impl_.get();
   return drm::input::InputDeviceOpener{
       [impl, tracked](const char* path, int /*flags*/) -> int {
-        if (impl == nullptr || impl->seat == nullptr || !impl->active) {
+        if (impl == nullptr || impl->seat == nullptr) {
+          return -ENOENT;
+        }
+        std::lock_guard const lk(impl->mu);
+        if (!impl->active) {
           return -ENOENT;
         }
         const std::string key(path);
@@ -355,6 +391,7 @@ drm::input::InputDeviceOpener Seat::input_opener() {
           ::close(fd);
           return;
         }
+        std::lock_guard const lk(impl->mu);
         const auto dit = impl->devices.find(path);
         if (dit != impl->devices.end()) {
           if (dit->second.device_id >= 0) {
