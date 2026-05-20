@@ -60,7 +60,8 @@ std::optional<Seat> Seat::open() {
   return std::nullopt;
 }
 
-std::optional<Seat::DeviceHandle> Seat::take_device(std::string_view /*path*/) {
+std::optional<Seat::DeviceHandle> Seat::take_device(std::string_view /*path*/,
+                                                    TakeDeviceOpts /*opts*/) {
   return std::nullopt;
 }
 void Seat::release_device(std::string_view /*path*/) {}
@@ -88,10 +89,15 @@ namespace {
 
 // Tracked-device entry: the path is what gets re-opened on resume, and
 // libseat's device_id is what we pass to close_device.
+//
+// `preserve_fd_across_resume` records the caller's TakeDeviceOpts choice
+// so on_enable_trampoline knows whether to skip the close+reopen and
+// keep the same fd integer alive across the pause cycle.
 struct TrackedDevice {
   std::string path;
   int fd{-1};
   int device_id{-1};
+  bool preserve_fd_across_resume{false};
 };
 
 // Route libseat's own diagnostics to stderr so they surface alongside
@@ -196,6 +202,17 @@ void Seat::on_enable_trampoline(libseat* seat, void* userdata) {
   }
 
   for (auto& [path, dev] : impl->devices) {
+    if (dev.preserve_fd_across_resume) {
+      // Capability-revoke backend (logind / seatd / builtin): the fd
+      // integer is still valid in our process, the kernel just lifted
+      // the revoke on the master capability. Skip the close+reopen
+      // and fire resume_cb with the existing fd so the consumer can
+      // re-modeset whatever pipe state the kernel reset.
+      if (impl->resume_cb) {
+        impl->resume_cb(path, dev.fd);
+      }
+      continue;
+    }
     if (dev.device_id >= 0) {
       libseat_close_device(seat, dev.device_id);
       dev.device_id = -1;
@@ -260,7 +277,8 @@ std::optional<Seat> Seat::open() {
   return Seat(std::move(impl));
 }
 
-std::optional<Seat::DeviceHandle> Seat::take_device(const std::string_view path) {
+std::optional<Seat::DeviceHandle> Seat::take_device(const std::string_view path,
+                                                    TakeDeviceOpts opts) {
   if (!impl_ || impl_->seat == nullptr) {
     return std::nullopt;
   }
@@ -275,7 +293,7 @@ std::optional<Seat::DeviceHandle> Seat::take_device(const std::string_view path)
     drm::println(stderr, "libseat_open_device({}): {}", key, std::system_category().message(errno));
     return std::nullopt;
   }
-  impl_->devices[key] = TrackedDevice{key, fd, device_id};
+  impl_->devices[key] = TrackedDevice{key, fd, device_id, opts.preserve_fd_across_resume};
   return DeviceHandle{fd, device_id};
 }
 

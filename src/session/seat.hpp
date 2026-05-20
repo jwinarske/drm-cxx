@@ -36,6 +36,27 @@ struct libseat;
 
 namespace drm::session {
 
+/// Options for `Seat::take_device`. At namespace scope rather than nested
+/// inside `Seat` so its default member initializers are visible when
+/// used as a default argument (= {}) on the `take_device` declaration —
+/// C++ doesn't yet see nested-class in-class initializers at the point
+/// of an enclosing member's default arg.
+struct TakeDeviceOpts {
+  /// If true, the device's fd is NOT closed and re-opened on the next
+  /// `enable_seat` — the same fd integer is preserved across the
+  /// pause/resume cycle. Correct for the capability-revoke backends
+  /// (logind, seatd, builtin/noop) where the kernel revokes the
+  /// master capability without invalidating the fd itself. The resume
+  /// callback still fires with that fd so the consumer can
+  /// re-modeset / re-arm any pipe state that the kernel reset on
+  /// session inactive.
+  ///
+  /// Default false (close + re-open) preserves the original
+  /// pessimistic contract: every per-fd kernel object is assumed
+  /// dead, the consumer rebuilds from scratch on the new fd.
+  bool preserve_fd_across_resume = false;
+};
+
 /// RAII wrapper around a libseat connection. Call `open()` once at
 /// startup and hold for the process lifetime. The destructor closes
 /// every tracked device and the seat itself.
@@ -79,8 +100,10 @@ class Seat {
 
   /// Open a device by path. Only succeeds when the seat is currently
   /// active. Stores the (path, fd, device_id) so resume can reopen
-  /// transparently.
-  [[nodiscard]] std::optional<DeviceHandle> take_device(std::string_view path);
+  /// transparently (or preserve, per `opts.preserve_fd_across_resume`).
+  /// See `TakeDeviceOpts` (namespace scope) for the resume-handling knob.
+  [[nodiscard]] std::optional<DeviceHandle> take_device(std::string_view path,
+                                                        TakeDeviceOpts opts = {});
 
   /// Close a device explicitly. Normally unnecessary — the destructor
   /// closes everything.
