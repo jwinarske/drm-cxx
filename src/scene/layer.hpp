@@ -126,6 +126,77 @@ class Layer {
     dirty_ = true;
   }
 
+  // ── Conditional display-side mutation ──────────────────────────────
+  // Same effect as the setters above, but only flip `dirty_` when the
+  // new value actually differs from the current one. The engine's
+  // present-layers callback hands the embedder a full layer array every
+  // frame, including layers whose geometry hasn't moved; routing those
+  // resubmissions through these variants keeps unchanged layers clean,
+  // so the commit re-emits properties only for layers that genuinely
+  // changed. Use the unconditional setters above when the caller
+  // already knows the value is changing (e.g. animation tickers) and
+  // wants to skip the comparison.
+
+  /// Update `display.src_rect` only if it differs. Marks dirty on change.
+  void set_src_rect_if_changed(Rect r) noexcept {
+    if (display_.src_rect != r) {
+      display_.src_rect = r;
+      dirty_ = true;
+    }
+  }
+  /// Update `display.dst_rect` only if it differs. Marks dirty on change.
+  void set_dst_rect_if_changed(Rect r) noexcept {
+    if (display_.dst_rect != r) {
+      display_.dst_rect = r;
+      dirty_ = true;
+    }
+  }
+  /// Update `display.rotation` only if it differs. Marks dirty on change.
+  void set_rotation_if_changed(std::uint64_t rot) noexcept {
+    if (display_.rotation != rot) {
+      display_.rotation = rot;
+      dirty_ = true;
+    }
+  }
+  /// Update `display.alpha` only if it differs. Marks dirty on change.
+  /// The `alpha_explicit_` sticky bit is set on the first call for any
+  /// value (matching `set_alpha`), so the round-trip back to opaque is
+  /// still emitted; only `dirty_` is gated on the value differing. The
+  /// first-ever call always dirties because the implicit pre-call alpha
+  /// is conceptually distinct from any explicit value.
+  void set_alpha_if_changed(std::uint16_t a) noexcept {
+    if (!alpha_explicit_ || display_.alpha != a) {
+      display_.alpha = a;
+      dirty_ = true;
+    }
+    alpha_explicit_ = true;
+  }
+  /// Update `display.zpos` only if it differs. Marks dirty on change.
+  void set_zpos_if_changed(std::optional<int> z) noexcept {
+    if (display_.zpos != z) {
+      display_.zpos = z;
+      dirty_ = true;
+    }
+  }
+  /// Update `display.color_primaries` only if it differs. Marks dirty on
+  /// change. Drives the scene's auto-derived connector `Colorspace`
+  /// write the same way `set_color_primaries` does.
+  void set_color_primaries_if_changed(std::optional<ColorPrimaries> cp) noexcept {
+    if (display_.color_primaries != cp) {
+      display_.color_primaries = cp;
+      dirty_ = true;
+    }
+  }
+  /// Update `display.source_eotf` only if it differs. Marks dirty on
+  /// change. Avoids the per-frame HDR_OUTPUT_METADATA re-derive when the
+  /// video stream's transfer function is resubmitted unchanged.
+  void set_source_eotf_if_changed(std::optional<drm::display::TransferFunction> eotf) noexcept {
+    if (display_.source_eotf != eotf) {
+      display_.source_eotf = eotf;
+      dirty_ = true;
+    }
+  }
+
   /// True when at least one display-side field has been mutated since
   /// the last `mark_clean`. The scene reads this during commit build to
   /// decide whether the layer's plane state needs re-emission.

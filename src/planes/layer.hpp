@@ -24,6 +24,14 @@ enum class ContentType : uint8_t {
 struct Rect {
   int32_t x{}, y{};
   uint32_t w{}, h{};
+
+  // Value equality over all four fields. Used by the scene's
+  // `_if_changed` setters to suppress no-op dirty flips; hand-written
+  // because the project targets C++17 (no defaulted operator==).
+  [[nodiscard]] bool operator==(const Rect& o) const noexcept {
+    return x == o.x && y == o.y && w == o.w && h == o.h;
+  }
+  [[nodiscard]] bool operator!=(const Rect& o) const noexcept { return !(*this == o); }
 };
 
 /// Property tags Layer recognizes. The set is closed: every KMS plane

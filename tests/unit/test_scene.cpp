@@ -18,6 +18,7 @@
 
 #include "core/device.hpp"
 
+#include <drm-cxx/display/hdr_metadata.hpp>
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
@@ -33,6 +34,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <optional>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -297,4 +299,104 @@ TEST(SceneLayer, RecordPlacementUnassignedClearsPlaneId) {
   layer.record_placement(drm::scene::LayerPlacement::Unassigned, {});
   EXPECT_EQ(layer.last_placement(), drm::scene::LayerPlacement::Unassigned);
   EXPECT_FALSE(layer.last_assigned_plane_id().has_value());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Conditional setters (Proposal 1) — `_if_changed` variants flip the
+// dirty flag only when the value actually changes, so steady-state
+// frames that resubmit unchanged geometry leave the layer clean.
+// ─────────────────────────────────────────────────────────────────────
+
+namespace {
+// Construct a clean scene Layer for the conditional-setter tests. The
+// ctor starts the layer dirty (first commit writes every property);
+// mark_clean() puts it in the steady-state condition these tests probe.
+drm::scene::Layer make_clean_layer(const drm::scene::DisplayParams& dp = {}) {
+  const drm::scene::LayerHandle h{1, 0};
+  drm::scene::Layer layer{h, /*source=*/nullptr, dp, drm::planes::ContentType::Generic, 0U};
+  layer.mark_clean();
+  return layer;
+}
+}  // namespace
+
+TEST(SceneLayerIfChanged, DstRectDirtiesOnChangeOnly) {
+  auto layer = make_clean_layer();
+  ASSERT_FALSE(layer.is_dirty());
+
+  layer.set_dst_rect_if_changed(drm::scene::Rect{0, 0, 1920, 1080});
+  EXPECT_TRUE(layer.is_dirty());
+
+  layer.mark_clean();
+  // Same value: must stay clean.
+  layer.set_dst_rect_if_changed(drm::scene::Rect{0, 0, 1920, 1080});
+  EXPECT_FALSE(layer.is_dirty());
+
+  // Different value: dirties.
+  layer.set_dst_rect_if_changed(drm::scene::Rect{0, 0, 1280, 720});
+  EXPECT_TRUE(layer.is_dirty());
+}
+
+TEST(SceneLayerIfChanged, SrcRectDirtiesOnChangeOnly) {
+  auto layer = make_clean_layer();
+  layer.set_src_rect_if_changed(drm::scene::Rect{0, 0, 100, 100});
+  EXPECT_TRUE(layer.is_dirty());
+  layer.mark_clean();
+  layer.set_src_rect_if_changed(drm::scene::Rect{0, 0, 100, 100});
+  EXPECT_FALSE(layer.is_dirty());
+}
+
+TEST(SceneLayerIfChanged, RotationDirtiesOnChangeOnly) {
+  auto layer = make_clean_layer();
+  layer.set_rotation_if_changed(1);
+  EXPECT_TRUE(layer.is_dirty());
+  layer.mark_clean();
+  layer.set_rotation_if_changed(1);
+  EXPECT_FALSE(layer.is_dirty());
+}
+
+TEST(SceneLayerIfChanged, ZposDirtiesOnChangeOnly) {
+  auto layer = make_clean_layer();
+  layer.set_zpos_if_changed(3);
+  EXPECT_TRUE(layer.is_dirty());
+  layer.mark_clean();
+  layer.set_zpos_if_changed(3);
+  EXPECT_FALSE(layer.is_dirty());
+  // nullopt vs a set value differs.
+  layer.set_zpos_if_changed(std::nullopt);
+  EXPECT_TRUE(layer.is_dirty());
+}
+
+TEST(SceneLayerIfChanged, ColorPrimariesAndEotfDirtyOnChangeOnly) {
+  auto layer = make_clean_layer();
+  layer.set_source_eotf_if_changed(drm::display::TransferFunction::SmpteSt2084Pq);
+  EXPECT_TRUE(layer.is_dirty());
+  layer.mark_clean();
+  // Stream resubmits the same transfer function every frame: stays clean.
+  layer.set_source_eotf_if_changed(drm::display::TransferFunction::SmpteSt2084Pq);
+  EXPECT_FALSE(layer.is_dirty());
+}
+
+TEST(SceneLayerIfChanged, AlphaFirstCallAlwaysDirtiesEvenAtDefault) {
+  // DisplayParams::alpha defaults to 0xFFFF (opaque). The first
+  // conditional set to that same default must still dirty and set the
+  // sticky explicit bit, because the implicit pre-call alpha is
+  // conceptually distinct from an explicitly-set value.
+  auto layer = make_clean_layer();
+  ASSERT_FALSE(layer.alpha_was_explicitly_set());
+
+  layer.set_alpha_if_changed(0xFFFF);
+  EXPECT_TRUE(layer.is_dirty());
+  EXPECT_TRUE(layer.alpha_was_explicitly_set());
+
+  layer.mark_clean();
+  // Second call with the same value no longer dirties.
+  layer.set_alpha_if_changed(0xFFFF);
+  EXPECT_FALSE(layer.is_dirty());
+
+  // A genuine change dirties; the round-trip back to opaque also dirties.
+  layer.set_alpha_if_changed(0x8000);
+  EXPECT_TRUE(layer.is_dirty());
+  layer.mark_clean();
+  layer.set_alpha_if_changed(0xFFFF);
+  EXPECT_TRUE(layer.is_dirty());
 }
