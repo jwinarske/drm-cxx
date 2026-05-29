@@ -349,9 +349,34 @@ class LayerScene::Impl {
       planes_layer.set_composited();
     }
 
-    slot.scene_layer = std::make_unique<Layer>(handle, std::move(desc.source), desc.display,
-                                               desc.content_type, desc.update_hint_hz);
+    slot.scene_layer =
+        std::make_unique<Layer>(handle, std::move(desc.source), desc.display, desc.content_type,
+                                desc.update_hint_hz, desc.identity_tag);
     return handle;
+  }
+
+  Layer* find_by_identity_tag(void* tag) noexcept {
+    if (tag == nullptr) {
+      return nullptr;
+    }
+    for (auto& slot : slots_) {
+      if (slot.alive && slot.scene_layer && slot.scene_layer->identity_tag() == tag) {
+        return slot.scene_layer.get();
+      }
+    }
+    return nullptr;
+  }
+
+  const Layer* find_by_identity_tag(void* tag) const noexcept {
+    if (tag == nullptr) {
+      return nullptr;
+    }
+    for (const auto& slot : slots_) {
+      if (slot.alive && slot.scene_layer && slot.scene_layer->identity_tag() == tag) {
+        return slot.scene_layer.get();
+      }
+    }
+    return nullptr;
   }
 
   void remove_layer(LayerHandle handle) {
@@ -2669,6 +2694,14 @@ Layer* LayerScene::get_layer(LayerHandle handle) noexcept {
 
 const Layer* LayerScene::get_layer(LayerHandle handle) const noexcept {
   return impl_->get_layer(handle);
+}
+
+Layer* LayerScene::find_by_identity_tag(void* tag) noexcept {
+  return impl_->find_by_identity_tag(tag);
+}
+
+const Layer* LayerScene::find_by_identity_tag(void* tag) const noexcept {
+  return impl_->find_by_identity_tag(tag);
 }
 
 std::size_t LayerScene::layer_count() const noexcept {

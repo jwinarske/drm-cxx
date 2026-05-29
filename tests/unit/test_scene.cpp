@@ -27,6 +27,7 @@
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/gbm_buffer_source.hpp>
 #include <drm-cxx/scene/layer.hpp>
+#include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
@@ -409,4 +410,37 @@ TEST(SceneLayerIfChanged, AlphaFirstCallAlwaysDirtiesEvenAtDefault) {
   layer.mark_clean();
   layer.set_alpha_if_changed(0xFFFF);
   EXPECT_TRUE(layer.is_dirty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// identity_tag (Proposal 2) — forwarded LayerDesc field, recovered by
+// LayerScene::find_by_identity_tag. The full scene-level round-trip
+// (plus survival across rebind / session resume) is covered by the
+// vkms integration tests; this section pins down the Layer-side
+// storage contract that doesn't need a live device.
+// ─────────────────────────────────────────────────────────────────────
+
+TEST(SceneLayerIdentityTag, LayerDescDefaultsToNullptr) {
+  const drm::scene::LayerDesc desc;
+  EXPECT_EQ(desc.identity_tag, nullptr);
+}
+
+TEST(SceneLayerIdentityTag, LayerCtorDefaultsToNullptr) {
+  const drm::scene::LayerHandle h{1, 0};
+  const drm::scene::DisplayParams dp;
+  // Legacy ctor call site (5 args) — exercises the default identity_tag
+  // value, proving the new parameter is source-compatible.
+  const drm::scene::Layer layer{h, /*source=*/nullptr, dp, drm::planes::ContentType::Generic, 0U};
+  EXPECT_EQ(layer.identity_tag(), nullptr);
+}
+
+TEST(SceneLayerIdentityTag, LayerCtorStoresAndReturnsValue) {
+  const drm::scene::LayerHandle h{2, 0};
+  const drm::scene::DisplayParams dp;
+  int sentinel = 0;
+  // The scene never dereferences the tag — any non-null pointer the
+  // caller hands over must round-trip verbatim.
+  const drm::scene::Layer layer{h,   /*source=*/nullptr, dp, drm::planes::ContentType::UI,
+                                60U, &sentinel};
+  EXPECT_EQ(layer.identity_tag(), &sentinel);
 }
