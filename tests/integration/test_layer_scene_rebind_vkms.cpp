@@ -216,6 +216,96 @@ TEST(LayerSceneRebindVkms, NoOpRebindPreservesHandlesAndLetsCommitSucceed) {
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }
 
+// Proposal-2 round-trip. The scene resolves a layer by its opaque
+// identity_tag without a parallel embedder-side map, and the mapping
+// survives rebind() — the embedder's identity contract holds across
+// the same scene transitions LayerHandle is documented stable across.
+TEST(LayerSceneRebindVkms, FindByIdentityTagRoundTripAndSurvivesRebind) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+
+  // Two layers, two distinct identity tags. The pointer values stand
+  // in for engine-side identities (e.g. FlutterBackingStore*); the
+  // scene never dereferences them.
+  int tag_a = 0;
+  int tag_b = 0;
+
+  auto a_source = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(a_source.has_value());
+  LayerDesc a_desc;
+  a_desc.source = std::move(*a_source);
+  a_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  a_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  a_desc.display.zpos = 1;
+  a_desc.identity_tag = &tag_a;
+  auto a_handle_r = fx.scene->add_layer(std::move(a_desc));
+  ASSERT_TRUE(a_handle_r.has_value());
+  const auto a_handle = *a_handle_r;
+
+  auto b_source = DumbBufferSource::create(*fx.dev, fb_w / 2U, fb_h / 2U, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(b_source.has_value());
+  LayerDesc b_desc;
+  b_desc.source = std::move(*b_source);
+  b_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w / 2U, fb_h / 2U};
+  b_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w / 2U, fb_h / 2U};
+  b_desc.display.zpos = 2;
+  b_desc.identity_tag = &tag_b;
+  auto b_handle_r = fx.scene->add_layer(std::move(b_desc));
+  ASSERT_TRUE(b_handle_r.has_value());
+  const auto b_handle = *b_handle_r;
+
+  // Round-trip: each tag resolves back to the corresponding live Layer,
+  // and the resolved Layer's handle matches the original add_layer
+  // handle. Nullptr is the unset sentinel and matches nothing.
+  auto* a_layer = fx.scene->find_by_identity_tag(&tag_a);
+  ASSERT_NE(a_layer, nullptr);
+  EXPECT_EQ(a_layer->handle().id, a_handle.id);
+  auto* b_layer = fx.scene->find_by_identity_tag(&tag_b);
+  ASSERT_NE(b_layer, nullptr);
+  EXPECT_EQ(b_layer->handle().id, b_handle.id);
+  EXPECT_EQ(fx.scene->find_by_identity_tag(nullptr), nullptr);
+
+  // Unknown tag: not found, no crash.
+  int unknown_tag = 0;
+  EXPECT_EQ(fx.scene->find_by_identity_tag(&unknown_tag), nullptr);
+
+  ASSERT_TRUE(fx.scene->commit().has_value());
+
+  // Survive a no-op rebind — same crtc / connector / mode. The scene
+  // tears down + rebuilds internal state; identity_tag rides along on
+  // the Layer because the Layer object itself is preserved across the
+  // transition (LayerHandle is documented stable across rebind, and
+  // identity_tag is a non-mutating field on the same object).
+  auto report = fx.scene->rebind(fx.active.crtc_id, fx.active.connector_id, fx.active.mode);
+  ASSERT_TRUE(report.has_value()) << report.error().message();
+
+  auto* a_after = fx.scene->find_by_identity_tag(&tag_a);
+  ASSERT_NE(a_after, nullptr);
+  EXPECT_EQ(a_after->handle().id, a_handle.id);
+  auto* b_after = fx.scene->find_by_identity_tag(&tag_b);
+  ASSERT_NE(b_after, nullptr);
+  EXPECT_EQ(b_after->handle().id, b_handle.id);
+
+  // Remove a layer; its tag stops resolving. The other tag is
+  // unaffected.
+  fx.scene->remove_layer(a_handle);
+  EXPECT_EQ(fx.scene->find_by_identity_tag(&tag_a), nullptr);
+  auto* b_still = fx.scene->find_by_identity_tag(&tag_b);
+  ASSERT_NE(b_still, nullptr);
+  EXPECT_EQ(b_still->handle().id, b_handle.id);
+
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
 TEST(LayerSceneRebindVkms, OffScreenLayerFlaggedInCompatibilityReport) {
   const auto node = find_vkms_node();
   if (!node) {

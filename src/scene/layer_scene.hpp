@@ -110,6 +110,19 @@ class LayerScene {
   [[nodiscard]] Layer* get_layer(LayerHandle handle) noexcept;
   [[nodiscard]] const Layer* get_layer(LayerHandle handle) const noexcept;
 
+  /// Look up a layer by the opaque `identity_tag` passed in its
+  /// `LayerDesc`. Returns nullptr if no currently-live layer has the
+  /// given tag (or the tag is nullptr, since nullptr is the unset
+  /// sentinel and matching against it would return an arbitrary
+  /// non-tagged layer). When multiple live layers share a tag — which
+  /// callers should avoid but the scene does not police — the first
+  /// match in slot order is returned. Lookup is a linear scan over the
+  /// live slot table; the IVI workload that motivates this method
+  /// typically has 5–15 layers, where the linear scan beats a hashmap
+  /// probe on cache traffic.
+  [[nodiscard]] Layer* find_by_identity_tag(void* tag) noexcept;
+  [[nodiscard]] const Layer* find_by_identity_tag(void* tag) const noexcept;
+
   [[nodiscard]] std::size_t layer_count() const noexcept;
 
   /// The stream capability the scene was constructed with. Callers

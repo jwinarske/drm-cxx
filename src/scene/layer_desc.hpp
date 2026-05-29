@@ -54,6 +54,21 @@ struct LayerDesc {
   /// don't reach CPU memory (future EGL Stream consumers, tiled GBM
   /// BOs) cannot be composited and will be dropped this frame.
   bool force_composited{false};
+
+  /// Opaque pointer the scene stores verbatim on the created `Layer`
+  /// and returns from `LayerScene::find_by_identity_tag`. Not
+  /// interpreted by the scene — never dereferenced, freed, or copied
+  /// beyond a value copy onto the `Layer`. Callers commonly stash the
+  /// engine-side identity here (e.g. a `FlutterBackingStore*` or a
+  /// platform-view id cast to `void*`) to look the scene-side `Layer`
+  /// up without maintaining a parallel handle map.
+  ///
+  /// NOTE: This is layer identity for caller-side lookup; it is
+  /// distinct from the `user_data` pointer passed to
+  /// `LayerScene::commit(flags, user_data)`, which is the page-flip /
+  /// commit-context pointer the kernel round-trips on vblank. The two
+  /// carry unrelated semantics.
+  void* identity_tag{nullptr};
 };
 
 }  // namespace drm::scene

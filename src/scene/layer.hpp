@@ -63,6 +63,15 @@ class Layer {
   /// hint was supplied. Read-only post-create.
   [[nodiscard]] std::uint32_t update_hint_hz() const noexcept { return update_hint_hz_; }
 
+  /// Opaque pointer forwarded verbatim from `LayerDesc::identity_tag`,
+  /// nullptr if the caller didn't set one. The scene never
+  /// dereferences, frees, or copies (beyond the value copy onto this
+  /// `Layer`) this pointer. Recovered by
+  /// `LayerScene::find_by_identity_tag`. Read-only post-create; stable
+  /// across `rebind()` and `on_session_resumed()` because the `Layer`
+  /// itself is preserved across both.
+  [[nodiscard]] void* identity_tag() const noexcept { return identity_tag_; }
+
   // ── Display-side mutation ──────────────────────────────────────────
   // Each setter flips the dirty flag. The scene clears it after a
   // successful commit via mark_clean(). The granularity is per-layer,
@@ -243,12 +252,14 @@ class Layer {
   /// steer consumers toward the add_layer path. Exposed in the public
   /// API to avoid friending a pimpl'd nested class.
   Layer(LayerHandle handle, std::unique_ptr<LayerBufferSource> source, const DisplayParams& display,
-        drm::planes::ContentType content_type, std::uint32_t update_hint_hz) noexcept
+        drm::planes::ContentType content_type, std::uint32_t update_hint_hz,
+        void* identity_tag = nullptr) noexcept
       : handle_(handle),
         source_(std::move(source)),
         display_(display),
         content_type_(content_type),
-        update_hint_hz_(update_hint_hz) {}
+        update_hint_hz_(update_hint_hz),
+        identity_tag_(identity_tag) {}
 
  private:
   LayerHandle handle_;
@@ -256,6 +267,10 @@ class Layer {
   DisplayParams display_;
   drm::planes::ContentType content_type_;
   std::uint32_t update_hint_hz_;
+  // Opaque caller-side identity. Stored verbatim, never dereferenced or
+  // freed by the scene. Recovered by
+  // `LayerScene::find_by_identity_tag`. `nullptr` is the unset sentinel.
+  void* identity_tag_{nullptr};
 
   // Starts true so the first commit writes every property on every
   // freshly-added layer — no stale plane state carries over from
