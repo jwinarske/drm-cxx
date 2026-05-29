@@ -374,6 +374,16 @@ TEST(SceneLayerIfChanged, ColorPrimariesAndEotfDirtyOnChangeOnly) {
   // Stream resubmits the same transfer function every frame: stays clean.
   layer.set_source_eotf_if_changed(drm::display::TransferFunction::SmpteSt2084Pq);
   EXPECT_FALSE(layer.is_dirty());
+
+  // Color primaries follow the same shape: first set dirties, identical
+  // resubmit stays clean, a real change dirties again.
+  layer.set_color_primaries_if_changed(drm::scene::ColorPrimaries::Bt2020);
+  EXPECT_TRUE(layer.is_dirty());
+  layer.mark_clean();
+  layer.set_color_primaries_if_changed(drm::scene::ColorPrimaries::Bt2020);
+  EXPECT_FALSE(layer.is_dirty());
+  layer.set_color_primaries_if_changed(drm::scene::ColorPrimaries::Bt709);
+  EXPECT_TRUE(layer.is_dirty());
 }
 
 TEST(SceneLayerIfChanged, AlphaFirstCallAlwaysDirtiesEvenAtDefault) {
