@@ -1538,10 +1538,25 @@ class LayerScene::Impl {
       diagnose_modifier_rejection(*acq.planes_layer);
       auto mapping = acq.scene_layer->source().map(drm::MapAccess::Read);
       if (!mapping) {
-        drm::log_warn(
-            "scene::LayerScene: layer {} needs composition but its source map() failed ({}); "
-            "dropping",
-            acq.scene_layer->handle().id, mapping.error().message());
+        // `function_not_supported` is the documented contract for an
+        // uncompositable (scanout-only) source — see BufferSource::map().
+        // The allocator couldn't place it on a plane and it has no CPU
+        // mapping to composite from, so dropping it is expected behaviour,
+        // not a failure. Log at debug to avoid a per-frame warn when such a
+        // source is in the scene every frame (e.g. a direct-scanout-only
+        // SceneSubmitsFbId source on a driver that routes it to composition).
+        // Genuine map failures (EIO, ENOMEM, …) still warn.
+        if (mapping.error() == std::errc::function_not_supported) {
+          drm::log_debug(
+              "scene::LayerScene: layer {} dropped — source is uncompositable "
+              "(no CPU mapping) and the allocator found no plane for it",
+              acq.scene_layer->handle().id);
+        } else {
+          drm::log_warn(
+              "scene::LayerScene: layer {} needs composition but its source "
+              "map() failed ({}); dropping",
+              acq.scene_layer->handle().id, mapping.error().message());
+        }
         continue;
       }
       acq.cached_mapping.emplace(std::move(*mapping));
@@ -2508,7 +2523,17 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
       report.layers_assigned + report.layers_composited + report.layers_skipped_no_frame;
   if (report.layers_total > accounted) {
     report.layers_unassigned = report.layers_total - accounted;
-    drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
+    // On a real commit a dropped layer means content the user won't see, so
+    // warn. During a test_only dry run this is a placement *prediction* (the
+    // caller inspects report.placements to decide a fallback path, e.g. routing
+    // the frame through its own compositor); nothing is actually dropped, so
+    // emitting it at warn every probed frame is misleading noise — log at debug.
+    if (test_only) {
+      drm::log_debug("scene::LayerScene: {} layer(s) would be dropped (test)",
+                     report.layers_unassigned);
+    } else {
+      drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
+    }
   }
 
   // Per-layer placement readout. Always populates `report.placements`
