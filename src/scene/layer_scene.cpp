@@ -406,6 +406,30 @@ class LayerScene::Impl {
       output_.remove_layer(*slot->planes_layer);
       slot->planes_layer = nullptr;
     }
+    // Scrub the deferred-release ring of any acquisition that still
+    // references this layer. The ring holds raw scene_layer pointers
+    // (AcquisitionSlot::scene_layer = slot.scene_layer.get()); resetting
+    // the owning unique_ptr below would leave them dangling, and the
+    // next finalize_frame's release_all() would dereference freed memory
+    // (source().release()) → crash. The buffer may still be mid-scanout,
+    // but the layer is leaving the scene, so releasing now — while the
+    // source is still alive — is the correct trade (mirrors
+    // release_pending_acquisitions()'s synchronous drain). Null the slot
+    // so release_all() skips it; entries stay in place to preserve ring
+    // ordering.
+    if (slot->scene_layer) {
+      const Layer* dying = slot->scene_layer.get();
+      const auto scrub = [&](std::vector<AcquisitionSlot>& ring) {
+        for (auto& a : ring) {
+          if (a.scene_layer == dying) {
+            a.scene_layer->source().release(a.buffer);
+            a.scene_layer = nullptr;
+          }
+        }
+      };
+      scrub(prev_acquisitions_);
+      scrub(prev_prev_acquisitions_);
+    }
     slot->scene_layer.reset();
     slot->alive = false;
     // Slot index is slot_idx in the vector; store slot_idx (= handle.id-1)
