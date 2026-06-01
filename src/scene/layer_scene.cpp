@@ -952,12 +952,23 @@ class LayerScene::Impl {
     dst.set_property(drm::planes::PropTag::CrtcY, static_cast<std::uint64_t>(d.dst_rect.y));
     dst.set_property(drm::planes::PropTag::CrtcW, static_cast<std::uint64_t>(d.dst_rect.w));
     dst.set_property(drm::planes::PropTag::CrtcH, static_cast<std::uint64_t>(d.dst_rect.h));
+    // Resolve src_rect per the LayerDesc contract: a zero width/height means
+    // "the source buffer's full extent". Callers commonly set only dst_rect
+    // (the scene has no way to guess a screen position, but the source extent
+    // is known from format()), so without this resolution SRC_W/SRC_H below
+    // would be written as 0 — which the kernel rejects with EINVAL (errno=22)
+    // on the plane commit. That was the root cause of the direct-scanout
+    // atomic TEST failing on every controller (amdgpu DC, RPi5 vc4): the layer
+    // never carried a valid source rectangle, so direct assignment to any
+    // plane was rejected and the frame fell back to composition.
+    const std::uint32_t src_w = d.src_rect.w != 0 ? d.src_rect.w : fmt.width;
+    const std::uint32_t src_h = d.src_rect.h != 0 ? d.src_rect.h : fmt.height;
     dst.set_property(drm::planes::PropTag::SrcX,
                      to_16_16(static_cast<std::uint32_t>(d.src_rect.x)));
     dst.set_property(drm::planes::PropTag::SrcY,
                      to_16_16(static_cast<std::uint32_t>(d.src_rect.y)));
-    dst.set_property(drm::planes::PropTag::SrcW, to_16_16(d.src_rect.w));
-    dst.set_property(drm::planes::PropTag::SrcH, to_16_16(d.src_rect.h));
+    dst.set_property(drm::planes::PropTag::SrcW, to_16_16(src_w));
+    dst.set_property(drm::planes::PropTag::SrcH, to_16_16(src_h));
 
     // Format + modifier let the allocator statically screen planes for
     // compatibility before any test commit. The allocator reads both
@@ -1538,10 +1549,25 @@ class LayerScene::Impl {
       diagnose_modifier_rejection(*acq.planes_layer);
       auto mapping = acq.scene_layer->source().map(drm::MapAccess::Read);
       if (!mapping) {
-        drm::log_warn(
-            "scene::LayerScene: layer {} needs composition but its source map() failed ({}); "
-            "dropping",
-            acq.scene_layer->handle().id, mapping.error().message());
+        // `function_not_supported` is the documented contract for an
+        // uncompositable (scanout-only) source — see BufferSource::map().
+        // The allocator couldn't place it on a plane and it has no CPU
+        // mapping to composite from, so dropping it is expected behaviour,
+        // not a failure. Log at debug to avoid a per-frame warn when such a
+        // source is in the scene every frame (e.g. a direct-scanout-only
+        // SceneSubmitsFbId source on a driver that routes it to composition).
+        // Genuine map failures (EIO, ENOMEM, …) still warn.
+        if (mapping.error() == std::errc::function_not_supported) {
+          drm::log_debug(
+              "scene::LayerScene: layer {} dropped — source is uncompositable "
+              "(no CPU mapping) and the allocator found no plane for it",
+              acq.scene_layer->handle().id);
+        } else {
+          drm::log_warn(
+              "scene::LayerScene: layer {} needs composition but its source "
+              "map() failed ({}); dropping",
+              acq.scene_layer->handle().id, mapping.error().message());
+        }
         continue;
       }
       acq.cached_mapping.emplace(std::move(*mapping));
@@ -2508,7 +2534,17 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
       report.layers_assigned + report.layers_composited + report.layers_skipped_no_frame;
   if (report.layers_total > accounted) {
     report.layers_unassigned = report.layers_total - accounted;
-    drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
+    // On a real commit a dropped layer means content the user won't see, so
+    // warn. During a test_only dry run this is a placement *prediction* (the
+    // caller inspects report.placements to decide a fallback path, e.g. routing
+    // the frame through its own compositor); nothing is actually dropped, so
+    // emitting it at warn every probed frame is misleading noise — log at debug.
+    if (test_only) {
+      drm::log_debug("scene::LayerScene: {} layer(s) would be dropped (test)",
+                     report.layers_unassigned);
+    } else {
+      drm::log_warn("scene::LayerScene: {} layer(s) dropped this frame", report.layers_unassigned);
+    }
   }
 
   // Per-layer placement readout. Always populates `report.placements`
