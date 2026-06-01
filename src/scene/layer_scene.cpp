@@ -952,12 +952,23 @@ class LayerScene::Impl {
     dst.set_property(drm::planes::PropTag::CrtcY, static_cast<std::uint64_t>(d.dst_rect.y));
     dst.set_property(drm::planes::PropTag::CrtcW, static_cast<std::uint64_t>(d.dst_rect.w));
     dst.set_property(drm::planes::PropTag::CrtcH, static_cast<std::uint64_t>(d.dst_rect.h));
+    // Resolve src_rect per the LayerDesc contract: a zero width/height means
+    // "the source buffer's full extent". Callers commonly set only dst_rect
+    // (the scene has no way to guess a screen position, but the source extent
+    // is known from format()), so without this resolution SRC_W/SRC_H below
+    // would be written as 0 — which the kernel rejects with EINVAL (errno=22)
+    // on the plane commit. That was the root cause of the direct-scanout
+    // atomic TEST failing on every controller (amdgpu DC, RPi5 vc4): the layer
+    // never carried a valid source rectangle, so direct assignment to any
+    // plane was rejected and the frame fell back to composition.
+    const std::uint32_t src_w = d.src_rect.w != 0 ? d.src_rect.w : fmt.width;
+    const std::uint32_t src_h = d.src_rect.h != 0 ? d.src_rect.h : fmt.height;
     dst.set_property(drm::planes::PropTag::SrcX,
                      to_16_16(static_cast<std::uint32_t>(d.src_rect.x)));
     dst.set_property(drm::planes::PropTag::SrcY,
                      to_16_16(static_cast<std::uint32_t>(d.src_rect.y)));
-    dst.set_property(drm::planes::PropTag::SrcW, to_16_16(d.src_rect.w));
-    dst.set_property(drm::planes::PropTag::SrcH, to_16_16(d.src_rect.h));
+    dst.set_property(drm::planes::PropTag::SrcW, to_16_16(src_w));
+    dst.set_property(drm::planes::PropTag::SrcH, to_16_16(src_h));
 
     // Format + modifier let the allocator statically screen planes for
     // compatibility before any test commit. The allocator reads both
