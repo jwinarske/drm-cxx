@@ -535,6 +535,10 @@ class LayerScene::Impl {
   }
   [[nodiscard]] bool force_full_property_writes() const noexcept { return force_full_writes_; }
 
+  void set_external_reserved_planes(drm::span<const std::uint32_t> planes) {
+    external_reserved_planes_.assign(planes.data(), planes.data() + planes.size());
+  }
+
   // Conservative pre-build peek for SceneSet::NarrowPolicy::AutoOnModeset.
   // Returns true iff the next build_frame_into pass will definitely
   // (or very likely) OR ALLOW_MODESET into effective_flags.
@@ -2234,6 +2238,15 @@ class LayerScene::Impl {
   // assembles for the allocator. Lives only inside that call; cleared
   // + reserved at top.
   std::vector<std::uint32_t> scratch_reserved_planes_;
+  // Caller-supplied plane ids the scene must NEVER disable: planes
+  // armed by something outside this scene (e.g. a hardware/overlay
+  // cursor managed by drm::cursor::Renderer). On a CRTC with no
+  // dedicated cursor plane the cursor takes an overlay this scene
+  // would otherwise treat as "unused" and disable on every commit,
+  // fighting the cursor's own commits. build_frame_into folds these
+  // into scratch_reserved_planes_ so the allocator's disable-unused
+  // pass leaves them alone. Set via set_external_reserved_planes().
+  std::vector<std::uint32_t> external_reserved_planes_;
   // Per-frame acquisitions list. build_frame_into populates it via
   // acquire_all and std::moves it into FrameBuildState::acquisitions
   // before returning. finalize_frame moves the (now-cleared but
@@ -2491,7 +2504,7 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // their properties itself via compose_unassigned / the canvas-arm
   // path and arm_stream_layer_planes respectively.
   scratch_reserved_planes_.clear();
-  scratch_reserved_planes_.reserve(1 + acquisitions.size());
+  scratch_reserved_planes_.reserve(1 + acquisitions.size() + external_reserved_planes_.size());
   if (last_canvas_plane_id_.has_value()) {
     scratch_reserved_planes_.push_back(*last_canvas_plane_id_);
   }
@@ -2499,6 +2512,12 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
     if (acq.stream_pinned_plane_id.has_value()) {
       scratch_reserved_planes_.push_back(*acq.stream_pinned_plane_id);
     }
+  }
+  // Caller-armed planes (e.g. an overlay cursor managed outside this
+  // scene): the allocator must not disable them in its disable-unused
+  // pass — the external owner drives their properties itself.
+  for (const auto id : external_reserved_planes_) {
+    scratch_reserved_planes_.push_back(id);
   }
   const auto reserved_span = scratch_reserved_planes_.empty()
                                  ? drm::span<const std::uint32_t>{}
@@ -2817,6 +2836,10 @@ void LayerScene::set_output_metadata(const std::optional<drm::display::HdrSource
 
 void LayerScene::set_force_full_property_writes(bool force) noexcept {
   impl_->set_force_full_property_writes(force);
+}
+
+void LayerScene::set_external_reserved_planes(drm::span<const std::uint32_t> planes) {
+  impl_->set_external_reserved_planes(planes);
 }
 
 bool LayerScene::force_full_property_writes() const noexcept {

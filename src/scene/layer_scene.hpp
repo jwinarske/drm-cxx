@@ -27,6 +27,7 @@
 #include "stream_capability.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 
 #include <xf86drmMode.h>
 
@@ -317,6 +318,17 @@ class LayerScene {
   /// across pause/resume; cleared on scene destruction.
   void set_force_full_property_writes(bool force) noexcept;
   [[nodiscard]] bool force_full_property_writes() const noexcept;
+
+  /// Planes armed by something OUTSIDE this scene that the allocator
+  /// must never disable in its disable-unused-planes pass. The
+  /// canonical case: a CRTC with no dedicated cursor plane, where
+  /// drm::cursor::Renderer takes an overlay this scene would otherwise
+  /// treat as unused — disabling it every commit fights the cursor's
+  /// own commits (visible as cursor/primary flicker on motion). Pass
+  /// the cursor's plane id here so the scene leaves it alone. Replaces
+  /// the full set on each call; pass an empty span to clear. Survives
+  /// pause/resume and rebind (stored on the scene, re-read every frame).
+  void set_external_reserved_planes(drm::span<const std::uint32_t> planes);
 
   // ── Session hooks ──────────────────────────────────────────────────
   //
