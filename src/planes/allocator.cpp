@@ -13,6 +13,7 @@
 #include <drm-cxx/detail/span.hpp>
 
 #include <drm_mode.h>
+#include <xf86drmMode.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -21,6 +22,7 @@
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <system_error>
@@ -164,22 +166,48 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
 
   // Determine CRTC index once. Passed to every path that has to filter
   // planes by CRTC (warm-start, full search, try_test_commit, stale-plane
-  // disables).
-  uint32_t crtc_index = 0;
-  const auto all_planes = registry_.all();
-  for (uint32_t idx = 0; idx < 32; ++idx) {
-    bool found = false;
-    for (const auto& p : all_planes) {
-      if (p.compatible_with_crtc(idx)) {
-        found = true;
-        break;
+  // disables). This MUST be the index of the Output's actual CRTC in
+  // drmModeRes::crtcs[] — that bit position is what plane.possible_crtcs
+  // is tested against. The old "first index with any compatible plane"
+  // heuristic broke on multi-CRTC hardware where the target CRTC isn't
+  // the lowest populated one: e.g. RPi5 vc4 has the chosen CRTC at index
+  // 2 (primary possible_crtcs=0x4) but its overlays span 0xe (indices
+  // 1-3), so the heuristic picked index 1 — a *different* CRTC's plane
+  // set, whose PRIMARY then EINVALs against the real CRTC every frame.
+  const uint32_t target_crtc = output.crtc_id();
+  if (!cached_crtc_index_.has_value() || cached_crtc_index_id_ != target_crtc) {
+    uint32_t resolved_index = 0;
+    bool resolved = false;
+    std::unique_ptr<drmModeRes, decltype(&drmModeFreeResources)> res(drmModeGetResources(dev_.fd()),
+                                                                     drmModeFreeResources);
+    if (res) {
+      for (int i = 0; i < res->count_crtcs; ++i) {
+        if (res->crtcs[i] == target_crtc) {
+          resolved_index = static_cast<uint32_t>(i);
+          resolved = true;
+          break;
+        }
       }
     }
-    if (found) {
-      crtc_index = idx;
-      break;
+    if (!resolved) {
+      // Fall back to the legacy first-compatible-index heuristic only
+      // when the CRTC can't be located (e.g. a synthetic registry built
+      // via from_capabilities() in tests, with no real drmModeRes).
+      const auto all_planes = registry_.all();
+      for (uint32_t idx = 0; idx < 32; ++idx) {
+        const bool found =
+            std::any_of(all_planes.begin(), all_planes.end(),
+                        [idx](const PlaneCapabilities& p) { return p.compatible_with_crtc(idx); });
+        if (found) {
+          resolved_index = idx;
+          break;
+        }
+      }
     }
+    cached_crtc_index_ = resolved_index;
+    cached_crtc_index_id_ = target_crtc;
   }
+  const uint32_t crtc_index = *cached_crtc_index_;
 
   // A "new" layer is one in the scene this frame that wasn't placed by
   // the previous frame — i.e., not represented as a value in
@@ -1086,6 +1114,15 @@ void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_in
   }
 }
 
+bool Allocator::zpos_is_fixed(const uint32_t plane_id) const {
+  for (const auto& p : registry_.all()) {
+    if (p.id == plane_id) {
+      return p.zpos_min.has_value() && p.zpos_max.has_value() && *p.zpos_min == *p.zpos_max;
+    }
+  }
+  return false;
+}
+
 drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer& layer,
                                                                      const uint32_t plane_id,
                                                                      AtomicRequest& req) const {
@@ -1103,6 +1140,11 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer
     // same property map), so filter them out of the atomic write path
     // rather than stripping them upstream and losing the hint.
     if (prop_store_.is_immutable(plane_id, name).value_or(false)) {
+      continue;
+    }
+    // Fixed-slot zpos (min == max) is not settable even without the
+    // IMMUTABLE flag — writing it EINVALs on e.g. vc4's PRIMARY.
+    if (name == "zpos" && zpos_is_fixed(plane_id)) {
       continue;
     }
     if (auto result = req.add_property(plane_id, *prop_id, value); !result.has_value()) {
@@ -1144,6 +1186,11 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
       continue;
     }
     if (prop_store_.is_immutable(plane_id, name).value_or(false)) {
+      continue;
+    }
+    // Fixed-slot zpos (min == max) is not settable even without the
+    // IMMUTABLE flag — writing it EINVALs on e.g. vc4's PRIMARY.
+    if (tag == PropTag::Zpos && zpos_is_fixed(plane_id)) {
       continue;
     }
     // Externally-bound layers (EGL stream sources) have their FB_ID

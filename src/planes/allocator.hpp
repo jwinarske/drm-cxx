@@ -324,9 +324,26 @@ class Allocator {
   void disable_unused_planes(AtomicRequest& req, uint32_t crtc_index, const PlaneAssignment& keep,
                              bool track_state, bool test_only);
 
+  // True when the plane's advertised zpos range is degenerate
+  // (zpos_min == zpos_max), i.e. the slot is fixed and zpos is not
+  // actually settable. Some drivers (e.g. vc4's PRIMARY, range [0,0])
+  // expose such a property WITHOUT the DRM_MODE_PROP_IMMUTABLE flag, so
+  // is_immutable() doesn't catch it; the kernel's atomic_check still
+  // rejects any write with EINVAL. The apply paths skip the zpos write
+  // for these planes so a fixed-slot plane (notably a UI layer assigned
+  // to the primary) doesn't poison the whole commit.
+  [[nodiscard]] bool zpos_is_fixed(uint32_t plane_id) const;
+
   const Device& dev_;
   PlaneRegistry& registry_;
   PropertyStore prop_store_;
+
+  // Cache of the Output's CRTC id → its index in drmModeRes::crtcs[],
+  // resolved via drmModeGetResources. Avoids that ioctl on every apply()
+  // (the index is stable for the fd's lifetime). Keyed by crtc id so a
+  // caller that retargets the Output to a different CRTC re-resolves.
+  std::optional<uint32_t> cached_crtc_index_;
+  uint32_t cached_crtc_index_id_{0};
 
   // §13.3 Previous allocation state
   bool previous_allocation_valid_{false};
