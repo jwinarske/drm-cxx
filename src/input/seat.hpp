@@ -34,6 +34,12 @@ struct PointerMotionEvent {
   uint32_t time_ms{};
   double dx{};
   double dy{};
+  // libinput device name (libinput_device_get_name), or nullptr. Valid for the
+  // duration of the synchronous EventHandler call only — the device owns the
+  // string; copy it if retained. Lets a consumer apply per-device handling
+  // (e.g. rotating a built-in trackpad's deltas to a rotated display while
+  // leaving an external mouse alone).
+  const char* device_name{nullptr};
 };
 
 struct PointerButtonEvent {
@@ -56,6 +62,8 @@ struct TouchEvent {
   double x{};
   double y{};
   enum class Type : uint8_t { Down, Up, Motion, Frame, Cancel } type{};
+  // libinput device name; see PointerMotionEvent::device_name for lifetime.
+  const char* device_name{nullptr};
 };
 
 struct SwitchEvent {

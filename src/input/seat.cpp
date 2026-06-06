@@ -292,6 +292,7 @@ void Seat::process_events() {
         me.time_ms = libinput_event_pointer_get_time(pev);
         me.dx = libinput_event_pointer_get_dx(pev);
         me.dy = libinput_event_pointer_get_dy(pev);
+        me.device_name = libinput_device_get_name(libinput_event_get_device(ev));
         handler_(InputEvent{PointerEvent{me}});
         break;
       }
@@ -336,6 +337,7 @@ void Seat::process_events() {
         TouchEvent te;
         te.time_ms = libinput_event_touch_get_time(tev);
         te.slot = libinput_event_touch_get_slot(tev);
+        te.device_name = libinput_device_get_name(libinput_event_get_device(ev));
         // Normalized [0,1) touch position in the device's native orientation.
         // The raw libinput coordinate is in mm; normalizing here lets the
         // consumer scale to its render extent and apply any display rotation
@@ -355,6 +357,7 @@ void Seat::process_events() {
         TouchEvent te;
         te.time_ms = libinput_event_touch_get_time(tev);
         te.slot = libinput_event_touch_get_slot(tev);
+        te.device_name = libinput_device_get_name(libinput_event_get_device(ev));
         te.type = TouchEvent::Type::Up;
         handler_(InputEvent{te});
         break;
@@ -368,6 +371,7 @@ void Seat::process_events() {
         TouchEvent te;
         te.time_ms = libinput_event_touch_get_time(tev);
         te.slot = libinput_event_touch_get_slot(tev);
+        te.device_name = libinput_device_get_name(libinput_event_get_device(ev));
         // Normalized [0,1) touch position in the device's native orientation.
         // The raw libinput coordinate is in mm; normalizing here lets the
         // consumer scale to its render extent and apply any display rotation
