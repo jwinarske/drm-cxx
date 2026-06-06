@@ -336,8 +336,12 @@ void Seat::process_events() {
         TouchEvent te;
         te.time_ms = libinput_event_touch_get_time(tev);
         te.slot = libinput_event_touch_get_slot(tev);
-        te.x = libinput_event_touch_get_x(tev);
-        te.y = libinput_event_touch_get_y(tev);
+        // Normalized [0,1) touch position in the device's native orientation.
+        // The raw libinput coordinate is in mm; normalizing here lets the
+        // consumer scale to its render extent and apply any display rotation
+        // without needing the digitizer's physical size.
+        te.x = libinput_event_touch_get_x_transformed(tev, 1.0);
+        te.y = libinput_event_touch_get_y_transformed(tev, 1.0);
         te.type = TouchEvent::Type::Down;
         handler_(InputEvent{te});
         break;
@@ -364,8 +368,12 @@ void Seat::process_events() {
         TouchEvent te;
         te.time_ms = libinput_event_touch_get_time(tev);
         te.slot = libinput_event_touch_get_slot(tev);
-        te.x = libinput_event_touch_get_x(tev);
-        te.y = libinput_event_touch_get_y(tev);
+        // Normalized [0,1) touch position in the device's native orientation.
+        // The raw libinput coordinate is in mm; normalizing here lets the
+        // consumer scale to its render extent and apply any display rotation
+        // without needing the digitizer's physical size.
+        te.x = libinput_event_touch_get_x_transformed(tev, 1.0);
+        te.y = libinput_event_touch_get_y_transformed(tev, 1.0);
         te.type = TouchEvent::Type::Motion;
         handler_(InputEvent{te});
         break;
