@@ -37,6 +37,10 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `vicodec`    | M2M FWHT codec endpoints            | 6.x                 | `V4l2DecoderSource` NV12 + P010 paths |
 | NVIDIA       | Quadro RTX A2000 (NVRM 535.288.01) | 6.x                 | `EglStreamSource` end-to-end (acquire, atomic test, scene wiring). Desktop driver gap noted in quirks. |
 | Tegra        | Jetson Orin (nvgpu)                | 5.15.148-tegra (L4T)| Visible scanout on DP-1: `atomic_modeset`, `layered_demo`, `signage_player`, `hdr_demo`, `stream_demo` (CPU fallback tier), `v4l2_camera_demo --mode mmap`, `cursor_rotate`, `vulkan_display` (display enumeration), `vulkan_scene` (60fps vblank-locked), all `overlay_planes` / `scene_*` enumeration runs. Driver gaps noted in quirks. |
+| `amdgpu`     | RDNA2 Van Gogh APU (Steam Deck)     | 6.11.11-valve29     | `drm::fmt`: **real DCC `tile27 dcc=1 retile` scanout** via both EGL and Vulkan (`egl_offload_scanout`, `vulkan_offload_scanout`). See [§ Hardware compression](#hardware-compression-format-modifiers). |
+| `panfrost`   | Mali-G52 (Radxa Zero 3 / RK3566)    | 6.1.84-rk2410       | `drm::fmt`: **real ARM AFBC `16x16\|YTR\|SPARSE` scanout** via EGL on a VOP2 cluster plane (`egl_offload_scanout`). |
+| `rockchip-drm` + libmali | Mali-G610 (RK3588 / NanoPC-T6) | 6.1.141      | `drm::fmt`: AFBC `IN_FORMATS` decode validated; compressed offload falls back to LINEAR (libmali limitation — see quirks). |
+| `vc4`        | VideoCore (RPi4 / RPi5)             | 6.12.75-rpt         | `drm::fmt`: Broadcom SAND / VC4-T-tiled `IN_FORMATS` decode validated; LINEAR scanout. |
 
 What's **not** validated:
 
@@ -141,6 +145,59 @@ no vkms instance with ≥2 connected outputs is provisioned).
 
 ---
 
+## Hardware compression (format modifiers)
+
+`drm::fmt` (`src/fmt/format_mod.{hpp,cpp}`) handles DRM format
+modifiers and hardware-compression-aware scanout. It was live-validated
+across five GPU families on real silicon. Two distinct things were
+measured per platform:
+
+- **decode** — read a plane's `IN_FORMATS` blob and run every modifier
+  through `classify()` / `describe()`.
+- **scanout** — a GPU renders into a *compressed* buffer that the
+  display actually presents (visible pixels, not just `TEST_ONLY`).
+
+The governing principle, confirmed empirically on every board:
+
+- **`IN_FORMATS` only prunes.** A plane advertising a modifier is
+  necessary, not sufficient.
+- **An atomic `TEST_ONLY` commit is the ground truth.**
+- **Whether compression reaches the screen depends on the GPU
+  *userspace* exposing a display-compatible compressed modifier as
+  *renderable*.** Real compressed scanout needs the intersection of
+  (modifiers the GPU can render + export) and (modifiers the plane can
+  scan out) to contain a compressed entry. The display half is rarely
+  the limiter; the render half usually is.
+
+| GPU / userspace stack | decode | compressed scanout | why |
+|-----------------------|--------|--------------------|-----|
+| amdgpu RDNA2 desktop (Mesa 25.3.6)      | ✅ DCC | ❌ → `dcc=0` | Mesa exposes only `pipe_align` DCC as renderable; display wants `retile` → empty intersection |
+| amdgpu Van Gogh — Steam Deck (Mesa, gamescope-tuned) | ✅ DCC | ✅ `tile27 dcc=1 retile`, **EGL + Vulkan** | Deck's Mesa exposes the displayable `retile` modifier → intersection non-empty |
+| Mali-G52 / **panfrost** — Radxa Zero 3 (Mesa) | ✅ AFBC | ✅ `AFBC 16x16\|YTR\|SPARSE`, **EGL** | panfrost exposes AFBC as renderable; AFBC lives only on VOP2 **cluster** planes |
+| Mali-G610 / **libmali** — RK3588        | ✅ AFBC | ❌ → LINEAR | libmali won't allocate an exportable AFBC buffer via `gbm_bo_create_with_modifiers` (fails on every cluster plane) |
+| Broadcom **vc4** — RPi4 / RPi5          | ✅ SAND / T-tiled | n/a (LINEAR) | SAND / VC4-T-tiled are tiling, not compression; vc4 advertises no AFBC |
+
+Decode coverage spans all three vendor decoders against
+hardware-reported modifier values: AMD (DCC / tile / retile /
+pipe-align), ARM AFBC (block size + `YTR` / `SPLIT` / `SPARSE` / `CBR`
+/ `TILED` / `SC`), and Broadcom (VC4-T-tiled / SAND).
+
+The two platforms where real compression reaches the screen — the
+Steam Deck (AMD DCC) and the Radxa Zero 3 (ARM AFBC) — both rely on
+`describe()` / `supports()` distinguishing modifier *sub-flags* exactly
+(`pipe_align` vs `retile`; AFBC `SPARSE` vs `TILED|SC`). That fidelity
+is what makes the render∩display intersection compute correctly; a
+coarser "is it AFBC/DCC?" classifier would have mismatched on both
+winning boards.
+
+Same SoC family, different GPU userspace, opposite outcome: the RK3588
+(libmali) and the Radxa Zero 3 (Mesa panfrost) are both Rockchip VOP2 +
+Mali, yet only the Mesa-panfrost stack puts AFBC on screen. The split
+is the renderer's willingness to export a compressed buffer, never
+`drm::fmt`.
+
+---
+
 ## Driver quirks
 
 Workarounds for known kernel/driver behavior. Most are codified in
@@ -173,6 +230,16 @@ hits the cached answer first.
   ≤2 collide with the background layer; examples use `>=3`.
 - **OVERLAY plane briefly disabled on SRC_W/H change.** Visible as a
   ~1 vblank flicker; canvas underneath shows through.
+- **Displayable DCC needs the `retile` modifier, and Mesa must expose
+  it.** The GPU renders DCC `pipe_align` (`AMD_FMT_MOD` with
+  `DCC_PIPE_ALIGN=1`), but DCN can only scan out non-pipe-aligned DCC —
+  in practice the `retile` variant (`DCC_RETILE=1`, `PIPE_ALIGN=0`).
+  Real DCC scanout therefore requires Mesa to advertise the `retile`
+  modifier as *renderable*. Desktop Mesa 25.3.6 does **not** (only
+  `pipe_align`), so an exported render target falls back to `dcc=0`;
+  the Steam Deck's gamescope-tuned Mesa **does**, and `drm::fmt` drives
+  real DCC to screen there. The display side advertises both variants
+  on every box tested — the renderer is the gate.
 
 ### Intel i915
 
@@ -197,6 +264,36 @@ hits the cached answer first.
 - **Three /dev/video* nodes share the card name.** Probe by
   `VIDIOC_ENUM_FMT` looking for FWHT on the OUTPUT queue, not by
   string-matching the card name.
+
+### Rockchip VOP2 + Mali (RK3566 / RK3588)
+
+- **AFBC lives only on Cluster planes.** VOP2 advertises ARM AFBC
+  modifiers on its Cluster planes (incl. the default primary on
+  RK3588); the Esmart / Smart planes carry **zero** AFBC. A demo that
+  targets a Smart plane sees a LINEAR-only `IN_FORMATS` and never gets
+  compression even when the GPU can render it. (`DRM_FMT_PLANE`-style
+  plane targeting was used during bring-up to reach a Cluster plane.)
+- **Mesa panfrost exposes AFBC as renderable; libmali does not.** On
+  the Mesa-panfrost stack (Radxa Zero 3), `gbm_bo_create_with_modifiers`
+  with an AFBC modifier succeeds and the buffer scans out compressed.
+  On the proprietary libmali stack (RK3588, GPU at `/dev/mali0` with no
+  Mesa DRM render node), the same call **fails** for AFBC on every
+  cluster plane — libmali only uses AFBC for its own internal EGL
+  swapchain, not for an explicit exportable `gbm` allocation. The
+  failure is at buffer allocation, upstream of any plane logic, so
+  every cluster plane fails identically.
+- **AFBC sub-flags must match.** panfrost renders some AFBC variants
+  with `TILED|SC` set, which the VOP does not scan out; the plain
+  `SPARSE` / `YTR|SPARSE` variants are in both sets and are what land.
+  `drm::fmt`'s exact flag decode is what selects the intersecting one.
+
+### Broadcom vc4 (Raspberry Pi)
+
+- **SAND and VC4-T-tiled are tiling, not compression.** vc4 advertises
+  `BROADCOM_SAND64/128/256` and `VC4_T_TILED` on its HVS planes;
+  `classify()` correctly reports these as `Tiling`, not `Compression`.
+  vc4 advertises no AFBC, so there is no compressed-scanout path to
+  exercise on the Pi — only tiling/LINEAR.
 
 ### NVIDIA EGL Streams
 
@@ -365,7 +462,10 @@ hardware:
 | `examples/basics/atomic_modeset`             | Does a single-CRTC TEST commit land? Smallest possible KMS smoke. |
 | `examples/basics/hotplug_monitor`            | Does udev hotplug fire for this card's connector add/remove events? |
 | `tests/integration/test_*`                   | Per-module hardware-gated tests; `GTEST_SKIP` when their prerequisites aren't met. |
+| `examples/allocator/plane_caps`              | What `(fourcc, modifier)` pairs does each plane advertise, decoded to vendor + class? |
 | `DRM_EXT_DMABUF_DEBUG=1`                     | Env var: prints which step inside `ExternalDmaBufSource::create` returned EINVAL. Zero-cost when unset. |
+| `DRM_FMT_DUMP_EGL_MODS=1` / `DRM_FMT_DUMP_VK_MODS=1` | Env vars (`egl_offload_scanout` / `vulkan_offload_scanout`): print the renderable-vs-scannable modifier sets so you can see whether the render∩display intersection has a compressed entry. |
+| `DRM_FMT_FORCE_COMPRESSION=1`                | Env var (`compressed_scanout`, `vulkan_offload_scanout`, `gbm_surface_scanout`): drop non-compression candidates, forcing the GPU to commit to a compressed buffer or fail — the definitive test of whether a stack can export compression. |
 
 ### Probe workflow on an unfamiliar card
 
@@ -406,6 +506,11 @@ hardware categories:
 | `vulkan_display`               | Vulkan WSI direct-to-display. |
 | `egl_scene`                    | `GbmSurfaceSource` + EGL/GLES 3 producer + `LayerScene::candidate_modifiers` negotiation. |
 | `vulkan_scene`                 | Vulkan-rendered scene layer via `VK_EXT_image_drm_format_modifier` + `ExternalDmaBufSource` (the deliberate non-`gbm_surface` Vulkan path). |
+| `plane_caps`                   | Read-only `IN_FORMATS` dump decoded through `drm::fmt` (`classify` / `describe`). First tool to run on any new compression-capable card. |
+| `compressed_scanout`           | `drm::fmt` end-to-end: GBM allocate → rank candidates → `TEST_ONLY` → present. amdgpu / vc4 / Rockchip. |
+| `egl_offload_scanout`          | EGL/GLES render → dma-buf export → import on the display node. The AFBC/DCC offload harness (Steam Deck DCC, Radxa AFBC). |
+| `vulkan_offload_scanout`       | Vulkan `VK_EXT_image_drm_format_modifier` render → dma-buf → import. Steam Deck DCC validated; panvk lacks the dma-buf extensions. |
+| `gbm_surface_scanout`          | `gbm_surface` swapchain producer — the compositor-path counterpart to the offload demos. |
 
 ---
 

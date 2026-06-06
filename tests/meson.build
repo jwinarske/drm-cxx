@@ -13,6 +13,13 @@ test('test_format',
   ),
 )
 
+test('test_format_mod',
+  executable('test_format_mod',
+    'unit/test_format_mod.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_property_store',
   executable('test_property_store',
     'unit/test_property_store.cpp',

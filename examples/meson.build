@@ -303,3 +303,44 @@ if get_option('vulkan')
     dependencies : [drm_cxx_dep, vk_dep],
   )
 endif
+
+#
+# format-modifier / hardware-compression examples (drm::fmt, src/fmt).
+#
+# plane_caps + compressed_scanout are pure drm-cxx consumers (drm + gbm
+# ride in transitively via drm_cxx_dep). The two render-offload demos add
+# an EGL/GLES or Vulkan producer and gate on those deps exactly like
+# egl_scene / vulkan_scene above; the library itself never links them.
+#
+
+executable('plane_caps',
+  'allocator/plane_caps/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
+executable('compressed_scanout',
+  'allocator/compressed_scanout/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
+offload_egl_dep = dependency('egl', required : false)
+offload_gles_dep = dependency('glesv2', required : false)
+if offload_egl_dep.found() and offload_gles_dep.found()
+  executable('egl_offload_scanout',
+    'advanced/egl_offload_scanout/main.cpp',
+    dependencies : [drm_cxx_dep, offload_egl_dep, offload_gles_dep],
+  )
+  # Compositor-path counterpart: a gbm_surface swapchain, which is the only way
+  # Mesa hands out displayable-DCC (retile) on amdgpu. Same EGL/GLES gating.
+  executable('gbm_surface_scanout',
+    'advanced/gbm_surface_scanout/main.cpp',
+    dependencies : [drm_cxx_dep, offload_egl_dep, offload_gles_dep],
+  )
+endif
+
+if get_option('vulkan')
+  executable('vulkan_offload_scanout',
+    'advanced/vulkan_offload_scanout/main.cpp',
+    dependencies : [drm_cxx_dep, vk_dep],
+  )
+endif

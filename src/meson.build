@@ -52,6 +52,7 @@ drm_cxx_sources = files(
   'scene/v4l2_camera_source.cpp',
   'scene/v4l2_decoder_source.cpp',
   'sync/fence.cpp',
+  'fmt/format_mod.cpp',
 )
 
 drm_cxx_deps = [
@@ -315,6 +316,11 @@ install_headers(
 install_headers(
   'dumb/buffer.hpp',
   subdir : 'drm-cxx/dumb',
+)
+
+install_headers(
+  'fmt/format_mod.hpp',
+  subdir : 'drm-cxx/fmt',
 )
 
 install_headers(
