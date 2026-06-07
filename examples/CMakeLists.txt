@@ -21,6 +21,8 @@ foreach(_path
     allocator/scene_warm_start
     allocator/scene_priority
     allocator/scene_formats
+    allocator/plane_caps
+    allocator/compressed_scanout
     scene/layered_demo
     scene/video_grid
     scene/dual_display
@@ -202,6 +204,35 @@ if(DRM_CXX_VULKAN)
   add_executable(vulkan_scene advanced/vulkan_scene/main.cpp)
   target_link_libraries(vulkan_scene PRIVATE drm-cxx::drm-cxx PkgConfig::vulkan)
   target_include_directories(vulkan_scene PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # vulkan_offload_scanout — GPU(Vulkan) render -> dma-buf -> import on the
+  # display node (drm::fmt). Same Vulkan gate as vulkan_scene.
+  add_executable(vulkan_offload_scanout advanced/vulkan_offload_scanout/main.cpp)
+  target_link_libraries(vulkan_offload_scanout PRIVATE drm-cxx::drm-cxx PkgConfig::vulkan)
+  target_include_directories(vulkan_offload_scanout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
+# egl_offload_scanout — GPU(EGL/GLES) render -> dma-buf -> import on the
+# display node (drm::fmt). Same EGL + glesv2 gate as egl_scene; the
+# library never links these, only the demo's producer side does.
+pkg_check_modules(offload_egl IMPORTED_TARGET egl)
+pkg_check_modules(offload_gles IMPORTED_TARGET glesv2)
+if(TARGET PkgConfig::offload_egl AND TARGET PkgConfig::offload_gles)
+  add_executable(egl_offload_scanout advanced/egl_offload_scanout/main.cpp)
+  target_link_libraries(egl_offload_scanout PRIVATE
+    drm-cxx::drm-cxx
+    PkgConfig::offload_egl
+    PkgConfig::offload_gles)
+  target_include_directories(egl_offload_scanout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # gbm_surface_scanout — compositor-path counterpart: a gbm_surface swapchain,
+  # the only path Mesa hands out displayable-DCC (retile) on amdgpu.
+  add_executable(gbm_surface_scanout advanced/gbm_surface_scanout/main.cpp)
+  target_link_libraries(gbm_surface_scanout PRIVATE
+    drm-cxx::drm-cxx
+    PkgConfig::offload_egl
+    PkgConfig::offload_gles)
+  target_include_directories(gbm_surface_scanout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 add_subdirectory(scene/signage_player)

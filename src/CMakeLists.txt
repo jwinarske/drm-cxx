@@ -50,7 +50,8 @@ set(DRM_CXX_SOURCES
   scene/stream_capability.cpp
   scene/v4l2_camera_source.cpp
   scene/v4l2_decoder_source.cpp
-  sync/fence.cpp)
+  sync/fence.cpp
+  fmt/format_mod.cpp)
 
 if(DRM_CXX_VULKAN)
   list(APPEND DRM_CXX_SOURCES
@@ -348,6 +349,9 @@ install(FILES sync/fence.hpp
 
 install(FILES dumb/buffer.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/dumb)
+
+install(FILES fmt/format_mod.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/fmt)
 
 install(FILES
     scene/buffer_source.hpp
