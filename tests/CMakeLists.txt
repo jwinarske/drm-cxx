@@ -40,6 +40,7 @@ set(DRM_CXX_TESTS
   test_dumb_buffer
   test_buffer_mapping
   test_format_mod
+  test_negotiate
   test_log)
 
 if(DRM_CXX_HAS_XCURSOR)

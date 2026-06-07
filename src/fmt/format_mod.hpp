@@ -83,6 +83,17 @@ enum class BandwidthClass : std::uint8_t {
 // For logging only.
 [[nodiscard]] std::string describe(Modifier m);
 
+// Display-plane rotation. 90/270 transpose the scanout fetch order; 0/180 don't.
+enum class Rotation : std::uint8_t { Rotate0, Rotate90, Rotate180, Rotate270 };
+
+// Can a buffer with modifier m be scanned out under rotation r? A 90/270 rotation
+// transposes the fetch order, which the display engine cannot follow for a LINEAR
+// buffer (a rotated fetch needs a tiled layout) or for an AMD DCC metadata surface;
+// every other layout (plain tiling, AFBC, ...) is left to the atomic TEST_ONLY
+// commit to confirm. 0/180 never transpose, so all modifiers pass. This is a
+// pre-filter for the negotiator only -- correctness still rests on the commit.
+[[nodiscard]] bool rotation_compatible(Modifier m, Rotation r) noexcept;
+
 // ---------------------------------------------------------------------------
 // FormatTable: parsed, queryable view of a plane's IN_FORMATS blob.
 // ---------------------------------------------------------------------------
@@ -297,6 +308,28 @@ inline BandwidthClass classify(Modifier m) noexcept {
       // Unknown non-linear: assume tiled, not free.
       return BandwidthClass::Tiling;
   }
+}
+
+inline bool rotation_compatible(Modifier m, Rotation r) noexcept {
+  if (r != Rotation::Rotate90 && r != Rotation::Rotate270) {
+    return true;  // 0/180 keep the scanout walk order: any modifier is fine
+  }
+  if (m.is_linear()) {
+    return false;  // a rotated fetch needs a tiled layout, not raw bytes
+  }
+  if (m.vendor() == DRM_FORMAT_MOD_VENDOR_AMD) {
+    // AMD DCC metadata can't be walked transposed (same DCC bit classify() uses).
+#ifdef AMD_FMT_MOD
+    if (AMD_FMT_MOD_GET(DCC, m.value) != 0U) {
+      return false;
+    }
+#else
+    if (((m.value >> 13) & 0x1) != 0U) {
+      return false;
+    }
+#endif
+  }
+  return true;
 }
 
 inline std::uint64_t scanout_cost_bytes(std::uint32_t w, std::uint32_t h, std::uint32_t /*fourcc*/,
