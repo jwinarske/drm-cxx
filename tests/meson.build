@@ -20,6 +20,13 @@ test('test_format_mod',
   ),
 )
 
+test('test_negotiate',
+  executable('test_negotiate',
+    'unit/test_negotiate.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_property_store',
   executable('test_property_store',
     'unit/test_property_store.cpp',

@@ -158,6 +158,41 @@ void test_describe() {
 #endif
 }
 
+void test_rotation_compatible() {
+  using R = fmt::Rotation;
+  const fmt::Modifier lin{DRM_FORMAT_MOD_LINEAR};
+  const fmt::Modifier afbc{DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16)};
+  const fmt::Modifier tiled{DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED};  // tiled, non-DCC
+
+  // 0 / 180 never transpose the scanout walk: every modifier is compatible.
+  CHECK(fmt::rotation_compatible(lin, R::Rotate0));
+  CHECK(fmt::rotation_compatible(lin, R::Rotate180));
+  CHECK(fmt::rotation_compatible(afbc, R::Rotate0));
+  CHECK(fmt::rotation_compatible(tiled, R::Rotate180));
+
+  // 90 / 270 transpose: LINEAR can't be fetched rotated; tiled and AFBC can
+  // (AFBC is left to the commit -- the design contract's ground truth).
+  CHECK(!fmt::rotation_compatible(lin, R::Rotate90));
+  CHECK(!fmt::rotation_compatible(lin, R::Rotate270));
+  CHECK(fmt::rotation_compatible(tiled, R::Rotate90));
+  CHECK(fmt::rotation_compatible(tiled, R::Rotate270));
+  CHECK(fmt::rotation_compatible(afbc, R::Rotate90));
+
+#ifdef AMD_FMT_MOD
+  // AMD DCC cannot scan out rotated; the same tile layout without DCC can.
+  const fmt::Modifier amd_dcc{
+      AMD_FMT_MOD | AMD_FMT_MOD_SET(TILE_VERSION, AMD_FMT_MOD_TILE_VER_GFX9) |
+      AMD_FMT_MOD_SET(TILE, AMD_FMT_MOD_TILE_GFX9_64K_S_X) | AMD_FMT_MOD_SET(DCC, 1)};
+  const fmt::Modifier amd_nodcc{AMD_FMT_MOD |
+                                AMD_FMT_MOD_SET(TILE_VERSION, AMD_FMT_MOD_TILE_VER_GFX9) |
+                                AMD_FMT_MOD_SET(TILE, AMD_FMT_MOD_TILE_GFX9_64K_S_X)};
+  CHECK(fmt::rotation_compatible(amd_dcc, R::Rotate0));    // unrotated DCC: fine
+  CHECK(!fmt::rotation_compatible(amd_dcc, R::Rotate90));  // rotated DCC: rejected
+  CHECK(!fmt::rotation_compatible(amd_dcc, R::Rotate270));
+  CHECK(fmt::rotation_compatible(amd_nodcc, R::Rotate90));  // tiled non-DCC: ok
+#endif
+}
+
 void test_probe_cache() {
   using V = fmt::ModifierProbeCache::Verdict;
   fmt::ModifierProbeCache c;
@@ -180,6 +215,7 @@ int main() {
   test_format_table();
   test_format_table_malformed();
   test_classify();
+  test_rotation_compatible();
   test_cost();
   test_describe();
   test_probe_cache();

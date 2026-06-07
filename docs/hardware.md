@@ -41,6 +41,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `panfrost`   | Mali-G52 (Radxa Zero 3 / RK3566)    | 6.1.84-rk2410       | `drm::fmt`: **real ARM AFBC `16x16\|YTR\|SPARSE` scanout** via EGL on a VOP2 cluster plane (`egl_offload_scanout`). |
 | `rockchip-drm` + libmali | Mali-G610 (RK3588 / NanoPC-T6) | 6.1.141      | `drm::fmt`: AFBC `IN_FORMATS` decode validated; compressed offload falls back to LINEAR (libmali limitation — see quirks). |
 | `vc4`        | VideoCore (RPi4 / RPi5)             | 6.12.75-rpt         | `drm::fmt`: Broadcom SAND / VC4-T-tiled `IN_FORMATS` decode validated; LINEAR scanout. |
+| `imx-drm`    | i.MX8M Mini LCDIF (Nitrogen8M Mini, NXP BSP) | 6.1.22 (Yocto) | `drm::fmt`: **no-`IN_FORMATS` fallback** — `FormatTable::from_plane` returns `ENOENT`, caller assumes LINEAR-only (legacy fourccs, no modifier surface). |
 
 What's **not** validated:
 
@@ -176,6 +177,7 @@ The governing principle, confirmed empirically on every board:
 | Mali-G52 / **panfrost** — Radxa Zero 3 (Mesa) | ✅ AFBC | ✅ `AFBC 16x16\|YTR\|SPARSE`, **EGL** | panfrost exposes AFBC as renderable; AFBC lives only on VOP2 **cluster** planes |
 | Mali-G610 / **libmali** — RK3588        | ✅ AFBC | ❌ → LINEAR | libmali won't allocate an exportable AFBC buffer via `gbm_bo_create_with_modifiers` (fails on every cluster plane) |
 | Broadcom **vc4** — RPi4 / RPi5          | ✅ SAND / T-tiled | n/a (LINEAR) | SAND / VC4-T-tiled are tiling, not compression; vc4 advertises no AFBC |
+| **imx-drm** LCDIF — i.MX8M Mini         | n/a | n/a (LINEAR) | no `IN_FORMATS` at all; `from_plane` → `ENOENT` → caller falls back to LINEAR (the graceful-degradation path for legacy/simple display controllers) |
 
 Decode coverage spans all three vendor decoders against
 hardware-reported modifier values: AMD (DCC / tile / retile /
