@@ -297,6 +297,28 @@ hits the cached answer first.
   vc4 advertises no AFBC, so there is no compressed-scanout path to
   exercise on the Pi — only tiling/LINEAR.
 
+### imx-drm (i.MX8M Mini)
+
+Validation board: **Boundary Devices Nitrogen8M Mini**, NXP i.MX Yocto
+BSP, kernel 6.1.22. `card0` is `imx-drm` (the LCDIF display controller);
+the Vivante GPU is the proprietary `galcore` driver on `card1` (no Mesa
+render node).
+
+- **No `IN_FORMATS` on the display planes.** The LCDIF advertises a flat
+  legacy fourcc list (XRGB8888, ARGB8888, RGB565, …) with **no**
+  `IN_FORMATS` blob and no modifiers. `FormatTable::from_plane` returns
+  `ENOENT`, and `ScanoutTarget::discover` leaves `primary_formats` empty
+  so the caller assumes LINEAR — the graceful-degradation path for legacy
+  display controllers. Validated: `discover()` finds the connector → CRTC
+  → PRIMARY plane → preferred mode (1920×1080) with `in_formats=no`.
+- **LINEAR-only scanout.** There is no tiling/compression modifier path
+  to exercise here; the LCDIF scans out LINEAR. The Vivante GPU does AFBC
+  internally but exposes nothing through KMS `IN_FORMATS`.
+- **No native build tooling beyond a compiler.** The BSP image ships
+  `gcc`/`g++` and `libdrm`/`libgbm` runtime but no meson/ninja and no
+  `-dev` headers; bring drm-cxx's headers (or carry the API headers) and
+  compile the needed sources directly when validating on this board.
+
 ### NVIDIA EGL Streams
 
 - **EGL needs `EGL_DRM_MASTER_FD_EXT`.** Without it,
