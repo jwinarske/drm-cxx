@@ -57,7 +57,8 @@ set(DRM_CXX_SOURCES
   present/negotiate.cpp
   present/buffer_ring.cpp
   present/gbm_producer.cpp
-  present/scanout_backend.cpp)
+  present/scanout_backend.cpp
+  present/gl_scanout_producer.cpp)
 
 if(DRM_CXX_VULKAN)
   list(APPEND DRM_CXX_SOURCES
@@ -362,7 +363,7 @@ install(FILES fmt/format_mod.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/fmt)
 
 install(FILES present/negotiate.hpp present/scanout_producer.hpp present/buffer_ring.hpp
-        present/gbm_producer.hpp present/scanout_backend.hpp
+        present/gbm_producer.hpp present/scanout_backend.hpp present/gl_scanout_producer.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/present)
 
 install(FILES

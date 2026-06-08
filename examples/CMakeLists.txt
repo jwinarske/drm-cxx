@@ -176,6 +176,14 @@ if(TARGET PkgConfig::egl_scene_egl AND TARGET PkgConfig::egl_scene_gles)
     PkgConfig::egl_scene_egl
     PkgConfig::egl_scene_gles)
   target_include_directories(egl_scene PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # gl_present — GlScanoutProducer demo (EGL/GLES render -> ScanoutBackend).
+  add_executable(gl_present advanced/gl_present/main.cpp)
+  target_link_libraries(gl_present PRIVATE
+    drm-cxx::drm-cxx
+    PkgConfig::egl_scene_egl
+    PkgConfig::egl_scene_gles)
+  target_include_directories(gl_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 # capture_demo — libinput-driven snapshot demo for drm::capture.
