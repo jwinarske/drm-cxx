@@ -6,7 +6,7 @@
 #if DRM_CXX_HAS_EGL_STREAMS
 
 #include "buffer_source.hpp"
-#include "egl_runtime.hpp"
+#include <drm-cxx/core/egl_loader.hpp>
 #include "egl_stream_source.hpp"
 #include "stream_capability.hpp"
 
@@ -29,8 +29,8 @@ namespace drm::scene {
 
 namespace {
 
-using detail::egl_runtime;
-using detail::extension_present;
+using drm::detail::egl_loader;
+using drm::detail::extension_present;
 
 std::error_code make_errc(std::errc e) noexcept {
   return std::make_error_code(e);
@@ -42,7 +42,7 @@ std::error_code make_errc(std::errc e) noexcept {
 // EGLDeviceEXT reports the same DRM node we prefer the one with
 // EGL_EXT_device_drm in its per-device extension string.
 EGLDeviceEXT match_device(const drm::Device& dev) noexcept {
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if ((rt.query_devices == nullptr) || (rt.query_device_string == nullptr)) {
     return EGL_NO_DEVICE_EXT;
   }
@@ -98,7 +98,7 @@ EGLDeviceEXT match_device(const drm::Device& dev) noexcept {
 // only mode the initial drop supports; richer formats land when a
 // real workload calls for them.
 EGLConfig choose_config(EGLDisplay display) noexcept {
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if (rt.choose_config == nullptr) {
     return nullptr;
   }
@@ -136,7 +136,7 @@ EGLConfig choose_config(EGLDisplay display) noexcept {
 // will make this current with the producer surface when they want to
 // render.
 EGLContext create_gles_context(EGLDisplay display, EGLConfig config) noexcept {
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if ((rt.create_context == nullptr) || (rt.bind_api == nullptr)) {
     return EGL_NO_CONTEXT;
   }
@@ -161,7 +161,7 @@ drm::expected<EglStreamBuilder::Result, std::error_code> EglStreamBuilder::build
   if (req.format.width == 0 || req.format.height == 0) {
     return drm::unexpected<std::error_code>(make_errc(std::errc::invalid_argument));
   }
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if (!rt.loaded || (rt.initialize == nullptr) || (rt.get_platform_display_core == nullptr)) {
     return drm::unexpected<std::error_code>(make_errc(std::errc::function_not_supported));
   }

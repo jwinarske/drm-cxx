@@ -6,7 +6,7 @@
 #if DRM_CXX_HAS_EGL_STREAMS
 
 #include "buffer_source.hpp"
-#include "egl_runtime.hpp"
+#include <drm-cxx/core/egl_loader.hpp>
 #include "stream_capability.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
@@ -37,7 +37,7 @@ namespace drm::scene {
 
 namespace {
 
-using detail::egl_runtime;
+using drm::detail::egl_loader;
 
 std::error_code make_errc(std::errc e) noexcept {
   return std::make_error_code(e);
@@ -56,7 +56,7 @@ drm::expected<std::unique_ptr<EglStreamSource>, std::error_code> EglStreamSource
     return drm::unexpected<std::error_code>(make_errc(std::errc::invalid_argument));
   }
 
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if (!rt.loaded || rt.create_stream == nullptr || rt.create_stream_producer_surface == nullptr ||
       rt.destroy_stream == nullptr) {
     return drm::unexpected<std::error_code>(make_errc(std::errc::function_not_supported));
@@ -80,7 +80,7 @@ EglStreamSource::~EglStreamSource() {
 }
 
 drm::expected<void, std::error_code> EglStreamSource::create_stream() noexcept {
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
 
   // FIFO length 0 = mailbox mode: producer swaps never block waiting
   // for the consumer to retire prior frames. EGL_CONSUMER_AUTO_ACQUIRE
@@ -105,7 +105,7 @@ drm::expected<void, std::error_code> EglStreamSource::create_stream() noexcept {
 }
 
 drm::expected<void, std::error_code> EglStreamSource::create_producer_surface() noexcept {
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
 
   // The producer surface can only be created AFTER a consumer is
   // attached on NVIDIA's implementation: eglCreateStreamProducerSurfaceKHR
@@ -129,7 +129,7 @@ drm::expected<void, std::error_code> EglStreamSource::create_producer_surface() 
 }
 
 void EglStreamSource::destroy_stream_and_producer() noexcept {
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if (producer_surface_ != EGL_NO_SURFACE) {
     if (rt.destroy_surface != nullptr) {
       rt.destroy_surface(config_.display, producer_surface_);
@@ -156,7 +156,7 @@ drm::expected<void, std::error_code> EglStreamSource::prime_first_commit(drm::At
   if (first_frame_primed_) {
     return {};
   }
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if (rt.stream_consumer_acquire_attrib == nullptr || rt.stream_attrib == nullptr) {
     return drm::unexpected<std::error_code>(make_errc(std::errc::function_not_supported));
   }
@@ -222,7 +222,7 @@ void EglStreamSource::release(AcquiredBuffer /*acquired*/) noexcept {
 }
 
 drm::expected<void, std::error_code> EglStreamSource::bind_to_plane(std::uint32_t plane_id) {
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if (rt.get_output_layers == nullptr || rt.stream_consumer_output == nullptr) {
     return drm::unexpected<std::error_code>(make_errc(std::errc::function_not_supported));
   }
@@ -364,7 +364,7 @@ drm::expected<void, std::error_code> EglStreamSource::on_session_resumed(
   // remains in a paused-equivalent state (stream torn down, acquire
   // returns EAGAIN) so a subsequent commit doesn't crash inside
   // mesa.
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if (rt.query_string != nullptr) {
     if (rt.query_string(config_.display, EGL_VENDOR) == nullptr) {
       drm::log_warn(

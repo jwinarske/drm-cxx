@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 
-#include "egl_runtime.hpp"
+#include "egl_loader.hpp"
 
-#if DRM_CXX_HAS_EGL_STREAMS
+#if DRM_CXX_HAS_EGL
 
 #include <drm-cxx/log.hpp>
 
@@ -14,7 +14,7 @@
 #include <dlfcn.h>
 #include <mutex>
 
-namespace drm::scene::detail {
+namespace drm::detail {
 
 namespace {
 
@@ -28,10 +28,10 @@ Fn resolve_proc(PFNEGLGETPROCADDRESSPROC gpa, const char* name) noexcept {
   return reinterpret_cast<Fn>(gpa(name));
 }
 
-void initialize_runtime(EglRuntime& rt) noexcept {
+void initialize_runtime(EglLoader& rt) noexcept {
   rt.handle = ::dlopen("libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
   if (rt.handle == nullptr) {
-    drm::log_info("scene::egl_runtime: libEGL.so.1 not loadable ({}) — EGL Streams unsupported",
+    drm::log_info("egl_loader: libEGL.so.1 not loadable ({}) — EGL features unavailable",
                   ::dlerror() != nullptr ? ::dlerror() : "no error reported");
     return;
   }
@@ -50,11 +50,14 @@ void initialize_runtime(EglRuntime& rt) noexcept {
   rt.bind_api = resolve_sym<decltype(rt.bind_api)>(rt.handle, "eglBindAPI");
   rt.get_platform_display_core =
       resolve_sym<decltype(rt.get_platform_display_core)>(rt.handle, "eglGetPlatformDisplay");
+  rt.get_config_attrib =
+      resolve_sym<decltype(rt.get_config_attrib)>(rt.handle, "eglGetConfigAttrib");
+  rt.swap_buffers = resolve_sym<decltype(rt.swap_buffers)>(rt.handle, "eglSwapBuffers");
 
   if ((rt.get_proc_address == nullptr) || (rt.query_string == nullptr) ||
       (rt.initialize == nullptr) || (rt.terminate == nullptr) || (rt.get_error == nullptr)) {
     drm::log_warn(
-        "scene::egl_runtime: libEGL.so.1 loaded but missing core symbols — treating as "
+        "egl_loader: libEGL.so.1 loaded but missing core symbols — treating as "
         "unsupported");
     rt.handle = nullptr;
     return;
@@ -68,6 +71,12 @@ void initialize_runtime(EglRuntime& rt) noexcept {
       resolve_proc<PFNEGLQUERYDEVICESTRINGEXTPROC>(rt.get_proc_address, "eglQueryDeviceStringEXT");
   rt.get_platform_display = resolve_proc<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
       rt.get_proc_address, "eglGetPlatformDisplayEXT");
+
+  // Platform window-surface entry point for the GL scanout producer.
+  // Resolved via eglGetProcAddress (the platform/glvnd-correct path);
+  // null on libEGL < 1.5, which the producer treats as unsupported.
+  rt.create_platform_window_surface = resolve_proc<decltype(rt.create_platform_window_surface)>(
+      rt.get_proc_address, "eglCreatePlatformWindowSurface");
 
   // Streams extension entry points. Null on Mesa-only stacks; non-null
   // on the proprietary EGL implementations that advertise the
@@ -110,8 +119,8 @@ void initialize_runtime(EglRuntime& rt) noexcept {
 
 }  // namespace
 
-const EglRuntime& egl_runtime() noexcept {
-  static EglRuntime rt;
+const EglLoader& egl_loader() noexcept {
+  static EglLoader rt;
   static std::once_flag once;
   std::call_once(once, [] { initialize_runtime(rt); });
   return rt;
@@ -138,6 +147,6 @@ bool extension_present(const char* extensions, const char* name) noexcept {
   }
 }
 
-}  // namespace drm::scene::detail
+}  // namespace drm::detail
 
-#endif  // DRM_CXX_HAS_EGL_STREAMS
+#endif  // DRM_CXX_HAS_EGL

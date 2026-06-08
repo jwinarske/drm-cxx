@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 
 #if DRM_CXX_HAS_EGL_STREAMS
-#include "egl_runtime.hpp"
+#include <drm-cxx/core/egl_loader.hpp>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -49,8 +49,8 @@ StreamCapability probe_stream_capability(const drm::Device& /*dev*/) noexcept {
 
 namespace {
 
-using detail::egl_runtime;
-using detail::extension_present;
+using drm::detail::egl_loader;
+using drm::detail::extension_present;
 
 // Resolve the DRM-node path the EGL device reports against the
 // caller-supplied drm::Device by comparing st_rdev. Symlink-resolution
@@ -78,7 +78,7 @@ bool matches_drm_node(int dev_fd, const char* egl_drm_path) noexcept {
 
 StreamCapability probe_stream_capability(const drm::Device& dev) noexcept {
   StreamCapability cap;
-  const auto& rt = egl_runtime();
+  const auto& rt = egl_loader();
   if (!rt.loaded) {
     return cap;
   }
