@@ -27,6 +27,13 @@ test('test_negotiate',
   ),
 )
 
+test('test_buffer_ring',
+  executable('test_buffer_ring',
+    'unit/test_buffer_ring.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_property_store',
   executable('test_property_store',
     'unit/test_property_store.cpp',
