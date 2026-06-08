@@ -54,6 +54,7 @@ drm_cxx_sources = files(
   'sync/fence.cpp',
   'fmt/format_mod.cpp',
   'present/negotiate.cpp',
+  'present/buffer_ring.cpp',
 )
 
 drm_cxx_deps = [
@@ -326,6 +327,8 @@ install_headers(
 
 install_headers(
   'present/negotiate.hpp',
+  'present/scanout_producer.hpp',
+  'present/buffer_ring.hpp',
   subdir : 'drm-cxx/present',
 )
 

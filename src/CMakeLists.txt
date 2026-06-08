@@ -52,7 +52,8 @@ set(DRM_CXX_SOURCES
   scene/v4l2_decoder_source.cpp
   sync/fence.cpp
   fmt/format_mod.cpp
-  present/negotiate.cpp)
+  present/negotiate.cpp
+  present/buffer_ring.cpp)
 
 if(DRM_CXX_VULKAN)
   list(APPEND DRM_CXX_SOURCES
@@ -354,7 +355,7 @@ install(FILES dumb/buffer.hpp
 install(FILES fmt/format_mod.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/fmt)
 
-install(FILES present/negotiate.hpp
+install(FILES present/negotiate.hpp present/scanout_producer.hpp present/buffer_ring.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/present)
 
 install(FILES
