@@ -43,6 +43,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
 
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
@@ -117,6 +119,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
 
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
@@ -334,6 +338,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
 
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1

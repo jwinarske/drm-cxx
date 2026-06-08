@@ -109,15 +109,20 @@ else
   endif
 endif
 
+# Vulkan headers come from the vendored, version-pinned submodule
+# (third_party/Vulkan-Headers) so vulkan.hpp's dynamic-dispatch API
+# (vk::detail::DynamicLoader) is identical across CI / local / cross-builds,
+# independent of the host libvulkan-dev. libvulkan is dlopen'd at runtime by
+# VkScanoutProducer; the VK_KHR_display path additionally links system libvulkan.
+vk_headers_inc = include_directories('third_party/Vulkan-Headers/include', is_system : true)
+vk_headers_dep = declare_dependency(include_directories : vk_headers_inc)
+has_vulkan_headers = true
+
+# System libvulkan: linked by the VK_KHR_display path (src) and used directly by
+# the Vulkan C-API examples (vulkan_scene / vulkan_display / cluster_sim_vulkan).
+# Our own code's headers come from the vendored submodule above.
 if get_option('vulkan')
-  # Try system vulkan headers first, fall back to subproject
   vk_dep = dependency('vulkan', required : false)
-  if not vk_dep.found()
-    cmake = import('cmake')
-    vk_opts = cmake.subproject_options()
-    vk_headers = cmake.subproject('Vulkan-Headers', options : vk_opts)
-    vk_dep = vk_headers.dependency('Vulkan-Headers')
-  endif
 endif
 
 # libseat probe for drm::session::Seat. Sourced strictly from the
@@ -266,6 +271,7 @@ has_egl_streams = has_egl_headers
 if not has_egl_streams and not streams_feature.disabled()
   message('drm-cxx: EGL headers not found — drm::scene EGL Streams support will be a runtime no-op')
 endif
+
 
 # NvBufSurface probe for drm::scene::NvBufSurfaceSource. NVIDIA L4T
 # ships nvbufsurface.h under /usr/src/jetson_multimedia_api/include and

@@ -186,6 +186,13 @@ if(TARGET PkgConfig::egl_scene_egl AND TARGET PkgConfig::egl_scene_gles)
   target_include_directories(gl_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
+# vk_present — VkScanoutProducer demo. The producer encapsulates Vulkan
+# (vulkan.hpp dlopen'd at runtime inside the library), so this links only
+# drm-cxx — no libvulkan, no GL. Gated on Vulkan headers being present.
+add_executable(vk_present advanced/vk_present/main.cpp)
+target_link_libraries(vk_present PRIVATE drm-cxx::drm-cxx)
+target_include_directories(vk_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # capture_demo — libinput-driven snapshot demo for drm::capture.
 # Only built when Blend2D is on (same gate as the library module it exercises).
 if(DRM_CXX_HAS_BLEND2D)

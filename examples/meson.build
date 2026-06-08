@@ -269,6 +269,16 @@ if egl_scene_egl_dep.found() and egl_scene_gles_dep.found()
   )
 endif
 
+# vk_present — VkScanoutProducer demo. The producer encapsulates Vulkan
+# (vulkan.hpp dlopen'd at runtime inside the library), so this links only
+# drm-cxx — no libvulkan, no GL. Gated on Vulkan headers being present.
+if has_vulkan_headers
+  executable('vk_present',
+    'advanced/vk_present/main.cpp',
+    dependencies : [drm_cxx_dep],
+  )
+endif
+
 # capture_demo — libinput-driven snapshot demo for drm::capture. Gated
 # on blend2d since it #includes drm-cxx/capture/*.hpp.
 if has_blend2d
