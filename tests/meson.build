@@ -34,6 +34,13 @@ test('test_buffer_ring',
   ),
 )
 
+test('test_scanout_target',
+  executable('test_scanout_target',
+    'unit/test_scanout_target.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_property_store',
   executable('test_property_store',
     'unit/test_property_store.cpp',
