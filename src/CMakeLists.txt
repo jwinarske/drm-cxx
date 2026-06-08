@@ -39,7 +39,7 @@ set(DRM_CXX_SOURCES
   dumb/buffer.cpp
   scene/composite_canvas.cpp
   scene/dumb_buffer_source.cpp
-  scene/egl_runtime.cpp
+  core/egl_loader.cpp
   scene/egl_stream_builder.cpp
   scene/egl_stream_source.cpp
   scene/external_dma_buf_source.cpp
@@ -186,9 +186,9 @@ if(DRM_CXX_HAS_EGL_STREAMS)
       target_include_directories(drm-cxx SYSTEM PRIVATE ${_egl_incs})
     endif()
   endif()
-  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=1)
+  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=1 DRM_CXX_HAS_EGL=1)
 else()
-  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=0)
+  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=0 DRM_CXX_HAS_EGL=0)
 endif()
 
 # libxcursor: linked PRIVATE and included as -isystem so its public

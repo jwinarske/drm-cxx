@@ -1,13 +1,19 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 //
-// egl_runtime.hpp — process-singleton libEGL.so.1 dlopen wrapper shared
-// by the EGL Streams probe (stream_capability.cpp) and the
-// EglStreamSource construction path (egl_stream_source.cpp).
+// egl_loader.hpp — process-singleton libEGL.so.1 dlopen wrapper, shared
+// across the library's EGL consumers: the EGL Streams probe
+// (stream_capability.cpp), the EglStreamSource construction path
+// (egl_stream_source.cpp), and the GL scanout producer
+// (present/gl_scanout_producer.cpp).
+//
+// dlsym bootstraps eglGetProcAddress and the EGL 1.0 core ABI symbols
+// (portable to any EGL version); eglGetProcAddress resolves the
+// extension and platform entry points.
 //
 // Internal header. Not exported under include/drm-cxx/. Translation
 // units that need to drive libEGL include this and access the
-// singleton via `egl_runtime()`. The first caller pays the dlopen +
+// singleton via `egl_loader()`. The first caller pays the dlopen +
 // symbol-resolution cost under a std::once_flag; subsequent callers
 // read the resolved struct without synchronization.
 //
@@ -19,15 +25,15 @@
 
 #pragma once
 
-#if DRM_CXX_HAS_EGL_STREAMS
+#if DRM_CXX_HAS_EGL
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
-namespace drm::scene::detail {
+namespace drm::detail {
 
 /// Resolved EGL entry-point table. All pointers null until
-/// `egl_runtime()` runs its std::call_once initializer. After init:
+/// `egl_loader()` runs its std::call_once initializer. After init:
 ///
 ///   * If `loaded == true`, every bootstrap symbol is non-null and
 ///     callers can use them unconditionally.
@@ -37,7 +43,7 @@ namespace drm::scene::detail {
 ///     stacks have all the streams entry points as nullptr; the
 ///     proprietary EGL stack on a driver-version mismatch may also
 ///     leave some null.
-struct EglRuntime {
+struct EglLoader {
   void* handle{nullptr};
   bool loaded{false};
 
@@ -64,6 +70,14 @@ struct EglRuntime {
   // EGLint*). Needed for `EGL_DRM_MASTER_FD_EXT` which is documented
   // for the core call only. Null on libEGL < 1.5.
   decltype(&eglGetPlatformDisplay) get_platform_display_core{nullptr};
+
+  // Rendering-path entry points used by the GL scanout producer (a
+  // gbm_surface-backed EGL window surface). Core EGL, resolved via
+  // dlsym; create_platform_window_surface is EGL 1.5 core (EGLAttrib*
+  // attribute list) and is null on libEGL < 1.5.
+  decltype(&eglGetConfigAttrib) get_config_attrib{nullptr};
+  decltype(&eglSwapBuffers) swap_buffers{nullptr};
+  decltype(&eglCreatePlatformWindowSurface) create_platform_window_surface{nullptr};
 
   // Device-enumeration extension entry points — non-null iff the
   // corresponding client-side extension is advertised. The probe
@@ -100,7 +114,7 @@ struct EglRuntime {
 /// are zero-cost reads of the resolved struct. If libEGL.so.1 is not
 /// loadable, the returned runtime has `loaded == false` and all
 /// pointers null.
-[[nodiscard]] const EglRuntime& egl_runtime() noexcept;
+[[nodiscard]] const EglLoader& egl_loader() noexcept;
 
 /// Returns true iff `name` (NUL-terminated, no leading/trailing
 /// space) appears as a space-delimited token in `extensions`. Used
@@ -109,6 +123,6 @@ struct EglRuntime {
 /// false).
 [[nodiscard]] bool extension_present(const char* extensions, const char* name) noexcept;
 
-}  // namespace drm::scene::detail
+}  // namespace drm::detail
 
-#endif  // DRM_CXX_HAS_EGL_STREAMS
+#endif  // DRM_CXX_HAS_EGL

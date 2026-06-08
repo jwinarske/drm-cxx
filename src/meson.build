@@ -39,7 +39,7 @@ drm_cxx_sources = files(
   'dumb/buffer.cpp',
   'scene/composite_canvas.cpp',
   'scene/dumb_buffer_source.cpp',
-  'scene/egl_runtime.cpp',
+  'core/egl_loader.cpp',
   'scene/egl_stream_builder.cpp',
   'scene/egl_stream_source.cpp',
   'scene/external_dma_buf_source.cpp',
@@ -125,8 +125,8 @@ endif
 # but no libEGL.so.1 installed, and keeping our resolution strictly
 # dlopen-driven.
 streams_cpp_args = has_egl_streams \
-  ? ['-DDRM_CXX_HAS_EGL_STREAMS=1'] \
-  : ['-DDRM_CXX_HAS_EGL_STREAMS=0']
+  ? ['-DDRM_CXX_HAS_EGL_STREAMS=1', '-DDRM_CXX_HAS_EGL=1'] \
+  : ['-DDRM_CXX_HAS_EGL_STREAMS=0', '-DDRM_CXX_HAS_EGL=0']
 if has_egl_streams
   drm_cxx_deps += egl_dep.partial_dependency(compile_args : true, includes : true)
 endif
