@@ -42,6 +42,7 @@ set(DRM_CXX_TESTS
   test_format_mod
   test_negotiate
   test_buffer_ring
+  test_scanout_target
   test_log)
 
 if(DRM_CXX_HAS_XCURSOR)

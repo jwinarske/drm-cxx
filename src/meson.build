@@ -29,6 +29,7 @@ drm_cxx_sources = files(
   'display/tone_mapper.cpp',
   'display/hdr_metadata_cache.cpp',
   'display/hotplug_monitor.cpp',
+  'display/scanout_target.cpp',
   'session/seat.cpp',
   'time/clock.cpp',
   'gbm/device.cpp',
@@ -260,6 +261,7 @@ install_headers(
   'display/hdr_metadata.hpp',
   'display/hdr_metadata_cache.hpp',
   'display/hotplug_monitor.hpp',
+  'display/scanout_target.hpp',
   'display/tone_mapper.hpp',
   subdir : 'drm-cxx/display',
 )
