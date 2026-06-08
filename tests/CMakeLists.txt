@@ -302,6 +302,14 @@ target_link_libraries(test_gbm_surface_source_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_gbm_surface_source_vkms)
 
+add_executable(test_scanout_backend_vkms
+  integration/test_scanout_backend_vkms.cpp)
+target_link_libraries(test_scanout_backend_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_scanout_backend_vkms)
+
 # V4l2CameraSource integration test. Self-skips when no V4L2 capture
 # device or vkms isn't loaded.
 add_executable(test_v4l2_camera_source_vivid
