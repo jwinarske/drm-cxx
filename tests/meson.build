@@ -41,6 +41,13 @@ test('test_scanout_target',
   ),
 )
 
+test('test_driver_profile',
+  executable('test_driver_profile',
+    'unit/test_driver_profile.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_property_store',
   executable('test_property_store',
     'unit/test_property_store.cpp',

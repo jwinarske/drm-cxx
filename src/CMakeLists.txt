@@ -30,6 +30,7 @@ set(DRM_CXX_SOURCES
   display/hdr_metadata_cache.cpp
   display/hotplug_monitor.cpp
   display/scanout_target.cpp
+  display/driver_profile.cpp
   session/seat.cpp
   time/clock.cpp
   gbm/device.cpp
@@ -305,6 +306,7 @@ install(FILES
     display/hdr_metadata_cache.hpp
     display/hotplug_monitor.hpp
     display/scanout_target.hpp
+    display/driver_profile.hpp
     display/tone_mapper.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/display)
 
