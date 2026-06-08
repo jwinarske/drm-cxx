@@ -57,6 +57,8 @@ drm_cxx_sources = files(
   'fmt/format_mod.cpp',
   'present/negotiate.cpp',
   'present/buffer_ring.cpp',
+  'present/gbm_producer.cpp',
+  'present/scanout_backend.cpp',
 )
 
 drm_cxx_deps = [
@@ -333,6 +335,8 @@ install_headers(
   'present/negotiate.hpp',
   'present/scanout_producer.hpp',
   'present/buffer_ring.hpp',
+  'present/gbm_producer.hpp',
+  'present/scanout_backend.hpp',
   subdir : 'drm-cxx/present',
 )
 
