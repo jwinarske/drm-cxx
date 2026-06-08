@@ -59,6 +59,7 @@ drm_cxx_sources = files(
   'present/buffer_ring.cpp',
   'present/gbm_producer.cpp',
   'present/scanout_backend.cpp',
+  'present/gl_scanout_producer.cpp',
 )
 
 drm_cxx_deps = [
@@ -337,6 +338,7 @@ install_headers(
   'present/buffer_ring.hpp',
   'present/gbm_producer.hpp',
   'present/scanout_backend.hpp',
+  'present/gl_scanout_producer.hpp',
   subdir : 'drm-cxx/present',
 )
 

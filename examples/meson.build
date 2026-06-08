@@ -262,6 +262,11 @@ if egl_scene_egl_dep.found() and egl_scene_gles_dep.found()
     'advanced/egl_scene/main.cpp',
     dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep],
   )
+  # gl_present — GlScanoutProducer demo (EGL/GLES render -> ScanoutBackend).
+  executable('gl_present',
+    'advanced/gl_present/main.cpp',
+    dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep],
+  )
 endif
 
 # capture_demo — libinput-driven snapshot demo for drm::capture. Gated
