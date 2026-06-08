@@ -60,6 +60,7 @@ drm_cxx_sources = files(
   'present/gbm_producer.cpp',
   'present/scanout_backend.cpp',
   'present/gl_scanout_producer.cpp',
+  'present/vk_scanout_producer.cpp',
 )
 
 drm_cxx_deps = [
@@ -92,7 +93,9 @@ if get_option('vulkan')
     'vulkan/display.cpp',
     'vulkan/drm_surface.cpp',
   )
-  drm_cxx_deps += vk_dep
+  if vk_dep.found()
+    drm_cxx_deps += vk_dep.partial_dependency(links : true)
+  endif
 endif
 
 # libseat dep + define — PRIVATE, the public header compiles either
@@ -131,6 +134,13 @@ streams_cpp_args = has_egl_streams \
 if has_egl_streams
   drm_cxx_deps += egl_dep.partial_dependency(compile_args : true, includes : true)
 endif
+
+# Vulkan headers for the VkScanoutProducer. vulkan.hpp's dynamic dispatcher
+# dlopen's libvulkan.so.1 at runtime, so — exactly like EGL — we take the
+# compile args / includes only and never add -lvulkan to libdrm-cxx's link
+# line. `has_vulkan_headers` / `vk_headers_probe` come from the top meson.build.
+vulkan_cpp_args = ['-DDRM_CXX_HAS_VULKAN=1']
+drm_cxx_deps += vk_headers_dep
 
 # NvBufSurface — link-time dependency on libnvbufsurface.so when the
 # Jetson L4T headers + library are present. The header surface
@@ -191,7 +201,7 @@ drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
-  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args + gstreamer_cpp_args + streams_cpp_args + nvbufsurface_cpp_args,
+  cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args + gstreamer_cpp_args + streams_cpp_args + vulkan_cpp_args + nvbufsurface_cpp_args,
   install : true,
 )
 
@@ -202,7 +212,7 @@ drm_cxx_dep = declare_dependency(
   # Streams macro is part of the public ABI: consumers of the
   # installed scene/egl_stream_builder.hpp gate on it, so dependents
   # must see the same value drm-cxx was built with.
-  compile_args : streams_cpp_args,
+  compile_args : streams_cpp_args + vulkan_cpp_args,
 )
 
 # Install public headers
@@ -339,6 +349,7 @@ install_headers(
   'present/gbm_producer.hpp',
   'present/scanout_backend.hpp',
   'present/gl_scanout_producer.hpp',
+  'present/vk_scanout_producer.hpp',
   subdir : 'drm-cxx/present',
 )
 

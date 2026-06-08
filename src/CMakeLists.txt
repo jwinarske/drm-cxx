@@ -58,7 +58,8 @@ set(DRM_CXX_SOURCES
   present/buffer_ring.cpp
   present/gbm_producer.cpp
   present/scanout_backend.cpp
-  present/gl_scanout_producer.cpp)
+  present/gl_scanout_producer.cpp
+  present/vk_scanout_producer.cpp)
 
 if(DRM_CXX_VULKAN)
   list(APPEND DRM_CXX_SOURCES
@@ -191,6 +192,17 @@ if(DRM_CXX_HAS_EGL_STREAMS)
 else()
   target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=0 DRM_CXX_HAS_EGL=0)
 endif()
+
+# Vulkan headers for VkScanoutProducer. vulkan.hpp's dynamic dispatcher dlopen's
+# libvulkan at runtime, so we adopt its include dirs only and never add it to
+# drm-cxx's link line (mirrors EGL). Probed independently of DRM_CXX_VULKAN.
+# Vulkan headers from the vendored submodule (third_party/Vulkan-Headers) so
+# vulkan.hpp is identical everywhere; libvulkan is dlopen'd at runtime, so
+# DRM_CXX_HAS_VULKAN is always on. BEFORE so the vendored vulkan.hpp wins over
+# any system copy the linked PkgConfig::vulkan (display path) would add.
+target_include_directories(drm-cxx SYSTEM BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Vulkan-Headers/include)
+target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_VULKAN=1)
 
 # libxcursor: linked PRIVATE and included as -isystem so its public
 # header warnings don't hit our -Werror build. Matches the libseat
@@ -364,6 +376,7 @@ install(FILES fmt/format_mod.hpp
 
 install(FILES present/negotiate.hpp present/scanout_producer.hpp present/buffer_ring.hpp
         present/gbm_producer.hpp present/scanout_backend.hpp present/gl_scanout_producer.hpp
+        present/vk_scanout_producer.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/present)
 
 install(FILES

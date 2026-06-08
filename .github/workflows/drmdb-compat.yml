@@ -25,6 +25,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
 
       # The snapshot is ~3 MB and the upstream URL serves whatever's
       # current — there's no version pin. We cache by ISO year-week,
