@@ -6,9 +6,9 @@
 #if DRM_CXX_HAS_EGL_STREAMS
 
 #include "buffer_source.hpp"
-#include <drm-cxx/core/egl_loader.hpp>
 #include "stream_capability.hpp"
 
+#include <drm-cxx/core/egl_loader.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/log.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
