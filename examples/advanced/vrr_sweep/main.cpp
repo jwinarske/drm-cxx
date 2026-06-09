@@ -35,12 +35,14 @@
 #include <xf86drmMode.h>
 
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <string_view>
+#include <system_error>
 #include <time.h>  // NOLINT(modernize-deprecated-headers) — POSIX clock_nanosleep/CLOCK_MONOTONIC live here
 #include <utility>
 #include <vector>
@@ -83,15 +85,66 @@ std::optional<drm::display::VrefreshRange> edid_range(int fd, std::uint32_t conn
          static_cast<std::uint64_t>(ts.tv_nsec);
 }
 
+// Parse "WxH@R" (e.g. "1920x1080@120").
+bool parse_mode_spec(std::string_view s, unsigned& w, unsigned& h, unsigned& r) {
+  const auto xpos = s.find('x');
+  const auto apos = s.find('@');
+  if (xpos == std::string_view::npos || apos == std::string_view::npos || apos <= xpos) {
+    return false;
+  }
+  const auto to_u = [](std::string_view sv, unsigned& v) {
+    return std::from_chars(sv.data(), sv.data() + sv.size(), v).ec == std::errc{};
+  };
+  return to_u(s.substr(0, xpos), w) && to_u(s.substr(xpos + 1, apos - xpos - 1), h) &&
+         to_u(s.substr(apos + 1), r);
+}
+
+// Override `mode` with the connector's matching WxH@R mode. Returns false (and
+// lists what's available) when the spec is malformed or no mode matches.
+bool apply_mode(int fd, std::uint32_t connector_id, std::string_view spec, drmModeModeInfo& mode) {
+  unsigned w = 0;
+  unsigned h = 0;
+  unsigned r = 0;
+  if (!parse_mode_spec(spec, w, h, r)) {
+    drm::println(stderr, "vrr_sweep: bad --mode '{}' (expected WxH@R)", spec);
+    return false;
+  }
+  drmModeConnectorPtr conn = drmModeGetConnectorCurrent(fd, connector_id);
+  if (conn == nullptr) {
+    return false;
+  }
+  bool found = false;
+  for (int i = 0; i < conn->count_modes && !found; ++i) {
+    const auto& m = conn->modes[i];
+    if (m.hdisplay == w && m.vdisplay == h && m.vrefresh == r) {
+      mode = m;
+      found = true;
+    }
+  }
+  if (!found) {
+    drm::println(stderr, "vrr_sweep: mode {} not found; available:", spec);
+    for (int i = 0; i < conn->count_modes; ++i) {
+      const auto& m = conn->modes[i];
+      drm::println(stderr, "  {}x{}@{}", m.hdisplay, m.vdisplay, m.vrefresh);
+    }
+  }
+  drmModeFreeConnector(conn);
+  return found;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   bool want_vrr = false;
+  std::string_view mode_str;
   {
     int write = 1;
     for (int i = 1; i < argc; ++i) {
-      if (std::string_view{argv[i]} == "--vrr") {
+      const std::string_view a{argv[i]};
+      if (a == "--vrr") {
         want_vrr = true;
+      } else if (a == "--mode" && (i + 1) < argc) {
+        mode_str = argv[++i];
       } else {
         argv[write++] = argv[i];
       }
@@ -105,6 +158,11 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   auto& dev = output->device;
+  // --mode picks a non-preferred mode (e.g. a high-refresh one): VRR can only
+  // track up to the mode's max, so a 4K30 preferred mode pins the sweep at 30.
+  if (!mode_str.empty() && !apply_mode(dev.fd(), output->connector_id, mode_str, output->mode)) {
+    return EXIT_FAILURE;
+  }
   const std::uint32_t w = output->mode.hdisplay;
   const std::uint32_t h = output->mode.vdisplay;
 
