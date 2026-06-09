@@ -152,6 +152,11 @@ add_executable(vrr_sweep advanced/vrr_sweep/main.cpp)
 target_link_libraries(vrr_sweep PRIVATE drm-cxx::drm-cxx)
 target_include_directories(vrr_sweep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# cursor_scene — present a cursor as a scene layer via CursorSource.
+add_executable(cursor_scene advanced/cursor_scene/main.cpp)
+target_link_libraries(cursor_scene PRIVATE drm-cxx::drm-cxx)
+target_include_directories(cursor_scene PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
 # Dumps the per-device EGL Streams capability shape so users can verify
 # whether their system can host an EglStreamSource. Independent of

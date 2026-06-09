@@ -165,6 +165,9 @@ if has_xcursor
     'cursor/theme.cpp',
     'cursor/cursor.cpp',
     'cursor/renderer.cpp',
+    # Scene source presenting a cursor as an ordinary layer (VOP2 has no
+    # CURSOR plane); depends on drm::cursor, so gated with it.
+    'scene/cursor_source.cpp',
     # Vendored X11-free .xcursor loader (replaces system libxcursor).
     '../third_party/xcursor-mini/xcursor_file.c',
   )
@@ -299,6 +302,12 @@ if has_xcursor
     'cursor/cursor.hpp',
     'cursor/renderer.hpp',
     subdir : 'drm-cxx/cursor',
+  )
+  # CursorSource lives in scene/ but depends on drm::cursor, so its header
+  # installs only when the cursor feature is on (matches the .cpp gate).
+  install_headers(
+    'scene/cursor_source.hpp',
+    subdir : 'drm-cxx/scene',
   )
 endif
 
