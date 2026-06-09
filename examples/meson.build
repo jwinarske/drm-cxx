@@ -224,6 +224,12 @@ executable('damage_present',
   dependencies : [drm_cxx_dep],
 )
 
+# driver_caps — dump DriverProfile incl. frame-economy caps (damage/VRR/PSR).
+executable('driver_caps',
+  'advanced/driver_caps/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # ring_present — DumbRingSource + BufferRing: buffer-age repaint driving
 # FB_DAMAGE_CLIPS across a multi-slot ring.
 executable('ring_present',

@@ -23,6 +23,17 @@ class Device;
 
 namespace drm::display {
 
+// Best-effort panel self-refresh classification — telemetry only, never gates
+// behavior (frame_economy's idle-Skip is unconditional). PSR has no portable KMS
+// property; the portable necessary signal is the connector type, so this is the
+// first layer of the migration plan's PSR detection (a connected eDP/DSI panel
+// *may* self-refresh; anything external can't).
+enum class PanelSelfRefresh : std::uint8_t {
+  Unknown,   // no connected connector, or the connector set couldn't be read
+  None,      // every connected connector is external (HDMI/DP/...) — cannot self-refresh
+  Possible,  // a connected eDP / DSI panel — may support PSR (not authoritative)
+};
+
 struct DriverProfile {
   std::string name;              // drmGetVersion()->name; informational, never branched on
   bool addfb2_modifiers{false};  // DRM_CAP_ADDFB2_MODIFIERS: AddFB2 accepts explicit modifiers
@@ -34,6 +45,11 @@ struct DriverProfile {
   std::uint64_t cursor_width{64};  // DRM_CAP_CURSOR_WIDTH  (64 when the driver reports nothing)
   std::uint64_t cursor_height{64};  // DRM_CAP_CURSOR_HEIGHT (64 when the driver reports nothing)
 
+  // Frame-economy capabilities (per-object, probed by enumeration — not drmGetCap).
+  bool fb_damage_clips{false};  // >=1 plane advertises FB_DAMAGE_CLIPS (driver consumes damage)
+  bool vrr_capable{false};      // >=1 CRTC exposes VRR_ENABLED (variable refresh is drivable)
+  PanelSelfRefresh psr{PanelSelfRefresh::Unknown};  // telemetry only; see frame_economy
+
   [[nodiscard]] static drm::expected<DriverProfile, std::error_code> probe(const drm::Device& dev);
 };
 
@@ -43,5 +59,9 @@ struct PrimeCaps {
   bool can_export{false};
 };
 [[nodiscard]] PrimeCaps decode_prime_caps(std::uint64_t cap) noexcept;
+
+// True for connector types that can hold their image without a flip (eDP / DSI).
+// Pure helper behind DriverProfile::psr, exposed for testing.
+[[nodiscard]] bool connector_type_self_refreshes(std::uint32_t connector_type) noexcept;
 
 }  // namespace drm::display

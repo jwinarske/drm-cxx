@@ -9,6 +9,7 @@
 #include <drm-cxx/display/driver_profile.hpp>
 
 #include <drm.h>
+#include <drm_mode.h>
 
 #include <cstdio>
 
@@ -49,6 +50,21 @@ void test_defaults() {
   CHECK(!p.async_page_flip);
   CHECK(p.cursor_width == 64);  // 64 fallback when undefined
   CHECK(p.cursor_height == 64);
+  // Frame-economy caps default conservative (probe sets them when present).
+  CHECK(!p.fb_damage_clips);
+  CHECK(!p.vrr_capable);
+  CHECK(p.psr == display::PanelSelfRefresh::Unknown);
+}
+
+void test_connector_type_self_refreshes() {
+  // Embedded panels can self-refresh.
+  CHECK(display::connector_type_self_refreshes(DRM_MODE_CONNECTOR_eDP));
+  CHECK(display::connector_type_self_refreshes(DRM_MODE_CONNECTOR_DSI));
+  // External connectors cannot.
+  CHECK(!display::connector_type_self_refreshes(DRM_MODE_CONNECTOR_HDMIA));
+  CHECK(!display::connector_type_self_refreshes(DRM_MODE_CONNECTOR_DisplayPort));
+  CHECK(!display::connector_type_self_refreshes(DRM_MODE_CONNECTOR_VGA));
+  CHECK(!display::connector_type_self_refreshes(DRM_MODE_CONNECTOR_Unknown));
 }
 
 }  // namespace
@@ -56,6 +72,7 @@ void test_defaults() {
 int main() {
   test_decode_prime_caps();
   test_defaults();
+  test_connector_type_self_refreshes();
 
   if (g_fail) {
     std::fprintf(stderr, "%d check(s) failed\n", g_fail);

@@ -132,6 +132,11 @@ add_executable(damage_present advanced/damage_present/main.cpp)
 target_link_libraries(damage_present PRIVATE drm-cxx::drm-cxx)
 target_include_directories(damage_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# driver_caps — DriverProfile dump (frame-economy caps).
+add_executable(driver_caps advanced/driver_caps/main.cpp)
+target_link_libraries(driver_caps PRIVATE drm-cxx::drm-cxx)
+target_include_directories(driver_caps PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # ring_present — DumbRingSource + BufferRing buffer-age validation harness.
 add_executable(ring_present advanced/ring_present/main.cpp)
 target_link_libraries(ring_present PRIVATE drm-cxx::drm-cxx)
