@@ -34,6 +34,14 @@ test('test_buffer_ring',
   ),
 )
 
+# Integration: needs a dumb-capable DRM card (any driver; skips if none).
+test('test_dumb_ring_source',
+  executable('test_dumb_ring_source',
+    'integration/test_dumb_ring_source.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_scanout_target',
   executable('test_scanout_target',
     'unit/test_scanout_target.cpp',
