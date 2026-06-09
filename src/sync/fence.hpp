@@ -18,6 +18,11 @@ class SyncFence {
   // Merge another fence into this one. The other fence is consumed (moved from).
   [[nodiscard]] drm::expected<void, std::error_code> merge(SyncFence other);
 
+  // The underlying sync_file fd, for passing to a plane's IN_FENCE_FD property.
+  // The SyncFence keeps ownership: the kernel does not close IN_FENCE_FD, so the
+  // fence still closes the fd on destruction. Returns -1 once moved-from.
+  [[nodiscard]] int fd() const noexcept { return fd_; }
+
   ~SyncFence();
   SyncFence(SyncFence&& /*other*/) noexcept;
   SyncFence& operator=(SyncFence&& /*other*/) noexcept;

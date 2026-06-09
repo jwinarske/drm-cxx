@@ -179,8 +179,8 @@ TEST(SceneGbmSurfaceSource, ReleaseWithNullOpaqueIsSafe) {
   // The scene's cleanup path may call release() with a zero-init
   // AcquiredBuffer on shutdown after a failed acquire. Must not
   // crash; not even a debug-build assertion.
-  drm::scene::AcquiredBuffer const dummy;
-  (*src)->release(dummy);
+  drm::scene::AcquiredBuffer dummy;
+  (*src)->release(std::move(dummy));
 }
 
 // ── Session hooks ──────────────────────────────────────────────────────

@@ -191,7 +191,7 @@ class TrackingSource : public LayerBufferSource {
     AcquiredBuffer inner_buf;
     inner_buf.fb_id = acquired.fb_id;
     inner_buf.opaque = nullptr;
-    inner_->release(inner_buf);
+    inner_->release(std::move(inner_buf));
   }
 
   [[nodiscard]] BindingModel binding_model() const noexcept override {

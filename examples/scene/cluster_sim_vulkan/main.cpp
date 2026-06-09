@@ -512,7 +512,7 @@ class SwappingDmaBufSource : public drm::scene::LayerBufferSource {
     if (!r) {
       return r;
     }
-    drm::scene::AcquiredBuffer buf = *r;
+    drm::scene::AcquiredBuffer buf = std::move(*r);
     // NOLINTNEXTLINE(performance-no-int-to-ptr,cppcoreguidelines-pro-type-reinterpret-cast)
     buf.opaque = reinterpret_cast<void*>(static_cast<std::uintptr_t>(front_));
     return buf;
@@ -522,9 +522,9 @@ class SwappingDmaBufSource : public drm::scene::LayerBufferSource {
     const auto idx = static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(
         acq.opaque));  // NOLINT(performance-no-int-to-ptr,cppcoreguidelines-pro-type-reinterpret-cast)
     if (idx < sources_.size()) {
-      drm::scene::AcquiredBuffer const inner{acq.fb_id, nullptr};
+      drm::scene::AcquiredBuffer inner{acq.fb_id, nullptr};
       // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-      sources_[idx]->release(inner);
+      sources_[idx]->release(std::move(inner));
     }
   }
 

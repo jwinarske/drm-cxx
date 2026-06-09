@@ -309,7 +309,7 @@ int main(int argc, char* argv[]) {
       }
       auto acq = video_source->acquire();
       if (acq.has_value()) {
-        video_source->release(*acq);
+        video_source->release(std::move(*acq));
         got_first = true;
         break;
       }

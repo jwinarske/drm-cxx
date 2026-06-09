@@ -34,12 +34,14 @@
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <system_error>
 
 namespace drm {
@@ -109,6 +111,13 @@ class ExternalDmaBufSource : public LayerBufferSource {
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
 
+  // Stash a render-done sync_file the next acquire() hands back as the buffer's
+  // acquire fence (the scene wires it to the plane's IN_FENCE_FD, or CPU-waits
+  // it on drivers without that property). Used by GPU producers
+  // (VkScanoutProducer) that render asynchronously instead of CPU-blocking.
+  // Replaces any previously-stashed, not-yet-acquired fence.
+  void set_acquire_fence(drm::sync::SyncFence fence) noexcept { pending_fence_ = std::move(fence); }
+
  private:
   ExternalDmaBufSource() = default;
 
@@ -138,6 +147,7 @@ class ExternalDmaBufSource : public LayerBufferSource {
   std::array<PlaneRecord, k_max_planes> planes_{};
   std::size_t plane_count_{0};
   SourceFormat format_{};
+  std::optional<drm::sync::SyncFence> pending_fence_;
   std::function<void()> on_release_;
   bool on_release_fired_{false};
 };
