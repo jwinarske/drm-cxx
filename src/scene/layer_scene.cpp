@@ -469,7 +469,8 @@ class LayerScene::Impl {
     struct BlobScope {
       Impl* self;
       ~BlobScope() { self->destroy_ephemeral_blobs(); }
-    } blob_scope{this};
+    };
+    const BlobScope blob_scope{this};
     if (!req.valid()) {
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
     }
