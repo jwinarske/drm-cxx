@@ -41,6 +41,11 @@
 // buffered, so there's a brief tear during the clear — acceptable
 // for a demo, real applications would double-buffer.
 //
+// Vulkan is reached through Vulkan-Hpp's dynamic dispatcher
+// (VK_NO_PROTOTYPES + a DynamicLoader that dlopen's libvulkan at
+// runtime), so this links only drm-cxx — no -lvulkan — matching the
+// library's vk_scanout_producer and the vk_present demo.
+//
 // CLI:
 //
 //   vulkan_scene [--seconds N] [/dev/dri/cardN]
@@ -55,7 +60,13 @@
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage) -- vulkan.hpp config knobs; with
+// VK_NO_PROTOTYPES no C entry points are referenced, so nothing links libvulkan.
+#define VK_NO_PROTOTYPES
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <drm_fourcc.h>
+#include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_core.h>
 
 #include <array>
@@ -63,12 +74,16 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <string_view>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
+
+// NOLINTNEXTLINE(misc-include-cleaner) -- storage for the default dispatcher.
+VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 namespace {
 
@@ -93,58 +108,41 @@ struct Args {
   return a;
 }
 
-// Find the Vulkan physical device whose DRM major/minor matches the
-// DRM fd's stat. Required so Vulkan-allocated DMA-BUFs can be
-// imported by the KMS device that scans them out — cross-device
-// import works on some platforms but isn't portable.
-[[nodiscard]] VkPhysicalDevice pick_physical_device(VkInstance instance, int drm_fd) {
+// Find the Vulkan physical device whose DRM major/minor matches the DRM fd's
+// stat. Required so Vulkan-allocated DMA-BUFs can be imported by the KMS device
+// that scans them out — cross-device import works on some platforms but isn't
+// portable.
+[[nodiscard]] vk::PhysicalDevice pick_physical_device(vk::Instance instance, int drm_fd) {
   struct stat st{};
   if (fstat(drm_fd, &st) != 0) {
-    return VK_NULL_HANDLE;
+    return {};
   }
-  const unsigned int want_major = major(st.st_rdev);
-  const unsigned int want_minor = minor(st.st_rdev);
+  const auto want_major = static_cast<std::int64_t>(major(st.st_rdev));
+  const auto want_minor = static_cast<std::int64_t>(minor(st.st_rdev));
 
-  std::uint32_t count = 0;
-  vkEnumeratePhysicalDevices(instance, &count, nullptr);
-  if (count == 0) {
-    return VK_NULL_HANDLE;
+  const std::vector<vk::PhysicalDevice> devices = instance.enumeratePhysicalDevices();
+  if (devices.empty()) {
+    return {};
   }
-  std::vector<VkPhysicalDevice> devices(count);
-  vkEnumeratePhysicalDevices(instance, &count, devices.data());
-
-  auto get_drm_props = reinterpret_cast<
-      PFN_vkGetPhysicalDeviceProperties2>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-      vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
-  if (get_drm_props == nullptr) {
-    return devices.front();  // No properties2 — fall back to first.
-  }
-
-  for (auto* pd : devices) {
-    VkPhysicalDeviceDrmPropertiesEXT drm_props{};
-    drm_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
-    VkPhysicalDeviceProperties2 props2{};
-    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    props2.pNext = &drm_props;
-    get_drm_props(pd, &props2);
-
-    if (drm_props.hasPrimary != VK_FALSE && drm_props.primaryMajor == want_major &&
-        drm_props.primaryMinor == want_minor) {
+  for (vk::PhysicalDevice pd : devices) {
+    const auto chain =
+        pd.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDrmPropertiesEXT>();
+    const auto& drm = chain.get<vk::PhysicalDeviceDrmPropertiesEXT>();
+    if ((drm.hasPrimary != 0U) && drm.primaryMajor == want_major &&
+        drm.primaryMinor == want_minor) {
       return pd;
     }
-    if (drm_props.hasRender != VK_FALSE && drm_props.renderMajor == want_major &&
-        drm_props.renderMinor == want_minor) {
+    if ((drm.hasRender != 0U) && drm.renderMajor == want_major && drm.renderMinor == want_minor) {
       return pd;
     }
   }
   return devices.front();  // No match — caller still gets *something*.
 }
 
-[[nodiscard]] std::uint32_t find_memory_type(VkPhysicalDevice pd, std::uint32_t type_bits,
-                                             VkMemoryPropertyFlags flags) {
-  VkPhysicalDeviceMemoryProperties mp{};
-  vkGetPhysicalDeviceMemoryProperties(pd, &mp);
-  const drm::span<const VkMemoryType> types{mp.memoryTypes, mp.memoryTypeCount};
+[[nodiscard]] std::uint32_t find_memory_type(vk::PhysicalDevice pd, std::uint32_t type_bits,
+                                             vk::MemoryPropertyFlags flags) {
+  const vk::PhysicalDeviceMemoryProperties mp = pd.getMemoryProperties();
+  const drm::span<const vk::MemoryType> types{mp.memoryTypes.data(), mp.memoryTypeCount};
   for (std::uint32_t i = 0; i < types.size(); ++i) {
     if (((type_bits >> i) & 1U) == 0U) {
       continue;
@@ -182,8 +180,8 @@ int main(int argc, char* argv[]) {
   }
   auto& scene = *scene_r;
 
-  // Background dumb-buffer layer keeps PRIMARY armed across modeset
-  // (same dance the EGL demo does).
+  // Background dumb-buffer layer keeps PRIMARY armed across modeset (same dance
+  // the EGL demo does).
   auto bg_source = drm::scene::DumbBufferSource::create(device, fb_w, fb_h, DRM_FORMAT_ARGB8888);
   if (!bg_source) {
     drm::println(stderr, "DumbBufferSource::create: {}", bg_source.error().message());
@@ -199,304 +197,235 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Vulkan instance with the extensions we need to walk DRM
-  // properties + allocate exportable DMA-BUF-backed images.
-  const std::array<const char*, 2> inst_exts{
-      "VK_KHR_get_physical_device_properties2",
-      "VK_KHR_external_memory_capabilities",
-  };
-  VkApplicationInfo app{};
-  app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-  app.apiVersion = VK_API_VERSION_1_1;
-  VkInstanceCreateInfo ici{};
-  ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-  ici.pApplicationInfo = &app;
-  ici.enabledExtensionCount = static_cast<std::uint32_t>(inst_exts.size());
-  ici.ppEnabledExtensionNames = inst_exts.data();
-  VkInstance instance = VK_NULL_HANDLE;
-  if (vkCreateInstance(&ici, nullptr, &instance) != VK_SUCCESS) {
-    drm::println(stderr, "vkCreateInstance failed (libvulkan present? ICDs configured?)");
-    return EXIT_FAILURE;
-  }
+  try {
+    const vk::detail::DynamicLoader loader;
+    // NOLINTNEXTLINE(misc-include-cleaner) -- VULKAN_HPP_DEFAULT_DISPATCHER from vulkan.hpp
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(
+        loader.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
 
-  VkPhysicalDevice pd = pick_physical_device(instance, device.fd());
-  if (pd == VK_NULL_HANDLE) {
-    drm::println(stderr, "vulkan_scene: no VkPhysicalDevice matched the DRM fd");
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
+    // Instance with the extensions we need to walk DRM properties + allocate
+    // exportable DMA-BUF-backed images.
+    const std::array<const char*, 2> inst_exts{
+        "VK_KHR_get_physical_device_properties2",
+        "VK_KHR_external_memory_capabilities",
+    };
+    vk::ApplicationInfo app;
+    app.apiVersion = VK_API_VERSION_1_1;
+    vk::InstanceCreateInfo ici;
+    ici.pApplicationInfo = &app;
+    ici.setPEnabledExtensionNames(inst_exts);
+    const vk::Instance instance = vk::createInstance(ici);
+    // NOLINTNEXTLINE(misc-include-cleaner) -- VULKAN_HPP_DEFAULT_DISPATCHER from vulkan.hpp
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
 
-  // Queue family — any with graphics capability will do; vkCmdClear
-  // doesn't need a dedicated transfer queue on any current driver.
-  std::uint32_t qf_count = 0;
-  vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, nullptr);
-  std::vector<VkQueueFamilyProperties> qfs(qf_count);
-  vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, qfs.data());
-  std::uint32_t qf_index = 0xFFFFFFFFU;
-  for (std::uint32_t i = 0; i < qf_count; ++i) {
-    if ((qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0U) {
-      qf_index = i;
-      break;
+    const vk::PhysicalDevice pd = pick_physical_device(instance, device.fd());
+    if (!pd) {
+      drm::println(stderr, "vulkan_scene: no VkPhysicalDevice matched the DRM fd");
+      instance.destroy();
+      return EXIT_FAILURE;
     }
-  }
-  if (qf_index == 0xFFFFFFFFU) {
-    drm::println(stderr, "vulkan_scene: no graphics queue on the picked device");
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
 
-  const float qp = 1.0F;
-  VkDeviceQueueCreateInfo qci{};
-  qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-  qci.queueFamilyIndex = qf_index;
-  qci.queueCount = 1;
-  qci.pQueuePriorities = &qp;
+    // Queue family — any with graphics capability will do; vkCmdClear doesn't
+    // need a dedicated transfer queue on any current driver.
+    const std::vector<vk::QueueFamilyProperties> qfs = pd.getQueueFamilyProperties();
+    std::uint32_t qf_index = 0xFFFFFFFFU;
+    for (std::uint32_t i = 0; i < qfs.size(); ++i) {
+      if ((qfs[i].queueFlags & vk::QueueFlagBits::eGraphics)) {
+        qf_index = i;
+        break;
+      }
+    }
+    if (qf_index == 0xFFFFFFFFU) {
+      drm::println(stderr, "vulkan_scene: no graphics queue on the picked device");
+      instance.destroy();
+      return EXIT_FAILURE;
+    }
 
-  const std::array<const char*, 4> dev_exts{
-      "VK_KHR_external_memory",
-      "VK_KHR_external_memory_fd",
-      "VK_EXT_external_memory_dma_buf",
-      "VK_EXT_image_drm_format_modifier",
-  };
-  VkDeviceCreateInfo dci{};
-  dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-  dci.queueCreateInfoCount = 1;
-  dci.pQueueCreateInfos = &qci;
-  dci.enabledExtensionCount = static_cast<std::uint32_t>(dev_exts.size());
-  dci.ppEnabledExtensionNames = dev_exts.data();
-  VkDevice vk_device = VK_NULL_HANDLE;
-  if (vkCreateDevice(pd, &dci, nullptr, &vk_device) != VK_SUCCESS) {
-    drm::println(
-        stderr,
-        "vulkan_scene: vkCreateDevice failed — driver missing one of "
-        "{{VK_KHR_external_memory, VK_KHR_external_memory_fd, VK_EXT_external_memory_dma_buf, "
-        "VK_EXT_image_drm_format_modifier}}");
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
-  VkQueue queue = VK_NULL_HANDLE;
-  vkGetDeviceQueue(vk_device, qf_index, 0, &queue);
+    const float qp = 1.0F;
+    vk::DeviceQueueCreateInfo qci;
+    qci.queueFamilyIndex = qf_index;
+    qci.queueCount = 1;
+    qci.pQueuePriorities = &qp;
 
-  // Allocate a VkImage with the LINEAR DRM modifier. The single-
-  // modifier list is what VK_EXT_image_drm_format_modifier needs; a
-  // production renderer would intersect against
-  // LayerScene::candidate_modifiers(DRM_FORMAT_ARGB8888) and pick.
-  const std::uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
-  std::array<std::uint64_t, 1> modifiers{modifier};
-  VkImageDrmFormatModifierListCreateInfoEXT drm_list{};
-  drm_list.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
-  drm_list.drmFormatModifierCount = 1;
-  drm_list.pDrmFormatModifiers = modifiers.data();
+    const std::array<const char*, 4> dev_exts{
+        "VK_KHR_external_memory",
+        "VK_KHR_external_memory_fd",
+        "VK_EXT_external_memory_dma_buf",
+        "VK_EXT_image_drm_format_modifier",
+    };
+    vk::DeviceCreateInfo dci;
+    dci.setQueueCreateInfos(qci);
+    dci.setPEnabledExtensionNames(dev_exts);
+    const vk::Device vk_device = pd.createDevice(dci);
+    // NOLINTNEXTLINE(misc-include-cleaner) -- VULKAN_HPP_DEFAULT_DISPATCHER from vulkan.hpp
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(vk_device);
+    const vk::Queue queue = vk_device.getQueue(qf_index, 0);
 
-  VkExternalMemoryImageCreateInfo ext_img{};
-  ext_img.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-  ext_img.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-  ext_img.pNext = &drm_list;
+    // Allocate a VkImage with the LINEAR DRM modifier. The single-modifier list
+    // is what VK_EXT_image_drm_format_modifier needs; a production renderer would
+    // intersect against LayerScene::candidate_modifiers(DRM_FORMAT_ARGB8888) and
+    // pick. (On rockchip VOP2, PanVK only exports LINEAR for 8888 anyway, and the
+    // scene allocator lands the LINEAR buffer on an overlay plane.)
+    const std::uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+    const std::array<std::uint64_t, 1> modifiers{modifier};
+    vk::ImageDrmFormatModifierListCreateInfoEXT drm_list;
+    drm_list.setDrmFormatModifiers(modifiers);
+    vk::ExternalMemoryImageCreateInfo ext_img;
+    ext_img.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
+    ext_img.pNext = &drm_list;
 
-  VkImageCreateInfo ici_img{};
-  ici_img.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-  ici_img.pNext = &ext_img;
-  ici_img.imageType = VK_IMAGE_TYPE_2D;
-  ici_img.format = VK_FORMAT_B8G8R8A8_UNORM;  // matches DRM_FORMAT_ARGB8888 byte order
-  ici_img.extent = {fb_w, fb_h, 1};
-  ici_img.mipLevels = 1;
-  ici_img.arrayLayers = 1;
-  ici_img.samples = VK_SAMPLE_COUNT_1_BIT;
-  ici_img.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-  ici_img.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-  ici_img.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  ici_img.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk::ImageCreateInfo ici_img;
+    ici_img.pNext = &ext_img;
+    ici_img.imageType = vk::ImageType::e2D;
+    ici_img.format = vk::Format::eB8G8R8A8Unorm;  // matches DRM_FORMAT_ARGB8888 byte order
+    ici_img.extent = vk::Extent3D{fb_w, fb_h, 1};
+    ici_img.mipLevels = 1;
+    ici_img.arrayLayers = 1;
+    ici_img.samples = vk::SampleCountFlagBits::e1;
+    ici_img.tiling = vk::ImageTiling::eDrmFormatModifierEXT;
+    ici_img.usage = vk::ImageUsageFlagBits::eTransferDst;
+    ici_img.sharingMode = vk::SharingMode::eExclusive;
+    ici_img.initialLayout = vk::ImageLayout::eUndefined;
+    const vk::Image vk_image = vk_device.createImage(ici_img);
 
-  VkImage vk_image = VK_NULL_HANDLE;
-  if (vkCreateImage(vk_device, &ici_img, nullptr, &vk_image) != VK_SUCCESS) {
-    drm::println(stderr, "vulkan_scene: vkCreateImage (DRM-modifier ARGB8888 LINEAR) failed");
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
+    const vk::MemoryRequirements mr = vk_device.getImageMemoryRequirements(vk_image);
+    vk::ExportMemoryAllocateInfo emai;
+    emai.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
+    vk::MemoryAllocateInfo mai;
+    mai.pNext = &emai;
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex =
+        find_memory_type(pd, mr.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal);
+    if (mai.memoryTypeIndex == 0xFFFFFFFFU) {
+      drm::println(stderr, "vulkan_scene: no DEVICE_LOCAL memory type for the exportable image");
+      return EXIT_FAILURE;
+    }
+    const vk::DeviceMemory vk_mem = vk_device.allocateMemory(mai);
+    vk_device.bindImageMemory(vk_image, vk_mem, 0);
 
-  VkMemoryRequirements mr{};
-  vkGetImageMemoryRequirements(vk_device, vk_image, &mr);
-  VkExportMemoryAllocateInfo emai{};
-  emai.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-  emai.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-  VkMemoryAllocateInfo mai{};
-  mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  mai.pNext = &emai;
-  mai.allocationSize = mr.size;
-  mai.memoryTypeIndex =
-      find_memory_type(pd, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  if (mai.memoryTypeIndex == 0xFFFFFFFFU) {
-    drm::println(stderr, "vulkan_scene: no DEVICE_LOCAL memory type for the exportable image");
-    vkDestroyImage(vk_device, vk_image, nullptr);
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
-  VkDeviceMemory vk_mem = VK_NULL_HANDLE;
-  if (vkAllocateMemory(vk_device, &mai, nullptr, &vk_mem) != VK_SUCCESS) {
-    drm::println(stderr, "vulkan_scene: vkAllocateMemory failed");
-    vkDestroyImage(vk_device, vk_image, nullptr);
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
-  vkBindImageMemory(vk_device, vk_image, vk_mem, 0);
+    // Export the memory as a DMA-BUF fd.
+    vk::MemoryGetFdInfoKHR mgfi;
+    mgfi.memory = vk_mem;
+    mgfi.handleType = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
+    const int dmabuf_fd = vk_device.getMemoryFdKHR(mgfi);
+    if (dmabuf_fd < 0) {
+      drm::println(stderr, "vulkan_scene: vkGetMemoryFdKHR failed");
+      return EXIT_FAILURE;
+    }
 
-  // Export the memory as a DMA-BUF fd.
-  auto get_memory_fd = reinterpret_cast<
-      PFN_vkGetMemoryFdKHR>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-      vkGetDeviceProcAddr(vk_device, "vkGetMemoryFdKHR"));
-  if (get_memory_fd == nullptr) {
-    drm::println(stderr, "vulkan_scene: vkGetMemoryFdKHR not exported");
-    vkFreeMemory(vk_device, vk_mem, nullptr);
-    vkDestroyImage(vk_device, vk_image, nullptr);
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
-  VkMemoryGetFdInfoKHR mgfi{};
-  mgfi.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-  mgfi.memory = vk_mem;
-  mgfi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-  int dmabuf_fd = -1;
-  if (get_memory_fd(vk_device, &mgfi, &dmabuf_fd) != VK_SUCCESS || dmabuf_fd < 0) {
-    drm::println(stderr, "vulkan_scene: vkGetMemoryFdKHR failed");
-    vkFreeMemory(vk_device, vk_mem, nullptr);
-    vkDestroyImage(vk_device, vk_image, nullptr);
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
+    // Query the image's subresource layout for the row pitch + offset to feed
+    // into ExternalDmaBufSource.
+    vk::ImageSubresource sub;
+    sub.aspectMask = vk::ImageAspectFlagBits::eMemoryPlane0EXT;
+    const vk::SubresourceLayout layout = vk_device.getImageSubresourceLayout(vk_image, sub);
 
-  // Query the image's subresource layout so we know the row pitch
-  // and offset to feed into ExternalDmaBufSource.
-  VkImageSubresource sub{};
-  sub.aspectMask = VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
-  VkSubresourceLayout layout{};
-  vkGetImageSubresourceLayout(vk_device, vk_image, &sub, &layout);
+    drm::scene::ExternalPlaneInfo plane_info{};
+    plane_info.fd = dmabuf_fd;
+    plane_info.pitch = static_cast<std::uint32_t>(layout.rowPitch);
+    plane_info.offset = static_cast<std::uint32_t>(layout.offset);
+    const std::array<drm::scene::ExternalPlaneInfo, 1> planes{plane_info};
 
-  drm::scene::ExternalPlaneInfo plane_info{};
-  plane_info.fd = dmabuf_fd;
-  plane_info.pitch = static_cast<std::uint32_t>(layout.rowPitch);
-  plane_info.offset = static_cast<std::uint32_t>(layout.offset);
-  std::array<drm::scene::ExternalPlaneInfo, 1> planes{plane_info};
+    auto vk_source = drm::scene::ExternalDmaBufSource::create(
+        device, fb_w, fb_h, DRM_FORMAT_ARGB8888, modifier, planes);
+    ::close(dmabuf_fd);  // ExternalDmaBufSource dups the fd; we close ours now.
+    if (!vk_source) {
+      drm::println(stderr, "ExternalDmaBufSource::create: {}", vk_source.error().message());
+      return EXIT_FAILURE;
+    }
 
-  auto vk_source = drm::scene::ExternalDmaBufSource::create(device, fb_w, fb_h, DRM_FORMAT_ARGB8888,
-                                                            modifier, planes);
-  // ExternalDmaBufSource dups the fd; we close ours now.
-  ::close(dmabuf_fd);
-  if (!vk_source) {
-    drm::println(stderr, "ExternalDmaBufSource::create: {}", vk_source.error().message());
-    vkFreeMemory(vk_device, vk_mem, nullptr);
-    vkDestroyImage(vk_device, vk_image, nullptr);
-    vkDestroyDevice(vk_device, nullptr);
-    vkDestroyInstance(instance, nullptr);
-    return EXIT_FAILURE;
-  }
+    drm::scene::LayerDesc fg_desc;
+    fg_desc.source = std::move(*vk_source);
+    fg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+    fg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+    fg_desc.display.zpos = 3;
+    if (auto r = scene->add_layer(std::move(fg_desc)); !r) {
+      drm::println(stderr, "add_layer (vulkan): {}", r.error().message());
+      return EXIT_FAILURE;
+    }
 
-  drm::scene::LayerDesc fg_desc;
-  fg_desc.source = std::move(*vk_source);
-  fg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  fg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  fg_desc.display.zpos = 3;
-  if (auto r = scene->add_layer(std::move(fg_desc)); !r) {
-    drm::println(stderr, "add_layer (vulkan): {}", r.error().message());
-    return EXIT_FAILURE;
-  }
+    // Command pool + buffer for the per-frame clear.
+    vk::CommandPoolCreateInfo pci;
+    pci.queueFamilyIndex = qf_index;
+    pci.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+    const vk::CommandPool cmd_pool = vk_device.createCommandPool(pci);
+    vk::CommandBufferAllocateInfo cbai;
+    cbai.commandPool = cmd_pool;
+    cbai.level = vk::CommandBufferLevel::ePrimary;
+    cbai.commandBufferCount = 1;
+    const vk::CommandBuffer cmd = vk_device.allocateCommandBuffers(cbai).front();
 
-  // Command pool + buffer for the per-frame clear.
-  VkCommandPoolCreateInfo pci{};
-  pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-  pci.queueFamilyIndex = qf_index;
-  pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-  VkCommandPool cmd_pool = VK_NULL_HANDLE;
-  vkCreateCommandPool(vk_device, &pci, nullptr, &cmd_pool);
-
-  VkCommandBufferAllocateInfo cbai{};
-  cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  cbai.commandPool = cmd_pool;
-  cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cbai.commandBufferCount = 1;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  vkAllocateCommandBuffers(vk_device, &cbai, &cmd);
-
-  // First commit: brings up modeset + presents the Vulkan image
-  // before we've rendered. The image's INITIAL_LAYOUT is UNDEFINED
-  // → the kernel sees zero-initialized pixels; visible briefly until
-  // the first clear lands.
-  if (auto r = scene->commit(); !r) {
-    drm::println(stderr, "first commit: {}", r.error().message());
-    return EXIT_FAILURE;
-  }
-
-  using clk = std::chrono::steady_clock;
-  const auto t0 = clk::now();
-  const auto deadline = t0 + std::chrono::seconds(args.seconds);
-  std::uint64_t frames = 0;
-  bool first = true;
-  while (clk::now() < deadline) {
-    const float t = std::chrono::duration<float>(clk::now() - t0).count();
-    VkClearColorValue clear{};
-    clear.float32[0] = 0.5F + (0.5F * std::sin(t * 1.0F));
-    clear.float32[1] = 0.5F + (0.5F * std::sin((t * 1.3F) + 2.0F));
-    clear.float32[2] = 0.5F + (0.5F * std::sin((t * 1.7F) + 4.0F));
-    clear.float32[3] = 1.0F;
-
-    vkResetCommandBuffer(cmd, 0);
-    VkCommandBufferBeginInfo cbi{};
-    cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &cbi);
-
-    // Transition UNDEFINED → GENERAL on the first iteration, then
-    // hold GENERAL across re-clears. GENERAL is the right layout for
-    // the vkCmdClearColorImage path; TRANSFER_DST_OPTIMAL would also
-    // work but requires another transition after each clear.
-    VkImageMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.oldLayout = first ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
-    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = vk_image;
-    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    b.srcAccessMask = 0;
-    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &b);
-
-    VkImageSubresourceRange const range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdClearColorImage(cmd, vk_image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
-
-    vkEndCommandBuffer(cmd);
-
-    VkSubmitInfo si{};
-    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
-    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    // Single-buffered: idle the queue before letting KMS scan out.
-    // A real app would use an IN_FENCE_FD-backed sync_file to chain
-    // the GPU completion into the atomic commit.
-    vkQueueWaitIdle(queue);
-
+    // First commit: brings up modeset + presents the Vulkan image before we've
+    // rendered (UNDEFINED layout → zero pixels, visible briefly).
     if (auto r = scene->commit(); !r) {
-      drm::println(stderr, "commit: {}", r.error().message());
-      break;
+      drm::println(stderr, "first commit: {}", r.error().message());
+      return EXIT_FAILURE;
     }
-    ++frames;
-    first = false;
-  }
-  drm::println("vulkan_scene: {} frames in {}s", frames, args.seconds);
 
-  // Tear-down. Scene first (releases the dma-buf source's fb_id +
-  // GEM handle); then Vulkan.
-  scene.reset();
-  vkDestroyCommandPool(vk_device, cmd_pool, nullptr);
-  vkFreeMemory(vk_device, vk_mem, nullptr);
-  vkDestroyImage(vk_device, vk_image, nullptr);
-  vkDestroyDevice(vk_device, nullptr);
-  vkDestroyInstance(instance, nullptr);
+    using clk = std::chrono::steady_clock;
+    const auto t0 = clk::now();
+    const auto deadline = t0 + std::chrono::seconds(args.seconds);
+    std::uint64_t frames = 0;
+    bool first = true;
+    const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    while (clk::now() < deadline) {
+      const float t = std::chrono::duration<float>(clk::now() - t0).count();
+      vk::ClearColorValue clear;
+      clear.float32 = std::array<float, 4>{0.5F + (0.5F * std::sin(t * 1.0F)),
+                                           0.5F + (0.5F * std::sin((t * 1.3F) + 2.0F)),
+                                           0.5F + (0.5F * std::sin((t * 1.7F) + 4.0F)), 1.0F};
+
+      cmd.reset();
+      vk::CommandBufferBeginInfo cbi;
+      cbi.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+      cmd.begin(cbi);
+
+      // UNDEFINED → GENERAL on the first iteration, then hold GENERAL across
+      // re-clears (the right layout for the vkCmdClearColorImage path).
+      vk::ImageMemoryBarrier b;
+      b.oldLayout = first ? vk::ImageLayout::eUndefined : vk::ImageLayout::eGeneral;
+      b.newLayout = vk::ImageLayout::eGeneral;
+      b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      b.image = vk_image;
+      b.subresourceRange = range;
+      b.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+      cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
+                          vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, b);
+
+      cmd.clearColorImage(vk_image, vk::ImageLayout::eGeneral, clear, range);
+      cmd.end();
+
+      vk::SubmitInfo si;
+      si.setCommandBuffers(cmd);
+      queue.submit(si);
+      // Single-buffered: idle the queue before letting KMS scan out. A real app
+      // would chain GPU completion into the commit via IN_FENCE_FD.
+      queue.waitIdle();
+
+      if (auto r = scene->commit(); !r) {
+        drm::println(stderr, "commit: {}", r.error().message());
+        break;
+      }
+      ++frames;
+      first = false;
+    }
+    drm::println("vulkan_scene: {} frames in {}s", frames, args.seconds);
+
+    // Tear-down. Scene first (releases the dma-buf source's fb_id + GEM handle);
+    // then Vulkan.
+    scene.reset();
+    vk_device.destroyCommandPool(cmd_pool);
+    vk_device.freeMemory(vk_mem);
+    vk_device.destroyImage(vk_image);
+    vk_device.destroy();
+    instance.destroy();
+  } catch (const std::exception& e) {
+    drm::println(stderr, "vulkan_scene: vulkan error: {}", e.what());
+    return EXIT_FAILURE;
+  } catch (...) {
+    drm::println(stderr, "vulkan_scene: unknown vulkan error");
+    return EXIT_FAILURE;
+  }
+
   return EXIT_SUCCESS;
 }

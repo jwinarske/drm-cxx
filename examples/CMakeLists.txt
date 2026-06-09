@@ -246,15 +246,23 @@ if(DRM_CXX_VULKAN)
 
   # vulkan_scene — minimal Vulkan-rendered scene layer over
   # VK_EXT_image_drm_format_modifier + ExternalDmaBufSource.
+  # vulkan.hpp dynamic dispatch — links only drm-cxx (no libvulkan); vendored
+  # third_party/Vulkan-Headers (SYSTEM include).
   add_executable(vulkan_scene advanced/vulkan_scene/main.cpp)
-  target_link_libraries(vulkan_scene PRIVATE drm-cxx::drm-cxx PkgConfig::vulkan)
+  target_link_libraries(vulkan_scene PRIVATE drm-cxx::drm-cxx)
   target_include_directories(vulkan_scene PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(vulkan_scene SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Vulkan-Headers/include)
 
   # vulkan_offload_scanout — GPU(Vulkan) render -> dma-buf -> import on the
   # display node (drm::fmt). Same Vulkan gate as vulkan_scene.
+  # vulkan.hpp dynamic dispatch (VK_NO_PROTOTYPES) — links only drm-cxx, no
+  # libvulkan; uses the vendored third_party/Vulkan-Headers (SYSTEM include).
   add_executable(vulkan_offload_scanout advanced/vulkan_offload_scanout/main.cpp)
-  target_link_libraries(vulkan_offload_scanout PRIVATE drm-cxx::drm-cxx PkgConfig::vulkan)
+  target_link_libraries(vulkan_offload_scanout PRIVATE drm-cxx::drm-cxx)
   target_include_directories(vulkan_offload_scanout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(vulkan_offload_scanout SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Vulkan-Headers/include)
 endif()
 
 # egl_offload_scanout — GPU(EGL/GLES) render -> dma-buf -> import on the
