@@ -28,12 +28,14 @@
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <cstdint>
 #include <memory>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace drm {
 class Device;
@@ -75,12 +77,18 @@ class DumbBufferSource : public LayerBufferSource {
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
 
+  // Report the dirty region for the NEXT acquire() (then cleared). Empty =
+  // full-frame. A software source that repaints only part of its buffer sets
+  // this so the scene emits FB_DAMAGE_CLIPS. Replaces any prior unconsumed set.
+  void set_damage(drm::span<const DamageRect> rects);
+
  private:
   DumbBufferSource(drm::dumb::Buffer buffer, SourceFormat format) noexcept
       : buffer_(std::move(buffer)), format_(format) {}
 
   drm::dumb::Buffer buffer_;
   SourceFormat format_{};
+  std::vector<DamageRect> pending_damage_;
 };
 
 }  // namespace drm::scene

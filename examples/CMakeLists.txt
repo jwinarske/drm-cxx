@@ -127,6 +127,11 @@ add_executable(cursor_rotate advanced/cursor_rotate/main.cpp)
 target_link_libraries(cursor_rotate PRIVATE drm-cxx::drm-cxx)
 target_include_directories(cursor_rotate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# damage_present — FB_DAMAGE_CLIPS validation harness.
+add_executable(damage_present advanced/damage_present/main.cpp)
+target_link_libraries(damage_present PRIVATE drm-cxx::drm-cxx)
+target_include_directories(damage_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
 # Dumps the per-device EGL Streams capability shape so users can verify
 # whether their system can host an EglStreamSource. Independent of

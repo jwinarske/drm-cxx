@@ -8,6 +8,7 @@
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <drm_fourcc.h>
@@ -73,7 +74,13 @@ drm::expected<AcquiredBuffer, std::error_code> DumbBufferSource::acquire() {
   AcquiredBuffer acq;
   acq.fb_id = buffer_.fb_id();
   acq.opaque = nullptr;
+  acq.damage = std::move(pending_damage_);
+  pending_damage_.clear();
   return acq;
+}
+
+void DumbBufferSource::set_damage(drm::span<const DamageRect> rects) {
+  pending_damage_.assign(rects.begin(), rects.end());
 }
 
 drm::expected<drm::BufferMapping, std::error_code> DumbBufferSource::map(drm::MapAccess access) {

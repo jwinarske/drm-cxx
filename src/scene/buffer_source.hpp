@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <optional>
 #include <system_error>
+#include <vector>
 
 namespace drm {
 class Device;
@@ -100,11 +101,30 @@ struct SourceFormat {
 /// composition fallback to read complete pixels; the only fenced source
 /// today (ExternalDmaBufSource) is uncompositable, so this is deferred.
 ///
+/// A changed region of the buffer since the slot was last scanned out, in
+/// buffer pixels (top-left origin). Reported per-frame on `AcquiredBuffer` so
+/// the scene can emit `FB_DAMAGE_CLIPS` and the driver repaints only the dirty
+/// area (a power/bandwidth win, and what lets a PSR panel stay in self-refresh).
+struct DamageRect {
+  std::int32_t x{0};
+  std::int32_t y{0};
+  std::uint32_t w{0};
+  std::uint32_t h{0};
+};
+
+/// `damage` is the optional per-frame dirty-region list. **Empty means
+/// full-frame** — the scene emits no `FB_DAMAGE_CLIPS` and the whole buffer is
+/// assumed changed (correct, just not power-optimal). A non-empty list is the
+/// changed regions; the scene clamps the count and falls back to full-frame
+/// above its bound, and omits the blob on planes/drivers without the property.
+/// Sources that always repaint everything (most v1 sources) leave it empty.
+///
 /// Carrying a move-only SyncFence makes AcquiredBuffer move-only.
 struct AcquiredBuffer {
   std::uint32_t fb_id{0};
   void* opaque{nullptr};
   std::optional<drm::sync::SyncFence> acquire_fence;
+  std::vector<DamageRect> damage;
 };
 
 /// Polymorphic interface for "where does this layer's content come

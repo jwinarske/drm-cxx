@@ -217,6 +217,13 @@ executable('cursor_rotate',
   dependencies : [drm_cxx_dep],
 )
 
+# damage_present — FB_DAMAGE_CLIPS validation: a moving box reports only its
+# touched regions as per-frame damage (DumbBufferSource::set_damage).
+executable('damage_present',
+  'advanced/damage_present/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
 # Builds on every host independent of the streams= option; the probe
 # itself short-circuits to Unsupported on builds without EGL headers
