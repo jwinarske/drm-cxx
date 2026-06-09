@@ -182,6 +182,11 @@ class GbmSurfaceSource : public LayerBufferSource {
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
 
+  // Stash a render-done sync_file the next acquire() returns as the buffer's
+  // acquire fence (the scene wires it to the plane's IN_FENCE_FD, or CPU-waits
+  // it). Used by GlScanoutProducer, which exports an EGL native fence per frame.
+  void set_acquire_fence(drm::sync::SyncFence fence) noexcept;
+
  private:
   GbmSurfaceSource();
 

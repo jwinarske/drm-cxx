@@ -114,6 +114,13 @@ void initialize_runtime(EglLoader& rt) noexcept {
         rt.get_proc_address, "eglStreamConsumerAcquireAttribEXT");
   }
 
+  // EGL fence-sync entry points for the GL producer's acquire-fence export.
+  rt.create_sync = resolve_proc<PFNEGLCREATESYNCKHRPROC>(rt.get_proc_address, "eglCreateSyncKHR");
+  rt.destroy_sync =
+      resolve_proc<PFNEGLDESTROYSYNCKHRPROC>(rt.get_proc_address, "eglDestroySyncKHR");
+  rt.dup_native_fence_fd = resolve_proc<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>(
+      rt.get_proc_address, "eglDupNativeFenceFDANDROID");
+
   rt.loaded = true;
 }
 
