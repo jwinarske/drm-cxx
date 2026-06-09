@@ -506,8 +506,11 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base_ref="origin/${{ github.base_ref }}"
             git fetch --no-tags --quiet origin "${{ github.base_ref }}"
+            # Restrict to src/ + examples/ (minus the vendored thorvg tree),
+            # matching the full-tree `find src examples` scope below. tests/ is
+            # intentionally never tidied (its CHECK harness uses do-while etc.).
             mapfile -t files < <(git diff --name-only --diff-filter=d "${base_ref}...HEAD" \
-              | grep -E '\.cpp$' \
+              | grep -E '^(src|examples)/.*\.cpp$' \
               | grep -v '^examples/scene/thorvg_janitor/' || true)
             if [ "${#files[@]}" -eq 0 ]; then
               echo "clang-tidy: no changed .cpp files to lint"
