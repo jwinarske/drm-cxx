@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 
+#include "planes/allocator.hpp"
 #include "planes/plane_registry.hpp"
 
 #include <drm_fourcc.h>
@@ -93,4 +94,21 @@ TEST(PlaneCapabilitiesTest, DefaultValues) {
   EXPECT_FALSE(caps.zpos_max.has_value());
   EXPECT_FALSE(caps.supports_rotation);
   EXPECT_FALSE(caps.supports_scaling);
+}
+
+TEST(PowerAwareBias, BandwidthClassBonus) {
+  using drm::planes::bandwidth_class_bonus;
+  // LINEAR composites cheaply — no placement bonus.
+  EXPECT_EQ(bandwidth_class_bonus(DRM_FORMAT_MOD_LINEAR), 0);
+  // Tiled: better DRAM locality — small bonus.
+  EXPECT_EQ(bandwidth_class_bonus(DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED), 1);
+  // Compressed (AFBC / DCC): biggest saving — direct scanout avoids a GPU
+  // decompress, so the matcher should most strongly keep it on a plane.
+  EXPECT_EQ(bandwidth_class_bonus(DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16)), 2);
+  EXPECT_EQ(bandwidth_class_bonus(DRM_FORMAT_MOD_QCOM_COMPRESSED), 2);
+  // The ordering (compressed > tiled > linear) is what biases placement.
+  EXPECT_GT(bandwidth_class_bonus(DRM_FORMAT_MOD_QCOM_COMPRESSED),
+            bandwidth_class_bonus(DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED));
+  EXPECT_GT(bandwidth_class_bonus(DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED),
+            bandwidth_class_bonus(DRM_FORMAT_MOD_LINEAR));
 }
