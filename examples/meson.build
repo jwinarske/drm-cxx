@@ -224,6 +224,13 @@ executable('damage_present',
   dependencies : [drm_cxx_dep],
 )
 
+# ring_present — DumbRingSource + BufferRing: buffer-age repaint driving
+# FB_DAMAGE_CLIPS across a multi-slot ring.
+executable('ring_present',
+  'advanced/ring_present/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
 # Builds on every host independent of the streams= option; the probe
 # itself short-circuits to Unsupported on builds without EGL headers

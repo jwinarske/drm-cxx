@@ -132,6 +132,11 @@ add_executable(damage_present advanced/damage_present/main.cpp)
 target_link_libraries(damage_present PRIVATE drm-cxx::drm-cxx)
 target_include_directories(damage_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# ring_present — DumbRingSource + BufferRing buffer-age validation harness.
+add_executable(ring_present advanced/ring_present/main.cpp)
+target_link_libraries(ring_present PRIVATE drm-cxx::drm-cxx)
+target_include_directories(ring_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
 # Dumps the per-device EGL Streams capability shape so users can verify
 # whether their system can host an EglStreamSource. Independent of

@@ -74,6 +74,12 @@ foreach(_t ${DRM_CXX_TESTS})
   gtest_discover_tests(${_t})
 endforeach()
 
+# DumbRingSource integration test — plain CHECK harness (not gtest), lives under
+# integration/, needs a dumb-capable card (skips if none). Wired explicitly.
+add_executable(test_dumb_ring_source integration/test_dumb_ring_source.cpp)
+target_link_libraries(test_dumb_ring_source PRIVATE drm-cxx::drm-cxx)
+add_test(NAME test_dumb_ring_source COMMAND test_dumb_ring_source)
+
 # VKMS integration test — self-skips when vkms is absent. Kept out of
 # the loop above because its source lives under tests/integration/
 # rather than tests/unit/.
