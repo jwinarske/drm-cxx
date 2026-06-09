@@ -3,6 +3,7 @@
 // present/gl_scanout_producer.cpp
 
 #include <drm-cxx/present/gl_scanout_producer.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #if DRM_CXX_HAS_EGL
 
@@ -26,6 +27,7 @@
 #include <cstdint>
 #include <memory>
 #include <system_error>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -242,9 +244,36 @@ drm::expected<void, std::error_code> GlScanoutProducer::swap_buffers() {
   if ((display_ == nullptr) || (surface_ == nullptr)) {
     return drm::unexpected<std::error_code>(err(std::errc::not_connected));
   }
-  if (egl.swap_buffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) !=
-      EGL_TRUE) {
+  auto* dpy = static_cast<EGLDisplay>(display_);
+
+  // Insert a native-fence sync capturing the frame's draw BEFORE the swap;
+  // eglSwapBuffers flushes the queued GL commands, which is what makes the
+  // exported fd valid. The fd then signals when the GPU finishes the frame — we
+  // hand it to the source as this buffer's acquire fence so KMS waits on the
+  // render (or the scene CPU-waits it) instead of relying on implicit sync.
+  // Null entry points (stacks without EGL_ANDROID_native_fence_sync) just skip
+  // the export and fall back to the driver's implicit ordering.
+  EGLSyncKHR sync = EGL_NO_SYNC_KHR;
+  if ((egl.create_sync != nullptr) && (egl.dup_native_fence_fd != nullptr)) {
+    sync = egl.create_sync(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr);
+  }
+
+  if (egl.swap_buffers(dpy, static_cast<EGLSurface>(surface_)) != EGL_TRUE) {
+    if ((sync != EGL_NO_SYNC_KHR) && (egl.destroy_sync != nullptr)) {
+      egl.destroy_sync(dpy, sync);
+    }
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
+  }
+
+  if (sync != EGL_NO_SYNC_KHR) {
+    const int fence_fd = egl.dup_native_fence_fd(dpy, sync);
+    egl.destroy_sync(dpy, sync);
+    if (fence_fd >= 0) {
+      if (auto fence = drm::sync::SyncFence::import_fd(fence_fd); fence && (source_ != nullptr)) {
+        source_->set_acquire_fence(std::move(*fence));
+      }
+      ::close(fence_fd);  // import_fd dups; close ours
+    }
   }
   return {};
 }

@@ -8,6 +8,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/gbm/device.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <drm_fourcc.h>
 #include <drm_mode.h>
@@ -137,6 +138,10 @@ struct GbmSurfaceSource::Impl {
   std::unordered_set<struct gbm_bo*> live_bos;
 
   bool session_paused{false};
+
+  // Render-done sync_file stashed by set_acquire_fence(), handed to the scene
+  // by the next acquire() as the buffer's acquire fence (GL producer path).
+  std::optional<drm::sync::SyncFence> pending_fence;
 
   Impl() = default;
   Impl(const Impl&) = delete;
@@ -284,7 +289,15 @@ drm::expected<AcquiredBuffer, std::error_code> GbmSurfaceSource::acquire() {
   AcquiredBuffer acq;
   acq.fb_id = fb_id;
   acq.opaque = bo;
+  // Hand back the GL producer's render-done fence (if any) and clear the slot.
+  acq.acquire_fence = std::exchange(impl_->pending_fence, std::nullopt);
   return acq;
+}
+
+void GbmSurfaceSource::set_acquire_fence(drm::sync::SyncFence fence) noexcept {
+  if (impl_) {
+    impl_->pending_fence = std::move(fence);
+  }
 }
 
 void GbmSurfaceSource::release(AcquiredBuffer acquired) noexcept {

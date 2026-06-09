@@ -107,6 +107,14 @@ struct EglLoader {
   // plane. NVIDIA's driver fills in FB_ID for the stream's first
   // frame and submits the atomic commit itself.
   PFNEGLSTREAMCONSUMERACQUIREATTRIBKHRPROC stream_consumer_acquire_attrib{nullptr};
+
+  // EGL_KHR_fence_sync + EGL_ANDROID_native_fence_sync entry points — the GL
+  // scanout producer creates a native-fence sync after a frame's draw and
+  // exports it as a sync_file (the acquire fence KMS waits on). Null on stacks
+  // without those extensions; the producer then renders synchronously.
+  PFNEGLCREATESYNCKHRPROC create_sync{nullptr};
+  PFNEGLDESTROYSYNCKHRPROC destroy_sync{nullptr};
+  PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_native_fence_fd{nullptr};
 };
 
 /// Process-singleton EGL runtime accessor. First call performs the
