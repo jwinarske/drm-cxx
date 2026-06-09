@@ -349,6 +349,7 @@ install_headers(
   'present/scanout_producer.hpp',
   'present/buffer_ring.hpp',
   'present/dumb_ring_source.hpp',
+  'present/frame_economy.hpp',
   'present/gbm_producer.hpp',
   'present/scanout_backend.hpp',
   'present/gl_scanout_producer.hpp',

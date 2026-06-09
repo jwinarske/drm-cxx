@@ -137,6 +137,11 @@ add_executable(ring_present advanced/ring_present/main.cpp)
 target_link_libraries(ring_present PRIVATE drm-cxx::drm-cxx)
 target_include_directories(ring_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# idle_present — FrameEconomy idle-suppression harness.
+add_executable(idle_present advanced/idle_present/main.cpp)
+target_link_libraries(idle_present PRIVATE drm-cxx::drm-cxx)
+target_include_directories(idle_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
 # Dumps the per-device EGL Streams capability shape so users can verify
 # whether their system can host an EglStreamSource. Independent of

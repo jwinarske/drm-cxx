@@ -231,6 +231,12 @@ executable('ring_present',
   dependencies : [drm_cxx_dep],
 )
 
+# idle_present — FrameEconomy idle-suppression: unchanged frames issue no commit.
+executable('idle_present',
+  'advanced/idle_present/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
 # Builds on every host independent of the streams= option; the probe
 # itself short-circuits to Unsupported on builds without EGL headers

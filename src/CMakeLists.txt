@@ -375,7 +375,7 @@ install(FILES fmt/format_mod.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/fmt)
 
 install(FILES present/negotiate.hpp present/scanout_producer.hpp present/buffer_ring.hpp
-        present/dumb_ring_source.hpp
+        present/dumb_ring_source.hpp present/frame_economy.hpp
         present/gbm_producer.hpp present/scanout_backend.hpp present/gl_scanout_producer.hpp
         present/vk_scanout_producer.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/present)

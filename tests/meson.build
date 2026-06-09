@@ -34,6 +34,13 @@ test('test_buffer_ring',
   ),
 )
 
+test('test_frame_economy',
+  executable('test_frame_economy',
+    'unit/test_frame_economy.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # Integration: needs a dumb-capable DRM card (any driver; skips if none).
 test('test_dumb_ring_source',
   executable('test_dumb_ring_source',
