@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 # SPDX-License-Identifier: MIT
 
-project('drm-cxx', ['cpp'],
+project('drm-cxx', ['c', 'cpp'],
   version : '1.0.0',
   meson_version : '>=1.3.0',
   license : 'MIT',
@@ -139,25 +139,16 @@ if not has_libseat
   message('drm-cxx: libseat not found — drm::session::Seat will be a runtime no-op')
 endif
 
-# libxcursor probe for drm::cursor. The renderer's KMS side needs no
-# extra deps (just libdrm, already required), but the theme loader
-# calls XcursorFilenameLoadImages to rasterize .cursor files.
+# drm::cursor's .xcursor file loader is VENDORED, X11-free, and static
+# (third_party/xcursor-mini) — the upstream libXcursor file-loader subset.
+# This drops the system libxcursor.so dependency and its entire X11 chain
+# (libX11/libXrender/libXfixes/libxcb/...); the renderer's KMS side already
+# needs no X11. So the cursor feature is available whenever it isn't
+# explicitly disabled, with no system probe.
 cursor_feature = get_option('cursor')
-if not cursor_feature.disabled()
-  xcursor_lib_dep = dependency('xcursor', required : cursor_feature.enabled(),
-                               include_type : 'system')
-else
-  xcursor_lib_dep = disabler()
-endif
-has_xcursor = xcursor_lib_dep.found()
-if has_xcursor
-  xcursor_delay_arg = cpp.has_member('XcursorImage', 'delay',
-    prefix : '#include <X11/Xcursor/Xcursor.h>',
-    dependencies : xcursor_lib_dep) ? '-DHAS_XCURSOR_DELAY' : ''
-else
-  xcursor_delay_arg = ''
-  message('drm-cxx: libxcursor not found — drm::cursor will not be built')
-endif
+has_xcursor = not cursor_feature.disabled()
+# The vendored XcursorImage carries the `delay` field (libXcursor >= 1.1).
+xcursor_delay_arg = has_xcursor ? '-DHAS_XCURSOR_DELAY' : ''
 
 # Blend2D probe for drm::capture (and future drm::csd). Upstream ships
 # a CMake config but no pkg-config file — meson's `method: 'cmake'`

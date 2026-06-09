@@ -71,7 +71,9 @@ if(DRM_CXX_HAS_XCURSOR)
   list(APPEND DRM_CXX_SOURCES
     cursor/theme.cpp
     cursor/cursor.cpp
-    cursor/renderer.cpp)
+    cursor/renderer.cpp
+    # Vendored X11-free .xcursor loader (replaces system libxcursor).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xcursor-mini/xcursor_file.c)
 endif()
 
 if(DRM_CXX_HAS_BLEND2D)
@@ -204,16 +206,13 @@ target_include_directories(drm-cxx SYSTEM BEFORE PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Vulkan-Headers/include)
 target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_VULKAN=1)
 
-# libxcursor: linked PRIVATE and included as -isystem so its public
-# header warnings don't hit our -Werror build. Matches the libseat
-# pattern.
+# Vendored X11-free .xcursor loader (third_party/xcursor-mini): its
+# xcursor_file.c is compiled straight into drm-cxx, so there is no library
+# to link — just put its header on the private include path. -isystem keeps
+# any warnings out of our -Werror build, matching the old libxcursor pattern.
 if(DRM_CXX_HAS_XCURSOR)
-  get_target_property(_xcursor_incs PkgConfig::xcursor INTERFACE_INCLUDE_DIRECTORIES)
-  if(_xcursor_incs)
-    set_property(TARGET PkgConfig::xcursor
-                 APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_xcursor_incs})
-  endif()
-  target_link_libraries(drm-cxx PRIVATE PkgConfig::xcursor)
+  target_include_directories(drm-cxx SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xcursor-mini)
   if(DRM_CXX_HAS_XCURSOR_DELAY)
     target_compile_definitions(drm-cxx PRIVATE HAS_XCURSOR_DELAY)
   endif()

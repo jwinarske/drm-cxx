@@ -86,7 +86,7 @@ run_command('ln', '-sfn',
   meson.project_build_root() / 'drm-cxx',
   check : true)
 
-drm_cxx_inc = include_directories('.', '..')
+drm_cxx_inc = include_directories('.', '..', '../third_party/xcursor-mini')
 
 if get_option('vulkan')
   drm_cxx_sources += files(
@@ -164,8 +164,9 @@ if has_xcursor
     'cursor/theme.cpp',
     'cursor/cursor.cpp',
     'cursor/renderer.cpp',
+    # Vendored X11-free .xcursor loader (replaces system libxcursor).
+    '../third_party/xcursor-mini/xcursor_file.c',
   )
-  drm_cxx_deps += xcursor_lib_dep
   if xcursor_delay_arg != ''
     cursor_cpp_args += xcursor_delay_arg
   endif
