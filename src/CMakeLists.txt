@@ -73,6 +73,9 @@ if(DRM_CXX_HAS_XCURSOR)
     cursor/theme.cpp
     cursor/cursor.cpp
     cursor/renderer.cpp
+    # Scene source presenting a cursor as an ordinary layer; depends on
+    # drm::cursor, so gated with it.
+    scene/cursor_source.cpp
     # Vendored X11-free .xcursor loader (replaces system libxcursor).
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xcursor-mini/xcursor_file.c)
 endif()

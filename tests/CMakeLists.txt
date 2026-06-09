@@ -81,6 +81,14 @@ add_executable(test_dumb_ring_source integration/test_dumb_ring_source.cpp)
 target_link_libraries(test_dumb_ring_source PRIVATE drm-cxx::drm-cxx)
 add_test(NAME test_dumb_ring_source COMMAND test_dumb_ring_source)
 
+# CursorSource integration test — plain CHECK harness, needs a dumb-capable card
+# (skips if none) and the cursor feature (CursorSource depends on drm::cursor).
+if(DRM_CXX_HAS_XCURSOR)
+  add_executable(test_cursor_source integration/test_cursor_source.cpp)
+  target_link_libraries(test_cursor_source PRIVATE drm-cxx::drm-cxx)
+  add_test(NAME test_cursor_source COMMAND test_cursor_source)
+endif()
+
 # VKMS integration test — self-skips when vkms is absent. Kept out of
 # the loop above because its source lives under tests/integration/
 # rather than tests/unit/.

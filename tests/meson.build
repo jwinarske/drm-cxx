@@ -238,6 +238,13 @@ if has_xcursor
       dependencies : test_deps,
     ),
   )
+
+  test('test_cursor_source',
+    executable('test_cursor_source',
+      'integration/test_cursor_source.cpp',
+      dependencies : test_deps,
+    ),
+  )
 endif
 
 if has_blend2d
