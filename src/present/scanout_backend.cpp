@@ -56,16 +56,36 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
     return drm::unexpected<std::error_code>(profile.error());
   }
 
-  // Negotiate the producer's modifiers against the plane's IN_FORMATS (when the
-  // driver exposes them). No blob or no overlap -> fall back to LINEAR, which
-  // every plane can scan out.
+  // Build the scene first so we can negotiate the producer's modifiers against
+  // the union across ALL non-cursor planes (candidate_modifiers), not just the
+  // primary's IN_FORMATS. On split SoCs (e.g. RK3588/VOP2) the primary plane
+  // advertises only AFBC while the GPU exports LINEAR — negotiating primary-only
+  // would intersect to empty and miss the LINEAR-capable overlay the allocator
+  // will actually place the layer on. The atomic TEST during placement remains
+  // the real arbiter of which plane accepts the chosen modifier.
+  scene::LayerScene::Config scene_cfg;
+  scene_cfg.crtc_id = target->crtc_id;
+  scene_cfg.connector_id = target->connector_id;
+  scene_cfg.mode = target->mode;
+  scene_cfg.stream_capability = scene::stream_capability_unsupported();
+  auto scene = scene::LayerScene::create(dev, scene_cfg);
+  if (!scene) {
+    return drm::unexpected<std::error_code>(scene.error());
+  }
+
   std::vector<fmt::Modifier> producer_mods;
   for (const std::uint64_t value : producer.exportable_modifiers(cfg.fourcc)) {
     producer_mods.push_back(fmt::Modifier{value});
   }
+  std::vector<fmt::Modifier> plane_mods;
+  for (const std::uint64_t value : (*scene)->candidate_modifiers(cfg.fourcc)) {
+    plane_mods.push_back(fmt::Modifier{value});
+  }
+  // No overlap (or no IN_FORMATS) -> fall back to LINEAR, which every plane can
+  // scan out; the allocator's TEST_ONLY then decides where it lands.
   std::vector<fmt::Modifier> negotiated;
-  if (const auto& plane_formats = target->primary_formats; plane_formats.has_value()) {
-    negotiated = negotiate(producer_mods, *plane_formats, cfg.fourcc, cfg.rotation);
+  if (!plane_mods.empty()) {
+    negotiated = negotiate(producer_mods, plane_mods, cfg.rotation);
   }
   std::vector<std::uint64_t> allowed;
   if (negotiated.empty()) {
@@ -80,16 +100,6 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
       producer.create_buffer(target->mode.hdisplay, target->mode.vdisplay, cfg.fourcc, allowed);
   if (!source) {
     return drm::unexpected<std::error_code>(source.error());
-  }
-
-  scene::LayerScene::Config scene_cfg;
-  scene_cfg.crtc_id = target->crtc_id;
-  scene_cfg.connector_id = target->connector_id;
-  scene_cfg.mode = target->mode;
-  scene_cfg.stream_capability = scene::stream_capability_unsupported();
-  auto scene = scene::LayerScene::create(dev, scene_cfg);
-  if (!scene) {
-    return drm::unexpected<std::error_code>(scene.error());
   }
 
   scene::LayerDesc desc;
