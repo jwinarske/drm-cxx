@@ -351,9 +351,11 @@ if get_option('vulkan')
   # vulkan_scene — minimal Vulkan-rendered scene layer over
   # VK_EXT_image_drm_format_modifier + ExternalDmaBufSource. Links
   # libvulkan directly (no dlsym shenanigans here).
+  # vulkan.hpp dynamic dispatch (VK_NO_PROTOTYPES): vendored headers only, no
+  # libvulkan link — vulkan.hpp dlopen's it at runtime.
   executable('vulkan_scene',
     'advanced/vulkan_scene/main.cpp',
-    dependencies : [drm_cxx_dep, vk_dep],
+    dependencies : [drm_cxx_dep, vk_headers_dep],
   )
 endif
 
@@ -392,8 +394,10 @@ if offload_egl_dep.found() and offload_gles_dep.found()
 endif
 
 if get_option('vulkan')
+  # vulkan.hpp dynamic dispatch (VK_NO_PROTOTYPES): vendored headers only, no
+  # libvulkan link — vulkan.hpp dlopen's it at runtime (matches vk_present).
   executable('vulkan_offload_scanout',
     'advanced/vulkan_offload_scanout/main.cpp',
-    dependencies : [drm_cxx_dep, vk_dep],
+    dependencies : [drm_cxx_dep, vk_headers_dep],
   )
 endif
