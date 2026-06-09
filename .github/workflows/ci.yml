@@ -340,6 +340,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'true'
+          # Full history so the PR clang-tidy pass can diff against the base
+          # branch and lint only the files this PR changes (see the clang-tidy
+          # step). Push-to-main runs tidy the whole tree regardless.
+          fetch-depth: 0
 
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
@@ -489,10 +493,33 @@ jobs:
       # Tidy src + every example except the vendored thorvg_janitor tree
       # (has its own LICENSE and tracks upstream; pruning it here matches
       # the -isystem rationale for {fmt}).
+      #
+      # Parallelized across all runner cores (xargs -P), and on pull_request
+      # only the .cpp files the PR changes are tidied — the push-to-main run
+      # re-tidies the whole tree as the regression net, so cross-file breakage a
+      # changed-files pass can't see is still caught on merge. This turns a
+      # ~20-30 min serial full-tree gate into seconds for a typical PR.
       - name: clang-tidy
         run: |
-          find src examples -name '*.cpp' -not -path 'examples/scene/thorvg_janitor/*' | \
-            xargs clang-tidy-19 -p builddir
+          set -euo pipefail
+          jobs="$(nproc)"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_ref="origin/${{ github.base_ref }}"
+            git fetch --no-tags --quiet origin "${{ github.base_ref }}"
+            mapfile -t files < <(git diff --name-only --diff-filter=d "${base_ref}...HEAD" \
+              | grep -E '\.cpp$' \
+              | grep -v '^examples/scene/thorvg_janitor/' || true)
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "clang-tidy: no changed .cpp files to lint"
+              exit 0
+            fi
+            printf 'clang-tidy: %d changed file(s), %s job(s)\n' "${#files[@]}" "$jobs"
+            printf '%s\n' "${files[@]}" | xargs -P "$jobs" -n 1 clang-tidy-19 -p builddir
+          else
+            echo "clang-tidy: full tree, $jobs job(s)"
+            find src examples -name '*.cpp' -not -path 'examples/scene/thorvg_janitor/*' \
+              | xargs -P "$jobs" -n 1 clang-tidy-19 -p builddir
+          fi
 
       - name: clang-format
         run: |
