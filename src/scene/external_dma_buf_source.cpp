@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <sys/ioctl.h>
 #include <system_error>
 #include <unistd.h>
@@ -188,6 +189,9 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufSource::acquire() {
   AcquiredBuffer acq;
   acq.fb_id = fb_id_;
   acq.opaque = nullptr;
+  // Hand back the producer's render-done fence (if any) and clear the slot so a
+  // re-acquire without a fresh render doesn't re-submit a stale/empty fence.
+  acq.acquire_fence = std::exchange(pending_fence_, std::nullopt);
   return acq;
 }
 

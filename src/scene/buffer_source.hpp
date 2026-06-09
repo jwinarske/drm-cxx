@@ -34,8 +34,10 @@
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <system_error>
 
 namespace drm {
@@ -82,18 +84,27 @@ struct SourceFormat {
 /// For `BindingModel::DriverOwnsBinding` sources (v2, unimplemented):
 ///   * `fb_id` must be 0 — the scene skips FB_ID writes.
 ///
-/// Fence import (`IN_FENCE_FD` plane property) is deliberately not part
-/// of this contract today. Every shipped source produces ready buffers
-/// synchronously (V4L2 stateful decoders, GBM front-buffer queues,
-/// dumb buffers, libcamera-imported DMA-BUFs), so no caller is owed a
-/// sync_file plumb. When a fence-producing source lands — Vulkan
-/// OUT_FENCE export, a real V4L2 fence-aware decoder, etc. — wire
-/// `IN_FENCE_FD` through `LayerScene::lower_layer` together with a
-/// retire-side close path; do not add a field here without a consumer
-/// + test rig to validate the close discipline.
+/// `acquire_fence` is an optional render-done sync_file: the buffer's
+/// pixels are only valid once it signals. Set it when the source's
+/// producer renders asynchronously (e.g. VkScanoutProducer exporting a
+/// semaphore as a sync_file) instead of CPU-blocking before returning.
+/// The scene takes ownership: when the assigned plane advertises
+/// `IN_FENCE_FD`, the scene hands the fd to KMS so the kernel waits
+/// before scanout; otherwise it CPU-`wait()`s the fence before commit.
+/// Either way the SyncFence rides this buffer's lifecycle and closes the
+/// fd when the buffer is released or dropped — the kernel does not take
+/// ownership of `IN_FENCE_FD`. Sources that produce ready buffers
+/// synchronously (dumb, GBM, V4L2, imported DMA-BUFs) leave it nullopt.
+///
+/// NOTE: a CPU-mappable fenced source must `wait()` before `map()` for
+/// composition fallback to read complete pixels; the only fenced source
+/// today (ExternalDmaBufSource) is uncompositable, so this is deferred.
+///
+/// Carrying a move-only SyncFence makes AcquiredBuffer move-only.
 struct AcquiredBuffer {
   std::uint32_t fb_id{0};
   void* opaque{nullptr};
+  std::optional<drm::sync::SyncFence> acquire_fence;
 };
 
 /// Polymorphic interface for "where does this layer's content come

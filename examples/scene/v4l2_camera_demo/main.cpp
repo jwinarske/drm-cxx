@@ -458,7 +458,7 @@ int main(int argc, char* argv[]) {
       }
       auto acq = cam_source->acquire();
       if (acq.has_value()) {
-        cam_source->release(*acq);
+        cam_source->release(std::move(*acq));
         got_first = true;
         break;
       }

@@ -256,7 +256,7 @@ TEST_F(GstVkmsFixture, AcquiresSysmemSampleEndToEnd) {
 
   // release() is a no-op for this source — exercise it anyway so the
   // contract test isn't a documentation lie.
-  src->release(*acquired);
+  src->release(std::move(*acquired));
 }
 
 TEST_F(GstVkmsFixture, HandlesCapsChangeMidStream) {

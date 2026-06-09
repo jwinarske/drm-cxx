@@ -16,6 +16,7 @@
 #include <drm-cxx/log.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <drm_fourcc.h>
 #include <vulkan/vulkan.hpp>
@@ -95,6 +96,11 @@ struct VkScanoutProducer::Impl {
   vk::DeviceMemory memory;
   vk::Extent2D extent;
   bool first_frame{true};
+  // Non-owning: the scene owns the source; the producer outlives the scene
+  // (its VkImage memory backs the dmabuf), so this stays valid.
+  scene::ExternalDmaBufSource* vk_source{nullptr};
+  vk::Semaphore export_sem;  // signaled by each render submit, exported as sync_file
+  vk::Fence reuse_fence;     // CPU-waited before re-recording (image + cmd reuse)
 
   ~Impl() {
     try {
@@ -105,6 +111,12 @@ struct VkScanoutProducer::Impl {
         }
         if (memory) {
           device.freeMemory(memory);
+        }
+        if (export_sem) {
+          device.destroySemaphore(export_sem);
+        }
+        if (reuse_fence) {
+          device.destroyFence(reuse_fence);
         }
         if (cmd_pool) {
           device.destroyCommandPool(cmd_pool);
@@ -149,7 +161,11 @@ drm::expected<std::unique_ptr<VkScanoutProducer>, std::error_code> VkScanoutProd
         vk::InstanceCreateInfo{}.setPApplicationInfo(&app).setPEnabledExtensionNames(inst_exts));
     VULKAN_HPP_DEFAULT_DISPATCHER.init(impl->instance);
 
+    vk::PhysicalDevice cross_device_fallback;
     for (const vk::PhysicalDevice& candidate : impl->instance.enumeratePhysicalDevices()) {
+      if (!cross_device_fallback) {
+        cross_device_fallback = candidate;  // first Vulkan device (the GPU)
+      }
       auto chain =
           candidate
               .getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDrmPropertiesEXT>();
@@ -161,8 +177,21 @@ drm::expected<std::unique_ptr<VkScanoutProducer>, std::error_code> VkScanoutProd
       }
     }
     if (!impl->physical) {
-      drm::log_warn("VkScanoutProducer: no Vulkan device matches DRM node {}:{}", want_major,
-                    want_minor);
+      // No Vulkan device drives this KMS node. On a split render/display SoC
+      // (e.g. RK3588: PanVK on the panthor render node, scanout on rockchip) the
+      // GPU is a separate device — render on it and let the buffer cross to the
+      // KMS device as a dmabuf (ExternalDmaBufSource imports it on impl->dev).
+      // Cross-device scanout usually needs a LINEAR / otherwise-common modifier;
+      // the backend's negotiation against the plane's IN_FORMATS handles that.
+      impl->physical = cross_device_fallback;
+      if (impl->physical) {
+        drm::log_info(
+            "VkScanoutProducer: no Vulkan device for KMS node {}:{}; using a separate render "
+            "device (cross-device scanout via dmabuf)",
+            want_major, want_minor);
+      }
+    }
+    if (!impl->physical) {
       return drm::unexpected<std::error_code>(err(std::errc::no_such_device));
     }
 
@@ -182,9 +211,10 @@ drm::expected<std::unique_ptr<VkScanoutProducer>, std::error_code> VkScanoutProd
 
     const float prio = 1.0F;
     const vk::DeviceQueueCreateInfo qci{{}, qf, 1, &prio};
-    const std::array<const char*, 4> dev_exts{"VK_KHR_external_memory", "VK_KHR_external_memory_fd",
-                                              "VK_EXT_external_memory_dma_buf",
-                                              "VK_EXT_image_drm_format_modifier"};
+    const std::array<const char*, 6> dev_exts{
+        "VK_KHR_external_memory",         "VK_KHR_external_memory_fd",
+        "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier",
+        "VK_KHR_external_semaphore",      "VK_KHR_external_semaphore_fd"};
     impl->device = impl->physical.createDevice(
         vk::DeviceCreateInfo{}.setQueueCreateInfos(qci).setPEnabledExtensionNames(dev_exts));
     VULKAN_HPP_DEFAULT_DISPATCHER.init(impl->device);
@@ -196,6 +226,14 @@ drm::expected<std::unique_ptr<VkScanoutProducer>, std::error_code> VkScanoutProd
                     .allocateCommandBuffers(vk::CommandBufferAllocateInfo{
                         impl->cmd_pool, vk::CommandBufferLevel::ePrimary, 1})
                     .front();
+
+    // A semaphore signaled by each render submit and exported as a sync_file
+    // (the acquire fence KMS waits on), plus a fence for the CPU reuse-wait.
+    vk::StructureChain<vk::SemaphoreCreateInfo, vk::ExportSemaphoreCreateInfo> sem_chain{
+        vk::SemaphoreCreateInfo{},
+        vk::ExportSemaphoreCreateInfo{vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd}};
+    impl->export_sem = impl->device.createSemaphore(sem_chain.get<vk::SemaphoreCreateInfo>());
+    impl->reuse_fence = impl->device.createFence(vk::FenceCreateInfo{});
   } catch (const std::exception& e) {
     drm::log_warn("VkScanoutProducer::create: {}", e.what());
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
@@ -330,6 +368,8 @@ VkScanoutProducer::create_buffer(std::uint32_t width, std::uint32_t height, std:
     return drm::unexpected<std::error_code>(source.error());
   }
   impl_->extent = vk::Extent2D{width, height};
+  // Keep a non-owning handle so render_clear can stash the acquire fence on it.
+  impl_->vk_source = (*source).get();
   return std::unique_ptr<scene::LayerBufferSource>(std::move(*source));
 }
 
@@ -338,6 +378,14 @@ drm::expected<void, std::error_code> VkScanoutProducer::render_clear(std::array<
     return drm::unexpected<std::error_code>(err(std::errc::not_connected));
   }
   try {
+    if (!impl_->first_frame) {
+      // Wait for the previous submit before reusing the command buffer and
+      // re-rendering into the single image (buffer-reuse safety; OUT_FENCE-gated
+      // double-buffering is a follow-up). This is a 1-frame-behind CPU gate, not
+      // a wait on the current frame — the commit still overlaps this submit.
+      (void)impl_->device.waitForFences(impl_->reuse_fence, VK_TRUE, UINT64_MAX);
+      impl_->device.resetFences(impl_->reuse_fence);
+    }
     impl_->cmd.reset();
     impl_->cmd.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
@@ -358,8 +406,26 @@ drm::expected<void, std::error_code> VkScanoutProducer::render_clear(std::array<
     impl_->cmd.clearColorImage(impl_->image, vk::ImageLayout::eGeneral, clear, range);
     impl_->cmd.end();
 
-    impl_->queue.submit(vk::SubmitInfo{}.setCommandBuffers(impl_->cmd));
-    impl_->queue.waitIdle();
+    // Submit WITHOUT a CPU wait: signal the export semaphore (-> sync_file the
+    // scene hands KMS as IN_FENCE_FD) and the reuse fence (next-frame gate).
+    impl_->queue.submit(
+        vk::SubmitInfo{}.setCommandBuffers(impl_->cmd).setSignalSemaphores(impl_->export_sem),
+        impl_->reuse_fence);
+
+    // Export the semaphore's pending signal as a sync_file and stash it on the
+    // source as this frame's acquire fence. import_fd dups, so close ours.
+    const int sem_fd = impl_->device.getSemaphoreFdKHR(vk::SemaphoreGetFdInfoKHR{
+        impl_->export_sem, vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd});
+    auto fence = drm::sync::SyncFence::import_fd(sem_fd);
+    if (sem_fd >= 0) {
+      ::close(sem_fd);
+    }
+    if (fence && (impl_->vk_source != nullptr)) {
+      impl_->vk_source->set_acquire_fence(std::move(*fence));
+    } else if (!fence) {
+      drm::log_warn("VkScanoutProducer::render_clear: sync_file import failed: {}",
+                    fence.error().message());
+    }
     impl_->first_frame = false;
   } catch (const std::exception& e) {
     drm::log_warn("VkScanoutProducer::render_clear: {}", e.what());

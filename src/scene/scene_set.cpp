@@ -50,7 +50,7 @@ class SharedLayerBufferSource final : public LayerBufferSource {
   [[nodiscard]] drm::expected<AcquiredBuffer, std::error_code> acquire() override {
     return inner_->acquire();
   }
-  void release(AcquiredBuffer acquired) noexcept override { inner_->release(acquired); }
+  void release(AcquiredBuffer acquired) noexcept override { inner_->release(std::move(acquired)); }
   [[nodiscard]] BindingModel binding_model() const noexcept override {
     return inner_->binding_model();
   }

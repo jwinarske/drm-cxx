@@ -44,7 +44,9 @@ class ProxyBufferSource : public scene::LayerBufferSource {
   [[nodiscard]] drm::expected<scene::AcquiredBuffer, std::error_code> acquire() override {
     return inner_->acquire();
   }
-  void release(scene::AcquiredBuffer acquired) noexcept override { inner_->release(acquired); }
+  void release(scene::AcquiredBuffer acquired) noexcept override {
+    inner_->release(std::move(acquired));
+  }
   [[nodiscard]] scene::BindingModel binding_model() const noexcept override {
     return inner_->binding_model();
   }

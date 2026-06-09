@@ -44,6 +44,7 @@ set(DRM_CXX_TESTS
   test_buffer_ring
   test_scanout_target
   test_driver_profile
+  test_acquire_fence
   test_log)
 
 if(DRM_CXX_HAS_XCURSOR)

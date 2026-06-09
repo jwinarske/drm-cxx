@@ -273,7 +273,7 @@ TEST_F(VicodecFixture, SubmitAndDriveDoesNotError) {
     auto acq_r = src->acquire();
     if (acq_r.has_value()) {
       EXPECT_NE(acq_r->fb_id, 0U);
-      src->release(*acq_r);
+      src->release(std::move(*acq_r));
       acquired = true;
       break;
     }

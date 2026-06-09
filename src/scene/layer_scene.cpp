@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -422,7 +423,7 @@ class LayerScene::Impl {
       const auto scrub = [&](std::vector<AcquisitionSlot>& ring) {
         for (auto& a : ring) {
           if (a.scene_layer == dying) {
-            a.scene_layer->source().release(a.buffer);
+            a.scene_layer->source().release(std::move(a.buffer));
             a.scene_layer = nullptr;
           }
         }
@@ -921,8 +922,8 @@ class LayerScene::Impl {
                       slot.scene_layer->handle().id, acq.error().message());
         return drm::unexpected<std::error_code>(acq.error());
       }
-      out.push_back(AcquisitionSlot{slot.scene_layer.get(), slot.planes_layer, *acq, std::nullopt,
-                                    slot.stream_pinned_plane_id});
+      out.push_back(AcquisitionSlot{slot.scene_layer.get(), slot.planes_layer, std::move(*acq),
+                                    std::nullopt, slot.stream_pinned_plane_id});
     }
     return {};
   }
@@ -930,7 +931,7 @@ class LayerScene::Impl {
   static void release_all(std::vector<AcquisitionSlot>& acquisitions) noexcept {
     for (auto& a : acquisitions) {
       if (a.scene_layer != nullptr) {
-        a.scene_layer->source().release(a.buffer);
+        a.scene_layer->source().release(std::move(a.buffer));
       }
     }
     acquisitions.clear();
@@ -1822,6 +1823,41 @@ class LayerScene::Impl {
     }
   }
 
+  // Wire each natively-placed layer's acquire fence to its plane. When the
+  // plane advertises IN_FENCE_FD, hand the sync_file to KMS so the kernel waits
+  // on the producer's render before scanning out; otherwise CPU-wait the fence
+  // here so we never scan out a half-rendered buffer (correct on drivers without
+  // IN_FENCE_FD). The SyncFence stays in the AcquiredBuffer and closes on buffer
+  // release — the kernel does not take ownership of IN_FENCE_FD. The CPU-wait
+  // fallback runs only on the real commit; TEST_ONLY never scans out.
+  drm::expected<void, std::error_code> arm_layer_acquire_fences(
+      const std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
+      CommitReport& report, bool test_only) {
+    for (const auto& acq : acquisitions) {
+      if (!acq.buffer.acquire_fence.has_value()) {
+        continue;
+      }
+      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        continue;  // composited/dropped: the buffer's lifecycle owns the fence
+      }
+      const auto fence_fd = static_cast<std::uint64_t>(acq.buffer.acquire_fence->fd());
+      const auto prop_id = props_.property_id(*plane_id, "IN_FENCE_FD");
+      if (prop_id.has_value() && !props_.is_immutable(*plane_id, "IN_FENCE_FD").value_or(false)) {
+        if (auto r = req.add_property(*plane_id, *prop_id, fence_fd); !r) {
+          return r;
+        }
+        ++report.properties_written;
+      } else if (!test_only) {
+        if (auto r = acq.buffer.acquire_fence->wait(std::chrono::seconds(1)); !r) {
+          drm::log_warn("scene::LayerScene: acquire-fence CPU wait failed: {}",
+                        r.error().message());
+        }
+      }
+    }
+    return {};
+  }
+
   // For every layer the allocator placed natively, write the plane's
   // `COLOR_ENCODING` and `COLOR_RANGE` properties to the layer's
   // override (when set) or to the scene's default of BT.709 + Limited.
@@ -2562,6 +2598,9 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
 
   arm_layer_plane_blend_defaults(acquisitions, req, report, test_only);
   arm_layer_plane_color_props(acquisitions, req, report, test_only);
+  if (auto r = arm_layer_acquire_fences(acquisitions, req, report, test_only); !r) {
+    return drm::unexpected<std::error_code>(r.error());
+  }
 
   // rescue unassigned layers via CPU composition before
   // counting them as dropped. compose_unassigned() updates

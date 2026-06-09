@@ -48,6 +48,13 @@ test('test_driver_profile',
   ),
 )
 
+test('test_acquire_fence',
+  executable('test_acquire_fence',
+    'unit/test_acquire_fence.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_property_store',
   executable('test_property_store',
     'unit/test_property_store.cpp',
