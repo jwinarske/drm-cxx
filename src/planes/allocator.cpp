@@ -11,6 +11,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/fmt/format_mod.hpp>
 
 #include <drm_mode.h>
 #include <xf86drmMode.h>
@@ -745,6 +746,20 @@ const Layer* Allocator::pick_most_constrained(const std::vector<Layer*>& layers,
   return worst;
 }
 
+// Power-aware placement bonus by buffer modifier bandwidth class. Exposed (not
+// in the anonymous namespace) so the mapping is unit-testable. See score_pair.
+int bandwidth_class_bonus(std::uint64_t modifier) noexcept {
+  switch (drm::fmt::classify(drm::fmt::Modifier{modifier})) {
+    case drm::fmt::BandwidthClass::Compression:
+      return 2;  // DCC / AFBC / UBWC — biggest bandwidth + GPU-decompress saving
+    case drm::fmt::BandwidthClass::Tiling:
+      return 1;  // better DRAM locality, same byte count
+    case drm::fmt::BandwidthClass::Linear:
+      return 0;
+  }
+  return 0;
+}
+
 int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) const {
   int s = 0;
 
@@ -794,6 +809,16 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
         z.has_value() && !plane.zpos_min.has_value() && *z > 0) {
       s += 8;
     }
+  }
+
+  // Power-aware bias: scanning a compressed/tiled buffer out directly saves the
+  // most — a composition pass would force the GPU to decompress (and re-encode)
+  // it, where a LINEAR layer composites cheaply. So when planes are contested,
+  // nudge the matcher to keep bandwidth-heavy layers on planes and composite the
+  // cheap LINEAR ones. A small tiebreak below the structural scores; the atomic
+  // TEST_ONLY during placement remains the correctness arbiter.
+  if (layer.format().has_value()) {
+    s += bandwidth_class_bonus(layer.modifier());
   }
 
   // §13.6 Content-type priority

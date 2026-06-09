@@ -30,6 +30,13 @@ class AtomicRequest;
 
 namespace drm::planes {
 
+/// Power-aware placement bonus for a buffer's modifier bandwidth class:
+/// Compression → 2, Tiling → 1, Linear → 0. Folded into `score_pair` so the
+/// matcher keeps compressed/tiled layers on planes (compositing them costs a GPU
+/// decompress) and composites the cheap LINEAR ones when planes are contested.
+/// A small tiebreak below the structural scores. Exposed for unit testing.
+[[nodiscard]] int bandwidth_class_bonus(std::uint64_t modifier) noexcept;
+
 struct CandidatePair {
   const PlaneCapabilities* plane;
   Layer* layer;
