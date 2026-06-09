@@ -110,6 +110,9 @@ ninja -C builddir
 meson test -C builddir
 ```
 
+The KMS integration tests skip unless a DRM device is present; to run them
+against virtual KMS, load vkms with overlay planes — see [`tests/README.md`](tests/README.md).
+
 CMake:
 
 ```sh
