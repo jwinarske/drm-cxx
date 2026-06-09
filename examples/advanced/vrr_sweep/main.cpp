@@ -35,13 +35,16 @@
 #include <xf86drmMode.h>
 
 #include <array>
+#include <cerrno>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <sched.h>
 #include <string_view>
+#include <sys/mman.h>
 #include <system_error>
 #include <time.h>  // NOLINT(modernize-deprecated-headers) — POSIX clock_nanosleep/CLOCK_MONOTONIC live here
 #include <utility>
@@ -83,6 +86,27 @@ std::optional<drm::display::VrefreshRange> edid_range(int fd, std::uint32_t conn
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (static_cast<std::uint64_t>(ts.tv_sec) * 1'000'000'000ULL) +
          static_cast<std::uint64_t>(ts.tv_nsec);
+}
+
+// Pin pages + run at real-time priority so the harness's own pacing jitter
+// (clock_nanosleep wakeup + commit scheduling) drops below the panel's VRR
+// behavior, making a VRR-on vs control difference measurable. Needs CAP_SYS_NICE
+// (run as root); best-effort, reports why it failed.
+bool engage_realtime() {
+  if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+    drm::println(stderr, "vrr_sweep: mlockall failed: {} (run as root for --rt)",
+                 std::strerror(errno));
+    return false;
+  }
+  // NOLINTNEXTLINE(misc-include-cleaner) — sched_param / SCHED_FIFO via <sched.h>
+  struct sched_param sp{};
+  sp.sched_priority = sched_get_priority_max(SCHED_FIFO) / 2;
+  if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0) {
+    drm::println(stderr, "vrr_sweep: sched_setscheduler(SCHED_FIFO) failed: {}",
+                 std::strerror(errno));
+    return false;
+  }
+  return true;
 }
 
 // Parse "WxH@R" (e.g. "1920x1080@120").
@@ -136,6 +160,7 @@ bool apply_mode(int fd, std::uint32_t connector_id, std::string_view spec, drmMo
 
 int main(int argc, char** argv) {
   bool want_vrr = false;
+  bool want_rt = false;
   std::string_view mode_str;
   {
     int write = 1;
@@ -143,6 +168,8 @@ int main(int argc, char** argv) {
       const std::string_view a{argv[i]};
       if (a == "--vrr") {
         want_vrr = true;
+      } else if (a == "--rt") {
+        want_rt = true;
       } else if (a == "--mode" && (i + 1) < argc) {
         mode_str = argv[++i];
       } else {
@@ -162,6 +189,10 @@ int main(int argc, char** argv) {
   // track up to the mode's max, so a 4K30 preferred mode pins the sweep at 30.
   if (!mode_str.empty() && !apply_mode(dev.fd(), output->connector_id, mode_str, output->mode)) {
     return EXIT_FAILURE;
+  }
+  if (want_rt) {
+    drm::println("vrr_sweep: RT pacing {}",
+                 engage_realtime() ? "engaged (SCHED_FIFO + mlockall)" : "not engaged");
   }
   const std::uint32_t w = output->mode.hdisplay;
   const std::uint32_t h = output->mode.vdisplay;
