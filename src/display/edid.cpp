@@ -13,6 +13,7 @@
 #include <system_error>
 
 extern "C" {
+#include <libdisplay-info/edid.h>
 #include <libdisplay-info/info.h>
 }
 
@@ -88,6 +89,31 @@ void populate_wide_gamut(ConnectorInfo& out, const struct di_info* info) {
   out.wide_gamut = w;
 }
 
+// Pull the vertical-refresh range from the EDID Display Range Limits descriptor
+// (tag 0xFD). For a VRR panel this is its adaptive-sync range. Walks the
+// NULL-terminated descriptor list for the range-limits one.
+void populate_range_limits(ConnectorInfo& out, const struct di_info* info) {
+  const struct di_edid* edid = di_info_get_edid(info);
+  if (edid == nullptr) {
+    return;
+  }
+  const struct di_edid_display_descriptor* const* descs = di_edid_get_display_descriptors(edid);
+  if (descs == nullptr) {
+    return;
+  }
+  for (std::size_t i = 0; descs[i] != nullptr; ++i) {
+    if (di_edid_display_descriptor_get_tag(descs[i]) != DI_EDID_DISPLAY_DESCRIPTOR_RANGE_LIMITS) {
+      continue;
+    }
+    const struct di_edid_display_range_limits* rl =
+        di_edid_display_descriptor_get_range_limits(descs[i]);
+    if (rl != nullptr && rl->max_vert_rate_hz > 0) {
+      out.vrefresh_range = VrefreshRange{rl->min_vert_rate_hz, rl->max_vert_rate_hz};
+    }
+    return;
+  }
+}
+
 }  // namespace
 
 drm::expected<ConnectorInfo, std::error_code> parse_edid(drm::span<const uint8_t> edid_blob) {
@@ -112,6 +138,7 @@ drm::expected<ConnectorInfo, std::error_code> parse_edid(drm::span<const uint8_t
   populate_colorimetry(result, info);
   populate_hdr(result, info);
   populate_wide_gamut(result, info);
+  populate_range_limits(result, info);
 
   di_info_destroy(info);
   return result;
