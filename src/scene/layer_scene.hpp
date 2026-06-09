@@ -43,6 +43,10 @@ class AtomicRequest;
 class Device;
 }  // namespace drm
 
+namespace drm::sync {
+class SyncFence;
+}  // namespace drm::sync
+
 namespace drm::display {
 struct HdrSourceMetadata;
 }  // namespace drm::display
@@ -227,8 +231,14 @@ class LayerScene {
   /// verbatim to drmModeAtomicCommit — the kernel routes it back as the
   /// user_data arg of page_flip_handler{,2} when the flip completes, so
   /// callers typically pass their PageFlip* here.
-  [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(std::uint32_t flags = 0,
-                                                                    void* user_data = nullptr);
+  /// `out_fence` (opt-in): when non-null and the CRTC advertises OUT_FENCE_PTR,
+  /// the real commit fills it with a sync_file that signals once this frame is
+  /// scanned out. The caller owns it (it closes the fd) and typically waits on
+  /// it before reusing the just-committed buffer. Left untouched on test commits
+  /// or drivers without OUT_FENCE_PTR.
+  [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(
+      std::uint32_t flags = 0, void* user_data = nullptr,
+      drm::sync::SyncFence* out_fence = nullptr);
 
   // ── SceneSet integration (advanced) ─────────────────────────────────
   //

@@ -110,8 +110,9 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
   return create(dev, producer, Config{});
 }
 
-drm::expected<scene::CommitReport, std::error_code> ScanoutBackend::present(std::uint32_t flags) {
-  return scene_->commit(flags);
+drm::expected<scene::CommitReport, std::error_code> ScanoutBackend::present(
+    std::uint32_t flags, drm::sync::SyncFence* out_fence) {
+  return scene_->commit(flags, nullptr, out_fence);
 }
 
 }  // namespace drm::present
