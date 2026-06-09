@@ -5,7 +5,8 @@ cmake_minimum_required(VERSION 3.21)
 project(drm-cxx
   VERSION 1.0.0
   DESCRIPTION "C++17 DRM/KMS library"
-  LANGUAGES CXX)
+  # C is for the vendored X11-free .xcursor loader (third_party/xcursor-mini).
+  LANGUAGES C CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
   message(FATAL_ERROR "drm-cxx requires Linux (DRM/KMS/GBM).")
@@ -223,25 +224,15 @@ if(NOT DRM_CXX_HAS_EGL_STREAMS AND NOT DRM_CXX_STREAMS STREQUAL "OFF")
   message(STATUS "drm-cxx: EGL headers not found — drm::scene EGL Streams support will be a runtime no-op")
 endif()
 
-# libxcursor probe for drm::cursor.
+# drm::cursor's .xcursor loader is vendored, X11-free, and static
+# (third_party/xcursor-mini) — no system libxcursor / X11 chain. The
+# feature is available unless explicitly turned off; the vendored
+# XcursorImage carries the `delay` field.
 if(NOT DRM_CXX_CURSOR STREQUAL "OFF")
-  if(DRM_CXX_CURSOR STREQUAL "ON")
-    pkg_check_modules(xcursor REQUIRED IMPORTED_TARGET xcursor)
-  else()
-    pkg_check_modules(xcursor IMPORTED_TARGET xcursor)
-  endif()
-  _drm_cxx_promote_system_includes(PkgConfig::xcursor)
-endif()
-if(TARGET PkgConfig::xcursor)
   set(DRM_CXX_HAS_XCURSOR 1)
-  include(CheckStructHasMember)
-  set(CMAKE_REQUIRED_INCLUDES ${xcursor_INCLUDE_DIRS})
-  check_struct_has_member("XcursorImage" delay "X11/Xcursor/Xcursor.h"
-    DRM_CXX_HAS_XCURSOR_DELAY LANGUAGE CXX)
-  unset(CMAKE_REQUIRED_INCLUDES)
+  set(DRM_CXX_HAS_XCURSOR_DELAY 1)
 else()
   set(DRM_CXX_HAS_XCURSOR 0)
-  message(STATUS "drm-cxx: libxcursor not found — drm::cursor will not be built")
 endif()
 
 # Blend2D probe for drm::capture (and future drm::csd). Upstream Blend2D

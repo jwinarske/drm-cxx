@@ -60,6 +60,16 @@ class Cursor {
                                                                    std::string_view preferred_theme,
                                                                    std::uint32_t requested_size);
 
+  /// Build a static (single-frame) cursor from caller-provided pixels —
+  /// the in-process fallback when no XCursor theme is installed. `pixels`
+  /// is ARGB8888, tightly packed, row-major, exactly `width * height`
+  /// entries; it is copied into the Cursor's own storage (the caller's
+  /// buffer is not aliased). Fails with std::errc::invalid_argument on a
+  /// zero/oversize dimension or a pixel-count mismatch.
+  [[nodiscard]] static drm::expected<Cursor, std::error_code> from_argb(
+      drm::span<const std::uint32_t> pixels, std::uint32_t width, std::uint32_t height, int xhot,
+      int yhot);
+
   Cursor(Cursor&&) noexcept;
   Cursor& operator=(Cursor&&) noexcept;
   Cursor(const Cursor&) = delete;

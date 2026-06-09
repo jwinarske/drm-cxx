@@ -258,3 +258,35 @@ TEST_F(CursorTest, FramesAreContiguouslyBacked) {
   const auto& f1 = c->at(1);
   EXPECT_EQ(f0.pixels.data() + f0.pixels.size(), f1.pixels.data());
 }
+
+TEST_F(CursorTest, FromArgbBuildsStaticCursor) {
+  // 2x2 ARGB sprite with hotspot (1,0): the themeless in-process fallback.
+  const std::vector<std::uint32_t> px = {0xff0000ffU, 0xff00ff00U, 0xffff0000U, 0xffffffffU};
+  auto c = drm::cursor::Cursor::from_argb(drm::span<const std::uint32_t>(px.data(), px.size()), 2,
+                                          2, 1, 0);
+  ASSERT_TRUE(c.has_value());
+  EXPECT_EQ(c->frame_count(), 1U);
+  EXPECT_FALSE(c->animated());
+
+  const auto& f = c->first();
+  EXPECT_EQ(f.width, 2U);
+  EXPECT_EQ(f.height, 2U);
+  EXPECT_EQ(f.xhot, 1);
+  EXPECT_EQ(f.yhot, 0);
+  ASSERT_EQ(f.pixels.size(), px.size());
+  // Pixels are copied into the Cursor's own storage, not aliasing the caller.
+  EXPECT_NE(f.pixels.data(), px.data());
+  EXPECT_EQ(f.pixels[0], 0xff0000ffU);
+  EXPECT_EQ(f.pixels[3], 0xffffffffU);
+}
+
+TEST_F(CursorTest, FromArgbRejectsBadDimensions) {
+  const std::vector<std::uint32_t> px(4, 0xffffffffU);
+  const drm::span<const std::uint32_t> sp(px.data(), px.size());
+  // pixel-count mismatch (4 pixels declared as 2x3).
+  EXPECT_FALSE(drm::cursor::Cursor::from_argb(sp, 2, 3, 0, 0).has_value());
+  // zero area.
+  EXPECT_FALSE(drm::cursor::Cursor::from_argb(sp, 0, 0, 0, 0).has_value());
+  // oversize dimension (> 512 guard).
+  EXPECT_FALSE(drm::cursor::Cursor::from_argb(sp, 513, 1, 0, 0).has_value());
+}

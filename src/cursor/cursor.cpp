@@ -6,8 +6,8 @@
 #include "detail/expected.hpp"
 #include "detail/span.hpp"
 #include "theme.hpp"
+#include "xcursor.h"  // vendored, X11-free .xcursor loader (third_party/xcursor-mini)
 
-#include <X11/Xcursor/Xcursor.h>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -134,6 +134,36 @@ drm::expected<Cursor, std::error_code> Cursor::load(const Theme& theme,
     return drm::unexpected<std::error_code>(resolved.error());
   }
   return load(*resolved, requested_size);
+}
+
+drm::expected<Cursor, std::error_code> Cursor::from_argb(drm::span<const std::uint32_t> pixels,
+                                                         std::uint32_t width, std::uint32_t height,
+                                                         int xhot, int yhot) {
+  // Same dimension guard as load(): a zero-area or oversize sprite is a
+  // caller bug, surfaced as a load error rather than a render-time surprise.
+  constexpr std::uint32_t k_max_dim = 512;
+  if (width == 0 || height == 0 || width > k_max_dim || height > k_max_dim) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+  const std::size_t n = static_cast<std::size_t>(width) * height;
+  if (pixels.size() != n) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+
+  // Copy into the Cursor's own contiguous storage; the single Frame spans
+  // it (same ownership model as load()). cycle stays 0 -> animated() false.
+  auto impl = std::make_unique<Impl>();
+  impl->pixel_storage.resize(n);
+  std::memcpy(impl->pixel_storage.data(), pixels.data(), n * sizeof(std::uint32_t));
+  impl->frames.push_back(Frame{
+      drm::span<const std::uint32_t>(impl->pixel_storage.data(), n),
+      width,
+      height,
+      xhot,
+      yhot,
+      std::chrono::milliseconds(0),
+  });
+  return Cursor(std::move(impl));
 }
 
 const Frame& Cursor::first() const noexcept {
