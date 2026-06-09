@@ -59,11 +59,21 @@ struct SupportedColorimetry {
   bool ictcp{false};       // BT.2100 ICtCp HDR (with PQ and/or HLG)
 };
 
+// EDID display range limits — the panel's vertical-refresh range in Hz, from
+// the EDID Display Range Limits descriptor (tag 0xFD). For a variable-refresh
+// panel this is its VRR range (e.g. 40–90 on the Steam Deck OLED); for a
+// fixed-rate panel min==max. nullopt when the EDID carries no range descriptor.
+struct VrefreshRange {
+  int min_hz{0};
+  int max_hz{0};
+};
+
 struct ConnectorInfo {
   std::string name;
   std::optional<ColorimetryInfo> colorimetry;
   std::optional<HdrStaticMetadata> hdr;
   std::optional<SupportedColorimetry> wide_gamut;
+  std::optional<VrefreshRange> vrefresh_range;
 };
 
 }  // namespace drm::display

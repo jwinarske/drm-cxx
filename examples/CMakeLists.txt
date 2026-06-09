@@ -147,6 +147,11 @@ add_executable(idle_present advanced/idle_present/main.cpp)
 target_link_libraries(idle_present PRIVATE drm-cxx::drm-cxx)
 target_include_directories(idle_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# vrr_sweep — VRR refresh-tracking measurement harness.
+add_executable(vrr_sweep advanced/vrr_sweep/main.cpp)
+target_link_libraries(vrr_sweep PRIVATE drm-cxx::drm-cxx)
+target_include_directories(vrr_sweep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # stream_probe — diagnostic CLI for drm::scene::probe_stream_capability.
 # Dumps the per-device EGL Streams capability shape so users can verify
 # whether their system can host an EglStreamSource. Independent of
