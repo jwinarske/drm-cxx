@@ -463,6 +463,14 @@ class LayerScene::Impl {
       std::uint32_t caller_flags, bool test_only, void* user_data,
       drm::sync::SyncFence* out_fence) {
     drm::AtomicRequest req(*dev_);
+    // Any FB_DAMAGE_CLIPS blobs armed during build are ephemeral: the kernel
+    // copies the damage into plane state at commit time, so destroy them on
+    // every exit (success, suspended, or error) once this commit is done.
+    struct BlobScope {
+      Impl* self;
+      ~BlobScope() { self->destroy_ephemeral_blobs(); }
+    };
+    const BlobScope blob_scope{this};
     if (!req.valid()) {
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
     }
@@ -1883,6 +1891,83 @@ class LayerScene::Impl {
     return {};
   }
 
+  // For every natively-placed layer whose acquired buffer carries a per-frame
+  // damage list, emit FB_DAMAGE_CLIPS on its plane so the driver repaints only
+  // the dirty region. Guardrails (both from the frame-economy plan):
+  //   * Empty damage == full-frame -> no blob, no property (the Full path must
+  //     pay nothing — a near-full repaint gains nothing from a damage blob).
+  //   * Over a small rect bound -> degrade to full-frame, keeping the per-commit
+  //     union O(small).
+  //   * Plane/driver without FB_DAMAGE_CLIPS -> silently skip (full-frame).
+  // Each blob is ephemeral: created here, destroyed after the commit consumes it
+  // (see destroy_ephemeral_blobs / the do_commit guard).
+  drm::expected<void, std::error_code> arm_layer_damage_clips(
+      const std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
+      CommitReport& report) {
+    constexpr std::size_t k_max_damage_rects = 16;
+    for (const auto& acq : acquisitions) {
+      if (acq.buffer.damage.empty() || acq.buffer.damage.size() > k_max_damage_rects) {
+        continue;
+      }
+      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        continue;  // composited/dropped: nothing to annotate
+      }
+      const auto prop_id = props_.property_id(*plane_id, "FB_DAMAGE_CLIPS");
+      if (!prop_id.has_value()) {
+        continue;  // driver/plane without the property: treat as full-frame
+      }
+      // Clamp every clip to the buffer extent (int64 sum is overflow-safe) and
+      // drop degenerate ones: a single out-of-bounds clip makes the kernel
+      // EINVAL the whole commit, so sanitize rather than trust the producer.
+      const auto fmt = acq.scene_layer->source().format();
+      const auto buf_w = static_cast<std::int64_t>(fmt.width);
+      const auto buf_h = static_cast<std::int64_t>(fmt.height);
+      std::vector<drm_mode_rect> rects;
+      rects.reserve(acq.buffer.damage.size());
+      for (const auto& d : acq.buffer.damage) {
+        const std::int32_t x1 = std::max<std::int32_t>(0, d.x);
+        const std::int32_t y1 = std::max<std::int32_t>(0, d.y);
+        const auto x2 = static_cast<std::int32_t>(
+            std::min<std::int64_t>(buf_w, static_cast<std::int64_t>(d.x) + d.w));
+        const auto y2 = static_cast<std::int32_t>(
+            std::min<std::int64_t>(buf_h, static_cast<std::int64_t>(d.y) + d.h));
+        if (x2 > x1 && y2 > y1) {
+          rects.push_back(drm_mode_rect{x1, y1, x2, y2});
+        }
+      }
+      if (rects.empty()) {
+        continue;  // every clip was degenerate -> treat as full-frame
+      }
+      std::uint32_t blob_id = 0;
+      if (drmModeCreatePropertyBlob(dev_->fd(), rects.data(), rects.size() * sizeof(drm_mode_rect),
+                                    &blob_id) != 0 ||
+          blob_id == 0) {
+        continue;  // blob alloc failed: degrade to full-frame for this layer
+      }
+      ephemeral_blobs_.push_back(blob_id);
+      if (auto r = req.add_property(*plane_id, *prop_id, blob_id); !r) {
+        return r;
+      }
+      ++report.properties_written;
+    }
+    return {};
+  }
+
+  // Destroy the FB_DAMAGE_CLIPS blobs created for the in-flight commit. Safe to
+  // call with an empty list; called after every commit attempt (the kernel has
+  // already copied the damage into plane state by then).
+  void destroy_ephemeral_blobs() noexcept {
+    if (dev_ != nullptr && dev_->fd() >= 0) {
+      for (const std::uint32_t id : ephemeral_blobs_) {
+        if (id != 0) {
+          drmModeDestroyPropertyBlob(dev_->fd(), id);
+        }
+      }
+    }
+    ephemeral_blobs_.clear();
+  }
+
   // For every layer the allocator placed natively, write the plane's
   // `COLOR_ENCODING` and `COLOR_RANGE` properties to the layer's
   // override (when set) or to the scene's default of BT.709 + Limited.
@@ -2238,6 +2323,10 @@ class LayerScene::Impl {
   std::vector<std::uint32_t> free_ids_;
 
   std::uint32_t mode_blob_id_{0};
+  // FB_DAMAGE_CLIPS property blobs created for the in-flight commit, destroyed
+  // after it (see arm_layer_damage_clips / do_commit's BlobScope). Single-
+  // threaded: the present loop owns commit, so no synchronization is needed.
+  std::vector<std::uint32_t> ephemeral_blobs_;
   bool first_commit_{true};
   bool suspended_{false};
   // Mirror of the allocator's force-full-writes flag — kept on Impl
@@ -2624,6 +2713,9 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   arm_layer_plane_blend_defaults(acquisitions, req, report, test_only);
   arm_layer_plane_color_props(acquisitions, req, report, test_only);
   if (auto r = arm_layer_acquire_fences(acquisitions, req, report, test_only); !r) {
+    return drm::unexpected<std::error_code>(r.error());
+  }
+  if (auto r = arm_layer_damage_clips(acquisitions, req, report); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
 
