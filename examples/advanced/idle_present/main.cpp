@@ -19,6 +19,7 @@
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/format.hpp>
+#include <drm-cxx/display/driver_profile.hpp>
 #include <drm-cxx/present/frame_economy.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
@@ -31,6 +32,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <unistd.h>
 #include <utility>
 
@@ -52,6 +54,20 @@ void fill_rect(drm::BufferMapping& m, std::int32_t x, std::int32_t y, std::int32
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Consume --vrr before open_and_pick_output walks the positional device path.
+  bool want_vrr = false;
+  {
+    int write = 1;
+    for (int i = 1; i < argc; ++i) {
+      if (std::string_view{argv[i]} == "--vrr") {
+        want_vrr = true;
+      } else {
+        argv[write++] = argv[i];
+      }
+    }
+    argc = write;
+  }
+
   auto output = drm::examples::open_and_pick_output(argc, argv);
   if (!output) {
     drm::println(stderr, "idle_present: no usable output");
@@ -90,6 +106,15 @@ int main(int argc, char** argv) {
   if (auto r = scene->add_layer(std::move(desc)); !r) {
     drm::println(stderr, "idle_present: add_layer: {}", r.error().message());
     return EXIT_FAILURE;
+  }
+
+  // --vrr: pair variable refresh with the idle-Skip. VRR matches the flip
+  // cadence while content updates; Skip stops flips entirely when it's static.
+  if (want_vrr) {
+    auto prof = drm::display::DriverProfile::probe(dev);
+    drm::println("idle_present: --vrr (driver vrr_capable={})",
+                 prof.has_value() && prof->vrr_capable);
+    scene->set_vrr_enabled(true);
   }
 
   const int frames = (argc > 2) ? std::atoi(argv[2]) : 300;

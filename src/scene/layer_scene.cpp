@@ -561,6 +561,11 @@ class LayerScene::Impl {
     hdr_dirty_pending_ = true;
   }
 
+  void set_vrr_enabled(bool enable) noexcept {
+    desired_vrr_ = enable;
+    vrr_user_set_ = true;
+  }
+
   void set_force_full_property_writes(bool force) noexcept {
     force_full_writes_ = force;
     if (allocator_.has_value()) {
@@ -2237,6 +2242,29 @@ class LayerScene::Impl {
     return needs_modeset;
   }
 
+  // Write the CRTC's VRR_ENABLED to the caller's set_vrr_enabled() request.
+  // No-op when the caller never set VRR, or the CRTC doesn't expose the property
+  // (older kernel / non-VRR pipe) — same silent-degrade contract as HDR. Returns
+  // true when the value changed: toggling VRR reconfigures CRTC timing, which
+  // amdgpu validates only under ALLOW_MODESET. Re-armed every commit (a sticky
+  // bool, dedup'd against last_written_vrr_), matching the HDR re-arm.
+  drm::expected<bool, std::error_code> inject_vrr_enabled(drm::AtomicRequest& req) {
+    if (!vrr_user_set_) {
+      return false;
+    }
+    const auto prop = props_.property_id(crtc_id_, "VRR_ENABLED");
+    if (!prop) {
+      return false;
+    }
+    const std::uint64_t value = desired_vrr_ ? 1U : 0U;
+    if (auto r = req.add_property(crtc_id_, *prop, value); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+    const bool needs_modeset = static_cast<int>(value) != last_written_vrr_;
+    last_written_vrr_ = static_cast<int>(value);
+    return needs_modeset;
+  }
+
   // write the connector's `Colorspace` property to the
   // enum value matching the auto-derived ColorPrimaries (per
   // derive_output_signaling). Falls back to `Default` when the
@@ -2463,6 +2491,13 @@ class LayerScene::Impl {
   // detect changes that require ALLOW_MODESET. Cleared on session
   // loss / rebind alongside the cache.
   std::uint32_t last_written_hdr_blob_id_{0};
+
+  // VRR_ENABLED state. desired_vrr_ is the caller's set_vrr_enabled() request;
+  // vrr_user_set_ gates arming; last_written_vrr_ (-1 = never written) detects
+  // the value change that needs ALLOW_MODESET.
+  bool desired_vrr_{false};
+  bool vrr_user_set_{false};
+  int last_written_vrr_{-1};
 
   // connector Colorspace property tracking. Cached
   // capabilities + last-written integer drive the same
@@ -2801,6 +2836,17 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
     effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
   }
 
+  // VRR_ENABLED — arm the CRTC's variable-refresh toggle (opt-in via
+  // set_vrr_enabled; no-op without the property). A change needs ALLOW_MODESET.
+  auto vrr_needs_modeset = inject_vrr_enabled(req);
+  if (!vrr_needs_modeset) {
+    release_all(acquisitions);
+    return drm::unexpected<std::error_code>(vrr_needs_modeset.error());
+  }
+  if (*vrr_needs_modeset) {
+    effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+  }
+
   FrameBuildPtr out(new FrameBuildState{});
   out->acquisitions = std::move(acquisitions);
   out->effective_flags = effective_flags;
@@ -2989,6 +3035,10 @@ bool LayerScene::would_request_modeset() const noexcept {
 
 void LayerScene::set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src) {
   impl_->set_output_metadata(src);
+}
+
+void LayerScene::set_vrr_enabled(bool enable) {
+  impl_->set_vrr_enabled(enable);
 }
 
 void LayerScene::set_force_full_property_writes(bool force) noexcept {

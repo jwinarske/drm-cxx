@@ -319,6 +319,15 @@ class LayerScene {
   /// returns the existing blob id.
   void set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src);
 
+  /// Request the CRTC's variable-refresh-rate toggle (VRR_ENABLED). Opt-in;
+  /// off until called. The scene arms it on every commit and ORs ALLOW_MODESET
+  /// into the flags when the value changes (amdgpu validates the timing
+  /// reconfigure only under modeset). Drivers/CRTCs without VRR_ENABLED (probe
+  /// `DriverProfile::vrr_capable`) silently swallow the call — no state change,
+  /// no error. Pairs with the idle-Skip: VRR matches the flip cadence while
+  /// content updates, Skip stops flips entirely when it's static.
+  void set_vrr_enabled(bool enable);
+
   /// Driver-quirk opt-out: when true, every layer property is
   /// re-emitted on every commit, bypassing the per-plane
   /// snapshot diff. Default false. Toggle on for drivers that refuse
