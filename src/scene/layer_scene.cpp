@@ -32,6 +32,7 @@
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/planes/output.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <drm_fourcc.h>
 #include <drm_mode.h>
@@ -47,6 +48,7 @@
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -457,9 +459,9 @@ class LayerScene::Impl {
   // Thin orchestrator over the two-phase build/finalize split. Built-in
   // commit() and test() route through here; SceneSet drives the same
   // split by hand so it can batch N scenes into one drm::AtomicRequest.
-  [[nodiscard]] drm::expected<CommitReport, std::error_code> do_commit(std::uint32_t caller_flags,
-                                                                       bool test_only,
-                                                                       void* user_data) {
+  [[nodiscard]] drm::expected<CommitReport, std::error_code> do_commit(
+      std::uint32_t caller_flags, bool test_only, void* user_data,
+      drm::sync::SyncFence* out_fence) {
     drm::AtomicRequest req(*dev_);
     if (!req.valid()) {
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_enough_memory));
@@ -476,11 +478,34 @@ class LayerScene::Impl {
     }
     auto state = std::move(*build);
     const std::uint32_t kernel_flags = LayerScene::effective_flags_of(*state);
+
+    // OUT_FENCE: request a sync_file the kernel writes during the real commit; it
+    // signals when this frame is scanned out. The caller (a producer doing its
+    // own buffer reuse) waits on it before overwriting the just-committed buffer.
+    // Opt-in (out_fence != nullptr), real commits only, and only where the CRTC
+    // advertises OUT_FENCE_PTR. out_fd must outlive req.commit() (the kernel
+    // writes through the pointer).
+    int out_fd = -1;
+    if ((out_fence != nullptr) && !test_only) {
+      if (const auto prop = props_.property_id(crtc_id_, "OUT_FENCE_PTR"); prop.has_value()) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        (void)req.add_property(
+            crtc_id_, *prop, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&out_fd)));
+      }
+    }
+
     drm::expected<void, std::error_code> kr;
     if (test_only) {
       kr = req.test(kernel_flags);
     } else {
       kr = req.commit(kernel_flags, user_data);
+    }
+
+    if ((out_fence != nullptr) && !test_only && kr.has_value() && (out_fd >= 0)) {
+      if (auto fence = drm::sync::SyncFence::import_fd(out_fd); fence.has_value()) {
+        *out_fence = std::move(*fence);  // import_fd dups; close the kernel's fd
+      }
+      ::close(out_fd);
     }
     return finalize_frame(std::move(state), kr);
   }
@@ -2843,12 +2868,13 @@ void LayerScene::prepare_stream_layers() {
 }
 
 drm::expected<CommitReport, std::error_code> LayerScene::test() {
-  return impl_->do_commit(0, /*test_only=*/true, /*user_data=*/nullptr);
+  return impl_->do_commit(0, /*test_only=*/true, /*user_data=*/nullptr, /*out_fence=*/nullptr);
 }
 
 drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t flags,
-                                                                void* user_data) {
-  return impl_->do_commit(flags, /*test_only=*/false, user_data);
+                                                                void* user_data,
+                                                                drm::sync::SyncFence* out_fence) {
+  return impl_->do_commit(flags, /*test_only=*/false, user_data, out_fence);
 }
 
 drm::expected<FrameBuildPtr, std::error_code> LayerScene::build_frame_into(

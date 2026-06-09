@@ -31,6 +31,9 @@ class Device;
 namespace drm::scene {
 class LayerScene;
 }
+namespace drm::sync {
+class SyncFence;
+}
 
 namespace drm::present {
 
@@ -53,8 +56,10 @@ class ScanoutBackend {
       drm::Device& dev, ScanoutProducer& producer);
 
   // Present one frame: commit the scene with `flags` (e.g. DRM_MODE_PAGE_FLIP_EVENT).
+  // `out_fence` (opt-in) receives a sync_file that signals when the frame is
+  // scanned out — wait on it before reusing the buffer the producer just rendered.
   [[nodiscard]] drm::expected<scene::CommitReport, std::error_code> present(
-      std::uint32_t flags = 0);
+      std::uint32_t flags = 0, drm::sync::SyncFence* out_fence = nullptr);
 
   [[nodiscard]] const display::ScanoutTarget& target() const noexcept { return target_; }
   [[nodiscard]] const display::DriverProfile& profile() const noexcept { return profile_; }

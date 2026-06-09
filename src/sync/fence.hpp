@@ -12,7 +12,14 @@ namespace drm::sync {
 
 class SyncFence {
  public:
+  // Empty fence (no underlying fd; valid() == false). Lets a caller
+  // default-construct an out-parameter that commit()/present() fill in.
+  SyncFence() noexcept = default;
+
   static drm::expected<SyncFence, std::error_code> import_fd(int fence_fd);
+
+  // True once this holds a real sync_file fd (e.g. a commit wrote an OUT_FENCE).
+  [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
 
   [[nodiscard]] drm::expected<void, std::error_code> wait(std::chrono::milliseconds timeout) const;
   // Merge another fence into this one. The other fence is consumed (moved from).

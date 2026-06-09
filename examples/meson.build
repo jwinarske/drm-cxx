@@ -277,6 +277,12 @@ if has_vulkan_headers
     'advanced/vk_present/main.cpp',
     dependencies : [drm_cxx_dep],
   )
+  # vk_out_fence — validate OUT_FENCE (scanout-done sync_file), counterpart to
+  # vk_present's IN_FENCE demo.
+  executable('vk_out_fence',
+    'advanced/vk_out_fence/main.cpp',
+    dependencies : [drm_cxx_dep],
+  )
 endif
 
 # capture_demo — libinput-driven snapshot demo for drm::capture. Gated
