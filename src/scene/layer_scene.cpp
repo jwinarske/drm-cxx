@@ -43,6 +43,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -564,6 +565,11 @@ class LayerScene::Impl {
   void set_vrr_enabled(bool enable) noexcept {
     desired_vrr_ = enable;
     vrr_user_set_ = true;
+  }
+
+  void set_output_transfer_function(LayerScene::OutputTransferFunction tf) noexcept {
+    desired_regamma_tf_ = tf;
+    regamma_tf_user_set_ = true;
   }
 
   void set_force_full_property_writes(bool force) noexcept {
@@ -2265,6 +2271,70 @@ class LayerScene::Impl {
     return needs_modeset;
   }
 
+  // amdgpu AMD_CRTC_REGAMMA_TF (output stage of the AMD color pipeline). The
+  // enum values are driver-assigned ("PQ inv_EOTF"=10, ...), so resolve the
+  // requested function against the property's enum list by name rather than
+  // hardcoding. No-op when the CRTC lacks the property (non-amdgpu / older
+  // kernel) or the driver's enum table doesn't carry the requested function.
+  // Returns true (needs ALLOW_MODESET) on change, mirroring inject_vrr_enabled.
+  drm::expected<bool, std::error_code> inject_output_regamma_tf(drm::AtomicRequest& req) {
+    if (!regamma_tf_user_set_) {
+      return false;
+    }
+    const auto prop = props_.property_id(crtc_id_, "AMD_CRTC_REGAMMA_TF");
+    if (!prop) {
+      return false;
+    }
+    const auto value = resolve_regamma_enum(*prop, desired_regamma_tf_);
+    if (!value) {
+      return false;
+    }
+    if (auto r = req.add_property(crtc_id_, *prop, *value); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+    const bool needs_modeset = static_cast<int>(*value) != last_written_regamma_;
+    last_written_regamma_ = static_cast<int>(*value);
+    return needs_modeset;
+  }
+
+  // Map our OutputTransferFunction to amdgpu's AMD_CRTC_REGAMMA_TF enum *name*,
+  // then look that name up in the live property's enum list to get its value.
+  [[nodiscard]] std::optional<std::uint64_t> resolve_regamma_enum(
+      std::uint32_t prop_id, LayerScene::OutputTransferFunction tf) const {
+    const char* const want = [tf]() -> const char* {
+      switch (tf) {
+        case LayerScene::OutputTransferFunction::Identity:
+          return "Identity";
+        case LayerScene::OutputTransferFunction::Srgb:
+          return "sRGB inv_EOTF";
+        case LayerScene::OutputTransferFunction::Bt709:
+          return "BT.709 OETF";
+        case LayerScene::OutputTransferFunction::Pq:
+          return "PQ inv_EOTF";
+        case LayerScene::OutputTransferFunction::Gamma22:
+          return "Gamma 2.2 inv_EOTF";
+        case LayerScene::OutputTransferFunction::Gamma24:
+          return "Gamma 2.4 inv_EOTF";
+        case LayerScene::OutputTransferFunction::Gamma26:
+          return "Gamma 2.6 inv_EOTF";
+        case LayerScene::OutputTransferFunction::Default:
+          break;
+      }
+      return "Default";
+    }();
+    std::unique_ptr<drmModePropertyRes, decltype(&drmModeFreeProperty)> p(
+        drmModeGetProperty(dev_->fd(), prop_id), drmModeFreeProperty);
+    if (!p) {
+      return std::nullopt;
+    }
+    for (int i = 0; i < p->count_enums; ++i) {
+      if (std::strcmp(p->enums[i].name, want) == 0) {
+        return p->enums[i].value;
+      }
+    }
+    return std::nullopt;
+  }
+
   // write the connector's `Colorspace` property to the
   // enum value matching the auto-derived ColorPrimaries (per
   // derive_output_signaling). Falls back to `Default` when the
@@ -2498,6 +2568,12 @@ class LayerScene::Impl {
   bool desired_vrr_{false};
   bool vrr_user_set_{false};
   int last_written_vrr_{-1};
+  // amdgpu AMD_CRTC_REGAMMA_TF (output stage of the AMD color pipeline).
+  // last_written_regamma_ (-1 = never) dedups + flags the modeset on change.
+  LayerScene::OutputTransferFunction desired_regamma_tf_{
+      LayerScene::OutputTransferFunction::Default};
+  bool regamma_tf_user_set_{false};
+  int last_written_regamma_{-1};
 
   // connector Colorspace property tracking. Cached
   // capabilities + last-written integer drive the same
@@ -2847,6 +2923,17 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
     effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
   }
 
+  // amdgpu AMD_CRTC_REGAMMA_TF — output stage of the AMD color pipeline (opt-in
+  // via set_output_transfer_function; no-op without the property). PROTOTYPE.
+  auto regamma_needs_modeset = inject_output_regamma_tf(req);
+  if (!regamma_needs_modeset) {
+    release_all(acquisitions);
+    return drm::unexpected<std::error_code>(regamma_needs_modeset.error());
+  }
+  if (*regamma_needs_modeset) {
+    effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+  }
+
   FrameBuildPtr out(new FrameBuildState{});
   out->acquisitions = std::move(acquisitions);
   out->effective_flags = effective_flags;
@@ -3039,6 +3126,10 @@ void LayerScene::set_output_metadata(const std::optional<drm::display::HdrSource
 
 void LayerScene::set_vrr_enabled(bool enable) {
   impl_->set_vrr_enabled(enable);
+}
+
+void LayerScene::set_output_transfer_function(OutputTransferFunction tf) {
+  impl_->set_output_transfer_function(tf);
 }
 
 void LayerScene::set_force_full_property_writes(bool force) noexcept {
