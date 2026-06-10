@@ -7,6 +7,7 @@
 #include "commit_report.hpp"
 #include "compatibility_report.hpp"
 #include "composite_canvas.hpp"
+#include "display_params.hpp"
 #include "layer.hpp"
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
@@ -41,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -1965,6 +1967,91 @@ class LayerScene::Impl {
     return {};
   }
 
+  // amdgpu per-plane color pipeline (AMD_PLANE_*). Stage 1: the input degamma
+  // transfer function (enum, resolved by name against the plane's own property)
+  // and the HDR luminance multiplier (S31.32 fixed-point; 1.0 == 2^32). Both are
+  // per-layer + independently optional; each is written onto the layer's
+  // assigned plane only when set AND the plane advertises the property
+  // (presence-gated, like the IN_FENCE_FD / FB_DAMAGE_CLIPS arming above). The
+  // blob stages (shaper / 3D-LUT / blend / CTM) will extend this method.
+  drm::expected<void, std::error_code> arm_layer_amd_plane_color(
+      const std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
+      CommitReport& report) {
+    for (const auto& acq : acquisitions) {
+      const auto& color = acq.scene_layer->display().amd_color;
+      if (!color.degamma_tf.has_value() && !color.hdr_mult.has_value()) {
+        continue;
+      }
+      const auto plane_id = acq.planes_layer->assigned_plane_id();
+      if (!plane_id.has_value()) {
+        continue;  // composited/dropped: no plane to configure
+      }
+      if (color.degamma_tf.has_value()) {
+        if (const auto prop = props_.property_id(*plane_id, "AMD_PLANE_DEGAMMA_TF")) {
+          if (const auto value = resolve_plane_degamma_enum(*prop, *color.degamma_tf)) {
+            if (auto r = req.add_property(*plane_id, *prop, *value); !r) {
+              return r;
+            }
+            ++report.properties_written;
+          }
+        }
+      }
+      if (color.hdr_mult.has_value()) {
+        if (const auto prop = props_.property_id(*plane_id, "AMD_PLANE_HDR_MULT")) {
+          // AMD_PLANE_HDR_MULT is S31.32 fixed-point: 1.0 == 2^32.
+          const double scaled = *color.hdr_mult * 4294967296.0;
+          const auto fixed =
+              scaled <= 0.0 ? std::uint64_t{0} : static_cast<std::uint64_t>(std::llround(scaled));
+          if (auto r = req.add_property(*plane_id, *prop, fixed); !r) {
+            return r;
+          }
+          ++report.properties_written;
+        }
+      }
+    }
+    return {};
+  }
+
+  // Resolve a PlaneDegammaTf to AMD_PLANE_DEGAMMA_TF's driver-assigned enum value
+  // by matching the amdgpu enum name on the given property (values are driver-
+  // assigned, so resolve by name; the degamma names are EOTF-direction, distinct
+  // from the inv_EOTF shaper/regamma names).
+  [[nodiscard]] std::optional<std::uint64_t> resolve_plane_degamma_enum(std::uint32_t prop_id,
+                                                                        PlaneDegammaTf tf) const {
+    const char* const want = [tf]() -> const char* {
+      switch (tf) {
+        case PlaneDegammaTf::Srgb:
+          return "sRGB EOTF";
+        case PlaneDegammaTf::Bt709:
+          return "BT.709 inv_OETF";
+        case PlaneDegammaTf::Pq:
+          return "PQ EOTF";
+        case PlaneDegammaTf::Identity:
+          return "Identity";
+        case PlaneDegammaTf::Gamma22:
+          return "Gamma 2.2 EOTF";
+        case PlaneDegammaTf::Gamma24:
+          return "Gamma 2.4 EOTF";
+        case PlaneDegammaTf::Gamma26:
+          return "Gamma 2.6 EOTF";
+        case PlaneDegammaTf::Default:
+          break;
+      }
+      return "Default";
+    }();
+    std::unique_ptr<drmModePropertyRes, decltype(&drmModeFreeProperty)> p(
+        drmModeGetProperty(dev_->fd(), prop_id), drmModeFreeProperty);
+    if (!p) {
+      return std::nullopt;
+    }
+    for (int i = 0; i < p->count_enums; ++i) {
+      if (std::strcmp(p->enums[i].name, want) == 0) {
+        return p->enums[i].value;
+      }
+    }
+    return std::nullopt;
+  }
+
   // Destroy the FB_DAMAGE_CLIPS blobs created for the in-flight commit. Safe to
   // call with an empty list; called after every commit attempt (the kernel has
   // already copied the damage into plane state by then).
@@ -2827,6 +2914,10 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
     return drm::unexpected<std::error_code>(r.error());
   }
   if (auto r = arm_layer_damage_clips(acquisitions, req, report); !r) {
+    return drm::unexpected<std::error_code>(r.error());
+  }
+
+  if (auto r = arm_layer_amd_plane_color(acquisitions, req, report); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
 
