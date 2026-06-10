@@ -329,14 +329,13 @@ class LayerScene {
   void set_vrr_enabled(bool enable);
 
   /// amdgpu output transfer function (`AMD_CRTC_REGAMMA_TF`) — the output stage
-  /// of the AMD per-plane color pipeline (the path gamescope uses for HDR on the
-  /// Steam Deck; upstream names are `AMD_*`, gamescope's experimental ones were
-  /// `VALVE1_*`). The scene resolves the requested function against the CRTC
-  /// property's enum list by name and arms it each commit, ORing ALLOW_MODESET
-  /// when it changes. CRTCs without the property (non-amdgpu, older kernels)
-  /// silently swallow the call. PROTOTYPE: this is the output stage only; the
-  /// per-plane stages (`AMD_PLANE_{DEGAMMA,SHAPER,LUT3D,BLEND}_*`, HDR_MULT) need
-  /// the allocator's per-plane apply path + LUT blobs and are a follow-up.
+  /// of amdgpu's DRM/KMS color-pipeline uAPI, used for HDR / wide-gamut output.
+  /// The scene resolves the requested function against the CRTC property's enum
+  /// list by name and arms it each commit, ORing ALLOW_MODESET when it changes.
+  /// CRTCs without the property (non-amdgpu, older kernels) silently swallow the
+  /// call. This is the output stage; the per-plane stages
+  /// (`AMD_PLANE_{DEGAMMA,SHAPER,LUT3D,BLEND}_*`, `HDR_MULT`) are driven through
+  /// `DisplayParams::amd_color`.
   enum class OutputTransferFunction : std::uint8_t {
     Default,  ///< driver default (no regamma applied)
     Identity,

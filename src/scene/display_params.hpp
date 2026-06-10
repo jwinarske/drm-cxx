@@ -44,6 +44,37 @@ enum class ColorPrimaries : std::uint8_t {
 /// `uint32_t w/h` match `CRTC_W/H`.
 using Rect = drm::planes::Rect;
 
+/// amdgpu per-plane color pipeline — the `AMD_PLANE_*` properties of amdgpu's
+/// DRM/KMS color-management uAPI, used for HDR / tone-mapping / wide-gamut.
+/// Presence-gated: planes or drivers without the properties ignore this
+/// silently. Landing incrementally — stage 1 is the input degamma transfer
+/// function plus the HDR luminance multiplier; the shaper / 3D-LUT / blend / CTM
+/// (blob) stages follow.
+enum class PlaneDegammaTf : std::uint8_t {
+  Default,   ///< driver default — `AMD_PLANE_DEGAMMA_TF` enum "Default"
+  Srgb,      ///< "sRGB EOTF"
+  Bt709,     ///< "BT.709 inv_OETF"
+  Pq,        ///< "PQ EOTF" — HDR10 input
+  Identity,  ///< "Identity"
+  Gamma22,   ///< "Gamma 2.2 EOTF"
+  Gamma24,   ///< "Gamma 2.4 EOTF"
+  Gamma26,   ///< "Gamma 2.6 EOTF"
+};
+
+/// Per-layer amdgpu plane color-pipeline configuration. Each field is
+/// independently optional — unset means "don't touch that property" (so the
+/// plane keeps the driver default / whatever a previous compositor left). The
+/// scene writes these onto the layer's assigned plane at commit time, by name,
+/// skipping any property the plane doesn't advertise.
+struct AmdPlaneColor {
+  /// `AMD_PLANE_DEGAMMA_TF` — linearizes the layer's input encoding. Resolved
+  /// against the plane property's live enum list by name.
+  std::optional<PlaneDegammaTf> degamma_tf;
+  /// `AMD_PLANE_HDR_MULT` — per-plane luminance multiplier in linear light
+  /// (S31.32 fixed-point on the wire; 1.0 = identity).
+  std::optional<double> hdr_mult;
+};
+
 /// Per-layer display configuration. Lowered to plane properties at
 /// commit time: src_rect → SRC_X/Y/W/H (scaled by 16 for the kernel's
 /// 16.16 fixed-point convention); dst_rect → CRTC_X/Y/W/H; rotation →
@@ -87,6 +118,10 @@ struct DisplayParams {
   /// declares HDR signaling on the connector via
   /// `HDR_OUTPUT_METADATA`.
   std::optional<drm::display::TransferFunction> source_eotf;
+
+  /// amdgpu per-plane color pipeline (`AMD_PLANE_*`). Default = all-unset =
+  /// nothing written. See `AmdPlaneColor`.
+  AmdPlaneColor amd_color{};
 
   [[nodiscard]] constexpr bool needs_scaling() const noexcept {
     return src_rect.w != dst_rect.w || src_rect.h != dst_rect.h;
