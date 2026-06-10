@@ -45,8 +45,19 @@
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
+// Vulkan is reached through Vulkan-Hpp's dynamic dispatcher: VK_NO_PROTOTYPES
+// means no C entry points are referenced, so this links only drm-cxx (no
+// libvulkan) -- vulkan.hpp dlopen's it at runtime, matching vk_present /
+// vulkan_scene. The raw C structs/enums are kept (this is a large demo); only
+// the calls route through VULKAN_HPP_DEFAULT_DISPATCHER.
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define VK_NO_PROTOTYPES
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
+
 #include <drm_fourcc.h>
 #include <drm_mode.h>
+#include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_core.h>
 #include <xf86drmMode.h>
 
@@ -99,6 +110,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -107,6 +119,9 @@
 #include <unistd.h>
 #include <utility>
 #include <vector>
+
+// NOLINTNEXTLINE(misc-include-cleaner) -- storage for the default dispatcher.
+VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 namespace {
 
@@ -222,16 +237,18 @@ void on_sigint(int /*signo*/) noexcept {
   const unsigned int want_minor = minor(st.st_rdev);
 
   std::uint32_t count = 0;
-  vkEnumeratePhysicalDevices(instance, &count, nullptr);
+  // NOLINTNEXTLINE(misc-include-cleaner) -- VULKAN_HPP_DEFAULT_DISPATCHER from vulkan.hpp
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumeratePhysicalDevices(instance, &count, nullptr);
   if (count == 0) {
     return VK_NULL_HANDLE;
   }
   std::vector<VkPhysicalDevice> devices(count);
-  vkEnumeratePhysicalDevices(instance, &count, devices.data());
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumeratePhysicalDevices(instance, &count, devices.data());
 
   auto get_drm_props = reinterpret_cast<
       PFN_vkGetPhysicalDeviceProperties2>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-      vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2"));
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(instance,
+                                                          "vkGetPhysicalDeviceProperties2"));
   if (get_drm_props == nullptr) {
     return devices.front();
   }
@@ -256,7 +273,7 @@ void on_sigint(int /*signo*/) noexcept {
 [[nodiscard]] std::uint32_t find_memory_type(VkPhysicalDevice pd, std::uint32_t type_bits,
                                              VkMemoryPropertyFlags flags) {
   VkPhysicalDeviceMemoryProperties mp{};
-  vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceMemoryProperties(pd, &mp);
   const drm::span<const VkMemoryType> types{mp.memoryTypes, mp.memoryTypeCount};
   for (std::uint32_t i = 0; i < types.size(); ++i) {
     if (((type_bits >> i) & 1U) == 0U) {
@@ -469,7 +486,7 @@ void paint_warning_cell_template(std::uint8_t* template_pixels, std::uint32_t ce
   info.codeSize = code_bytes;
   info.pCode = code;
   VkShaderModule mod = VK_NULL_HANDLE;
-  if (vkCreateShaderModule(dev, &info, nullptr, &mod) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateShaderModule(dev, &info, nullptr, &mod) != VK_SUCCESS) {
     return VK_NULL_HANDLE;
   }
   return mod;
@@ -745,7 +762,19 @@ int main(int argc, char* argv[]) {
   }
   auto& scene = *scene_r;
 
-  // Vulkan instance.
+  // Vulkan instance. Initialize the dynamic dispatcher first (dlopen libvulkan).
+  // DynamicLoader throws if libvulkan is absent; contain it so main stays
+  // no-throw to the runtime.
+  std::optional<vk::detail::DynamicLoader> vk_loader;
+  try {
+    vk_loader.emplace();
+  } catch (const std::exception& e) {
+    drm::println(stderr, "cluster_sim_vulkan: cannot load libvulkan: {}", e.what());
+    return EXIT_FAILURE;
+  }
+  // NOLINTNEXTLINE(misc-include-cleaner) -- VULKAN_HPP_DEFAULT_DISPATCHER from vulkan.hpp
+  VULKAN_HPP_DEFAULT_DISPATCHER.init(
+      vk_loader->getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
   const std::array<const char*, 2> inst_exts{
       "VK_KHR_get_physical_device_properties2",
       "VK_KHR_external_memory_capabilities",
@@ -759,22 +788,24 @@ int main(int argc, char* argv[]) {
   ici.enabledExtensionCount = static_cast<std::uint32_t>(inst_exts.size());
   ici.ppEnabledExtensionNames = inst_exts.data();
   VkInstance instance = VK_NULL_HANDLE;
-  if (vkCreateInstance(&ici, nullptr, &instance) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateInstance(&ici, nullptr, &instance) != VK_SUCCESS) {
     drm::println(stderr, "vkCreateInstance failed");
     return EXIT_FAILURE;
   }
+  // NOLINTNEXTLINE(misc-include-cleaner) -- VULKAN_HPP_DEFAULT_DISPATCHER from vulkan.hpp
+  VULKAN_HPP_DEFAULT_DISPATCHER.init(vk::Instance(instance));
 
   VkPhysicalDevice pd = pick_physical_device(instance, device.fd());
   if (pd == VK_NULL_HANDLE) {
     drm::println(stderr, "no VkPhysicalDevice matched the DRM fd");
-    vkDestroyInstance(instance, nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyInstance(instance, nullptr);
     return EXIT_FAILURE;
   }
 
   std::uint32_t qf_count = 0;
-  vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, nullptr);
   std::vector<VkQueueFamilyProperties> qfs(qf_count);
-  vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, qfs.data());
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, qfs.data());
   std::uint32_t qf_index = 0xFFFFFFFFU;
   for (std::uint32_t i = 0; i < qf_count; ++i) {
     if ((qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0U) {
@@ -784,7 +815,7 @@ int main(int argc, char* argv[]) {
   }
   if (qf_index == 0xFFFFFFFFU) {
     drm::println(stderr, "no graphics queue");
-    vkDestroyInstance(instance, nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyInstance(instance, nullptr);
     return EXIT_FAILURE;
   }
 
@@ -794,11 +825,14 @@ int main(int argc, char* argv[]) {
   qci.queueFamilyIndex = qf_index;
   qci.queueCount = 1;
   qci.pQueuePriorities = &qp;
-  const std::array<const char*, 5> dev_exts{
+  const std::array<const char*, 6> dev_exts{
       "VK_KHR_external_memory",
       "VK_KHR_external_memory_fd",
       "VK_EXT_external_memory_dma_buf",
       "VK_EXT_image_drm_format_modifier",
+      // Required dependency of VK_EXT_image_drm_format_modifier on a Vulkan 1.1
+      // device (it's core in 1.2); amdgpu's validation flags its absence.
+      "VK_KHR_image_format_list",
       // Lets the end-of-frame barrier transfer queue-family ownership
       // of the DMA-BUF image to VK_QUEUE_FAMILY_FOREIGN_EXT (the KMS
       // scanout consumer), which on this Tegra driver is what
@@ -813,13 +847,15 @@ int main(int argc, char* argv[]) {
   dci.enabledExtensionCount = static_cast<std::uint32_t>(dev_exts.size());
   dci.ppEnabledExtensionNames = dev_exts.data();
   VkDevice vk_device = VK_NULL_HANDLE;
-  if (vkCreateDevice(pd, &dci, nullptr, &vk_device) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDevice(pd, &dci, nullptr, &vk_device) != VK_SUCCESS) {
     drm::println(stderr, "vkCreateDevice failed");
-    vkDestroyInstance(instance, nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyInstance(instance, nullptr);
     return EXIT_FAILURE;
   }
+  // NOLINTNEXTLINE(misc-include-cleaner) -- VULKAN_HPP_DEFAULT_DISPATCHER from vulkan.hpp
+  VULKAN_HPP_DEFAULT_DISPATCHER.init(vk::Device(vk_device));
   VkQueue queue = VK_NULL_HANDLE;
-  vkGetDeviceQueue(vk_device, qf_index, 0, &queue);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceQueue(vk_device, qf_index, 0, &queue);
 
   // Two DRM-modifier-LINEAR ARGB8888 Vulkan images, ping-ponged each
   // frame so KMS never reads the buffer Vulkan is currently writing.
@@ -829,23 +865,63 @@ int main(int argc, char* argv[]) {
   // back), so KMS scans the just-rendered buffer while Vulkan renders
   // into the other one. Single plane — no OVERLAY tricks needed.
   constexpr int k_swap_count = 2;
-  const std::uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   std::array<VkImage, k_swap_count> vk_images{};
   std::array<VkDeviceMemory, k_swap_count> vk_mems{};
   std::array<std::unique_ptr<drm::scene::ExternalDmaBufSource>, k_swap_count> bg_sources{};
 
   auto get_memory_fd = reinterpret_cast<
       PFN_vkGetMemoryFdKHR>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-      vkGetDeviceProcAddr(vk_device, "vkGetMemoryFdKHR"));
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(vk_device, "vkGetMemoryFdKHR"));
   if (get_memory_fd == nullptr) {
     drm::println(stderr, "vkGetMemoryFdKHR missing");
     return EXIT_FAILURE;
   }
+  auto get_modifier_props = reinterpret_cast<
+      PFN_vkGetImageDrmFormatModifierPropertiesEXT>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(
+          vk_device, "vkGetImageDrmFormatModifierPropertiesEXT"));
+  if (get_modifier_props == nullptr) {
+    drm::println(stderr, "vkGetImageDrmFormatModifierPropertiesEXT missing");
+    return EXIT_FAILURE;
+  }
 
-  std::array<std::uint64_t, 1> modifiers{modifier};
+  // Negotiate the scanout modifier instead of hardcoding LINEAR: intersect what
+  // KMS planes accept (candidate_modifiers) with what this Vulkan device can
+  // render B8G8R8A8 into. amdgpu DC presents Vulkan dma-bufs as AMD-tiled, not
+  // LINEAR -- a hardcoded LINEAR renders blank there; PanVK/VOP2 only export
+  // LINEAR, so the intersection is LINEAR and it still works.
+  VkDrmFormatModifierPropertiesListEXT vk_mod_list{};
+  vk_mod_list.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+  VkFormatProperties2 vk_fp{};
+  vk_fp.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+  vk_fp.pNext = &vk_mod_list;
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFormatProperties2(pd, VK_FORMAT_B8G8R8A8_UNORM,
+                                                                     &vk_fp);
+  std::vector<VkDrmFormatModifierPropertiesEXT> vk_mods(vk_mod_list.drmFormatModifierCount);
+  vk_mod_list.pDrmFormatModifierProperties = vk_mods.data();
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFormatProperties2(pd, VK_FORMAT_B8G8R8A8_UNORM,
+                                                                     &vk_fp);
+  const std::vector<std::uint64_t> kms_mods = scene->candidate_modifiers(DRM_FORMAT_ARGB8888);
+  std::vector<std::uint64_t> modifiers;
+  for (const auto& vm : vk_mods) {
+    if ((vm.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0U) {
+      continue;
+    }
+    if (std::find(kms_mods.begin(), kms_mods.end(), vm.drmFormatModifier) != kms_mods.end()) {
+      modifiers.push_back(vm.drmFormatModifier);
+    }
+  }
+  // Tiled/compressed first so amdgpu picks a DC-presentable layout; LINEAR last.
+  std::stable_sort(modifiers.begin(), modifiers.end(), [](std::uint64_t a, std::uint64_t b) {
+    return (a != DRM_FORMAT_MOD_LINEAR) && (b == DRM_FORMAT_MOD_LINEAR);
+  });
+  if (modifiers.empty()) {
+    drm::println(stderr, "cluster_sim_vulkan: no modifier the GPU can render and KMS can scan out");
+    return EXIT_FAILURE;
+  }
   VkImageDrmFormatModifierListCreateInfoEXT drm_list{};
   drm_list.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
-  drm_list.drmFormatModifierCount = 1;
+  drm_list.drmFormatModifierCount = static_cast<std::uint32_t>(modifiers.size());
   drm_list.pDrmFormatModifiers = modifiers.data();
   VkExternalMemoryImageCreateInfo ext_img{};
   ext_img.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
@@ -867,19 +943,28 @@ int main(int argc, char* argv[]) {
     iic.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     iic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    if (vkCreateImage(vk_device, &iic, nullptr, &vk_images[i]) != VK_SUCCESS) {
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImage(vk_device, &iic, nullptr, &vk_images[i]) !=
+        VK_SUCCESS) {
       drm::println(stderr, "vkCreateImage[{}] failed", i);
       return EXIT_FAILURE;
     }
     VkMemoryRequirements mr{};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    vkGetImageMemoryRequirements(vk_device, vk_images[i], &mr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetImageMemoryRequirements(vk_device, vk_images[i], &mr);
     VkExportMemoryAllocateInfo emai{};
     emai.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
     emai.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    // amdgpu reports requiresDedicatedAllocation for DRM-modifier images; without
+    // a VkMemoryDedicatedAllocateInfo the bind is invalid and the buffer scans
+    // out blank (VOP2/Tegra don't require it, which is why it worked there).
+    VkMemoryDedicatedAllocateInfo dedicated{};
+    dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+    dedicated.image = vk_images[i];
+    dedicated.pNext = &emai;
     VkMemoryAllocateInfo mai{};
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    mai.pNext = &emai;
+    mai.pNext = &dedicated;
     mai.allocationSize = mr.size;
     mai.memoryTypeIndex =
         find_memory_type(pd, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -888,12 +973,13 @@ int main(int argc, char* argv[]) {
       return EXIT_FAILURE;
     }
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    if (vkAllocateMemory(vk_device, &mai, nullptr, &vk_mems[i]) != VK_SUCCESS) {
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateMemory(vk_device, &mai, nullptr, &vk_mems[i]) !=
+        VK_SUCCESS) {
       drm::println(stderr, "vkAllocateMemory[{}] failed", i);
       return EXIT_FAILURE;
     }
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    vkBindImageMemory(vk_device, vk_images[i], vk_mems[i], 0);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkBindImageMemory(vk_device, vk_images[i], vk_mems[i], 0);
 
     VkMemoryGetFdInfoKHR mgfi{};
     mgfi.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
@@ -905,18 +991,34 @@ int main(int argc, char* argv[]) {
       drm::println(stderr, "vkGetMemoryFdKHR[{}] failed", i);
       return EXIT_FAILURE;
     }
-    VkImageSubresource sub{};
-    sub.aspectMask = VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
-    VkSubresourceLayout layout{};
+    // Which modifier did the driver pick, and how many planes does it have?
+    VkImageDrmFormatModifierPropertiesEXT chosen_props{};
+    chosen_props.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT;
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    vkGetImageSubresourceLayout(vk_device, vk_images[i], &sub, &layout);
-    drm::scene::ExternalPlaneInfo plane_info{};
-    plane_info.fd = dmabuf_fd;
-    plane_info.pitch = static_cast<std::uint32_t>(layout.rowPitch);
-    plane_info.offset = static_cast<std::uint32_t>(layout.offset);
-    std::array<drm::scene::ExternalPlaneInfo, 1> planes{plane_info};
+    get_modifier_props(vk_device, vk_images[i], &chosen_props);
+    const std::uint64_t chosen_modifier = chosen_props.drmFormatModifier;
+    unsigned nplanes = 1;
+    for (const auto& vm : vk_mods) {
+      if (vm.drmFormatModifier == chosen_modifier) {
+        nplanes = vm.drmFormatModifierPlaneCount;
+        break;
+      }
+    }
+    std::vector<drm::scene::ExternalPlaneInfo> planes(nplanes);
+    for (unsigned p = 0; p < nplanes; ++p) {
+      VkImageSubresource sub{};
+      sub.aspectMask =
+          static_cast<VkImageAspectFlagBits>(VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT << p);
+      VkSubresourceLayout layout{};
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkGetImageSubresourceLayout(vk_device, vk_images[i], &sub,
+                                                                &layout);
+      planes[p].fd = dmabuf_fd;
+      planes[p].pitch = static_cast<std::uint32_t>(layout.rowPitch);
+      planes[p].offset = static_cast<std::uint32_t>(layout.offset);
+    }
     auto src = drm::scene::ExternalDmaBufSource::create(device, fb_w, fb_h, DRM_FORMAT_ARGB8888,
-                                                        modifier, planes);
+                                                        chosen_modifier, planes);
     ::close(dmabuf_fd);
     if (!src) {
       drm::println(stderr, "ExternalDmaBufSource::create[{}]: {}", i, src.error().message());
@@ -933,7 +1035,11 @@ int main(int argc, char* argv[]) {
   bg_desc.source = std::move(swap_source);
   bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
-  bg_desc.display.zpos = 0;
+  // Single full-screen layer: leave zpos unset so LayerScene anchors it on
+  // PRIMARY (its zpos_min) on any SoC -- amdgpu pins PRIMARY at zpos 2, so a
+  // hardcoded low zpos would scan out on an overlay *beneath* PRIMARY and be
+  // occluded (black). The scene's bottom-layer-to-PRIMARY hint handles this
+  // agnostically (amdgpu -> 2, VOP2 -> 0).
   if (auto r = scene->add_layer(std::move(bg_desc)); !r) {
     drm::println(stderr, "add_layer (Vulkan bg): {}", r.error().message());
     return EXIT_FAILURE;
@@ -1027,7 +1133,8 @@ int main(int argc, char* argv[]) {
   rpci.dependencyCount = static_cast<std::uint32_t>(deps.size());
   rpci.pDependencies = deps.data();
   VkRenderPass render_pass = VK_NULL_HANDLE;
-  if (vkCreateRenderPass(vk_device, &rpci, nullptr, &render_pass) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateRenderPass(vk_device, &rpci, nullptr, &render_pass) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkCreateRenderPass failed");
     return EXIT_FAILURE;
   }
@@ -1045,7 +1152,9 @@ int main(int argc, char* argv[]) {
                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
     ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    if (vkCreateImageView(vk_device, &ivci, nullptr, &image_views[i]) != VK_SUCCESS) {
+    VkImageView& image_view = image_views[i];
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView(vk_device, &ivci, nullptr, &image_view) !=
+        VK_SUCCESS) {
       drm::println(stderr, "vkCreateImageView[{}] failed", i);
       return EXIT_FAILURE;
     }
@@ -1053,13 +1162,14 @@ int main(int argc, char* argv[]) {
     fbci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbci.renderPass = render_pass;
     fbci.attachmentCount = 1;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    fbci.pAttachments = &image_views[i];
+    fbci.pAttachments = &image_view;
     fbci.width = fb_w;
     fbci.height = fb_h;
     fbci.layers = 1;
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    if (vkCreateFramebuffer(vk_device, &fbci, nullptr, &framebuffers[i]) != VK_SUCCESS) {
+    VkFramebuffer& framebuffer = framebuffers[i];
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateFramebuffer(vk_device, &fbci, nullptr,
+                                                          &framebuffer) != VK_SUCCESS) {
       drm::println(stderr, "vkCreateFramebuffer[{}] failed", i);
       return EXIT_FAILURE;
     }
@@ -1083,7 +1193,8 @@ int main(int argc, char* argv[]) {
   plci.pushConstantRangeCount = 1;
   plci.pPushConstantRanges = &pcr;
   VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
-  if (vkCreatePipelineLayout(vk_device, &plci, nullptr, &pipeline_layout) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreatePipelineLayout(vk_device, &plci, nullptr,
+                                                           &pipeline_layout) != VK_SUCCESS) {
     drm::println(stderr, "vkCreatePipelineLayout failed");
     return EXIT_FAILURE;
   }
@@ -1156,8 +1267,8 @@ int main(int argc, char* argv[]) {
   gpci.renderPass = render_pass;
   gpci.subpass = 0;
   VkPipeline pipeline = VK_NULL_HANDLE;
-  if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &gpci, nullptr, &pipeline) !=
-      VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &gpci,
+                                                              nullptr, &pipeline) != VK_SUCCESS) {
     drm::println(stderr, "vkCreateGraphicsPipelines failed");
     return EXIT_FAILURE;
   }
@@ -1168,14 +1279,14 @@ int main(int argc, char* argv[]) {
   pci.queueFamilyIndex = qf_index;
   pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
   VkCommandPool cmd_pool = VK_NULL_HANDLE;
-  vkCreateCommandPool(vk_device, &pci, nullptr, &cmd_pool);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateCommandPool(vk_device, &pci, nullptr, &cmd_pool);
   VkCommandBufferAllocateInfo cbai{};
   cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
   cbai.commandPool = cmd_pool;
   cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   cbai.commandBufferCount = 1;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
-  vkAllocateCommandBuffers(vk_device, &cbai, &cmd);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateCommandBuffers(vk_device, &cbai, &cmd);
 
   // -------- Dial template texture + textured-quad pipeline ------------
   // One sampled image holds the static dial face (rim + face + ticks)
@@ -1202,23 +1313,25 @@ int main(int argc, char* argv[]) {
   dial_ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   dial_ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkImage dial_image = VK_NULL_HANDLE;
-  if (vkCreateImage(vk_device, &dial_ici, nullptr, &dial_image) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImage(vk_device, &dial_ici, nullptr, &dial_image) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkCreateImage (dial) failed");
     return EXIT_FAILURE;
   }
   VkMemoryRequirements dial_mr{};
-  vkGetImageMemoryRequirements(vk_device, dial_image, &dial_mr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetImageMemoryRequirements(vk_device, dial_image, &dial_mr);
   VkMemoryAllocateInfo dial_mai{};
   dial_mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   dial_mai.allocationSize = dial_mr.size;
   dial_mai.memoryTypeIndex =
       find_memory_type(pd, dial_mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   VkDeviceMemory dial_mem = VK_NULL_HANDLE;
-  if (vkAllocateMemory(vk_device, &dial_mai, nullptr, &dial_mem) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateMemory(vk_device, &dial_mai, nullptr, &dial_mem) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkAllocateMemory (dial) failed");
     return EXIT_FAILURE;
   }
-  vkBindImageMemory(vk_device, dial_image, dial_mem, 0);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkBindImageMemory(vk_device, dial_image, dial_mem, 0);
 
   // Staging buffer — host-visible coherent, sized for tightly packed
   // BGRA pixels. Blend2D paints into the mapped pointer.
@@ -1229,12 +1342,13 @@ int main(int argc, char* argv[]) {
   dial_bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
   dial_bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   VkBuffer staging_buf = VK_NULL_HANDLE;
-  if (vkCreateBuffer(vk_device, &dial_bci, nullptr, &staging_buf) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateBuffer(vk_device, &dial_bci, nullptr, &staging_buf) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkCreateBuffer (staging) failed");
     return EXIT_FAILURE;
   }
   VkMemoryRequirements stg_mr{};
-  vkGetBufferMemoryRequirements(vk_device, staging_buf, &stg_mr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetBufferMemoryRequirements(vk_device, staging_buf, &stg_mr);
   VkMemoryAllocateInfo stg_mai{};
   stg_mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   stg_mai.allocationSize = stg_mr.size;
@@ -1242,21 +1356,22 @@ int main(int argc, char* argv[]) {
       find_memory_type(pd, stg_mr.memoryTypeBits,
                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   VkDeviceMemory staging_mem = VK_NULL_HANDLE;
-  if (vkAllocateMemory(vk_device, &stg_mai, nullptr, &staging_mem) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateMemory(vk_device, &stg_mai, nullptr, &staging_mem) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkAllocateMemory (staging) failed");
     return EXIT_FAILURE;
   }
-  vkBindBufferMemory(vk_device, staging_buf, staging_mem, 0);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkBindBufferMemory(vk_device, staging_buf, staging_mem, 0);
 
   void* stg_ptr = nullptr;
-  vkMapMemory(vk_device, staging_mem, 0, dial_bytes, 0, &stg_ptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkMapMemory(vk_device, staging_mem, 0, dial_bytes, 0, &stg_ptr);
   // Defensive: vkAllocateMemory doesn't promise zero-init, and
   // Blend2D's fill_all + SRC_OVER drawing only writes pixels the
   // shapes touch — leaving anywhere outside the rim at whatever
   // residual values the allocator returned. Zero first.
   std::memset(stg_ptr, 0, static_cast<std::size_t>(dial_bytes));
   paint_dial_template(static_cast<std::uint8_t*>(stg_ptr), dial_size);
-  vkUnmapMemory(vk_device, staging_mem);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkUnmapMemory(vk_device, staging_mem);
 
   // One-shot upload command buffer: barrier UNDEFINED → TRANSFER_DST,
   // vkCmdCopyBufferToImage, barrier → SHADER_READ_ONLY_OPTIMAL.
@@ -1264,7 +1379,7 @@ int main(int argc, char* argv[]) {
     VkCommandBufferBeginInfo upload_cbi{};
     upload_cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     upload_cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &upload_cbi);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkBeginCommandBuffer(cmd, &upload_cbi);
 
     VkImageMemoryBarrier to_dst{};
     to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1276,8 +1391,9 @@ int main(int argc, char* argv[]) {
     to_dst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     to_dst.srcAccessMask = 0;
     to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &to_dst);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                                                       nullptr, 0, nullptr, 1, &to_dst);
 
     VkBufferImageCopy region{};
     region.bufferOffset = 0;
@@ -1286,8 +1402,8 @@ int main(int argc, char* argv[]) {
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.imageOffset = {0, 0, 0};
     region.imageExtent = {dial_size, dial_size, 1};
-    vkCmdCopyBufferToImage(cmd, staging_buf, dial_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                           &region);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdCopyBufferToImage(
+        cmd, staging_buf, dial_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     VkImageMemoryBarrier to_shader{};
     to_shader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1299,23 +1415,24 @@ int main(int argc, char* argv[]) {
     to_shader.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     to_shader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &to_shader);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
+                                                       nullptr, 0, nullptr, 1, &to_shader);
 
-    vkEndCommandBuffer(cmd);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkEndCommandBuffer(cmd);
 
     VkSubmitInfo upload_si{};
     upload_si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     upload_si.commandBufferCount = 1;
     upload_si.pCommandBuffers = &cmd;
-    vkQueueSubmit(queue, 1, &upload_si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit(queue, 1, &upload_si, VK_NULL_HANDLE);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueWaitIdle(queue);
   }
 
   // Staging is done with — release it; the dial image owns its
   // contents on the device side now.
-  vkDestroyBuffer(vk_device, staging_buf, nullptr);
-  vkFreeMemory(vk_device, staging_mem, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyBuffer(vk_device, staging_buf, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkFreeMemory(vk_device, staging_mem, nullptr);
 
   VkImageViewCreateInfo dial_ivci{};
   dial_ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1326,7 +1443,8 @@ int main(int argc, char* argv[]) {
                           VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
   dial_ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
   VkImageView dial_view = VK_NULL_HANDLE;
-  if (vkCreateImageView(vk_device, &dial_ivci, nullptr, &dial_view) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView(vk_device, &dial_ivci, nullptr, &dial_view) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkCreateImageView (dial) failed");
     return EXIT_FAILURE;
   }
@@ -1343,7 +1461,8 @@ int main(int argc, char* argv[]) {
   sci.maxLod = 0.0F;
   sci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
   VkSampler dial_sampler = VK_NULL_HANDLE;
-  if (vkCreateSampler(vk_device, &sci, nullptr, &dial_sampler) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateSampler(vk_device, &sci, nullptr, &dial_sampler) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkCreateSampler failed");
     return EXIT_FAILURE;
   }
@@ -1358,7 +1477,8 @@ int main(int argc, char* argv[]) {
   dslci.bindingCount = 1;
   dslci.pBindings = &dsb;
   VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
-  if (vkCreateDescriptorSetLayout(vk_device, &dslci, nullptr, &dsl) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDescriptorSetLayout(vk_device, &dslci, nullptr, &dsl) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkCreateDescriptorSetLayout failed");
     return EXIT_FAILURE;
   }
@@ -1375,7 +1495,8 @@ int main(int argc, char* argv[]) {
   dpci.poolSizeCount = 1;
   dpci.pPoolSizes = &dps;
   VkDescriptorPool dpool = VK_NULL_HANDLE;
-  if (vkCreateDescriptorPool(vk_device, &dpci, nullptr, &dpool) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateDescriptorPool(vk_device, &dpci, nullptr, &dpool) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkCreateDescriptorPool failed");
     return EXIT_FAILURE;
   }
@@ -1385,7 +1506,8 @@ int main(int argc, char* argv[]) {
   dsai.descriptorSetCount = 1;
   dsai.pSetLayouts = &dsl;
   VkDescriptorSet dset = VK_NULL_HANDLE;
-  if (vkAllocateDescriptorSets(vk_device, &dsai, &dset) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateDescriptorSets(vk_device, &dsai, &dset) !=
+      VK_SUCCESS) {
     drm::println(stderr, "vkAllocateDescriptorSets failed");
     return EXIT_FAILURE;
   }
@@ -1400,7 +1522,7 @@ int main(int argc, char* argv[]) {
   wds.descriptorCount = 1;
   wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
   wds.pImageInfo = &dii;
-  vkUpdateDescriptorSets(vk_device, 1, &wds, 0, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkUpdateDescriptorSets(vk_device, 1, &wds, 0, nullptr);
 
   // -------- Info-text + warn-cell texture arrays ---------------------
   // 241 info-text templates (0..240 km/h, k_info_w x k_info_h each) and
@@ -1431,20 +1553,21 @@ int main(int argc, char* argv[]) {
     ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(vk_device, &ici, nullptr, &img) != VK_SUCCESS) {
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImage(vk_device, &ici, nullptr, &img) != VK_SUCCESS) {
       return false;
     }
     VkMemoryRequirements mr{};
-    vkGetImageMemoryRequirements(vk_device, img, &mr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetImageMemoryRequirements(vk_device, img, &mr);
     VkMemoryAllocateInfo mai{};
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     mai.allocationSize = mr.size;
     mai.memoryTypeIndex =
         find_memory_type(pd, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(vk_device, &mai, nullptr, &mem) != VK_SUCCESS) {
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateMemory(vk_device, &mai, nullptr, &mem) !=
+        VK_SUCCESS) {
       return false;
     }
-    vkBindImageMemory(vk_device, img, mem, 0);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkBindImageMemory(vk_device, img, mem, 0);
     return true;
   };
 
@@ -1477,12 +1600,14 @@ int main(int argc, char* argv[]) {
   astg_bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
   astg_bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   VkBuffer array_staging_buf = VK_NULL_HANDLE;
-  if (vkCreateBuffer(vk_device, &astg_bci, nullptr, &array_staging_buf) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateBuffer(vk_device, &astg_bci, nullptr,
+                                                   &array_staging_buf) != VK_SUCCESS) {
     drm::println(stderr, "vkCreateBuffer (info+warn staging) failed");
     return EXIT_FAILURE;
   }
   VkMemoryRequirements astg_mr{};
-  vkGetBufferMemoryRequirements(vk_device, array_staging_buf, &astg_mr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkGetBufferMemoryRequirements(vk_device, array_staging_buf,
+                                                              &astg_mr);
   VkMemoryAllocateInfo astg_mai{};
   astg_mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   astg_mai.allocationSize = astg_mr.size;
@@ -1490,14 +1615,17 @@ int main(int argc, char* argv[]) {
       find_memory_type(pd, astg_mr.memoryTypeBits,
                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   VkDeviceMemory array_staging_mem = VK_NULL_HANDLE;
-  if (vkAllocateMemory(vk_device, &astg_mai, nullptr, &array_staging_mem) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateMemory(vk_device, &astg_mai, nullptr,
+                                                     &array_staging_mem) != VK_SUCCESS) {
     drm::println(stderr, "vkAllocateMemory (info+warn staging) failed");
     return EXIT_FAILURE;
   }
-  vkBindBufferMemory(vk_device, array_staging_buf, array_staging_mem, 0);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkBindBufferMemory(vk_device, array_staging_buf, array_staging_mem,
+                                                   0);
 
   void* astg_ptr = nullptr;
-  vkMapMemory(vk_device, array_staging_mem, 0, array_staging_bytes, 0, &astg_ptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkMapMemory(vk_device, array_staging_mem, 0, array_staging_bytes, 0,
+                                            &astg_ptr);
   std::memset(astg_ptr, 0, static_cast<std::size_t>(array_staging_bytes));
   // Info layers: speed_kmh = 0..240.
   for (std::uint32_t i = 0; i < k_info_layer_count; ++i) {
@@ -1518,14 +1646,14 @@ int main(int argc, char* argv[]) {
     paint_warning_cell_template(dim_ptr, k_warn_dim_argb, k_warn_glyph_dim_argb, spec.glyph,
                                 font_face);
   }
-  vkUnmapMemory(vk_device, array_staging_mem);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkUnmapMemory(vk_device, array_staging_mem);
 
   // One-shot upload command buffer for both arrays.
   {
     VkCommandBufferBeginInfo upload_cbi{};
     upload_cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     upload_cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &upload_cbi);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkBeginCommandBuffer(cmd, &upload_cbi);
 
     auto barrier_to = [&](VkImage img, std::uint32_t layers, VkImageLayout old_layout,
                           VkImageLayout new_layout, VkAccessFlags src_access,
@@ -1541,7 +1669,8 @@ int main(int argc, char* argv[]) {
       b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
       b.srcAccessMask = src_access;
       b.dstAccessMask = dst_access;
-      vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr,
+                                                         0, nullptr, 1, &b);
     };
 
     barrier_to(info_image, k_info_layer_count, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1557,8 +1686,9 @@ int main(int argc, char* argv[]) {
       info_regions[i].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, i, 1};
       info_regions[i].imageExtent = {k_info_w, k_info_h, 1};
     }
-    vkCmdCopyBufferToImage(cmd, array_staging_buf, info_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           static_cast<std::uint32_t>(info_regions.size()), info_regions.data());
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdCopyBufferToImage(
+        cmd, array_staging_buf, info_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        static_cast<std::uint32_t>(info_regions.size()), info_regions.data());
 
     std::vector<VkBufferImageCopy> warn_regions(k_warn_layer_count);
     for (std::uint32_t i = 0; i < k_warn_layer_count; ++i) {
@@ -1566,8 +1696,9 @@ int main(int argc, char* argv[]) {
       warn_regions[i].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, i, 1};
       warn_regions[i].imageExtent = {k_warn_w, k_warn_h, 1};
     }
-    vkCmdCopyBufferToImage(cmd, array_staging_buf, warn_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           static_cast<std::uint32_t>(warn_regions.size()), warn_regions.data());
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdCopyBufferToImage(
+        cmd, array_staging_buf, warn_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        static_cast<std::uint32_t>(warn_regions.size()), warn_regions.data());
 
     barrier_to(info_image, k_info_layer_count, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1578,16 +1709,16 @@ int main(int argc, char* argv[]) {
                VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-    vkEndCommandBuffer(cmd);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkEndCommandBuffer(cmd);
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
-    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueWaitIdle(queue);
   }
-  vkDestroyBuffer(vk_device, array_staging_buf, nullptr);
-  vkFreeMemory(vk_device, array_staging_mem, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyBuffer(vk_device, array_staging_buf, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkFreeMemory(vk_device, array_staging_mem, nullptr);
 
   auto make_array_view = [&](VkImage img, std::uint32_t layers) -> VkImageView {
     VkImageViewCreateInfo ivci{};
@@ -1599,7 +1730,8 @@ int main(int argc, char* argv[]) {
                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
     ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
     VkImageView v = VK_NULL_HANDLE;
-    if (vkCreateImageView(vk_device, &ivci, nullptr, &v) != VK_SUCCESS) {
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateImageView(vk_device, &ivci, nullptr, &v) !=
+        VK_SUCCESS) {
       return VK_NULL_HANDLE;
     }
     return v;
@@ -1620,7 +1752,7 @@ int main(int argc, char* argv[]) {
     a.descriptorSetCount = 1;
     a.pSetLayouts = &dsl;
     VkDescriptorSet s = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(vk_device, &a, &s) != VK_SUCCESS) {
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkAllocateDescriptorSets(vk_device, &a, &s) != VK_SUCCESS) {
       return VK_NULL_HANDLE;
     }
     VkDescriptorImageInfo dii_arr{};
@@ -1634,7 +1766,7 @@ int main(int argc, char* argv[]) {
     w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w.pImageInfo = &dii_arr;
-    vkUpdateDescriptorSets(vk_device, 1, &w, 0, nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkUpdateDescriptorSets(vk_device, 1, &w, 0, nullptr);
     return s;
   };
   VkDescriptorSet info_dset = alloc_array_set(info_view);
@@ -1666,7 +1798,8 @@ int main(int argc, char* argv[]) {
   tex_plci.pushConstantRangeCount = 1;
   tex_plci.pPushConstantRanges = &tex_pcr;
   VkPipelineLayout tex_pipeline_layout = VK_NULL_HANDLE;
-  if (vkCreatePipelineLayout(vk_device, &tex_plci, nullptr, &tex_pipeline_layout) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreatePipelineLayout(vk_device, &tex_plci, nullptr,
+                                                           &tex_pipeline_layout) != VK_SUCCESS) {
     drm::println(stderr, "vkCreatePipelineLayout (textured) failed");
     return EXIT_FAILURE;
   }
@@ -1712,8 +1845,8 @@ int main(int argc, char* argv[]) {
   tex_gpci.renderPass = render_pass;
   tex_gpci.subpass = 1;
   VkPipeline tex_pipeline = VK_NULL_HANDLE;
-  if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &tex_gpci, nullptr, &tex_pipeline) !=
-      VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateGraphicsPipelines(
+          vk_device, VK_NULL_HANDLE, 1, &tex_gpci, nullptr, &tex_pipeline) != VK_SUCCESS) {
     drm::println(stderr, "vkCreateGraphicsPipelines (textured) failed");
     return EXIT_FAILURE;
   }
@@ -1737,8 +1870,8 @@ int main(int argc, char* argv[]) {
   dfx_plci.pushConstantRangeCount = 1;
   dfx_plci.pPushConstantRanges = &dfx_pcr;
   VkPipelineLayout dial_fx_pipeline_layout = VK_NULL_HANDLE;
-  if (vkCreatePipelineLayout(vk_device, &dfx_plci, nullptr, &dial_fx_pipeline_layout) !=
-      VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreatePipelineLayout(
+          vk_device, &dfx_plci, nullptr, &dial_fx_pipeline_layout) != VK_SUCCESS) {
     drm::println(stderr, "vkCreatePipelineLayout (dial_fx) failed");
     return EXIT_FAILURE;
   }
@@ -1765,8 +1898,8 @@ int main(int argc, char* argv[]) {
   dfx_gpci.renderPass = render_pass;
   dfx_gpci.subpass = 1;
   VkPipeline dial_fx_pipeline = VK_NULL_HANDLE;
-  if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &dfx_gpci, nullptr,
-                                &dial_fx_pipeline) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateGraphicsPipelines(
+          vk_device, VK_NULL_HANDLE, 1, &dfx_gpci, nullptr, &dial_fx_pipeline) != VK_SUCCESS) {
     drm::println(stderr, "vkCreateGraphicsPipelines (dial_fx) failed");
     return EXIT_FAILURE;
   }
@@ -1804,8 +1937,8 @@ int main(int argc, char* argv[]) {
   needle_plci.pushConstantRangeCount = 1;
   needle_plci.pPushConstantRanges = &needle_pcr;
   VkPipelineLayout needle_pipeline_layout = VK_NULL_HANDLE;
-  if (vkCreatePipelineLayout(vk_device, &needle_plci, nullptr, &needle_pipeline_layout) !=
-      VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreatePipelineLayout(vk_device, &needle_plci, nullptr,
+                                                           &needle_pipeline_layout) != VK_SUCCESS) {
     drm::println(stderr, "vkCreatePipelineLayout (needle) failed");
     return EXIT_FAILURE;
   }
@@ -1832,8 +1965,8 @@ int main(int argc, char* argv[]) {
   needle_gpci.renderPass = render_pass;
   needle_gpci.subpass = 1;
   VkPipeline needle_pipeline = VK_NULL_HANDLE;
-  if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &needle_gpci, nullptr,
-                                &needle_pipeline) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateGraphicsPipelines(
+          vk_device, VK_NULL_HANDLE, 1, &needle_gpci, nullptr, &needle_pipeline) != VK_SUCCESS) {
     drm::println(stderr, "vkCreateGraphicsPipelines (needle) failed");
     return EXIT_FAILURE;
   }
@@ -1873,8 +2006,8 @@ int main(int argc, char* argv[]) {
   ta_plci.pushConstantRangeCount = 1;
   ta_plci.pPushConstantRanges = &ta_pcr;
   VkPipelineLayout tex_array_pipeline_layout = VK_NULL_HANDLE;
-  if (vkCreatePipelineLayout(vk_device, &ta_plci, nullptr, &tex_array_pipeline_layout) !=
-      VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreatePipelineLayout(
+          vk_device, &ta_plci, nullptr, &tex_array_pipeline_layout) != VK_SUCCESS) {
     drm::println(stderr, "vkCreatePipelineLayout (tex_array) failed");
     return EXIT_FAILURE;
   }
@@ -1901,8 +2034,8 @@ int main(int argc, char* argv[]) {
   ta_gpci.renderPass = render_pass;
   ta_gpci.subpass = 1;
   VkPipeline tex_array_pipeline = VK_NULL_HANDLE;
-  if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &ta_gpci, nullptr,
-                                &tex_array_pipeline) != VK_SUCCESS) {
+  if (VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateGraphicsPipelines(
+          vk_device, VK_NULL_HANDLE, 1, &ta_gpci, nullptr, &tex_array_pipeline) != VK_SUCCESS) {
     drm::println(stderr, "vkCreateGraphicsPipelines (tex_array) failed");
     return EXIT_FAILURE;
   }
@@ -1991,11 +2124,11 @@ int main(int argc, char* argv[]) {
 
     const double t = std::chrono::duration<double>(clk::now() - t0).count();
 
-    vkResetCommandBuffer(cmd, 0);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkResetCommandBuffer(cmd, 0);
     VkCommandBufferBeginInfo cbi{};
     cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &cbi);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkBeginCommandBuffer(cmd, &cbi);
 
     VkRenderPassBeginInfo rpbi{};
     rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2006,17 +2139,17 @@ int main(int argc, char* argv[]) {
     rpbi.renderArea.extent = {fb_w, fb_h};
     rpbi.clearValueCount = 0;
     rpbi.pClearValues = nullptr;
-    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     // Subpass 0: bg radial gradient via full-screen triangle.
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(bg_pc),
-                       &bg_pc);
-    vkCmdDraw(cmd, 3, 1, 0, 0);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+        cmd, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(bg_pc), &bg_pc);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 3, 1, 0, 0);
 
     // Subpass 1: two textured dial templates side by side, then the
     // matching SDF needles + hubs on top of each.
-    vkCmdNextSubpass(cmd, VK_SUBPASS_CONTENTS_INLINE);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdNextSubpass(cmd, VK_SUBPASS_CONTENTS_INLINE);
     // Sweep values are needed by dial_fx (redline intensity) and the
     // needle pipeline (angle), so compute them up front. The first
     // k_startup_sweep_s seconds both needles do a "self-test" 0→1→0
@@ -2049,20 +2182,22 @@ int main(int argc, char* argv[]) {
     const auto tach_redline = static_cast<float>(smoothstep01(0.80, 1.0, tach_norm));
 
     if (!skip_dial) {
-      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline);
-      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline_layout, 0, 1,
-                              &dset, 0, nullptr);
-      vkCmdPushConstants(cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(speedo_pc),
-                         &speedo_pc);
-      vkCmdDraw(cmd, 6, 1, 0, 0);
-      vkCmdPushConstants(cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(tach_pc),
-                         &tach_pc);
-      vkCmdDraw(cmd, 6, 1, 0, 0);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                      tex_pipeline);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindDescriptorSets(
+          cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_pipeline_layout, 0, 1, &dset, 0, nullptr);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+          cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(speedo_pc), &speedo_pc);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 6, 1, 0, 0);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+          cmd, tex_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(tach_pc), &tach_pc);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 6, 1, 0, 0);
 
       // Metallic rim highlight + top-half gloss over each dial; the
       // tach also gets a redline tint that ramps up as the needle
       // climbs past 80% of its sweep.
-      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dial_fx_pipeline);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                      dial_fx_pipeline);
       const DialFxPushConstants speedo_dfx{
           speedo_pc.dst_x0,
           speedo_pc.dst_y0,
@@ -2077,22 +2212,23 @@ int main(int argc, char* argv[]) {
           0.0F,
           0.0F,
       };
-      vkCmdPushConstants(cmd, dial_fx_pipeline_layout,
-                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                         sizeof(speedo_dfx), &speedo_dfx);
-      vkCmdDraw(cmd, 6, 1, 0, 0);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+          cmd, dial_fx_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+          0, sizeof(speedo_dfx), &speedo_dfx);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 6, 1, 0, 0);
       const DialFxPushConstants tach_dfx{
           tach_pc.dst_x0, tach_pc.dst_y0, tach_pc.dst_x1, tach_pc.dst_y1,
           tach_pc.uv_x0,  tach_pc.uv_y0,  tach_pc.uv_x1,  tach_pc.uv_y1,
           tach_redline,   0.0F,           0.0F,           0.0F,
       };
-      vkCmdPushConstants(cmd, dial_fx_pipeline_layout,
-                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                         sizeof(tach_dfx), &tach_dfx);
-      vkCmdDraw(cmd, 6, 1, 0, 0);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+          cmd, dial_fx_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+          0, sizeof(tach_dfx), &tach_dfx);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 6, 1, 0, 0);
     }
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, needle_pipeline);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                    needle_pipeline);
 
     NeedlePushConstants speedo_needle_pc{
         speedo_pc.dst_x0,
@@ -2113,10 +2249,10 @@ int main(int argc, char* argv[]) {
         k_half_thickness_norm,
         speedo_redline,
     };
-    vkCmdPushConstants(cmd, needle_pipeline_layout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                       sizeof(speedo_needle_pc), &speedo_needle_pc);
-    vkCmdDraw(cmd, 6, 1, 0, 0);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+        cmd, needle_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        sizeof(speedo_needle_pc), &speedo_needle_pc);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 6, 1, 0, 0);
 
     NeedlePushConstants tach_needle_pc{
         tach_pc.dst_x0,
@@ -2137,16 +2273,18 @@ int main(int argc, char* argv[]) {
         k_half_thickness_norm,
         tach_redline,
     };
-    vkCmdPushConstants(cmd, needle_pipeline_layout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                       sizeof(tach_needle_pc), &tach_needle_pc);
-    vkCmdDraw(cmd, 6, 1, 0, 0);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+        cmd, needle_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        sizeof(tach_needle_pc), &tach_needle_pc);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 6, 1, 0, 0);
 
     // Info readout: current speed-derived layer index into the
     // 241-layer info texture array, drawn between the dials.
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_array_pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_array_pipeline_layout, 0, 1,
-                            &info_dset, 0, nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                    tex_array_pipeline);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                          tex_array_pipeline_layout, 0, 1,
+                                                          &info_dset, 0, nullptr);
     {
       const auto speed_kmh = static_cast<std::uint32_t>(
           std::lround(std::clamp(speedo_norm * static_cast<double>(k_info_speed_max_kmh), 0.0,
@@ -2154,30 +2292,31 @@ int main(int argc, char* argv[]) {
       TexArrayPushConstants pc = info_pc;
       pc.layer =
           static_cast<std::int32_t>(std::min<std::uint32_t>(speed_kmh, k_info_layer_count - 1U));
-      vkCmdPushConstants(cmd, tex_array_pipeline_layout,
-                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc),
-                         &pc);
-      vkCmdDraw(cmd, 6, 1, 0, 0);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+          cmd, tex_array_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+          0, sizeof(pc), &pc);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 6, 1, 0, 0);
     }
 
     // Warn cells: each cell's "lit" state cycles on a 1-Hz schedule
     // offset per-cell so something is always changing — the texture
     // array layer = (cell * 2) for lit, (cell * 2) + 1 for dim.
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tex_array_pipeline_layout, 0, 1,
-                            &warn_dset, 0, nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                          tex_array_pipeline_layout, 0, 1,
+                                                          &warn_dset, 0, nullptr);
     for (int cell = 0; cell < k_warn_count; ++cell) {
       const double phase = t + (cell * 0.37);
       const bool lit = (static_cast<int>(std::floor(phase)) & 1) == 0;
       // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
       TexArrayPushConstants pc = warn_pcs[static_cast<std::size_t>(cell)];
       pc.layer = static_cast<std::int32_t>((cell * 2) + (lit ? 0 : 1));
-      vkCmdPushConstants(cmd, tex_array_pipeline_layout,
-                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc),
-                         &pc);
-      vkCmdDraw(cmd, 6, 1, 0, 0);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPushConstants(
+          cmd, tex_array_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+          0, sizeof(pc), &pc);
+      VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdDraw(cmd, 6, 1, 0, 0);
     }
 
-    vkCmdEndRenderPass(cmd);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdEndRenderPass(cmd);
 
     // Release the image to the foreign queue family (the KMS scanout
     // consumer). The subpass dependency above already ordered the
@@ -2197,18 +2336,18 @@ int main(int argc, char* argv[]) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
     release.image = vk_images[back_index];
     release.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                         &release);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdPipelineBarrier(
+        cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
+        0, nullptr, 0, nullptr, 1, &release);
 
-    vkEndCommandBuffer(cmd);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkEndCommandBuffer(cmd);
 
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
-    vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueWaitIdle(queue);
 
     // The next commit's acquire() should return the FB we just
     // rendered into. The plane page-flips between the two FBs.
@@ -2236,52 +2375,54 @@ int main(int argc, char* argv[]) {
   }
 
   scene.reset();
-  vkDestroyPipeline(vk_device, dial_fx_pipeline, nullptr);
-  vkDestroyPipelineLayout(vk_device, dial_fx_pipeline_layout, nullptr);
-  vkDestroyShaderModule(vk_device, dial_fx_frag, nullptr);
-  vkDestroyPipeline(vk_device, tex_array_pipeline, nullptr);
-  vkDestroyPipelineLayout(vk_device, tex_array_pipeline_layout, nullptr);
-  vkDestroyShaderModule(vk_device, tex_array_frag, nullptr);
-  vkDestroyShaderModule(vk_device, tex_array_vert, nullptr);
-  vkDestroyImageView(vk_device, warn_view, nullptr);
-  vkDestroyImageView(vk_device, info_view, nullptr);
-  vkFreeMemory(vk_device, warn_mem, nullptr);
-  vkDestroyImage(vk_device, warn_image, nullptr);
-  vkFreeMemory(vk_device, info_mem, nullptr);
-  vkDestroyImage(vk_device, info_image, nullptr);
-  vkDestroyPipeline(vk_device, needle_pipeline, nullptr);
-  vkDestroyPipelineLayout(vk_device, needle_pipeline_layout, nullptr);
-  vkDestroyShaderModule(vk_device, needle_frag, nullptr);
-  vkDestroyShaderModule(vk_device, needle_vert, nullptr);
-  vkDestroyPipeline(vk_device, tex_pipeline, nullptr);
-  vkDestroyPipelineLayout(vk_device, tex_pipeline_layout, nullptr);
-  vkDestroyShaderModule(vk_device, tex_frag, nullptr);
-  vkDestroyShaderModule(vk_device, tex_vert, nullptr);
-  vkDestroyDescriptorPool(vk_device, dpool, nullptr);
-  vkDestroyDescriptorSetLayout(vk_device, dsl, nullptr);
-  vkDestroySampler(vk_device, dial_sampler, nullptr);
-  vkDestroyImageView(vk_device, dial_view, nullptr);
-  vkFreeMemory(vk_device, dial_mem, nullptr);
-  vkDestroyImage(vk_device, dial_image, nullptr);
-  vkDestroyPipeline(vk_device, pipeline, nullptr);
-  vkDestroyPipelineLayout(vk_device, pipeline_layout, nullptr);
-  vkDestroyShaderModule(vk_device, bg_frag, nullptr);
-  vkDestroyShaderModule(vk_device, bg_vert, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipeline(vk_device, dial_fx_pipeline, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipelineLayout(vk_device, dial_fx_pipeline_layout,
+                                                        nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, dial_fx_frag, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipeline(vk_device, tex_array_pipeline, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipelineLayout(vk_device, tex_array_pipeline_layout,
+                                                        nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, tex_array_frag, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, tex_array_vert, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImageView(vk_device, warn_view, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImageView(vk_device, info_view, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkFreeMemory(vk_device, warn_mem, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImage(vk_device, warn_image, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkFreeMemory(vk_device, info_mem, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImage(vk_device, info_image, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipeline(vk_device, needle_pipeline, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipelineLayout(vk_device, needle_pipeline_layout, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, needle_frag, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, needle_vert, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipeline(vk_device, tex_pipeline, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipelineLayout(vk_device, tex_pipeline_layout, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, tex_frag, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, tex_vert, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyDescriptorPool(vk_device, dpool, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyDescriptorSetLayout(vk_device, dsl, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroySampler(vk_device, dial_sampler, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImageView(vk_device, dial_view, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkFreeMemory(vk_device, dial_mem, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImage(vk_device, dial_image, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipeline(vk_device, pipeline, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyPipelineLayout(vk_device, pipeline_layout, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, bg_frag, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyShaderModule(vk_device, bg_vert, nullptr);
   for (int i = 0; i < k_swap_count; ++i) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    vkDestroyFramebuffer(vk_device, framebuffers[i], nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyFramebuffer(vk_device, framebuffers[i], nullptr);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    vkDestroyImageView(vk_device, image_views[i], nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImageView(vk_device, image_views[i], nullptr);
   }
-  vkDestroyRenderPass(vk_device, render_pass, nullptr);
-  vkDestroyCommandPool(vk_device, cmd_pool, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyRenderPass(vk_device, render_pass, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyCommandPool(vk_device, cmd_pool, nullptr);
   for (int i = 0; i < k_swap_count; ++i) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    vkFreeMemory(vk_device, vk_mems[i], nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkFreeMemory(vk_device, vk_mems[i], nullptr);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-    vkDestroyImage(vk_device, vk_images[i], nullptr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyImage(vk_device, vk_images[i], nullptr);
   }
-  vkDestroyDevice(vk_device, nullptr);
-  vkDestroyInstance(instance, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyDevice(vk_device, nullptr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyInstance(instance, nullptr);
   return EXIT_SUCCESS;
 }
