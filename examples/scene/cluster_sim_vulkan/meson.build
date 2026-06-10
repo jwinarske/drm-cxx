@@ -93,7 +93,7 @@ executable('cluster_sim_vulkan',
   needle_vert_spv, needle_frag_spv,
   tex_array_vert_spv, tex_array_frag_spv,
   dial_fx_frag_spv,
-  dependencies : [drm_cxx_dep, vk_dep, blend2d_dep],
+  dependencies : [drm_cxx_dep, vk_headers_dep, blend2d_dep],
   include_directories : [include_directories('..'),
                          include_directories('.')],
 )
