@@ -44,11 +44,12 @@ enum class ColorPrimaries : std::uint8_t {
 /// `uint32_t w/h` match `CRTC_W/H`.
 using Rect = drm::planes::Rect;
 
-/// amdgpu per-plane color pipeline (the `AMD_PLANE_*` properties — the path
-/// gamescope drives for HDR / tone-mapping on the Steam Deck). Presence-gated:
-/// planes or drivers without the properties ignore this silently. Landing
-/// incrementally — stage 1 is the input degamma transfer function plus the HDR
-/// luminance multiplier; the shaper / 3D-LUT / blend / CTM (blob) stages follow.
+/// amdgpu per-plane color pipeline — the `AMD_PLANE_*` properties of amdgpu's
+/// DRM/KMS color-management uAPI, used for HDR / tone-mapping / wide-gamut.
+/// Presence-gated: planes or drivers without the properties ignore this
+/// silently. Landing incrementally — stage 1 is the input degamma transfer
+/// function plus the HDR luminance multiplier; the shaper / 3D-LUT / blend / CTM
+/// (blob) stages follow.
 enum class PlaneDegammaTf : std::uint8_t {
   Default,   ///< driver default — `AMD_PLANE_DEGAMMA_TF` enum "Default"
   Srgb,      ///< "sRGB EOTF"
