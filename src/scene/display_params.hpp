@@ -17,8 +17,10 @@
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
 
+#include <array>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace drm::scene {
 
@@ -50,29 +52,57 @@ using Rect = drm::planes::Rect;
 /// silently. Landing incrementally — stage 1 is the input degamma transfer
 /// function plus the HDR luminance multiplier; the shaper / 3D-LUT / blend / CTM
 /// (blob) stages follow.
-enum class PlaneDegammaTf : std::uint8_t {
-  Default,   ///< driver default — `AMD_PLANE_DEGAMMA_TF` enum "Default"
-  Srgb,      ///< "sRGB EOTF"
-  Bt709,     ///< "BT.709 inv_OETF"
-  Pq,        ///< "PQ EOTF" — HDR10 input
-  Identity,  ///< "Identity"
-  Gamma22,   ///< "Gamma 2.2 EOTF"
-  Gamma24,   ///< "Gamma 2.4 EOTF"
-  Gamma26,   ///< "Gamma 2.6 EOTF"
+/// Logical transfer-function selector for the amdgpu plane color stages. The
+/// stage decides the direction: degamma + blend linearize an encoding (EOTF
+/// direction), while the shaper (and the CRTC regamma) re-encode (inverse-EOTF).
+/// The scene resolves the selection against each property's live enum list by
+/// name, so the same selector maps to the right driver enum per stage.
+enum class PlaneTransferFunction : std::uint8_t {
+  Default,  ///< driver default
+  Srgb,
+  Bt709,
+  Pq,  ///< HDR10
+  Identity,
+  Gamma22,
+  Gamma24,
+  Gamma26,
 };
 
-/// Per-layer amdgpu plane color-pipeline configuration. Each field is
-/// independently optional — unset means "don't touch that property" (so the
-/// plane keeps the driver default / whatever a previous compositor left). The
-/// scene writes these onto the layer's assigned plane at commit time, by name,
-/// skipping any property the plane doesn't advertise.
+/// One RGB entry of an amdgpu color LUT / 3D-LUT. Values map linearly to
+/// 0.0–1.0 (0x0 == 0.0, 0xffff == 1.0); packed into the kernel's `drm_color_lut`.
+struct ColorLutEntry {
+  std::uint16_t r{};
+  std::uint16_t g{};
+  std::uint16_t b{};
+};
+
+/// Per-layer amdgpu plane color-pipeline configuration, in pipeline order:
+/// degamma → HDR mult → shaper(TF + LUT) → 3D-LUT → blend(TF + LUT), with a CTM.
+/// Each field is independently optional/empty — unset means "don't touch that
+/// property" (the plane keeps the driver default / whatever a previous
+/// compositor left). The scene writes these onto the layer's assigned plane at
+/// commit time, skipping any property the plane doesn't advertise. LUT vectors
+/// must match the plane's advertised `AMD_PLANE_*_LUT_SIZE` (1D) or its cube
+/// dimension `AMD_PLANE_LUT3D_SIZE`³ or the kernel rejects the commit.
 struct AmdPlaneColor {
-  /// `AMD_PLANE_DEGAMMA_TF` — linearizes the layer's input encoding. Resolved
-  /// against the plane property's live enum list by name.
-  std::optional<PlaneDegammaTf> degamma_tf;
-  /// `AMD_PLANE_HDR_MULT` — per-plane luminance multiplier in linear light
-  /// (S31.32 fixed-point on the wire; 1.0 = identity).
+  /// `AMD_PLANE_DEGAMMA_TF` — linearizes the layer's input encoding (EOTF).
+  std::optional<PlaneTransferFunction> degamma_tf;
+  /// `AMD_PLANE_HDR_MULT` — luminance multiplier in linear light (S31.32 on the
+  /// wire; 1.0 = identity).
   std::optional<double> hdr_mult;
+  /// `AMD_PLANE_SHAPER_TF` — re-encodes linear → shaper space (inverse-EOTF).
+  std::optional<PlaneTransferFunction> shaper_tf;
+  /// `AMD_PLANE_SHAPER_LUT` — 1D shaper curve (size = `AMD_PLANE_SHAPER_LUT_SIZE`).
+  std::vector<ColorLutEntry> shaper_lut;
+  /// `AMD_PLANE_LUT3D` — gamut / tone-map cube (size = `AMD_PLANE_LUT3D_SIZE`³,
+  /// blue-major then green then red).
+  std::vector<ColorLutEntry> lut3d;
+  /// `AMD_PLANE_BLEND_TF` — re-encodes into the blending space (EOTF).
+  std::optional<PlaneTransferFunction> blend_tf;
+  /// `AMD_PLANE_BLEND_LUT` — 1D blend curve (size = `AMD_PLANE_BLEND_LUT_SIZE`).
+  std::vector<ColorLutEntry> blend_lut;
+  /// `AMD_PLANE_CTM` — row-major 3×3 color matrix (packed S31.32 sign-magnitude).
+  std::optional<std::array<double, 9>> ctm;
 };
 
 /// Per-layer display configuration. Lowered to plane properties at

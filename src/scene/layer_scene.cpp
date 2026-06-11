@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -1967,74 +1968,193 @@ class LayerScene::Impl {
     return {};
   }
 
-  // amdgpu per-plane color pipeline (AMD_PLANE_*). Stage 1: the input degamma
-  // transfer function (enum, resolved by name against the plane's own property)
-  // and the HDR luminance multiplier (S31.32 fixed-point; 1.0 == 2^32). Both are
-  // per-layer + independently optional; each is written onto the layer's
-  // assigned plane only when set AND the plane advertises the property
-  // (presence-gated, like the IN_FENCE_FD / FB_DAMAGE_CLIPS arming above). The
-  // blob stages (shaper / 3D-LUT / blend / CTM) will extend this method.
+  // amdgpu per-plane color pipeline (AMD_PLANE_*), in pipeline order: degamma ->
+  // HDR mult -> shaper(TF + LUT) -> 3D-LUT -> blend(TF + LUT) -> CTM. Each piece
+  // is per-layer + optional; written onto the layer's assigned plane only when
+  // set AND the plane advertises the property (presence-gated, like the
+  // IN_FENCE_FD / FB_DAMAGE_CLIPS arming above). LUT / 3D-LUT / CTM go through
+  // ephemeral property blobs, destroyed after the commit like FB_DAMAGE_CLIPS.
   drm::expected<void, std::error_code> arm_layer_amd_plane_color(
       const std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
       CommitReport& report) {
     for (const auto& acq : acquisitions) {
-      const auto& color = acq.scene_layer->display().amd_color;
-      if (!color.degamma_tf.has_value() && !color.hdr_mult.has_value()) {
+      const auto& c = acq.scene_layer->display().amd_color;
+      const bool any = c.degamma_tf.has_value() || c.hdr_mult.has_value() ||
+                       c.shaper_tf.has_value() || !c.shaper_lut.empty() || !c.lut3d.empty() ||
+                       c.blend_tf.has_value() || !c.blend_lut.empty() || c.ctm.has_value();
+      if (!any) {
         continue;
       }
-      const auto plane_id = acq.planes_layer->assigned_plane_id();
-      if (!plane_id.has_value()) {
+      const auto assigned = acq.planes_layer->assigned_plane_id();
+      if (!assigned.has_value()) {
         continue;  // composited/dropped: no plane to configure
       }
-      if (color.degamma_tf.has_value()) {
-        if (const auto prop = props_.property_id(*plane_id, "AMD_PLANE_DEGAMMA_TF")) {
-          if (const auto value = resolve_plane_degamma_enum(*prop, *color.degamma_tf)) {
-            if (auto r = req.add_property(*plane_id, *prop, *value); !r) {
-              return r;
-            }
-            ++report.properties_written;
-          }
+      const std::uint32_t plane = *assigned;
+      if (c.degamma_tf.has_value()) {
+        if (auto r =
+                write_plane_tf(plane, "AMD_PLANE_DEGAMMA_TF", *c.degamma_tf, false, req, report);
+            !r) {
+          return r;
         }
       }
-      if (color.hdr_mult.has_value()) {
-        if (const auto prop = props_.property_id(*plane_id, "AMD_PLANE_HDR_MULT")) {
-          // AMD_PLANE_HDR_MULT is S31.32 fixed-point: 1.0 == 2^32.
-          const double scaled = *color.hdr_mult * 4294967296.0;
+      if (c.hdr_mult.has_value()) {
+        if (const auto prop = props_.property_id(plane, "AMD_PLANE_HDR_MULT")) {
+          const double scaled = *c.hdr_mult * 4294967296.0;  // S31.32: 1.0 == 2^32
           const auto fixed =
               scaled <= 0.0 ? std::uint64_t{0} : static_cast<std::uint64_t>(std::llround(scaled));
-          if (auto r = req.add_property(*plane_id, *prop, fixed); !r) {
+          if (auto r = req.add_property(plane, *prop, fixed); !r) {
             return r;
           }
           ++report.properties_written;
+        }
+      }
+      if (c.shaper_tf.has_value()) {
+        if (auto r = write_plane_tf(plane, "AMD_PLANE_SHAPER_TF", *c.shaper_tf, true, req, report);
+            !r) {
+          return r;
+        }
+      }
+      if (!c.shaper_lut.empty()) {
+        if (auto r = write_plane_lut(plane, "AMD_PLANE_SHAPER_LUT", c.shaper_lut, req, report);
+            !r) {
+          return r;
+        }
+      }
+      if (!c.lut3d.empty()) {
+        if (auto r = write_plane_lut(plane, "AMD_PLANE_LUT3D", c.lut3d, req, report); !r) {
+          return r;
+        }
+      }
+      if (c.blend_tf.has_value()) {
+        if (auto r = write_plane_tf(plane, "AMD_PLANE_BLEND_TF", *c.blend_tf, false, req, report);
+            !r) {
+          return r;
+        }
+      }
+      if (!c.blend_lut.empty()) {
+        if (auto r = write_plane_lut(plane, "AMD_PLANE_BLEND_LUT", c.blend_lut, req, report); !r) {
+          return r;
+        }
+      }
+      if (c.ctm.has_value()) {
+        if (auto r = write_plane_ctm(plane, *c.ctm, req, report); !r) {
+          return r;
         }
       }
     }
     return {};
   }
 
-  // Resolve a PlaneDegammaTf to AMD_PLANE_DEGAMMA_TF's driver-assigned enum value
-  // by matching the amdgpu enum name on the given property (values are driver-
-  // assigned, so resolve by name; the degamma names are EOTF-direction, distinct
-  // from the inv_EOTF shaper/regamma names).
-  [[nodiscard]] std::optional<std::uint64_t> resolve_plane_degamma_enum(std::uint32_t prop_id,
-                                                                        PlaneDegammaTf tf) const {
-    const char* const want = [tf]() -> const char* {
+  // Resolve + write a transfer-function selection onto a plane enum property.
+  // `inverse` selects the encode names ("PQ inv_EOTF" — shaper/regamma) over the
+  // linearize names ("PQ EOTF" — degamma/blend). No-op if the property is absent
+  // or the driver's enum table lacks the resolved name.
+  drm::expected<void, std::error_code> write_plane_tf(std::uint32_t plane_id, const char* prop_name,
+                                                      PlaneTransferFunction tf, bool inverse,
+                                                      drm::AtomicRequest& req,
+                                                      CommitReport& report) {
+    const auto prop = props_.property_id(plane_id, prop_name);
+    if (!prop) {
+      return {};
+    }
+    const auto value = resolve_plane_tf_enum(*prop, tf, inverse);
+    if (!value) {
+      return {};
+    }
+    if (auto r = req.add_property(plane_id, *prop, *value); !r) {
+      return r;
+    }
+    ++report.properties_written;
+    return {};
+  }
+
+  // Pack ColorLutEntry[] into a drm_color_lut[] property blob and write it onto a
+  // plane LUT property (shaper / 3D-LUT / blend). The caller sizes the vector to
+  // the plane's advertised LUT size; the kernel rejects a mismatch. No-op if the
+  // plane lacks the property. The blob is ephemeral (freed after the commit).
+  drm::expected<void, std::error_code> write_plane_lut(std::uint32_t plane_id,
+                                                       const char* prop_name,
+                                                       const std::vector<ColorLutEntry>& lut,
+                                                       drm::AtomicRequest& req,
+                                                       CommitReport& report) {
+    const auto prop = props_.property_id(plane_id, prop_name);
+    if (!prop) {
+      return {};
+    }
+    std::vector<drm_color_lut> entries(lut.size());
+    for (std::size_t i = 0; i < lut.size(); ++i) {
+      entries[i] = drm_color_lut{lut[i].r, lut[i].g, lut[i].b, 0};
+    }
+    std::uint32_t blob_id = 0;
+    if (drmModeCreatePropertyBlob(dev_->fd(), entries.data(),
+                                  entries.size() * sizeof(drm_color_lut), &blob_id) != 0) {
+      return drm::unexpected<std::error_code>(std::error_code(errno, std::generic_category()));
+    }
+    ephemeral_blobs_.push_back(blob_id);
+    if (auto r = req.add_property(plane_id, *prop, blob_id); !r) {
+      return r;
+    }
+    ++report.properties_written;
+    return {};
+  }
+
+  // Write a row-major 3x3 color matrix onto AMD_PLANE_CTM via an ephemeral blob.
+  // amdgpu's plane CTM is drm_color_ctm_3x4 (3 rows x 4 cols; the 4th column is a
+  // per-channel offset), so the 3x3 maps into the 3x3 block with a zero offset
+  // column — 12 entries of S31.32 sign-magnitude (bit 63 = sign). Built as raw
+  // u64[12] to avoid depending on the struct being declared. No-op if absent.
+  drm::expected<void, std::error_code> write_plane_ctm(std::uint32_t plane_id,
+                                                       const std::array<double, 9>& m,
+                                                       drm::AtomicRequest& req,
+                                                       CommitReport& report) {
+    const auto prop = props_.property_id(plane_id, "AMD_PLANE_CTM");
+    if (!prop) {
+      return {};
+    }
+    const auto pack = [](double v) -> std::uint64_t {
+      const auto mag = static_cast<std::uint64_t>(std::llround(std::fabs(v) * 4294967296.0));
+      return v < 0.0 ? (mag | (std::uint64_t{1} << 63)) : mag;
+    };
+    const std::array<std::uint64_t, 12> packed{
+        pack(m[0]), pack(m[1]), pack(m[2]), 0,  // row 0 + offset
+        pack(m[3]), pack(m[4]), pack(m[5]), 0,  // row 1 + offset
+        pack(m[6]), pack(m[7]), pack(m[8]), 0,  // row 2 + offset
+    };
+    std::uint32_t blob_id = 0;
+    if (drmModeCreatePropertyBlob(dev_->fd(), packed.data(), packed.size() * sizeof(std::uint64_t),
+                                  &blob_id) != 0) {
+      return drm::unexpected<std::error_code>(std::error_code(errno, std::generic_category()));
+    }
+    ephemeral_blobs_.push_back(blob_id);
+    if (auto r = req.add_property(plane_id, *prop, blob_id); !r) {
+      return r;
+    }
+    ++report.properties_written;
+    return {};
+  }
+
+  // Resolve a PlaneTransferFunction to a plane TF property's driver-assigned enum
+  // value by name (values are driver-assigned, so resolve by name).
+  [[nodiscard]] std::optional<std::uint64_t> resolve_plane_tf_enum(std::uint32_t prop_id,
+                                                                   PlaneTransferFunction tf,
+                                                                   bool inverse) const {
+    const char* const want = [tf, inverse]() -> const char* {
       switch (tf) {
-        case PlaneDegammaTf::Srgb:
-          return "sRGB EOTF";
-        case PlaneDegammaTf::Bt709:
-          return "BT.709 inv_OETF";
-        case PlaneDegammaTf::Pq:
-          return "PQ EOTF";
-        case PlaneDegammaTf::Identity:
+        case PlaneTransferFunction::Srgb:
+          return inverse ? "sRGB inv_EOTF" : "sRGB EOTF";
+        case PlaneTransferFunction::Bt709:
+          return inverse ? "BT.709 OETF" : "BT.709 inv_OETF";
+        case PlaneTransferFunction::Pq:
+          return inverse ? "PQ inv_EOTF" : "PQ EOTF";
+        case PlaneTransferFunction::Identity:
           return "Identity";
-        case PlaneDegammaTf::Gamma22:
-          return "Gamma 2.2 EOTF";
-        case PlaneDegammaTf::Gamma24:
-          return "Gamma 2.4 EOTF";
-        case PlaneDegammaTf::Gamma26:
-          return "Gamma 2.6 EOTF";
-        case PlaneDegammaTf::Default:
+        case PlaneTransferFunction::Gamma22:
+          return inverse ? "Gamma 2.2 inv_EOTF" : "Gamma 2.2 EOTF";
+        case PlaneTransferFunction::Gamma24:
+          return inverse ? "Gamma 2.4 inv_EOTF" : "Gamma 2.4 EOTF";
+        case PlaneTransferFunction::Gamma26:
+          return inverse ? "Gamma 2.6 inv_EOTF" : "Gamma 2.6 EOTF";
+        case PlaneTransferFunction::Default:
           break;
       }
       return "Default";
