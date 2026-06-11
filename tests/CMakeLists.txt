@@ -47,6 +47,7 @@ set(DRM_CXX_TESTS
   test_driver_profile
   test_mode_list
   test_dma_buf_source_cache
+  test_dumb_scanout_sink
   test_acquire_fence
   test_log)
 
