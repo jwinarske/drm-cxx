@@ -11,6 +11,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/display/driver_profile.hpp>
+#include <drm-cxx/display/mode_list.hpp>
 
 #include <cstdlib>
 #include <string>
@@ -53,5 +54,21 @@ int main(int argc, char** argv) {
   drm::println("  fb_damage_clips  : {}", prof->fb_damage_clips);
   drm::println("  vrr_capable      : {}", prof->vrr_capable);
   drm::println("  psr              : {}", psr_str(prof->psr));
+
+  // Connectors + advertised modes (display/mode_list).
+  if (auto conns = drm::display::query_connector_modes(*dev)) {
+    drm::println("  -- connectors --");
+    for (const auto& c : *conns) {
+      drm::println("  {:<10} id={:<3} {:<12} modes={}", c.name(), c.connector_id,
+                   c.connected ? "connected" : "disconnected", c.modes.size());
+      if (!c.modes.empty()) {
+        const auto& m = c.modes.front();
+        drm::println("      first: {}x{}@{}{}", m.width(), m.height(), m.refresh(),
+                     m.preferred() ? " (preferred)" : "");
+      }
+    }
+  } else {
+    drm::println(stderr, "  connectors: {}", conns.error().message());
+  }
   return EXIT_SUCCESS;
 }

@@ -31,6 +31,7 @@ drm_cxx_sources = files(
   'display/hotplug_monitor.cpp',
   'display/scanout_target.cpp',
   'display/driver_profile.cpp',
+  'display/mode_list.cpp',
   'session/seat.cpp',
   'time/clock.cpp',
   'gbm/device.cpp',
@@ -282,6 +283,7 @@ install_headers(
   'display/hotplug_monitor.hpp',
   'display/scanout_target.hpp',
   'display/driver_profile.hpp',
+  'display/mode_list.hpp',
   'display/tone_mapper.hpp',
   subdir : 'drm-cxx/display',
 )
