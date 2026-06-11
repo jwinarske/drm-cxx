@@ -70,6 +70,23 @@ test('test_mode_list',
   ),
 )
 
+test('test_dma_buf_source_cache',
+  executable('test_dma_buf_source_cache',
+    'unit/test_dma_buf_source_cache.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# Integration: needs a dumb-capable modeset card (vkms/amdgpu/rockchip; skips
+# if none). Serial — shares the DRM device with the other card-backed tests.
+test('test_dma_buf_source_cache_vkms',
+  executable('test_dma_buf_source_cache_vkms',
+    'integration/test_dma_buf_source_cache_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
 test('test_acquire_fence',
   executable('test_acquire_fence',
     'unit/test_acquire_fence.cpp',
