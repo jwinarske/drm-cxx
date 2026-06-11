@@ -40,6 +40,7 @@
 #include <drm-cxx/display/crtc_capabilities.hpp>
 #include <drm-cxx/display/crtc_color_pipeline.hpp>
 #include <drm-cxx/display/hdr_metadata.hpp>
+#include <drm-cxx/display/tone_mapper.hpp>
 #include <drm-cxx/scene/display_params.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer.hpp>
@@ -51,7 +52,6 @@
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
-#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -73,7 +73,7 @@ enum class Mode : std::uint8_t { Pq, Hlg, Sdr };
 struct Args {
   Mode mode{Mode::Pq};
   bool no_hw_pipeline{false};
-  bool amd_plane_color{false};
+  bool tone_map{false};
   bool dry_run{false};
   std::optional<float> target_nits;
   int hold_seconds{k_default_hold_seconds};
@@ -103,8 +103,8 @@ struct Args {
       a.hold_seconds = std::atoi(argv[++i]);
     } else if (arg == "--no-hw-pipeline") {
       a.no_hw_pipeline = true;
-    } else if (arg == "--amd-plane-color") {
-      a.amd_plane_color = true;
+    } else if (arg == "--tone-map") {
+      a.tone_map = true;
     } else if (arg == "--dry-run") {
       a.dry_run = true;
     } else {
@@ -165,18 +165,30 @@ std::uint64_t plane_lut_size(int fd, const char* name) {
   return sz;
 }
 
-// Identity 1D ramp LUT of n entries (grey ramp 0..1).
-std::vector<drm::scene::ColorLutEntry> ramp_lut(std::uint64_t n) {
-  std::vector<drm::scene::ColorLutEntry> v(n);
-  for (std::uint64_t i = 0; i < n; ++i) {
-    const auto c = n > 1 ? static_cast<std::uint16_t>(i * 65535ULL / (n - 1)) : std::uint16_t{0};
-    v[i] = {c, c, c};
-  }
-  return v;
+// Pack an 8-bit ARGB pixel into the 16-bit-per-channel u64 ToneMapper expects
+// (x*257 maps 0..255 -> 0..65535), apply the mapper, and unpack back to ARGB.
+// Mirrors src/scene/composite_canvas.cpp's apply_tone_mapper_argb. The software
+// tone-map fallback.
+std::uint32_t sw_tonemap_argb(std::uint32_t argb, const drm::display::ToneMapper& tm) {
+  const auto a = static_cast<std::uint16_t>(((argb >> 24U) & 0xFFU) * 257U);
+  const auto r = static_cast<std::uint16_t>(((argb >> 16U) & 0xFFU) * 257U);
+  const auto g = static_cast<std::uint16_t>(((argb >> 8U) & 0xFFU) * 257U);
+  const auto b = static_cast<std::uint16_t>((argb & 0xFFU) * 257U);
+  const std::uint64_t packed =
+      static_cast<std::uint64_t>(r) | (static_cast<std::uint64_t>(g) << 16U) |
+      (static_cast<std::uint64_t>(b) << 32U) | (static_cast<std::uint64_t>(a) << 48U);
+  const std::uint64_t o = tm(packed);
+  const auto u8 = [](std::uint64_t c) { return static_cast<std::uint32_t>((c & 0xFFFFU) / 257U); };
+  return (static_cast<std::uint32_t>((argb >> 24U) & 0xFFU) << 24U) | (u8(o) << 16U) |
+         (u8(o >> 16U) << 8U) | u8(o >> 32U);
 }
 
-// Identity 3D LUT cube of dim^3 entries (blue-major, then green, then red).
-std::vector<drm::scene::ColorLutEntry> identity_cube(std::uint64_t dim) {
+// Bake a ToneMapper into an amdgpu AMD_PLANE_LUT3D cube (dim^3 entries,
+// blue-major then green then red) by sampling the mapper at each grid point.
+// With Identity surrounding stages, the cube carries the full encoded->encoded
+// transform the hardware applies at scanout. The hardware tone-map.
+std::vector<drm::scene::ColorLutEntry> bake_tonemap_cube(const drm::display::ToneMapper& tm,
+                                                         std::uint64_t dim) {
   std::vector<drm::scene::ColorLutEntry> v;
   v.reserve(dim * dim * dim);
   const auto q = [dim](std::uint64_t i) {
@@ -185,7 +197,13 @@ std::vector<drm::scene::ColorLutEntry> identity_cube(std::uint64_t dim) {
   for (std::uint64_t b = 0; b < dim; ++b) {
     for (std::uint64_t g = 0; g < dim; ++g) {
       for (std::uint64_t r = 0; r < dim; ++r) {
-        v.push_back({q(r), q(g), q(b)});
+        const std::uint64_t packed =
+            static_cast<std::uint64_t>(q(r)) | (static_cast<std::uint64_t>(q(g)) << 16U) |
+            (static_cast<std::uint64_t>(q(b)) << 32U) | (std::uint64_t{0xFFFFU} << 48U);
+        const std::uint64_t o = tm(packed);
+        v.push_back({static_cast<std::uint16_t>(o & 0xFFFFU),
+                     static_cast<std::uint16_t>((o >> 16U) & 0xFFFFU),
+                     static_cast<std::uint16_t>((o >> 32U) & 0xFFFFU)});
       }
     }
   }
@@ -263,7 +281,26 @@ int main(int argc, char** argv) {
     drm::println(stderr, "background (ARGB8888 {}x{}): {}", w, h, bg_src_r.error().message());
     return EXIT_FAILURE;
   }
-  // Paint a horizontal gray ramp so the layer has visible content.
+  // HDR tone-map (--tone-map): map the PQ/HLG content toward the display.
+  // Hardware-first — if the plane exposes the AMD color pipeline, bake the
+  // ToneMapper into its 3D-LUT and the driver applies it at scanout (the layer
+  // keeps the source ramp). Otherwise fall back to the software ToneMapper run
+  // over the pixels (CPU). Both use the same ToneMapper, so the result matches
+  // across the fleet (Deck = hardware; host amdgpu + VOP2 = software).
+  const bool want_tonemap = args.tone_map && args.mode != Mode::Sdr;
+  const std::uint64_t cube_dim =
+      want_tonemap ? plane_lut_size(dev.fd(), "AMD_PLANE_LUT3D_SIZE") : 0;
+  const bool hw_tonemap = want_tonemap && cube_dim > 0 && !args.no_hw_pipeline;
+  const float tm_nits = args.target_nits.value_or(100.0F);
+  std::optional<drm::display::ToneMapper> tm;
+  if (want_tonemap) {
+    tm = args.mode == Mode::Hlg ? drm::display::ToneMapper::hlg_to_bt709(tm_nits)
+                                : drm::display::ToneMapper::bt2020_pq_to_bt709(tm_nits);
+  }
+
+  // Paint a horizontal gray ramp. On the software path, tone-map each pixel as we
+  // write it; on the hardware path leave the ramp for the 3D-LUT to transform.
+  const bool sw_tonemap = want_tonemap && !hw_tonemap;
   if (auto m = (*bg_src_r)->map(drm::MapAccess::Write)) {
     auto& mapping = *m;
     if (auto* base = mapping.pixels().data(); base != nullptr) {
@@ -272,8 +309,13 @@ int main(int argc, char** argv) {
         auto* px = reinterpret_cast<std::uint32_t*>(base + (static_cast<std::size_t>(y) * stride));
         for (std::uint32_t x = 0; x < w; ++x) {
           const auto v = static_cast<std::uint8_t>((x * 0xFFU) / (w > 1 ? (w - 1) : 1));
-          px[x] = (0xFFU << 24U) | (static_cast<std::uint32_t>(v) << 16U) |
-                  (static_cast<std::uint32_t>(v) << 8U) | static_cast<std::uint32_t>(v);
+          std::uint32_t argb = (0xFFU << 24U) | (static_cast<std::uint32_t>(v) << 16U) |
+                               (static_cast<std::uint32_t>(v) << 8U) |
+                               static_cast<std::uint32_t>(v);
+          if (sw_tonemap) {
+            argb = sw_tonemap_argb(argb, *tm);
+          }
+          px[x] = argb;
         }
       }
     }
@@ -290,47 +332,22 @@ int main(int argc, char** argv) {
   }
   bg_desc.display.src_rect = drm::scene::Rect{0, 0, w, h};
   bg_desc.display.dst_rect = drm::scene::Rect{0, 0, w, h};
-  // Opt-in amdgpu per-plane color pipeline on the HDR layer. This is the hardware
-  // path that composes with the HDR_OUTPUT_METADATA signaling above: the plane
-  // linearizes the input (degamma), runs the shaper -> 3D-LUT -> blend stages,
-  // and the CRTC re-encodes the output (regamma). Identity LUTs/CTM keep the
-  // picture unchanged — the point is the full pipeline wires up and the driver
-  // accepts it; a real tone-map would supply a non-identity 3D-LUT. No-op on
-  // planes/drivers without the AMD_PLANE_* properties (the commit just omits them).
-  if (args.amd_plane_color) {
+  if (hw_tonemap) {
+    // Bake the ToneMapper into the plane's 3D-LUT; the surrounding stages pass
+    // through (Identity) so the LUT carries the whole encoded->encoded transform
+    // amdgpu applies at scanout. Composes with the HDR_OUTPUT_METADATA above.
     using PTF = drm::scene::PlaneTransferFunction;
-    using OTF = drm::scene::LayerScene::OutputTransferFunction;
-    PTF plane_tf = PTF::Default;
-    OTF out_tf = OTF::Default;
-    if (args.mode == Mode::Pq) {
-      plane_tf = PTF::Pq;
-      out_tf = OTF::Pq;
-    } else if (args.mode == Mode::Sdr) {
-      plane_tf = PTF::Srgb;
-      out_tf = OTF::Srgb;
-    }  // HLG has no named TF in the AMD plane enum -> leave Default.
-    const auto shaper_n = plane_lut_size(dev.fd(), "AMD_PLANE_SHAPER_LUT_SIZE");
-    const auto blend_n = plane_lut_size(dev.fd(), "AMD_PLANE_BLEND_LUT_SIZE");
-    const auto cube_dim = plane_lut_size(dev.fd(), "AMD_PLANE_LUT3D_SIZE");
     auto& ac = bg_desc.display.amd_color;
-    ac.degamma_tf = plane_tf;
-    ac.shaper_tf = plane_tf;
-    ac.blend_tf = plane_tf;
-    if (shaper_n > 0) {
-      ac.shaper_lut = ramp_lut(shaper_n);
-    }
-    if (blend_n > 0) {
-      ac.blend_lut = ramp_lut(blend_n);
-    }
-    if (cube_dim > 0) {
-      ac.lut3d = identity_cube(cube_dim);
-    }
-    ac.ctm = std::array<double, 9>{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-    scene.set_output_transfer_function(out_tf);
-    drm::println(stderr,
-                 "  amd plane color: armed (shaper LUT {}, blend LUT {}, lut3d {}^3, ctm, "
-                 "degamma/shaper/blend + CRTC regamma); no-op if the plane lacks the props",
-                 shaper_n, blend_n, cube_dim);
+    ac.degamma_tf = PTF::Identity;
+    ac.shaper_tf = PTF::Identity;
+    ac.blend_tf = PTF::Identity;
+    ac.lut3d = bake_tonemap_cube(*tm, cube_dim);
+    scene.set_output_transfer_function(drm::scene::LayerScene::OutputTransferFunction::Identity);
+  }
+  if (want_tonemap) {
+    drm::println(stderr, "  tone-map: {} (target {} nits)",
+                 hw_tonemap ? "HARDWARE (AMD plane 3D-LUT)" : "SOFTWARE (ToneMapper CPU fallback)",
+                 tm_nits);
   }
   if (auto rh = scene.add_layer(std::move(bg_desc)); !rh) {
     drm::println(stderr, "add_layer(bg): {}", rh.error().message());
