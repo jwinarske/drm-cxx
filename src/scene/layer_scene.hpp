@@ -300,6 +300,14 @@ class LayerScene {
   /// group and a steady-state group before any destructive work runs.
   [[nodiscard]] bool would_request_modeset() const noexcept;
 
+  /// Whether the CRTC's driver advertises `DRM_CAP_ASYNC_PAGE_FLIP` (probed at
+  /// `create()`). When true, a caller may OR `DRM_MODE_PAGE_FLIP_ASYNC` into the
+  /// `commit()` flags to request a tearing / unthrottled flip on steady-state
+  /// frames. The scene strips the flag automatically on frames that can't be
+  /// flipped async (modeset/reconfig, TEST commits, or unsupported drivers), so
+  /// it is always safe to pass — it simply falls back to a vblank-synced flip.
+  [[nodiscard]] bool supports_async_flip() const noexcept;
+
   /// Set or clear the HDR static metadata signaled on this scene's
   /// connector. Wires the per-CRTC `HdrMetadataCache` so the next
   /// `commit()` writes the connector's `HDR_OUTPUT_METADATA`

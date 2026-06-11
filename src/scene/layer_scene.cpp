@@ -35,8 +35,10 @@
 #include <drm-cxx/planes/plane_registry.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
+#include <drm.h>
 #include <drm_fourcc.h>
 #include <drm_mode.h>
+#include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include <algorithm>
@@ -310,6 +312,12 @@ class LayerScene::Impl {
       return drm::unexpected<std::error_code>(caps.error());
     }
     connector_caps_ = *caps;
+    // Probe async page-flip support (DRM_CAP_ASYNC_PAGE_FLIP) once. Drives the
+    // strip of DRM_MODE_PAGE_FLIP_ASYNC from non-flip commits in
+    // build_frame_into so callers can request async unconditionally.
+    std::uint64_t async_cap = 0;
+    async_flip_supported_ =
+        drmGetCap(dev_->fd(), DRM_CAP_ASYNC_PAGE_FLIP, &async_cap) == 0 && async_cap != 0;
     return {};
   }
 
@@ -606,6 +614,8 @@ class LayerScene::Impl {
   [[nodiscard]] bool would_request_modeset() const noexcept {
     return first_commit_ || hdr_dirty_pending_;
   }
+
+  [[nodiscard]] bool supports_async_flip() const noexcept { return async_flip_supported_; }
 
   // Wire up the allocator's internal test_preparer to this Impl's
   // modeset-state injector. Called once during LayerScene::create after
@@ -2780,6 +2790,7 @@ class LayerScene::Impl {
   LayerScene::OutputTransferFunction desired_regamma_tf_{
       LayerScene::OutputTransferFunction::Default};
   bool regamma_tf_user_set_{false};
+  bool async_flip_supported_{false};  // DRM_CAP_ASYNC_PAGE_FLIP, probed at create
   int last_written_regamma_{-1};
 
   // connector Colorspace property tracking. Cached
@@ -3145,6 +3156,17 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
     effective_flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
   }
 
+  // DRM_MODE_PAGE_FLIP_ASYNC (tearing / unthrottled present) is only valid as a
+  // pure flip: the kernel rejects it alongside ALLOW_MODESET, it makes no sense
+  // on a TEST, and the driver must advertise DRM_CAP_ASYNC_PAGE_FLIP. Strip it in
+  // those cases so a caller can pass it unconditionally and transparently fall
+  // back to a vblank-synced flip instead of getting EINVAL.
+  if ((effective_flags & DRM_MODE_PAGE_FLIP_ASYNC) != 0U &&
+      (!async_flip_supported_ || test_only ||
+       (effective_flags & DRM_MODE_ATOMIC_ALLOW_MODESET) != 0U)) {
+    effective_flags &= ~static_cast<std::uint32_t>(DRM_MODE_PAGE_FLIP_ASYNC);
+  }
+
   FrameBuildPtr out(new FrameBuildState{});
   out->acquisitions = std::move(acquisitions);
   out->effective_flags = effective_flags;
@@ -3329,6 +3351,10 @@ std::uint32_t LayerScene::effective_flags_of(const FrameBuildState& state) noexc
 
 bool LayerScene::would_request_modeset() const noexcept {
   return impl_->would_request_modeset();
+}
+
+bool LayerScene::supports_async_flip() const noexcept {
+  return impl_->supports_async_flip();
 }
 
 void LayerScene::set_output_metadata(const std::optional<drm::display::HdrSourceMetadata>& src) {
