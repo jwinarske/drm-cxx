@@ -63,6 +63,13 @@ test('test_driver_profile',
   ),
 )
 
+test('test_mode_list',
+  executable('test_mode_list',
+    'unit/test_mode_list.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_acquire_fence',
   executable('test_acquire_fence',
     'unit/test_acquire_fence.cpp',
