@@ -161,6 +161,7 @@ bool apply_mode(int fd, std::uint32_t connector_id, std::string_view spec, drmMo
 int main(int argc, char** argv) {
   bool want_vrr = false;
   bool want_rt = false;
+  bool want_async = false;
   std::string_view mode_str;
   {
     int write = 1;
@@ -170,6 +171,8 @@ int main(int argc, char** argv) {
         want_vrr = true;
       } else if (a == "--rt") {
         want_rt = true;
+      } else if (a == "--async") {
+        want_async = true;
       } else if (a == "--mode" && (i + 1) < argc) {
         mode_str = argv[++i];
       } else {
@@ -235,6 +238,15 @@ int main(int argc, char** argv) {
   if (want_vrr) {
     scene->set_vrr_enabled(true);
   }
+  std::uint32_t commit_flags = DRM_MODE_PAGE_FLIP_EVENT;
+  if (want_async) {
+    commit_flags |= DRM_MODE_PAGE_FLIP_ASYNC;
+    drm::println(
+        "vrr_sweep: async flip {} — targets above the panel max only reach them if "
+        "the flip beats the vblank ceiling",
+        scene->supports_async_flip() ? "ON (DRM_CAP_ASYNC_PAGE_FLIP)"
+                                     : "requested but UNSUPPORTED (scene falls back)");
+  }
 
   drm::PageFlip page_flip(dev);
   std::vector<std::uint64_t> stamps;
@@ -242,7 +254,10 @@ int main(int argc, char** argv) {
     stamps.push_back(ts != 0 ? ts : now_ns());
   });
 
-  constexpr std::array<int, 7> targets{30, 40, 48, 60, 72, 90, 110};
+  // Targets span below + above common panel maxes. Rates above the mode's
+  // refresh only get reached when the flip beats the vblank ceiling — i.e. with
+  // --async on an async-capable driver; otherwise they clamp to the panel max.
+  constexpr std::array<int, 9> targets{30, 40, 48, 60, 72, 90, 110, 144, 200};
   constexpr int k_frames = 90;
 
   for (const int target : targets) {
@@ -263,7 +278,7 @@ int main(int argc, char** argv) {
         std::memset(m.pixels().data(), static_cast<int>(c & 0xFF), m.pixels().size());
         return std::vector<drm::present::Rect>{};  // full-frame: force a real flip
       });
-      if (auto r = scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &page_flip); !r) {
+      if (auto r = scene->commit(commit_flags, &page_flip); !r) {
         drm::println(stderr, "vrr_sweep: commit @ {}Hz: {}", target, r.error().message());
         return EXIT_FAILURE;
       }
