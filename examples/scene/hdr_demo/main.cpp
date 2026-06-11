@@ -48,16 +48,21 @@
 #include <drm-cxx/scene/output_signaling.hpp>
 
 #include <drm_fourcc.h>
+#include <drm_mode.h>
+#include <xf86drmMode.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -68,6 +73,7 @@ enum class Mode : std::uint8_t { Pq, Hlg, Sdr };
 struct Args {
   Mode mode{Mode::Pq};
   bool no_hw_pipeline{false};
+  bool amd_plane_color{false};
   bool dry_run{false};
   std::optional<float> target_nits;
   int hold_seconds{k_default_hold_seconds};
@@ -97,6 +103,8 @@ struct Args {
       a.hold_seconds = std::atoi(argv[++i]);
     } else if (arg == "--no-hw-pipeline") {
       a.no_hw_pipeline = true;
+    } else if (arg == "--amd-plane-color") {
+      a.amd_plane_color = true;
     } else if (arg == "--dry-run") {
       a.dry_run = true;
     } else {
@@ -127,6 +135,61 @@ const char* tier_name(bool no_hw, bool has_crtc_pipeline) noexcept {
     return "crtc-pipeline";
   }
   return "no-hw-pipeline-available (kernel-default scanout)";
+}
+
+// Read an AMD_PLANE_*_LUT_SIZE from the first plane advertising it (uniform
+// across a device's planes); 0 when the driver has no AMD plane color pipeline.
+std::uint64_t plane_lut_size(int fd, const char* name) {
+  std::uint64_t sz = 0;
+  drmModePlaneResPtr pr = drmModeGetPlaneResources(fd);
+  if (pr == nullptr) {
+    return sz;
+  }
+  for (std::uint32_t i = 0; i < pr->count_planes && sz == 0; ++i) {
+    drmModeObjectProperties* props =
+        drmModeObjectGetProperties(fd, pr->planes[i], DRM_MODE_OBJECT_PLANE);
+    if (props != nullptr) {
+      for (std::uint32_t j = 0; j < props->count_props && sz == 0; ++j) {
+        drmModePropertyPtr p = drmModeGetProperty(fd, props->props[j]);
+        if (p != nullptr) {
+          if (std::strcmp(p->name, name) == 0) {
+            sz = props->prop_values[j];
+          }
+          drmModeFreeProperty(p);
+        }
+      }
+      drmModeFreeObjectProperties(props);
+    }
+  }
+  drmModeFreePlaneResources(pr);
+  return sz;
+}
+
+// Identity 1D ramp LUT of n entries (grey ramp 0..1).
+std::vector<drm::scene::ColorLutEntry> ramp_lut(std::uint64_t n) {
+  std::vector<drm::scene::ColorLutEntry> v(n);
+  for (std::uint64_t i = 0; i < n; ++i) {
+    const auto c = n > 1 ? static_cast<std::uint16_t>(i * 65535ULL / (n - 1)) : std::uint16_t{0};
+    v[i] = {c, c, c};
+  }
+  return v;
+}
+
+// Identity 3D LUT cube of dim^3 entries (blue-major, then green, then red).
+std::vector<drm::scene::ColorLutEntry> identity_cube(std::uint64_t dim) {
+  std::vector<drm::scene::ColorLutEntry> v;
+  v.reserve(dim * dim * dim);
+  const auto q = [dim](std::uint64_t i) {
+    return dim > 1 ? static_cast<std::uint16_t>(i * 65535ULL / (dim - 1)) : std::uint16_t{0};
+  };
+  for (std::uint64_t b = 0; b < dim; ++b) {
+    for (std::uint64_t g = 0; g < dim; ++g) {
+      for (std::uint64_t r = 0; r < dim; ++r) {
+        v.push_back({q(r), q(g), q(b)});
+      }
+    }
+  }
+  return v;
 }
 
 }  // namespace
@@ -227,6 +290,48 @@ int main(int argc, char** argv) {
   }
   bg_desc.display.src_rect = drm::scene::Rect{0, 0, w, h};
   bg_desc.display.dst_rect = drm::scene::Rect{0, 0, w, h};
+  // Opt-in amdgpu per-plane color pipeline on the HDR layer. This is the hardware
+  // path that composes with the HDR_OUTPUT_METADATA signaling above: the plane
+  // linearizes the input (degamma), runs the shaper -> 3D-LUT -> blend stages,
+  // and the CRTC re-encodes the output (regamma). Identity LUTs/CTM keep the
+  // picture unchanged — the point is the full pipeline wires up and the driver
+  // accepts it; a real tone-map would supply a non-identity 3D-LUT. No-op on
+  // planes/drivers without the AMD_PLANE_* properties (the commit just omits them).
+  if (args.amd_plane_color) {
+    using PTF = drm::scene::PlaneTransferFunction;
+    using OTF = drm::scene::LayerScene::OutputTransferFunction;
+    PTF plane_tf = PTF::Default;
+    OTF out_tf = OTF::Default;
+    if (args.mode == Mode::Pq) {
+      plane_tf = PTF::Pq;
+      out_tf = OTF::Pq;
+    } else if (args.mode == Mode::Sdr) {
+      plane_tf = PTF::Srgb;
+      out_tf = OTF::Srgb;
+    }  // HLG has no named TF in the AMD plane enum -> leave Default.
+    const auto shaper_n = plane_lut_size(dev.fd(), "AMD_PLANE_SHAPER_LUT_SIZE");
+    const auto blend_n = plane_lut_size(dev.fd(), "AMD_PLANE_BLEND_LUT_SIZE");
+    const auto cube_dim = plane_lut_size(dev.fd(), "AMD_PLANE_LUT3D_SIZE");
+    auto& ac = bg_desc.display.amd_color;
+    ac.degamma_tf = plane_tf;
+    ac.shaper_tf = plane_tf;
+    ac.blend_tf = plane_tf;
+    if (shaper_n > 0) {
+      ac.shaper_lut = ramp_lut(shaper_n);
+    }
+    if (blend_n > 0) {
+      ac.blend_lut = ramp_lut(blend_n);
+    }
+    if (cube_dim > 0) {
+      ac.lut3d = identity_cube(cube_dim);
+    }
+    ac.ctm = std::array<double, 9>{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    scene.set_output_transfer_function(out_tf);
+    drm::println(stderr,
+                 "  amd plane color: armed (shaper LUT {}, blend LUT {}, lut3d {}^3, ctm, "
+                 "degamma/shaper/blend + CRTC regamma); no-op if the plane lacks the props",
+                 shaper_n, blend_n, cube_dim);
+  }
   if (auto rh = scene.add_layer(std::move(bg_desc)); !rh) {
     drm::println(stderr, "add_layer(bg): {}", rh.error().message());
     return EXIT_FAILURE;
