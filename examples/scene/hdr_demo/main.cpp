@@ -52,6 +52,7 @@
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -298,20 +299,34 @@ int main(int argc, char** argv) {
                                 : drm::display::ToneMapper::bt2020_pq_to_bt709(tm_nits);
   }
 
-  // Paint a horizontal gray ramp. On the software path, tone-map each pixel as we
-  // write it; on the hardware path leave the ramp for the 3D-LUT to transform.
+  // Paint a test pattern: saturated color bars (top two-thirds) that exercise the
+  // BT.2020 -> BT.709 gamut conversion and the full 3D-LUT cube — greys are
+  // gamut-invariant, so only colored input drives the matrix — plus a grey ramp
+  // (bottom third) for the luminance tone-curve. On the software path tone-map
+  // each pixel as we write it; on hardware leave it for the 3D-LUT to transform.
+  // Comparing the hardware vs software output also validates the cube ordering:
+  // a wrong LUT3D traversal would swap the bars' colors on the hardware path.
   const bool sw_tonemap = want_tonemap && !hw_tonemap;
   if (auto m = (*bg_src_r)->map(drm::MapAccess::Write)) {
     auto& mapping = *m;
     if (auto* base = mapping.pixels().data(); base != nullptr) {
       const auto stride = mapping.stride();
+      constexpr std::array<std::uint32_t, 8> bars{
+          0xFFFFFFFFU, 0xFFFFFF00U, 0xFF00FFFFU, 0xFF00FF00U,  // white yellow cyan green
+          0xFFFF00FFU, 0xFFFF0000U, 0xFF0000FFU, 0xFF000000U,  // magenta red blue black
+      };
+      const std::uint32_t bars_h = h * 2U / 3U;  // color bars above, grey ramp below
       for (std::uint32_t y = 0; y < h; ++y) {
         auto* px = reinterpret_cast<std::uint32_t*>(base + (static_cast<std::size_t>(y) * stride));
         for (std::uint32_t x = 0; x < w; ++x) {
-          const auto v = static_cast<std::uint8_t>((x * 0xFFU) / (w > 1 ? (w - 1) : 1));
-          std::uint32_t argb = (0xFFU << 24U) | (static_cast<std::uint32_t>(v) << 16U) |
-                               (static_cast<std::uint32_t>(v) << 8U) |
-                               static_cast<std::uint32_t>(v);
+          std::uint32_t argb = 0xFF000000U;
+          if (y < bars_h) {
+            argb = bars.at((x * bars.size()) / (w > 0 ? w : 1));
+          } else {
+            const auto v = static_cast<std::uint8_t>((x * 0xFFU) / (w > 1 ? (w - 1) : 1));
+            argb = (0xFFU << 24U) | (static_cast<std::uint32_t>(v) << 16U) |
+                   (static_cast<std::uint32_t>(v) << 8U) | static_cast<std::uint32_t>(v);
+          }
           if (sw_tonemap) {
             argb = sw_tonemap_argb(argb, *tm);
           }
