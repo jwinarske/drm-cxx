@@ -43,7 +43,7 @@ class DumbScanoutSink {
  public:
   struct Config {
     std::uint32_t drm_format{0};  ///< 0 => XRGB8888 (must be a 32-bpp packed format)
-    std::size_t buffers{2};       ///< ring depth (>=1); 0 => 2
+    std::size_t buffers{3};       ///< ring depth; 0 => 3 (the buffer-age path wants >=3)
   };
 
   /// Build a sink over an already-picked output (crtc / connector / mode — e.g.
@@ -53,7 +53,7 @@ class DumbScanoutSink {
       drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connector_id,
       const drmModeModeInfo& mode, const Config& cfg);
 
-  /// Overload using a default Config (XRGB8888, double-buffered).
+  /// Overload using a default Config (XRGB8888, triple-buffered).
   [[nodiscard]] static drm::expected<std::unique_ptr<DumbScanoutSink>, std::error_code> create(
       drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connector_id,
       const drmModeModeInfo& mode);

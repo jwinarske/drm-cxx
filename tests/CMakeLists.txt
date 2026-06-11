@@ -91,6 +91,12 @@ target_link_libraries(test_dma_buf_source_cache_vkms PRIVATE
   drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
 gtest_discover_tests(test_dma_buf_source_cache_vkms)
 
+# DumbScanoutSink page-flip integration test (gtest) — needs vkms; skips if none.
+add_executable(test_dumb_scanout_sink_vkms integration/test_dumb_scanout_sink_vkms.cpp)
+target_link_libraries(test_dumb_scanout_sink_vkms PRIVATE
+  drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
+gtest_discover_tests(test_dumb_scanout_sink_vkms)
+
 # CursorSource integration test — plain CHECK harness, needs a dumb-capable card
 # (skips if none) and the cursor feature (CursorSource depends on drm::cursor).
 if(DRM_CXX_HAS_XCURSOR)

@@ -38,7 +38,7 @@ drm::expected<std::unique_ptr<DumbScanoutSink>, std::error_code> DumbScanoutSink
   const std::uint32_t format = cfg.drm_format != 0 ? cfg.drm_format : DRM_FORMAT_XRGB8888;
   const auto width = static_cast<std::uint32_t>(mode.hdisplay);
   const auto height = static_cast<std::uint32_t>(mode.vdisplay);
-  const std::size_t slots = cfg.buffers != 0 ? cfg.buffers : 2;
+  const std::size_t slots = cfg.buffers != 0 ? cfg.buffers : 3;
 
   auto src_r = DumbRingSource::create(dev, width, height, format, slots);
   if (!src_r) {
