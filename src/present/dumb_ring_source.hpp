@@ -48,7 +48,8 @@ class DumbRingSource : public scene::LayerBufferSource {
  public:
   /// Allocate a ring of up to `max_slots` linear dumb buffers (>=1). Slots are
   /// allocated lazily as the ring grows under contention; the first paint()
-  /// allocates slot 0. `drm_format` must be a 32-bpp packed format (XRGB/ARGB).
+  /// allocates slot 0. `drm_format` is a packed format whose bpp is known to
+  /// `drm::format_bpp` (e.g. XRGB8888/ARGB8888 at 32 bpp or RGB565 at 16 bpp).
   [[nodiscard]] static drm::expected<std::unique_ptr<DumbRingSource>, std::error_code> create(
       const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_format,
       std::size_t max_slots = 3);

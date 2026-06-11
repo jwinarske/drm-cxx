@@ -6,6 +6,7 @@
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
+#include <drm-cxx/core/format.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
@@ -30,7 +31,7 @@ namespace {
 drm::expected<std::unique_ptr<DumbRingSource>, std::error_code> DumbRingSource::create(
     const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_format,
     std::size_t max_slots) {
-  if (width == 0 || height == 0 || max_slots == 0) {
+  if (width == 0 || height == 0 || max_slots == 0 || drm::format_bpp(drm_format) == 0) {
     return drm::unexpected<std::error_code>(err(std::errc::invalid_argument));
   }
   scene::SourceFormat fmt;
@@ -52,7 +53,7 @@ drm::expected<void, std::error_code> DumbRingSource::ensure_slot(std::size_t slo
   cfg.width = format_.width;
   cfg.height = format_.height;
   cfg.drm_format = format_.drm_fourcc;
-  cfg.bpp = 32;  // packed ARGB/XRGB — the shape DumbRingSource ships
+  cfg.bpp = drm::format_bpp(format_.drm_fourcc);  // packed; 16 (RGB565) / 32 (XRGB)
   cfg.add_fb = true;
   auto buf = drm::dumb::Buffer::create(*dev_, cfg);
   if (!buf) {
@@ -136,7 +137,7 @@ drm::expected<void, std::error_code> DumbRingSource::on_session_resumed(
       cfg.width = format_.width;
       cfg.height = format_.height;
       cfg.drm_format = format_.drm_fourcc;
-      cfg.bpp = 32;
+      cfg.bpp = drm::format_bpp(format_.drm_fourcc);
       cfg.add_fb = true;
       auto buf = drm::dumb::Buffer::create(new_dev, cfg);
       if (!buf) {
