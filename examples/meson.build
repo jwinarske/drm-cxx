@@ -237,6 +237,12 @@ executable('ring_present',
   dependencies : [drm_cxx_dep],
 )
 
+# software_present — DumbScanoutSink: CPU frames via dumb ring + atomic flip.
+executable('software_present',
+  'advanced/software_present/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # idle_present — FrameEconomy idle-suppression: unchanged frames issue no commit.
 executable('idle_present',
   'advanced/idle_present/main.cpp',

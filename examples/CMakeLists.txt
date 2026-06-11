@@ -142,6 +142,11 @@ add_executable(ring_present advanced/ring_present/main.cpp)
 target_link_libraries(ring_present PRIVATE drm-cxx::drm-cxx)
 target_include_directories(ring_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# software_present — DumbScanoutSink CPU-frame present harness.
+add_executable(software_present advanced/software_present/main.cpp)
+target_link_libraries(software_present PRIVATE drm-cxx::drm-cxx)
+target_include_directories(software_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # idle_present — FrameEconomy idle-suppression harness.
 add_executable(idle_present advanced/idle_present/main.cpp)
 target_link_libraries(idle_present PRIVATE drm-cxx::drm-cxx)
