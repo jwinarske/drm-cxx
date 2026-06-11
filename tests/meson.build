@@ -94,6 +94,16 @@ test('test_dma_buf_source_cache_vkms',
   is_parallel : false,
 )
 
+# Integration: DumbScanoutSink present -> flip -> page-flip event on vkms. Serial
+# (modesets); self-skips when vkms is absent.
+test('test_dumb_scanout_sink_vkms',
+  executable('test_dumb_scanout_sink_vkms',
+    'integration/test_dumb_scanout_sink_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
 test('test_acquire_fence',
   executable('test_acquire_fence',
     'unit/test_acquire_fence.cpp',
