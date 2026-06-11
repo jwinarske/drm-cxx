@@ -27,7 +27,6 @@
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/present/buffer_ring.hpp>
 #include <drm-cxx/present/dumb_ring_source.hpp>
-#include <drm-cxx/scene/display_params.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
@@ -44,7 +43,6 @@
 #include <cstring>
 #include <optional>
 #include <sched.h>
-#include <string>
 #include <string_view>
 #include <sys/mman.h>
 #include <system_error>
@@ -158,114 +156,12 @@ bool apply_mode(int fd, std::uint32_t connector_id, std::string_view spec, drmMo
   return found;
 }
 
-// Map a --regamma name to the scene's OutputTransferFunction.
-std::optional<drm::scene::LayerScene::OutputTransferFunction> parse_regamma(std::string_view s) {
-  using TF = drm::scene::LayerScene::OutputTransferFunction;
-  if (s == "default") {
-    return TF::Default;
-  }
-  if (s == "identity") {
-    return TF::Identity;
-  }
-  if (s == "srgb") {
-    return TF::Srgb;
-  }
-  if (s == "bt709") {
-    return TF::Bt709;
-  }
-  if (s == "pq") {
-    return TF::Pq;
-  }
-  if (s == "gamma22") {
-    return TF::Gamma22;
-  }
-  if (s == "gamma24") {
-    return TF::Gamma24;
-  }
-  if (s == "gamma26") {
-    return TF::Gamma26;
-  }
-  return std::nullopt;
-}
-
-// Read an object property's current value by name (nullopt if absent). Used to
-// confirm the AMD color props are present + what a commit set them to.
-std::optional<std::uint64_t> obj_prop_value(int fd, std::uint32_t obj_id, std::uint32_t obj_type,
-                                            const char* name) {
-  std::optional<std::uint64_t> out;
-  drmModeObjectProperties* props = drmModeObjectGetProperties(fd, obj_id, obj_type);
-  if (props == nullptr) {
-    return out;
-  }
-  for (std::uint32_t i = 0; i < props->count_props && !out.has_value(); ++i) {
-    drmModePropertyPtr p = drmModeGetProperty(fd, props->props[i]);
-    if (p != nullptr) {
-      if (std::strcmp(p->name, name) == 0) {
-        out = props->prop_values[i];
-      }
-      drmModeFreeProperty(p);
-    }
-  }
-  drmModeFreeObjectProperties(props);
-  return out;
-}
-
-// Find the plane currently scanning out on `crtc_id` (its CRTC_ID == crtc_id) so
-// we can read back the per-plane AMD color props the commit wrote.
-std::optional<std::uint32_t> active_plane_on_crtc(int fd, std::uint32_t crtc_id) {
-  std::optional<std::uint32_t> out;
-  drmModePlaneResPtr pr = drmModeGetPlaneResources(fd);
-  if (pr == nullptr) {
-    return out;
-  }
-  for (std::uint32_t i = 0; i < pr->count_planes && !out.has_value(); ++i) {
-    const auto v = obj_prop_value(fd, pr->planes[i], DRM_MODE_OBJECT_PLANE, "CRTC_ID");
-    if (v.has_value() && *v == crtc_id) {
-      out = pr->planes[i];
-    }
-  }
-  drmModeFreePlaneResources(pr);
-  return out;
-}
-
-std::optional<drm::scene::PlaneDegammaTf> parse_plane_degamma(std::string_view s) {
-  using TF = drm::scene::PlaneDegammaTf;
-  if (s == "default") {
-    return TF::Default;
-  }
-  if (s == "srgb") {
-    return TF::Srgb;
-  }
-  if (s == "bt709") {
-    return TF::Bt709;
-  }
-  if (s == "pq") {
-    return TF::Pq;
-  }
-  if (s == "identity") {
-    return TF::Identity;
-  }
-  if (s == "gamma22") {
-    return TF::Gamma22;
-  }
-  if (s == "gamma24") {
-    return TF::Gamma24;
-  }
-  if (s == "gamma26") {
-    return TF::Gamma26;
-  }
-  return std::nullopt;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
   bool want_vrr = false;
   bool want_rt = false;
   std::string_view mode_str;
-  std::string_view regamma_str;
-  std::string_view plane_degamma_str;
-  std::optional<double> plane_hdr_mult;
   {
     int write = 1;
     for (int i = 1; i < argc; ++i) {
@@ -276,12 +172,6 @@ int main(int argc, char** argv) {
         want_rt = true;
       } else if (a == "--mode" && (i + 1) < argc) {
         mode_str = argv[++i];
-      } else if (a == "--regamma" && (i + 1) < argc) {
-        regamma_str = argv[++i];
-      } else if (a == "--plane-degamma" && (i + 1) < argc) {
-        plane_degamma_str = argv[++i];
-      } else if (a == "--plane-hdr-mult" && (i + 1) < argc) {
-        plane_hdr_mult = std::strtod(argv[++i], nullptr);
       } else {
         argv[write++] = argv[i];
       }
@@ -329,21 +219,6 @@ int main(int argc, char** argv) {
   drm::scene::LayerDesc desc;
   desc.source = std::move(src);
   desc.display.dst_rect = {0, 0, w, h};
-  // amdgpu per-plane color pipeline (AMD_PLANE_*): set the input degamma TF
-  // and/or HDR multiplier on this layer; the scene writes them to the layer's
-  // assigned plane (no-op on planes without the props). Read back after commit.
-  if (!plane_degamma_str.empty()) {
-    const auto tf = parse_plane_degamma(plane_degamma_str);
-    if (!tf) {
-      drm::println(stderr,
-                   "vrr_sweep: bad --plane-degamma '{}' "
-                   "(default/srgb/bt709/pq/identity/gamma22..26)",
-                   plane_degamma_str);
-      return EXIT_FAILURE;
-    }
-    desc.display.amd_color.degamma_tf = tf;
-  }
-  desc.display.amd_color.hdr_mult = plane_hdr_mult;
   if (auto r = scene->add_layer(std::move(desc)); !r) {
     drm::println(stderr, "vrr_sweep: add_layer: {}", r.error().message());
     return EXIT_FAILURE;
@@ -356,20 +231,6 @@ int main(int argc, char** argv) {
   } else {
     drm::println("vrr_sweep: {}x{} — no EDID vrefresh range — VRR {}", w, h,
                  want_vrr ? "ON" : "off (control)");
-  }
-  if (!regamma_str.empty()) {
-    const auto tf = parse_regamma(regamma_str);
-    if (!tf) {
-      drm::println(stderr,
-                   "vrr_sweep: bad --regamma '{}' (default/identity/srgb/bt709/pq/gamma22..26)",
-                   regamma_str);
-      return EXIT_FAILURE;
-    }
-    const auto before =
-        obj_prop_value(dev.fd(), output->crtc_id, DRM_MODE_OBJECT_CRTC, "AMD_CRTC_REGAMMA_TF");
-    drm::println("vrr_sweep: AMD_CRTC_REGAMMA_TF on this CRTC: {} -> requesting '{}'",
-                 before ? "present" : "ABSENT (call will no-op)", regamma_str);
-    scene->set_output_transfer_function(*tf);
   }
   if (want_vrr) {
     scene->set_vrr_enabled(true);
@@ -432,36 +293,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (!regamma_str.empty()) {
-    const auto after =
-        obj_prop_value(dev.fd(), output->crtc_id, DRM_MODE_OBJECT_CRTC, "AMD_CRTC_REGAMMA_TF");
-    if (after) {
-      drm::println("vrr_sweep: AMD_CRTC_REGAMMA_TF after commit = {} (driver accepted the set)",
-                   *after);
-    } else {
-      drm::println("vrr_sweep: AMD_CRTC_REGAMMA_TF absent on this CRTC (set was a no-op)");
-    }
-  }
-  if (!plane_degamma_str.empty() || plane_hdr_mult.has_value()) {
-    const auto plane = active_plane_on_crtc(dev.fd(), output->crtc_id);
-    if (!plane) {
-      drm::println("vrr_sweep: no active plane found on the CRTC to read back");
-    } else {
-      if (!plane_degamma_str.empty()) {
-        const auto v =
-            obj_prop_value(dev.fd(), *plane, DRM_MODE_OBJECT_PLANE, "AMD_PLANE_DEGAMMA_TF");
-        drm::println("vrr_sweep: AMD_PLANE_DEGAMMA_TF (plane {}) after commit = {}", *plane,
-                     v ? std::to_string(*v) : std::string{"ABSENT (no-op)"});
-      }
-      if (plane_hdr_mult.has_value()) {
-        const auto v =
-            obj_prop_value(dev.fd(), *plane, DRM_MODE_OBJECT_PLANE, "AMD_PLANE_HDR_MULT");
-        drm::println(
-            "vrr_sweep: AMD_PLANE_HDR_MULT (plane {}) after commit = {} (1.0 == 4294967296)",
-            *plane, v ? std::to_string(*v) : std::string{"ABSENT (no-op)"});
-      }
-    }
-  }
   drm::println("vrr_sweep: done");
   return EXIT_SUCCESS;
 }
