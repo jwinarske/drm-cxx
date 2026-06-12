@@ -177,8 +177,18 @@ int main(int argc, char** argv) {
   gbm_bo* bo = gbm_bo_create_with_modifiers2(gbm, w, h, fourcc, mods.data(), mods.size(),
                                              GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT);
   if (bo == nullptr) {
-    std::fprintf(stderr, "gbm_bo_create_with_modifiers2 failed\n");
-    return 1;
+    // Some GPUs' GBM (e.g. Mesa PowerVR on StarFive) reject a multi-modifier
+    // create outright when they only render to LINEAR. Fall back to a plain
+    // LINEAR allocation — the "renegotiate toward LINEAR" path the messages
+    // below describe — so the offload still completes on LINEAR-only GPUs.
+    std::fprintf(stderr,
+                 "gbm_bo_create_with_modifiers2 failed; retrying LINEAR "
+                 "(GPU likely renders LINEAR-only)\n");
+    bo = gbm_bo_create(gbm, w, h, fourcc, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+    if (bo == nullptr) {
+      std::fprintf(stderr, "gbm_bo_create (LINEAR) failed\n");
+      return 1;
+    }
   }
   const fmt::Modifier chosen{gbm_bo_get_modifier(bo)};
   std::printf("GPU rendered into: %s\n", fmt::describe(chosen).c_str());
