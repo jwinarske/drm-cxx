@@ -274,9 +274,19 @@ drm::expected<ScanoutBuffer, std::error_code> ScanoutBuffer::import_dmabuf(int f
 
   std::uint32_t fb_id = 0;
   if (!err) {
-    if (drmModeAddFB2WithModifiers(fd, d.width, d.height, d.fourcc, handles.data(), strides.data(),
-                                   offsets.data(), mods.data(), &fb_id,
-                                   DRM_MODE_FB_MODIFIERS) != 0) {
+    if (d.modifier.value == DRM_FORMAT_MOD_INVALID) {
+      // No explicit modifier — e.g. a LINEAR buffer from a GPU whose GBM only
+      // renders LINEAR (PowerVR on StarFive). AddFB2WithModifiers with an
+      // INVALID modifier is ill-formed, and minimal display drivers without
+      // DRM_CAP_ADDFB2_MODIFIERS (e.g. starfive) return ENOSYS for the
+      // modifier'd path regardless. Use plain AddFB2 so the import still lands.
+      if (drmModeAddFB2(fd, d.width, d.height, d.fourcc, handles.data(), strides.data(),
+                        offsets.data(), &fb_id, 0) != 0) {
+        err = errno_ec(errno);
+      }
+    } else if (drmModeAddFB2WithModifiers(fd, d.width, d.height, d.fourcc, handles.data(),
+                                          strides.data(), offsets.data(), mods.data(), &fb_id,
+                                          DRM_MODE_FB_MODIFIERS) != 0) {
       err = errno_ec(errno);
     }
   }
