@@ -8,6 +8,7 @@
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/present/buffer_ring.hpp>
 #include <drm-cxx/present/dumb_ring_source.hpp>
+#include <drm-cxx/present/scanout_format.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -27,15 +28,29 @@
 namespace drm::present {
 
 DumbScanoutSink::DumbScanoutSink(std::unique_ptr<scene::LayerScene> scene, DumbRingSource* ring,
-                                 std::uint32_t w, std::uint32_t h, std::uint32_t refresh) noexcept
-    : scene_(std::move(scene)), ring_(ring), width_(w), height_(h), refresh_(refresh) {}
+                                 std::uint32_t w, std::uint32_t h, std::uint32_t refresh,
+                                 std::uint32_t format) noexcept
+    : scene_(std::move(scene)),
+      ring_(ring),
+      width_(w),
+      height_(h),
+      refresh_(refresh),
+      format_(format) {}
 
 DumbScanoutSink::~DumbScanoutSink() = default;
 
 drm::expected<std::unique_ptr<DumbScanoutSink>, std::error_code> DumbScanoutSink::create(
     drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connector_id,
     const drmModeModeInfo& mode, const Config& cfg) {
-  const std::uint32_t format = cfg.drm_format != 0 ? cfg.drm_format : DRM_FORMAT_XRGB8888;
+  // 0 => negotiate a format the CRTC's primary plane can scan out (prefer
+  // XRGB8888); fall back to XRGB8888 if the planes can't be queried.
+  std::uint32_t format = cfg.drm_format;
+  if (format == 0) {
+    format = negotiate_scanout_format(dev, crtc_id);
+    if (format == 0) {
+      format = DRM_FORMAT_XRGB8888;
+    }
+  }
   const auto width = static_cast<std::uint32_t>(mode.hdisplay);
   const auto height = static_cast<std::uint32_t>(mode.vdisplay);
   const std::size_t slots = cfg.buffers != 0 ? cfg.buffers : 3;
@@ -65,7 +80,7 @@ drm::expected<std::unique_ptr<DumbScanoutSink>, std::error_code> DumbScanoutSink
   }
 
   return std::unique_ptr<DumbScanoutSink>(
-      new DumbScanoutSink(std::move(scene), ring, width, height, mode.vrefresh));
+      new DumbScanoutSink(std::move(scene), ring, width, height, mode.vrefresh, format));
 }
 
 drm::expected<std::unique_ptr<DumbScanoutSink>, std::error_code> DumbScanoutSink::create(

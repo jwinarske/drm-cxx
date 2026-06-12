@@ -14,12 +14,15 @@
 // correctly. The power/bandwidth benefit is an internal driver optimization and
 // is not directly observable from userspace.
 //
-//   ./damage_present [/dev/dri/cardN] [frames]
+//   ./damage_present [/dev/dri/cardN] [frames] [--no-seat]
 
+#include "../../common/draw.hpp"
 #include "../../common/open_output.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
+#include <drm-cxx/core/format.hpp>
 #include <drm-cxx/detail/format.hpp>
+#include <drm-cxx/present/scanout_format.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
@@ -30,26 +33,8 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <unistd.h>
 #include <utility>
-
-namespace {
-
-void fill_rect(drm::BufferMapping& m, std::int32_t x, std::int32_t y, std::int32_t w,
-               std::int32_t h, std::uint32_t color) {
-  const auto px = m.pixels();
-  const auto stride = m.stride();
-  for (std::int32_t row = y; row < y + h; ++row) {
-    std::uint8_t* line =
-        px.data() + (static_cast<std::size_t>(row) * stride) + (static_cast<std::size_t>(x) * 4U);
-    for (std::int32_t col = 0; col < w; ++col) {
-      std::memcpy(line + (static_cast<std::size_t>(col) * 4U), &color, 4U);
-    }
-  }
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
   auto output = drm::examples::open_and_pick_output(argc, argv);
@@ -61,8 +46,15 @@ int main(int argc, char** argv) {
   const std::int32_t w = output->mode.hdisplay;
   const std::int32_t h = output->mode.vdisplay;
 
-  auto src_r = drm::scene::DumbBufferSource::create(
-      dev, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), DRM_FORMAT_XRGB8888);
+  // Negotiate a format the plane scans out (tilcdc, for one, has no XRGB8888).
+  const std::array<std::uint32_t, 2> prefs{DRM_FORMAT_XRGB8888, DRM_FORMAT_RGB565};
+  std::uint32_t fourcc = drm::present::negotiate_scanout_format(dev, output->crtc_id, prefs);
+  if (fourcc == 0) {
+    fourcc = DRM_FORMAT_XRGB8888;
+  }
+
+  auto src_r = drm::scene::DumbBufferSource::create(dev, static_cast<std::uint32_t>(w),
+                                                    static_cast<std::uint32_t>(h), fourcc);
   if (!src_r) {
     drm::println(stderr, "damage_present: dumb source: {}", src_r.error().message());
     return EXIT_FAILURE;
@@ -72,7 +64,7 @@ int main(int argc, char** argv) {
 
   constexpr std::uint32_t k_bg = 0x00202020U;  // dark gray
   if (auto m = dmg->map(drm::MapAccess::Write); m) {
-    std::memset(m->pixels().data(), 0x20, m->pixels().size());
+    drm::examples::clear(*m, fourcc, k_bg);
   }
 
   drm::scene::LayerScene::Config cfg;
@@ -94,7 +86,8 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  drm::println("damage_present: {}x{} — moving box, partial updates via FB_DAMAGE_CLIPS", w, h);
+  drm::println("damage_present: {}x{} {} — moving box, partial updates via FB_DAMAGE_CLIPS", w, h,
+               drm::format_name(fourcc));
 
   const int frames = (argc > 2) ? std::atoi(argv[2]) : 120;
   constexpr std::int32_t k_box = 256;
@@ -105,8 +98,8 @@ int main(int argc, char** argv) {
     const std::int32_t bx = (f * 17) % span_x;
     const std::uint32_t color = 0x00FF0000U | static_cast<std::uint32_t>((f * 4) & 0xFF);
     if (auto m = dmg->map(drm::MapAccess::Write); m) {
-      fill_rect(*m, prev_x, by, k_box, k_box, k_bg);  // erase old
-      fill_rect(*m, bx, by, k_box, k_box, color);     // draw new
+      drm::examples::fill_rect(*m, fourcc, prev_x, by, k_box, k_box, k_bg);  // erase old
+      drm::examples::fill_rect(*m, fourcc, bx, by, k_box, k_box, color);     // draw new
     }
     // Report exactly the two touched regions as this frame's damage.
     const std::array<drm::scene::DamageRect, 2> rects{{

@@ -37,10 +37,21 @@
 #include <xf86drmMode.h>
 
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <utility>
 
 namespace drm::examples {
+
+/// True if a bare flag (e.g. "--no-seat") appears anywhere in argv.
+[[nodiscard]] inline bool argv_has_flag(int argc, char* argv[], const char* flag) {
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], flag) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /// Device + libseat session pair. The Seat (when present) holds the
 /// revocable fd backing the Device; the Seat must outlive the Device,
@@ -61,15 +72,24 @@ struct Output {
 };
 
 /// Pick a card from argv (or prompt), open it through libseat when a
-/// backend is available, and enable atomic + universal planes. Returns
-/// nullopt on any failure; the helper has already logged the reason.
+/// backend is available, and enable atomic + universal planes. Pass
+/// `--no-seat` in argv to bypass libseat and open the node directly (the
+/// first opener takes DRM master) — for headless boards with no usable VT.
+/// Returns nullopt on any failure; the helper has already logged the reason.
 [[nodiscard]] inline std::optional<DeviceCtx> open_device(int argc, char* argv[]) {
   const auto path = drm::examples::select_device(argc, argv);
   if (!path) {
     return std::nullopt;
   }
 
-  auto seat = drm::session::Seat::open();
+  // --no-seat: skip libseat and open the DRM node directly (the first opener
+  // becomes DRM master). For headless boards with no usable VT — e.g. a
+  // serial-console image over SSH, where libseat's seat/VT setup fails.
+  const bool no_seat = argv_has_flag(argc, argv, "--no-seat");
+  std::optional<drm::session::Seat> seat;
+  if (!no_seat) {
+    seat = drm::session::Seat::open();
+  }
   const auto seat_dev = seat ? seat->take_device(*path) : std::nullopt;
   auto dev_holder = [&]() -> std::optional<drm::Device> {
     if (seat_dev) {

@@ -53,11 +53,12 @@ namespace drm::examples {
 /// Default rank: internal panels first, then cable-out, VGA last.
 /// Right for single-output kiosks and most laptops; matches the
 /// behavior consumers usually want from "give me a display."
-inline constexpr std::array<std::uint32_t, 11> k_main_rank = {
+inline constexpr std::array<std::uint32_t, 12> k_main_rank = {
     DRM_MODE_CONNECTOR_eDP,          // 14 — modern laptop panel
     DRM_MODE_CONNECTOR_LVDS,         // 7  — older laptop panel
     DRM_MODE_CONNECTOR_DSI,          // 16 — embedded MIPI panel
     DRM_MODE_CONNECTOR_DPI,          // 17 — embedded parallel RGB
+    DRM_MODE_CONNECTOR_SPI,          // 19 — embedded SPI panel (small TFTs)
     DRM_MODE_CONNECTOR_HDMIA,        // 11 — primary HDMI flavor
     DRM_MODE_CONNECTOR_HDMIB,        // 12 — historical HDMI dual-link
     DRM_MODE_CONNECTOR_DisplayPort,  // 10
@@ -70,11 +71,9 @@ inline constexpr std::array<std::uint32_t, 11> k_main_rank = {
 /// Internal panels only — for embedded apps that must ignore any
 /// external monitor even when plugged in (instrument cluster on a
 /// docked dev board, etc).
-inline constexpr std::array<std::uint32_t, 4> k_internal_rank = {
-    DRM_MODE_CONNECTOR_eDP,
-    DRM_MODE_CONNECTOR_LVDS,
-    DRM_MODE_CONNECTOR_DSI,
-    DRM_MODE_CONNECTOR_DPI,
+inline constexpr std::array<std::uint32_t, 5> k_internal_rank = {
+    DRM_MODE_CONNECTOR_eDP, DRM_MODE_CONNECTOR_LVDS, DRM_MODE_CONNECTOR_DSI,
+    DRM_MODE_CONNECTOR_DPI, DRM_MODE_CONNECTOR_SPI,
 };
 
 /// Cable-out connectors only — for signage / kiosks that should land

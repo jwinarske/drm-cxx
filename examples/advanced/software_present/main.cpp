@@ -12,20 +12,23 @@
 // With --vsync the loop paces to the display via a page-flip event instead of a
 // fixed timer. With --rgb565 the sink scans out RGB565 (16 bpp) instead of
 // XRGB8888 (32 bpp), halving the dumb-buffer footprint and copy bandwidth — the
-// classic embedded software-display trade. Needs DRM master; run from a free VT.
+// classic embedded software-display trade. Needs DRM master; run from a free VT,
+// or pass --no-seat on a headless board (skips libseat, opens DRM directly).
 //
-//   ./software_present [/dev/dri/cardN] [frames] [--vsync] [--rgb565]
+//   ./software_present [/dev/dri/cardN] [frames] [--vsync] [--rgb565] [--no-seat]
 
 #include "../../common/open_output.hpp"
 
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/present/dumb_scanout_sink.hpp>
+#include <drm-cxx/present/scanout_format.hpp>
 
 #include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -50,13 +53,14 @@ constexpr std::uint32_t argb_px(std::uint8_t r, std::uint8_t g, std::uint8_t b) 
 
 int main(int argc, char** argv) {
   bool vsync = false;
-  bool rgb565 = false;
+  bool force_rgb565 = false;
   int frames = 120;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--vsync") == 0) {
       vsync = true;
     } else if (std::strcmp(argv[i], "--rgb565") == 0) {
-      rgb565 = true;
+      force_rgb565 = true;
+    } else if (std::strcmp(argv[i], "--no-seat") == 0) {   // handled by open_output
     } else if (const int n = std::atoi(argv[i]); n > 0) {  // device path atoi's to 0
       frames = n;
     }
@@ -71,10 +75,17 @@ int main(int argc, char** argv) {
   const auto w = static_cast<std::uint32_t>(output->mode.hdisplay);
   const auto h = static_cast<std::uint32_t>(output->mode.vdisplay);
 
+  // Negotiate a format this renderer can produce (XRGB8888 or RGB565) against the
+  // plane — e.g. tilcdc has no XRGB8888. --rgb565 forces 16-bpp.
   drm::present::DumbScanoutSink::Config cfg;
   cfg.buffers = 3;  // headroom so present() rarely stalls on a busy slot
-  if (rgb565) {
+  if (force_rgb565) {
     cfg.drm_format = DRM_FORMAT_RGB565;
+  } else {
+    const std::array<std::uint32_t, 2> prefs{DRM_FORMAT_XRGB8888, DRM_FORMAT_RGB565};
+    const std::uint32_t fourcc =
+        drm::present::negotiate_scanout_format(dev, output->crtc_id, prefs);
+    cfg.drm_format = fourcc != 0 ? fourcc : DRM_FORMAT_XRGB8888;
   }
   auto sink_r = drm::present::DumbScanoutSink::create(dev, output->crtc_id, output->connector_id,
                                                       output->mode, cfg);
@@ -83,6 +94,7 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   auto sink = std::move(*sink_r);
+  const bool rgb565 = sink->drm_format() == DRM_FORMAT_RGB565;
 
   // Vsync pacing: arm DRM_MODE_PAGE_FLIP_EVENT on each present and block on the
   // PageFlip dispatcher until the flip lands, rather than a fixed sleep.

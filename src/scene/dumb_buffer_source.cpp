@@ -7,6 +7,7 @@
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
+#include <drm-cxx/core/format.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
@@ -37,11 +38,18 @@ namespace {
   if (is_semiplanar_yuv(drm_format)) {
     return drm::dumb::Buffer::create_planar(dev, drm_format, width, height);
   }
+  // Derive bpp from the format so 16-bpp packed formats (RGB565, needed on
+  // controllers like tilcdc that don't scan out XRGB8888) get the right stride;
+  // 24/32-bpp packed formats use their natural width. 0 => unknown format.
+  const std::uint32_t bpp = drm::format_bpp(drm_format);
+  if (bpp == 0) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
   drm::dumb::Config cfg;
   cfg.width = width;
   cfg.height = height;
   cfg.drm_format = drm_format;
-  cfg.bpp = 32;  // ARGB/XRGB packed; the only single-plane shape this source ships today.
+  cfg.bpp = bpp;
   cfg.add_fb = true;
   return drm::dumb::Buffer::create(dev, cfg);
 }

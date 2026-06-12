@@ -42,7 +42,7 @@ class DumbRingSource;
 class DumbScanoutSink {
  public:
   struct Config {
-    std::uint32_t drm_format{0};  ///< 0 => XRGB8888; any packed format (e.g. RGB565)
+    std::uint32_t drm_format{0};  ///< 0 => negotiate vs the plane (prefer XRGB8888); or set one
     std::size_t buffers{3};       ///< ring depth; 0 => 3 (the buffer-age path wants >=3)
   };
 
@@ -53,7 +53,7 @@ class DumbScanoutSink {
       drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connector_id,
       const drmModeModeInfo& mode, const Config& cfg);
 
-  /// Overload using a default Config (XRGB8888, triple-buffered).
+  /// Overload using a default Config (negotiated format, triple-buffered).
   [[nodiscard]] static drm::expected<std::unique_ptr<DumbScanoutSink>, std::error_code> create(
       drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connector_id,
       const drmModeModeInfo& mode);
@@ -79,18 +79,24 @@ class DumbScanoutSink {
   [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
   [[nodiscard]] std::uint32_t refresh_hz() const noexcept { return refresh_; }
 
+  /// The DRM fourcc the sink actually scans out — the requested format, or the
+  /// negotiated one when Config::drm_format was 0. Callers render their frames
+  /// in this format.
+  [[nodiscard]] std::uint32_t drm_format() const noexcept { return format_; }
+
   /// The underlying scene, for advanced commit / teardown wiring.
   [[nodiscard]] scene::LayerScene& scene() noexcept { return *scene_; }
 
  private:
   DumbScanoutSink(std::unique_ptr<scene::LayerScene> scene, DumbRingSource* ring, std::uint32_t w,
-                  std::uint32_t h, std::uint32_t refresh) noexcept;
+                  std::uint32_t h, std::uint32_t refresh, std::uint32_t format) noexcept;
 
   std::unique_ptr<scene::LayerScene> scene_;
   DumbRingSource* ring_;  ///< owned by scene_ (the layer's source)
   std::uint32_t width_;
   std::uint32_t height_;
   std::uint32_t refresh_;
+  std::uint32_t format_;
 };
 
 }  // namespace drm::present

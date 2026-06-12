@@ -137,6 +137,14 @@ add_executable(driver_caps advanced/driver_caps/main.cpp)
 target_link_libraries(driver_caps PRIVATE drm-cxx::drm-cxx)
 target_include_directories(driver_caps PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# minimal_kms_probe — registry + allocator-fallback probe for minimal/single-plane
+# GPU-less controllers (i.MX93 LCDIFv3, tilcdc, i.MX8MM LCDIF). Phase 1 dumps the
+# PlaneRegistry/DriverProfile shape; Phase 2 runs a LayerScene TEST_ONLY with
+# overlapping full-screen layers and reports assigned vs composited vs dropped.
+add_executable(minimal_kms_probe advanced/minimal_kms_probe/main.cpp)
+target_link_libraries(minimal_kms_probe PRIVATE drm-cxx::drm-cxx)
+target_include_directories(minimal_kms_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # ring_present — DumbRingSource + BufferRing buffer-age validation harness.
 add_executable(ring_present advanced/ring_present/main.cpp)
 target_link_libraries(ring_present PRIVATE drm-cxx::drm-cxx)
