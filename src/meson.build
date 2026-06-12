@@ -61,6 +61,7 @@ drm_cxx_sources = files(
   'present/buffer_ring.cpp',
   'present/dumb_ring_source.cpp',
   'present/dumb_scanout_sink.cpp',
+  'present/scanout_format.cpp',
   'present/gbm_producer.cpp',
   'present/scanout_backend.cpp',
   'present/gl_scanout_producer.cpp',
@@ -143,8 +144,16 @@ endif
 # dlopen's libvulkan.so.1 at runtime, so — exactly like EGL — we take the
 # compile args / includes only and never add -lvulkan to libdrm-cxx's link
 # line. `has_vulkan_headers` / `vk_headers_probe` come from the top meson.build.
-vulkan_cpp_args = ['-DDRM_CXX_HAS_VULKAN=1']
-drm_cxx_deps += vk_headers_dep
+# Tie the VkScanoutProducer (and its DRM_CXX_HAS_VULKAN guard) to the vulkan
+# option. vulkan=false drops the producer entirely — which is also what makes a
+# vulkan-free / 32-bit build viable: the producer's vk_image() returns a 64-bit
+# VkImage handle as void*, which can't compile on ILP32 targets (e.g. armhf).
+if get_option('vulkan')
+  vulkan_cpp_args = ['-DDRM_CXX_HAS_VULKAN=1']
+  drm_cxx_deps += vk_headers_dep
+else
+  vulkan_cpp_args = ['-DDRM_CXX_HAS_VULKAN=0']
+endif
 
 # NvBufSurface — link-time dependency on libnvbufsurface.so when the
 # Jetson L4T headers + library are present. The header surface
@@ -363,6 +372,7 @@ install_headers(
   'present/buffer_ring.hpp',
   'present/dumb_ring_source.hpp',
   'present/dumb_scanout_sink.hpp',
+  'present/scanout_format.hpp',
   'present/frame_economy.hpp',
   'present/gbm_producer.hpp',
   'present/scanout_backend.hpp',

@@ -15,42 +15,29 @@
 // age-driven repaint union is correct), and the partial-update commit is
 // accepted. On a plane/driver without FB_DAMAGE_CLIPS the scene full-frames.
 //
-//   ./ring_present [/dev/dri/cardN] [frames]
+//   ./ring_present [/dev/dri/cardN] [frames] [--no-seat]
 
+#include "../../common/draw.hpp"
 #include "../../common/open_output.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
+#include <drm-cxx/core/format.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/present/buffer_ring.hpp>
 #include <drm-cxx/present/dumb_ring_source.hpp>
+#include <drm-cxx/present/scanout_format.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
 #include <drm_fourcc.h>
 
+#include <array>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
+#include <system_error>
 #include <unistd.h>
 #include <utility>
 #include <vector>
-
-namespace {
-
-void fill_rect(drm::BufferMapping& m, std::int32_t x, std::int32_t y, std::int32_t w,
-               std::int32_t h, std::uint32_t color) {
-  const auto px = m.pixels();
-  const auto stride = m.stride();
-  for (std::int32_t row = y; row < y + h; ++row) {
-    std::uint8_t* line =
-        px.data() + (static_cast<std::size_t>(row) * stride) + (static_cast<std::size_t>(x) * 4U);
-    for (std::int32_t col = 0; col < w; ++col) {
-      std::memcpy(line + (static_cast<std::size_t>(col) * 4U), &color, 4U);
-    }
-  }
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
   auto output = drm::examples::open_and_pick_output(argc, argv);
@@ -62,8 +49,15 @@ int main(int argc, char** argv) {
   const std::int32_t w = output->mode.hdisplay;
   const std::int32_t h = output->mode.vdisplay;
 
-  auto src_r = drm::present::DumbRingSource::create(
-      dev, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), DRM_FORMAT_XRGB8888, 3);
+  // Negotiate a format the plane scans out (tilcdc, for one, has no XRGB8888).
+  const std::array<std::uint32_t, 2> prefs{DRM_FORMAT_XRGB8888, DRM_FORMAT_RGB565};
+  std::uint32_t fourcc = drm::present::negotiate_scanout_format(dev, output->crtc_id, prefs);
+  if (fourcc == 0) {
+    fourcc = DRM_FORMAT_XRGB8888;
+  }
+
+  auto src_r = drm::present::DumbRingSource::create(dev, static_cast<std::uint32_t>(w),
+                                                    static_cast<std::uint32_t>(h), fourcc, 3);
   if (!src_r) {
     drm::println(stderr, "ring_present: DumbRingSource: {}", src_r.error().message());
     return EXIT_FAILURE;
@@ -90,7 +84,8 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  drm::println("ring_present: {}x{} — 3-slot ring, buffer-age repaint via FB_DAMAGE_CLIPS", w, h);
+  drm::println("ring_present: {}x{} {} — 3-slot ring, buffer-age repaint via FB_DAMAGE_CLIPS", w, h,
+               drm::format_name(fourcc));
 
   constexpr std::uint32_t k_bg = 0x00202020U;
   constexpr std::int32_t k_box = 256;
@@ -106,14 +101,14 @@ int main(int argc, char** argv) {
 
     auto pr = ring->paint([&](drm::BufferMapping& m, const drm::present::Repaint& rp) {
       if (rp.full) {
-        std::memset(m.pixels().data(), 0x20, m.pixels().size());  // whole buffer
+        drm::examples::clear(m, fourcc, k_bg);  // whole buffer
       } else {
         for (const drm::present::Rect& r : rp.region) {  // erase the slot's stale union
-          fill_rect(m, r.x, r.y, static_cast<std::int32_t>(r.width),
-                    static_cast<std::int32_t>(r.height), k_bg);
+          drm::examples::fill_rect(m, fourcc, r.x, r.y, static_cast<std::int32_t>(r.width),
+                                   static_cast<std::int32_t>(r.height), k_bg);
         }
       }
-      fill_rect(m, bx, by, k_box, k_box, color);  // draw the box
+      drm::examples::fill_rect(m, fourcc, bx, by, k_box, k_box, color);  // draw the box
 
       // What changed this frame vs the previous frame: the box's old + new spots.
       std::vector<drm::present::Rect> fd;
@@ -125,9 +120,13 @@ int main(int argc, char** argv) {
       return fd;
     });
     if (!pr) {
-      // Ring momentarily out of free slots — retry next vblank.
-      ::usleep(16000);
-      continue;
+      if (pr.error() == std::make_error_code(std::errc::resource_unavailable_try_again)) {
+        ::usleep(16000);  // ring momentarily out of free slots — retry this frame
+        --f;
+        continue;
+      }
+      drm::println(stderr, "ring_present: paint f={}: {}", f, pr.error().message());
+      return EXIT_FAILURE;
     }
     prev_x = bx;
     have_prev = true;

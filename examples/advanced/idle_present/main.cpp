@@ -13,14 +13,17 @@
 // over 300, expect ~10 commits and ~290 skips — i.e. ~97% of page flips avoided
 // while idle. The display still updates correctly on the changed frames.
 //
-//   ./idle_present [/dev/dri/cardN] [frames] [change_period]
+//   ./idle_present [/dev/dri/cardN] [frames] [change_period] [--vrr] [--no-seat]
 
+#include "../../common/draw.hpp"
 #include "../../common/open_output.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
+#include <drm-cxx/core/format.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/display/driver_profile.hpp>
 #include <drm-cxx/present/frame_economy.hpp>
+#include <drm-cxx/present/scanout_format.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
@@ -31,27 +34,9 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <string_view>
 #include <unistd.h>
 #include <utility>
-
-namespace {
-
-void fill_rect(drm::BufferMapping& m, std::int32_t x, std::int32_t y, std::int32_t w,
-               std::int32_t h, std::uint32_t color) {
-  const auto px = m.pixels();
-  const auto stride = m.stride();
-  for (std::int32_t row = y; row < y + h; ++row) {
-    std::uint8_t* line =
-        px.data() + (static_cast<std::size_t>(row) * stride) + (static_cast<std::size_t>(x) * 4U);
-    for (std::int32_t col = 0; col < w; ++col) {
-      std::memcpy(line + (static_cast<std::size_t>(col) * 4U), &color, 4U);
-    }
-  }
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
   // Consume --vrr before open_and_pick_output walks the positional device path.
@@ -77,8 +62,15 @@ int main(int argc, char** argv) {
   const std::int32_t w = output->mode.hdisplay;
   const std::int32_t h = output->mode.vdisplay;
 
-  auto src_r = drm::scene::DumbBufferSource::create(
-      dev, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), DRM_FORMAT_XRGB8888);
+  // Negotiate a format the plane scans out (tilcdc, for one, has no XRGB8888).
+  const std::array<std::uint32_t, 2> prefs{DRM_FORMAT_XRGB8888, DRM_FORMAT_RGB565};
+  std::uint32_t fourcc = drm::present::negotiate_scanout_format(dev, output->crtc_id, prefs);
+  if (fourcc == 0) {
+    fourcc = DRM_FORMAT_XRGB8888;
+  }
+
+  auto src_r = drm::scene::DumbBufferSource::create(dev, static_cast<std::uint32_t>(w),
+                                                    static_cast<std::uint32_t>(h), fourcc);
   if (!src_r) {
     drm::println(stderr, "idle_present: dumb source: {}", src_r.error().message());
     return EXIT_FAILURE;
@@ -86,7 +78,7 @@ int main(int argc, char** argv) {
   auto src = std::move(*src_r);
   auto* dmg = src.get();
   if (auto m = dmg->map(drm::MapAccess::Write); m) {
-    std::memset(m->pixels().data(), 0x20, m->pixels().size());
+    drm::examples::clear(*m, fourcc, 0x00202020U);
   }
 
   drm::scene::LayerScene::Config cfg;
@@ -119,7 +111,8 @@ int main(int argc, char** argv) {
 
   const int frames = (argc > 2) ? std::atoi(argv[2]) : 300;
   const int period = (argc > 3) ? std::atoi(argv[3]) : 30;
-  drm::println("idle_present: {}x{} — change every {} frames over {}", w, h, period, frames);
+  drm::println("idle_present: {}x{} {} — change every {} frames over {}", w, h,
+               drm::format_name(fourcc), period, frames);
 
   constexpr std::int32_t k_box = 256;
   const std::int32_t bx = (w - k_box) / 2;
@@ -132,7 +125,7 @@ int main(int argc, char** argv) {
     if (changed) {
       const std::uint32_t color = 0x00FF0000U | static_cast<std::uint32_t>((f * 8) & 0xFF);
       if (auto m = dmg->map(drm::MapAccess::Write); m) {
-        fill_rect(*m, bx, by, k_box, k_box, color);
+        drm::examples::fill_rect(*m, fourcc, bx, by, k_box, k_box, color);
       }
       const std::array<drm::scene::DamageRect, 1> rects{
           {{bx, by, static_cast<std::uint32_t>(k_box), static_cast<std::uint32_t>(k_box)}}};

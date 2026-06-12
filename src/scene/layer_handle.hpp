@@ -54,7 +54,10 @@ struct std::hash<drm::scene::LayerHandle> {
   std::size_t operator()(drm::scene::LayerHandle h) const noexcept {
     // Splay id into the upper 32 bits, generation into the lower — the
     // two fields are independent enough that XOR-mixing would collide
-    // every time id == generation (both start at 1 for slot 0).
-    return (static_cast<std::size_t>(h.id) << 32U) ^ h.generation;
+    // every time id == generation (both start at 1 for slot 0). Compute in
+    // 64 bits then fold to size_t, so both fields still contribute on ILP32
+    // targets (a 32-bit `size_t << 32U` would be undefined behavior).
+    const std::uint64_t packed = (static_cast<std::uint64_t>(h.id) << 32U) ^ h.generation;
+    return static_cast<std::size_t>(packed ^ (packed >> 32U));
   }
 };

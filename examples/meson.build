@@ -243,6 +243,13 @@ executable('software_present',
   dependencies : [drm_cxx_dep],
 )
 
+# minimal_kms_probe — registry + allocator-fallback probe for minimal single-plane /
+# GPU-less controllers (i.MX LCDIFv3, TI tilcdc, ...). Read-only + TEST_ONLY.
+executable('minimal_kms_probe',
+  'advanced/minimal_kms_probe/main.cpp',
+  dependencies : [drm_cxx_dep],
+)
+
 # idle_present — FrameEconomy idle-suppression: unchanged frames issue no commit.
 executable('idle_present',
   'advanced/idle_present/main.cpp',
@@ -315,8 +322,9 @@ endif
 
 # vk_present — VkScanoutProducer demo. The producer encapsulates Vulkan
 # (vulkan.hpp dlopen'd at runtime inside the library), so this links only
-# drm-cxx — no libvulkan, no GL. Gated on Vulkan headers being present.
-if has_vulkan_headers
+# drm-cxx — no libvulkan, no GL. Gated on the vulkan option (which is what now
+# compiles VkScanoutProducer into the library — see src/meson.build).
+if get_option('vulkan')
   executable('vk_present',
     'advanced/vk_present/main.cpp',
     dependencies : [drm_cxx_dep],

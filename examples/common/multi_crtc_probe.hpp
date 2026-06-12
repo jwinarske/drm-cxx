@@ -139,6 +139,12 @@ inline std::string connector_type_name(std::uint32_t type, std::uint32_t type_id
     case DRM_MODE_CONNECTOR_WRITEBACK:
       base = "Writeback";
       break;
+    case DRM_MODE_CONNECTOR_SPI:
+      base = "SPI";
+      break;
+    case DRM_MODE_CONNECTOR_USB:
+      base = "USB";
+      break;
     default:
       base = "Unknown";
       break;
