@@ -9,11 +9,12 @@
 // Vulkan / GBM) end to end: a software rasterizer's "here is a finished frame"
 // model rather than a paint-into-the-mapping callback.
 //
-// With --vsync the loop paces to the display: present() arms a page-flip event
-// and the loop blocks on the PageFlip dispatcher until the flip completes,
-// instead of a fixed timer. Needs DRM master, so run it from a free VT.
+// With --vsync the loop paces to the display via a page-flip event instead of a
+// fixed timer. With --rgb565 the sink scans out RGB565 (16 bpp) instead of
+// XRGB8888 (32 bpp), halving the dumb-buffer footprint and copy bandwidth — the
+// classic embedded software-display trade. Needs DRM master; run from a free VT.
 //
-//   ./software_present [/dev/dri/cardN] [frames] [--vsync]
+//   ./software_present [/dev/dri/cardN] [frames] [--vsync] [--rgb565]
 
 #include "../../common/open_output.hpp"
 
@@ -21,6 +22,7 @@
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/present/dumb_scanout_sink.hpp>
 
+#include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
@@ -34,12 +36,27 @@
 #include <utility>
 #include <vector>
 
+namespace {
+
+constexpr std::uint16_t rgb565_px(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+  return static_cast<std::uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+constexpr std::uint32_t argb_px(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+  return 0xFF000000U | (static_cast<std::uint32_t>(r) << 16) |
+         (static_cast<std::uint32_t>(g) << 8) | b;
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   bool vsync = false;
+  bool rgb565 = false;
   int frames = 120;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--vsync") == 0) {
       vsync = true;
+    } else if (std::strcmp(argv[i], "--rgb565") == 0) {
+      rgb565 = true;
     } else if (const int n = std::atoi(argv[i]); n > 0) {  // device path atoi's to 0
       frames = n;
     }
@@ -56,6 +73,9 @@ int main(int argc, char** argv) {
 
   drm::present::DumbScanoutSink::Config cfg;
   cfg.buffers = 3;  // headroom so present() rarely stalls on a busy slot
+  if (rgb565) {
+    cfg.drm_format = DRM_FORMAT_RGB565;
+  }
   auto sink_r = drm::present::DumbScanoutSink::create(dev, output->crtc_id, output->connector_id,
                                                       output->mode, cfg);
   if (!sink_r) {
@@ -74,29 +94,47 @@ int main(int argc, char** argv) {
                                std::uint64_t /*ts*/) { flip_done = true; });
   }
 
-  drm::println(
-      "software_present: {}x{} @ {}Hz — CPU frames via dumb ring + atomic flip ({} pacing)", w, h,
-      sink->refresh_hz(), vsync ? "vsync" : "timer");
+  drm::println("software_present: {}x{} @ {}Hz — {} via dumb ring + atomic flip ({} pacing)", w, h,
+               sink->refresh_hz(), rgb565 ? "RGB565" : "XRGB8888", vsync ? "vsync" : "timer");
 
-  const std::uint32_t stride = w * 4U;
+  const std::uint32_t bytes_pp = rgb565 ? 2U : 4U;
+  const std::uint32_t stride = w * bytes_pp;
   std::vector<std::byte> frame(static_cast<std::size_t>(stride) * h);
-  auto* px = reinterpret_cast<std::uint32_t*>(frame.data());
 
   constexpr std::int32_t k_box = 200;
   const std::int32_t span_x =
       (static_cast<std::int32_t>(w) > k_box) ? static_cast<std::int32_t>(w) - k_box : 1;
   const std::int32_t by = (static_cast<std::int32_t>(h) - k_box) / 2;
+  const std::size_t pixels = static_cast<std::size_t>(w) * h;
 
   for (int f = 0; f < frames; ++f) {
-    // Software render the whole frame: grey background + a moving green box.
-    for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
-      px[i] = 0xFF202020U;
-    }
+    // Software render the whole frame: grey background + a moving green box. The
+    // green channel animates so a static screenshot still shows motion stepping.
     const std::int32_t bx = (f * 13) % span_x;
-    const std::uint32_t color = 0xFF00FF00U | static_cast<std::uint32_t>((f * 4) & 0xFF);
-    for (std::int32_t y = by; y < by + k_box; ++y) {
-      for (std::int32_t x = bx; x < bx + k_box; ++x) {
-        px[(static_cast<std::size_t>(y) * w) + static_cast<std::size_t>(x)] = color;
+    const auto g = static_cast<std::uint8_t>(0x80 + ((f * 2) & 0x7F));
+    if (rgb565) {
+      auto* p = reinterpret_cast<std::uint16_t*>(frame.data());
+      const std::uint16_t bg = rgb565_px(0x20, 0x20, 0x20);
+      const std::uint16_t box = rgb565_px(0, g, 0);
+      for (std::size_t i = 0; i < pixels; ++i) {
+        p[i] = bg;
+      }
+      for (std::int32_t y = by; y < by + k_box; ++y) {
+        for (std::int32_t x = bx; x < bx + k_box; ++x) {
+          p[(static_cast<std::size_t>(y) * w) + static_cast<std::size_t>(x)] = box;
+        }
+      }
+    } else {
+      auto* p = reinterpret_cast<std::uint32_t*>(frame.data());
+      const std::uint32_t bg = argb_px(0x20, 0x20, 0x20);
+      const std::uint32_t box = argb_px(0, g, 0);
+      for (std::size_t i = 0; i < pixels; ++i) {
+        p[i] = bg;
+      }
+      for (std::int32_t y = by; y < by + k_box; ++y) {
+        for (std::int32_t x = bx; x < bx + k_box; ++x) {
+          p[(static_cast<std::size_t>(y) * w) + static_cast<std::size_t>(x)] = box;
+        }
       }
     }
 

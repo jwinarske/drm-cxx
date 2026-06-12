@@ -42,7 +42,7 @@ class DumbRingSource;
 class DumbScanoutSink {
  public:
   struct Config {
-    std::uint32_t drm_format{0};  ///< 0 => XRGB8888 (must be a 32-bpp packed format)
+    std::uint32_t drm_format{0};  ///< 0 => XRGB8888; any packed format (e.g. RGB565)
     std::size_t buffers{3};       ///< ring depth; 0 => 3 (the buffer-age path wants >=3)
   };
 
