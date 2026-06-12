@@ -126,7 +126,14 @@ inline constexpr std::array<std::uint32_t, 7> k_external_rank = {
 
   for (const auto cid : connector_ids) {
     auto c = drm::get_connector(fd, cid);
-    if (!c || c->connection != DRM_MODE_CONNECTED || c->count_modes == 0 || c->encoder_id == 0) {
+    // Connected with at least one mode is the real requirement. A bound
+    // encoder is NOT required: on cold KMS (no compositor has driven this
+    // connector yet, or one exited) encoder_id is 0, but the connector is
+    // still perfectly usable — the caller resolves a CRTC from the
+    // connector's possible encoders. Requiring a live binding here made
+    // every example fail on a headless / freshly-booted board with a
+    // monitor attached (e.g. StarFive after stopping gdm).
+    if (!c || c->connection != DRM_MODE_CONNECTED || c->count_modes == 0) {
       continue;
     }
     types.push_back(c->connector_type);
