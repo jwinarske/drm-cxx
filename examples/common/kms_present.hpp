@@ -13,6 +13,8 @@
 #include <xf86drmMode.h>
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 
@@ -61,6 +63,21 @@ inline std::optional<Target> pick_target(int fd) {
   }
   t.connector_id = conn->connector_id;
   t.mode = conn->modes[0];
+  // Optional lower-mode override for bandwidth-limited bring-up (e.g. a 4K
+  // panel where you want to test at 720p): DRM_FORCE_MODE=WxH picks the first
+  // matching mode from the connector's EDID list, else keeps the preferred.
+  if (const char* want = std::getenv("DRM_FORCE_MODE"); want != nullptr) {
+    unsigned fw = 0;
+    unsigned fh = 0;
+    if (std::sscanf(want, "%ux%u", &fw, &fh) == 2) {
+      for (int m = 0; m < conn->count_modes; ++m) {
+        if (conn->modes[m].hdisplay == fw && conn->modes[m].vdisplay == fh) {
+          t.mode = conn->modes[m];
+          break;
+        }
+      }
+    }
+  }
 
   for (int e = 0; e < conn->count_encoders && t.crtc_id == 0; ++e) {
     drmModeEncoder* enc = drmModeGetEncoder(fd, conn->encoders[e]);
