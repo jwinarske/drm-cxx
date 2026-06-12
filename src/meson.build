@@ -133,10 +133,14 @@ endif
 # libdrm-cxx — making drm-cxx loadable on Mesa systems that have egl.h
 # but no libEGL.so.1 installed, and keeping our resolution strictly
 # dlopen-driven.
-streams_cpp_args = has_egl_streams \
-  ? ['-DDRM_CXX_HAS_EGL_STREAMS=1', '-DDRM_CXX_HAS_EGL=1'] \
-  : ['-DDRM_CXX_HAS_EGL_STREAMS=0', '-DDRM_CXX_HAS_EGL=0']
-if has_egl_streams
+# DRM_CXX_HAS_EGL covers the render-offload producer (GlScanoutProducer) and
+# is independent of EGL Streams; DRM_CXX_HAS_EGL_STREAMS gates the scene
+# Streams path. Streams implies EGL (has_egl is true whenever has_egl_streams
+# is). Either one pulls in the EGL headers (compile_args/includes only — libEGL
+# is dlopen'd, never on libdrm-cxx's link line).
+streams_cpp_args = (has_egl_streams ? ['-DDRM_CXX_HAS_EGL_STREAMS=1'] : ['-DDRM_CXX_HAS_EGL_STREAMS=0']) \
+  + (has_egl ? ['-DDRM_CXX_HAS_EGL=1'] : ['-DDRM_CXX_HAS_EGL=0'])
+if has_egl
   drm_cxx_deps += egl_dep.partial_dependency(compile_args : true, includes : true)
 endif
 
