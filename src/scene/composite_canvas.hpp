@@ -58,6 +58,16 @@ struct CompositeCanvasConfig {
   /// explicitly.
   std::uint32_t canvas_width{0};
   std::uint32_t canvas_height{0};
+
+  /// DRM FourCC the canvas dumb buffers (and thus the armed scanout FB)
+  /// are allocated in. 0 => DRM_FORMAT_ARGB8888 (the default, byte-for-
+  /// byte the internal blend format). Set this to a format the target
+  /// plane actually scans out when ARGB8888 isn't advertised — minimal
+  /// controllers such as tilcdc expose only XBGR8888 / RGB565. The
+  /// internal blend always runs in ARGB8888; flush() converts to this
+  /// output format per row. Supported: ARGB/XRGB/XBGR/ABGR8888 and
+  /// RGB565 / BGR565; anything else fails create() with invalid_argument.
+  std::uint32_t output_fourcc{0};
 };
 
 /// Source-pixel descriptor for blend operations. Packs the four
@@ -162,6 +172,17 @@ class CompositeCanvas {
                          std::uint32_t dst_width, std::uint32_t dst_height, std::int32_t x,
                          std::int32_t y, std::int32_t w, std::int32_t h) noexcept;
 
+  /// Convert one row of `pixel_count` ARGB8888 pixels (`src`, memory
+  /// order B,G,R,A) into `out_fourcc`, writing to `dst`. This is the
+  /// shadow→scanout step flush() applies per dirty row so the canvas can
+  /// land on a plane that doesn't advertise ARGB8888. Supported
+  /// `out_fourcc`: ARGB/XRGB8888 (straight copy), XBGR/ABGR8888 (R↔B
+  /// swap), RGB565 / BGR565 (16bpp pack). Any other value falls back to a
+  /// 32bpp copy. Exposed static so unit tests can verify the packing
+  /// without a live DRM device.
+  static void convert_row(std::uint8_t* dst, const std::uint8_t* src, std::int32_t pixel_count,
+                          std::uint32_t out_fourcc) noexcept;
+
   /// CPU SRC_OVER blend: dst.argb = src.argb OVER dst.argb at
   /// `dst_rect`, sampling from `src.pixels` at `src_rect`. Both rects
   /// are clipped against their respective buffer extents; mismatched
@@ -232,13 +253,13 @@ class CompositeCanvas {
     return buffers_[back_index_].stride();
   }
 
-  // Canvas pixel format and modifier are fixed for v1 (ARGB8888 linear),
-  // so these are static — exposed via the canvas type rather than an
-  // instance for clarity at the call site.
-
-  /// DRM FourCC for canvas pixels (`DRM_FORMAT_ARGB8888` in v1).
-  [[nodiscard]] static std::uint32_t drm_fourcc() noexcept;
-  /// DRM modifier for canvas pixels (`DRM_FORMAT_MOD_LINEAR` in v1).
+  /// DRM FourCC the canvas dumb buffers / scanout FB are allocated in —
+  /// the negotiated `CompositeCanvasConfig::output_fourcc` (ARGB8888 by
+  /// default). The internal blend is always ARGB8888 regardless; this is
+  /// what the armed plane scans out.
+  [[nodiscard]] std::uint32_t drm_fourcc() const noexcept { return output_fourcc_; }
+  /// DRM modifier for canvas pixels (`DRM_FORMAT_MOD_LINEAR`; dumb
+  /// buffers are linear by construction).
   [[nodiscard]] static std::uint64_t modifier() noexcept;
 
   /// True when the canvas can be armed — both buffers were allocated
@@ -276,8 +297,13 @@ class CompositeCanvas {
 
  private:
   CompositeCanvas(drm::dumb::Buffer back, drm::dumb::Buffer front, std::uint32_t width,
-                  std::uint32_t height) noexcept
-      : buffers_{std::move(back), std::move(front)}, width_(width), height_(height) {}
+                  std::uint32_t height, std::uint32_t output_fourcc,
+                  std::uint32_t output_bpp) noexcept
+      : buffers_{std::move(back), std::move(front)},
+        width_(width),
+        height_(height),
+        output_fourcc_(output_fourcc),
+        output_bpp_(output_bpp) {}
 
   std::array<drm::dumb::Buffer, 2> buffers_;
   // Cached userspace shadow buffer. clear() / blend() write here
@@ -304,6 +330,11 @@ class CompositeCanvas {
   std::size_t back_index_{1};
   std::uint32_t width_{0};
   std::uint32_t height_{0};
+  // Output (scanout) pixel format + its bytes-per-pixel. The dumb
+  // buffers are allocated in this format; flush() converts the always-
+  // ARGB8888 shadow into it per row. Defaults to ARGB8888 / 4.
+  std::uint32_t output_fourcc_{0};
+  std::uint32_t output_bpp_{4};
 
   // Ensure the shadow buffer is allocated and sized to match the
   // current back buffer's stride. Returns false if the buffer pair
