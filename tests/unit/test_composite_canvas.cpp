@@ -15,6 +15,7 @@
 
 #include <drm_fourcc.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>
@@ -408,4 +409,65 @@ TEST(CompositeCanvasBlend, ToneMapperBlendsOverBackgroundCorrectly) {
   const auto r = static_cast<std::uint8_t>((px >> 16U) & 0xFFU);
   EXPECT_GT(r, 0U);
   EXPECT_LE(r, 0xFFU);
+}
+
+// ── convert_row: ARGB8888 shadow → scanout format ────────────────────
+// flush() applies this per dirty row so the canvas can land on a plane
+// that doesn't advertise ARGB8888 (tilcdc et al.). Source bytes are
+// memory order B,G,R,A. Three primaries cover every channel lane.
+
+namespace {
+// One ARGB8888 pixel as a 4-byte little-endian buffer (memory B,G,R,A).
+std::array<std::uint8_t, 12> argb_row_rgb() {
+  // red, green, blue pixels back to back.
+  return {0x00, 0x00, 0xFF, 0xFF,   // red:   B=0 G=0 R=FF
+          0x00, 0xFF, 0x00, 0xFF,   // green: B=0 G=FF R=0
+          0xFF, 0x00, 0x00, 0xFF};  // blue:  B=FF G=0 R=0
+}
+}  // namespace
+
+TEST(CompositeCanvasConvertRow, ArgbAndXrgbAreStraightCopies) {
+  const auto src = argb_row_rgb();
+  for (const std::uint32_t fmt : {DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888}) {
+    std::array<std::uint8_t, 12> dst{};
+    CompositeCanvas::convert_row(dst.data(), src.data(), 3, fmt);
+    EXPECT_EQ(dst, src) << "fourcc 0x" << std::hex << fmt;
+  }
+}
+
+TEST(CompositeCanvasConvertRow, XbgrSwapsRedAndBlue) {
+  const auto src = argb_row_rgb();
+  std::array<std::uint8_t, 12> dst{};
+  CompositeCanvas::convert_row(dst.data(), src.data(), 3, DRM_FORMAT_XBGR8888);
+  // red pixel: dst memory order becomes R,G,B,X → R in byte0.
+  EXPECT_EQ(dst[0], 0xFF);  // R
+  EXPECT_EQ(dst[2], 0x00);  // B
+  // blue pixel (index 2): B was 0xFF, now in byte2.
+  EXPECT_EQ(dst[8], 0x00);   // R
+  EXPECT_EQ(dst[10], 0xFF);  // B
+  EXPECT_EQ(dst[3], 0xFF);   // alpha preserved
+}
+
+TEST(CompositeCanvasConvertRow, Rgb565PacksPrimaries) {
+  const auto src = argb_row_rgb();
+  std::array<std::uint8_t, 6> dst{};
+  CompositeCanvas::convert_row(dst.data(), src.data(), 3, DRM_FORMAT_RGB565);
+  auto px = [&](std::size_t i) {
+    return static_cast<std::uint16_t>(dst[i * 2] | (dst[i * 2 + 1] << 8U));
+  };
+  EXPECT_EQ(px(0), 0xF800);  // red   → top 5 bits
+  EXPECT_EQ(px(1), 0x07E0);  // green → middle 6 bits
+  EXPECT_EQ(px(2), 0x001F);  // blue  → low 5 bits
+}
+
+TEST(CompositeCanvasConvertRow, Bgr565SwapsRedAndBlueInPack) {
+  const auto src = argb_row_rgb();
+  std::array<std::uint8_t, 6> dst{};
+  CompositeCanvas::convert_row(dst.data(), src.data(), 3, DRM_FORMAT_BGR565);
+  auto px = [&](std::size_t i) {
+    return static_cast<std::uint16_t>(dst[i * 2] | (dst[i * 2 + 1] << 8U));
+  };
+  EXPECT_EQ(px(0), 0x001F);  // red lands in the low (blue) field
+  EXPECT_EQ(px(1), 0x07E0);  // green unchanged
+  EXPECT_EQ(px(2), 0xF800);  // blue lands in the high (red) field
 }

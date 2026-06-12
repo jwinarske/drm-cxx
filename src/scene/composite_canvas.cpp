@@ -196,6 +196,25 @@ bool source_is_opaque(std::uint32_t fourcc) noexcept {
   return fourcc == DRM_FORMAT_XRGB8888;
 }
 
+// Bytes per pixel of a canvas *output* (scanout) format, or 0 if the
+// canvas can't emit it. The internal blend is always ARGB8888; these
+// are the formats flush() knows how to convert that shadow into so the
+// canvas can land on a plane that doesn't advertise ARGB8888.
+std::uint32_t canvas_output_bpp(std::uint32_t fourcc) noexcept {
+  switch (fourcc) {
+    case DRM_FORMAT_ARGB8888:
+    case DRM_FORMAT_XRGB8888:
+    case DRM_FORMAT_XBGR8888:
+    case DRM_FORMAT_ABGR8888:
+      return 4U;
+    case DRM_FORMAT_RGB565:
+    case DRM_FORMAT_BGR565:
+      return 2U;
+    default:
+      return 0U;
+  }
+}
+
 // reinterpret_cast precludes constexpr evaluation, so this stays a
 // runtime helper. The body is small enough that any optimizer inlines
 // it; the cost of dropping constexpr is purely informational.
@@ -314,7 +333,102 @@ inline void neon_row_blend_over(std::uint32_t* dst, const std::uint32_t* src, st
 }
 #endif  // DRM_CXX_HAS_NEON
 
+// R↔B channel swap: ARGB8888 (memory B,G,R,A) → XBGR/ABGR8888 (memory
+// R,G,B,A). On NEON, vld4_u8 de-interleaves 8 pixels into planar B/G/R/A
+// 8-byte lanes and vst4_u8 re-interleaves them with R and B lanes
+// exchanged — the swap is free (just a different store order), no shifts
+// or masks. The scalar tail (and the whole body on non-NEON builds)
+// matches CompositeCanvas::convert_row's reference exactly. `__restrict`
+// asserts the shadow (src) and dumb buffer (dst) never alias — they're
+// always distinct allocations — so x86_64 / riscv64 autovectorize the
+// scalar loop (pshufb / RVV) instead of serializing on a phantom hazard.
+inline void row_swap_rb(std::uint8_t* __restrict dst, const std::uint8_t* __restrict src,
+                        std::uint32_t n) noexcept {
+  std::uint32_t i = 0;
+#if DRM_CXX_HAS_NEON
+  for (; i + 8U <= n; i += 8U) {
+    const uint8x8x4_t s = vld4_u8(src + (i * 4U));
+    uint8x8x4_t o;
+    o.val[0] = s.val[2];  // R
+    o.val[1] = s.val[1];  // G
+    o.val[2] = s.val[0];  // B
+    o.val[3] = s.val[3];  // A / X
+    vst4_u8(dst + (i * 4U), o);
+  }
+#endif
+  for (; i < n; ++i) {
+    const std::uint32_t o = i * 4U;
+    dst[o + 0U] = src[o + 2U];
+    dst[o + 1U] = src[o + 1U];
+    dst[o + 2U] = src[o + 0U];
+    dst[o + 3U] = src[o + 3U];
+  }
+}
+
+// ARGB8888 (memory B,G,R,A) → RGB565 / BGR565 pack. `swap_rb` true emits
+// BGR565 (B in the high 5-bit field, R in the low). On NEON, vld4_u8
+// gives planar channels; each is widened to u16, shifted to its field,
+// and OR-combined, then 8 packed u16 are stored in one vst1q_u16. The
+// scalar tail mirrors convert_row's reference bit-for-bit. `__restrict`
+// (src/dst never alias) lets x86_64 / riscv64 autovectorize the fallback.
+inline void row_pack_565(std::uint8_t* __restrict dst, const std::uint8_t* __restrict src,
+                         std::uint32_t n, bool swap_rb) noexcept {
+  std::uint32_t i = 0;
+#if DRM_CXX_HAS_NEON
+  for (; i + 8U <= n; i += 8U) {
+    const uint8x8x4_t s = vld4_u8(src + (i * 4U));
+    const uint8x8_t hi8 = swap_rb ? s.val[0] : s.val[2];  // B or R → top field
+    const uint8x8_t lo8 = swap_rb ? s.val[2] : s.val[0];  // R or B → low field
+    const uint16x8_t hi = vshlq_n_u16(vshrq_n_u16(vmovl_u8(hi8), 3), 11);
+    const uint16x8_t grn = vshlq_n_u16(vshrq_n_u16(vmovl_u8(s.val[1]), 2), 5);
+    const uint16x8_t lo = vshrq_n_u16(vmovl_u8(lo8), 3);
+    vst1q_u16(reinterpret_cast<std::uint16_t*>(dst + (i * 2U)), vorrq_u16(vorrq_u16(hi, grn), lo));
+  }
+#endif
+  for (; i < n; ++i) {
+    const std::uint32_t s = i * 4U;
+    const std::uint32_t b = src[s + 0U];
+    const std::uint32_t g = src[s + 1U];
+    const std::uint32_t r = src[s + 2U];
+    const std::uint32_t hi5 = swap_rb ? b : r;
+    const std::uint32_t lo5 = swap_rb ? r : b;
+    const auto v =
+        static_cast<std::uint16_t>(((hi5 >> 3U) << 11U) | ((g >> 2U) << 5U) | (lo5 >> 3U));
+    const std::uint32_t d = i * 2U;
+    dst[d + 0U] = static_cast<std::uint8_t>(v & 0xFFU);
+    dst[d + 1U] = static_cast<std::uint8_t>(v >> 8U);
+  }
+}
+
 }  // namespace
+
+// Convert one row of `n` ARGB8888 shadow pixels (memory order B,G,R,A)
+// into `out_fourcc`, writing to `dst`. Called per dirty row by flush();
+// `out_fourcc` is one of the canvas_output_bpp()-supported formats (the
+// create()-validated invariant), so the default arm never fires in
+// practice — it falls back to a straight 32bpp copy for safety.
+void CompositeCanvas::convert_row(std::uint8_t* dst, const std::uint8_t* src,
+                                  std::int32_t pixel_count, std::uint32_t out_fourcc) noexcept {
+  const auto count = static_cast<std::size_t>(pixel_count);
+  const auto n = static_cast<std::uint32_t>(pixel_count);
+  switch (out_fourcc) {
+    case DRM_FORMAT_ARGB8888:
+    case DRM_FORMAT_XRGB8888:
+      std::memcpy(dst, src, count * 4U);
+      return;
+    case DRM_FORMAT_XBGR8888:
+    case DRM_FORMAT_ABGR8888:
+      row_swap_rb(dst, src, n);
+      return;
+    case DRM_FORMAT_RGB565:
+    case DRM_FORMAT_BGR565:
+      row_pack_565(dst, src, n, out_fourcc == DRM_FORMAT_BGR565);
+      return;
+    default:
+      std::memcpy(dst, src, count * 4U);
+      return;
+  }
+}
 
 drm::expected<std::unique_ptr<CompositeCanvas>, std::error_code> CompositeCanvas::create(
     const drm::Device& dev, const CompositeCanvasConfig& cfg) {
@@ -322,11 +436,18 @@ drm::expected<std::unique_ptr<CompositeCanvas>, std::error_code> CompositeCanvas
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
 
+  const std::uint32_t out_fourcc =
+      (cfg.output_fourcc == 0U) ? DRM_FORMAT_ARGB8888 : cfg.output_fourcc;
+  const std::uint32_t out_bpp = canvas_output_bpp(out_fourcc);
+  if (out_bpp == 0U) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+
   drm::dumb::Config dumb_cfg;
   dumb_cfg.width = cfg.canvas_width;
   dumb_cfg.height = cfg.canvas_height;
-  dumb_cfg.drm_format = DRM_FORMAT_ARGB8888;
-  dumb_cfg.bpp = 32;
+  dumb_cfg.drm_format = out_fourcc;
+  dumb_cfg.bpp = out_bpp * 8U;
   dumb_cfg.add_fb = true;
 
   auto back = drm::dumb::Buffer::create(dev, dumb_cfg);
@@ -339,7 +460,8 @@ drm::expected<std::unique_ptr<CompositeCanvas>, std::error_code> CompositeCanvas
   }
 
   return std::unique_ptr<CompositeCanvas>(new CompositeCanvas(std::move(*back), std::move(*front),
-                                                              cfg.canvas_width, cfg.canvas_height));
+                                                              cfg.canvas_width, cfg.canvas_height,
+                                                              out_fourcc, out_bpp));
 }
 
 void CompositeCanvas::begin_frame() noexcept {
@@ -352,8 +474,12 @@ bool CompositeCanvas::ensure_shadow() noexcept {
   if (buf.empty() || buf.data() == nullptr) {
     return false;
   }
-  const std::uint32_t stride = buf.stride();
-  const std::size_t bytes = buf.size_bytes();
+  // The shadow is always ARGB8888 (4 bpp) regardless of the output
+  // format the dumb buffers were allocated in — flush() converts. Its
+  // stride is its own tight width*4, decoupled from buf.stride() (which
+  // may be a different bpp entirely for an RGB565 output).
+  const std::uint32_t stride = width_ * 4U;
+  const std::size_t bytes = static_cast<std::size_t>(stride) * height_;
   if (stride != shadow_stride_bytes_ || shadow_.size() != bytes) {
     shadow_.assign(bytes, 0U);
     shadow_stride_bytes_ = stride;
@@ -443,7 +569,8 @@ void CompositeCanvas::flush() noexcept {
   if (buf.empty() || buf.data() == nullptr) {
     return;
   }
-  if (shadow_.empty() || shadow_.size() != buf.size_bytes()) {
+  const std::size_t shadow_bytes = static_cast<std::size_t>(shadow_stride_bytes_) * height_;
+  if (shadow_.empty() || shadow_.size() != shadow_bytes) {
     return;
   }
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
@@ -451,13 +578,12 @@ void CompositeCanvas::flush() noexcept {
   DirtyRect flush_rect;
   if (clip_to_canvas(flush_rect_unclipped, static_cast<std::int32_t>(width_),
                      static_cast<std::int32_t>(height_), flush_rect)) {
-    const std::size_t row_bytes = static_cast<std::size_t>(flush_rect.w) * 4U;
     for (std::int32_t row = flush_rect.y; row < flush_rect.y + flush_rect.h; ++row) {
       const auto src_off = (static_cast<std::size_t>(row) * shadow_stride_bytes_) +
                            (static_cast<std::size_t>(flush_rect.x) * 4U);
       const auto dst_off = (static_cast<std::size_t>(row) * buf.stride()) +
-                           (static_cast<std::size_t>(flush_rect.x) * 4U);
-      std::memcpy(buf.data() + dst_off, shadow_.data() + src_off, row_bytes);
+                           (static_cast<std::size_t>(flush_rect.x) * output_bpp_);
+      convert_row(buf.data() + dst_off, shadow_.data() + src_off, flush_rect.w, output_fourcc_);
     }
   }
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
@@ -696,10 +822,6 @@ void CompositeCanvas::blend(const CompositeSrc& src, const CompositeRect& src_re
                                 static_cast<std::int32_t>(dst_rect.h)});
 }
 
-std::uint32_t CompositeCanvas::drm_fourcc() noexcept {
-  return DRM_FORMAT_ARGB8888;
-}
-
 std::uint64_t CompositeCanvas::modifier() noexcept {
   // Dumb buffers are linear by construction.
   return DRM_FORMAT_MOD_LINEAR;
@@ -719,8 +841,8 @@ drm::expected<void, std::error_code> CompositeCanvas::on_session_resumed(
   drm::dumb::Config dumb_cfg;
   dumb_cfg.width = width_;
   dumb_cfg.height = height_;
-  dumb_cfg.drm_format = DRM_FORMAT_ARGB8888;
-  dumb_cfg.bpp = 32;
+  dumb_cfg.drm_format = output_fourcc_;
+  dumb_cfg.bpp = output_bpp_ * 8U;
   dumb_cfg.add_fb = true;
 
   for (auto& buf : buffers_) {

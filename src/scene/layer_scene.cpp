@@ -1151,6 +1151,38 @@ class LayerScene::Impl {
     return std::nullopt;
   }
 
+  // Best canvas output format `p` can scan out, in descending
+  // preference: ARGB8888 first (byte-identical to the internal blend —
+  // no per-row conversion in flush()), then the other 8888 channel
+  // orders, then the 16bpp packs. nullopt when the plane advertises none
+  // of them — it can't host a composition canvas. Minimal controllers
+  // (tilcdc) expose no ARGB8888 but do scan out XBGR8888 / RGB565, so the
+  // canvas adopts one of those rather than being stuck with an
+  // un-armable ARGB8888 buffer and dropping every overflow layer.
+  static std::optional<std::uint32_t> canvas_format_for_plane(
+      const drm::planes::PlaneCapabilities& p) {
+    static constexpr std::array<std::uint32_t, 6> k_canvas_formats{
+        DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_FORMAT_XBGR8888,
+        DRM_FORMAT_ABGR8888, DRM_FORMAT_RGB565,   DRM_FORMAT_BGR565};
+    for (const std::uint32_t f : k_canvas_formats) {
+      if (p.supports_format(f)) {
+        return f;
+      }
+    }
+    return std::nullopt;
+  }
+
+  // Whether `p` can host the composition canvas this frame. Once the
+  // canvas exists its format is fixed (its dumb buffers are already
+  // allocated), so the plane must scan out that exact format; before it
+  // exists, any canvas-capable format qualifies.
+  bool plane_hosts_canvas(const drm::planes::PlaneCapabilities& p) const {
+    if (composition_canvas_) {
+      return p.supports_format(composition_canvas_->drm_fourcc());
+    }
+    return canvas_format_for_plane(p).has_value();
+  }
+
   // Decide whether to reserve a canvas plane up front for this
   // commit. Returns the plane id to reserve, or nullopt when neither
   // overflow nor primary-anchor reservation is needed.
@@ -1190,7 +1222,7 @@ class LayerScene::Impl {
       if (p->type == drm::planes::DRMPlaneType::CURSOR) {
         continue;
       }
-      if (!p->supports_format(DRM_FORMAT_ARGB8888)) {
+      if (!plane_hosts_canvas(*p)) {
         continue;
       }
       eligible.push_back(p);
@@ -1496,7 +1528,7 @@ class LayerScene::Impl {
           continue;
         }
         if (is_in_use(p->id) || p->type == drm::planes::DRMPlaneType::CURSOR ||
-            !p->supports_format(DRM_FORMAT_ARGB8888)) {
+            !plane_hosts_canvas(*p)) {
           break;  // reservation invalidated this frame; fall back below
         }
         return p;
@@ -1511,7 +1543,7 @@ class LayerScene::Impl {
       if (is_in_use(p->id)) {
         continue;
       }
-      if (!p->supports_format(DRM_FORMAT_ARGB8888)) {
+      if (!plane_hosts_canvas(*p)) {
         continue;
       }
       if (p->type == drm::planes::DRMPlaneType::OVERLAY) {
@@ -1685,6 +1717,11 @@ class LayerScene::Impl {
       CompositeCanvasConfig cfg;
       cfg.canvas_width = mode_.hdisplay;
       cfg.canvas_height = mode_.vdisplay;
+      // Allocate the canvas in a format `target_plane` actually scans out
+      // — find_free_canvas_plane only returns a canvas-capable plane, so
+      // this is always set. On the common path it's ARGB8888 (no
+      // conversion); on tilcdc-class controllers it's XBGR8888 / RGB565.
+      cfg.output_fourcc = canvas_format_for_plane(*target_plane).value_or(DRM_FORMAT_ARGB8888);
       auto canvas = CompositeCanvas::create(*dev_, cfg);
       if (!canvas) {
         drm::log_warn("scene::LayerScene: CompositeCanvas::create failed: {}",
