@@ -238,8 +238,15 @@ endif
 # a header-only check against <EGL/egl.h> on the include path. The
 # probe-side stub when neither is found is documented in
 # src/scene/stream_capability.cpp.
+# EGL is shared by two independent features: the render-offload producer
+# (drm::present::GlScanoutProducer, gated by `egl`) and EGL Streams
+# (drm::scene, gated by `streams`). Streams implies egl. Probe the EGL
+# headers once if either feature wants them; libEGL is always dlopen'd at
+# runtime, so we only ever take headers/compile-args, never -lEGL.
 streams_feature = get_option('streams')
-if not streams_feature.disabled()
+egl_feature = get_option('egl')
+egl_wanted = (not streams_feature.disabled()) or (not egl_feature.disabled())
+if egl_wanted
   egl_dep = dependency('egl', required : false, include_type : 'system')
   if egl_dep.found()
     has_egl_headers = true
@@ -254,13 +261,18 @@ if not streams_feature.disabled()
   if streams_feature.enabled() and not has_egl_headers
     error('drm-cxx: streams=enabled requested but EGL headers not found (install libegl-dev / mesa-libEGL-devel)')
   endif
+  if egl_feature.enabled() and not has_egl_headers
+    error('drm-cxx: egl=enabled requested but EGL headers not found (install libegl-dev / mesa-libEGL-devel)')
+  endif
 else
   egl_dep = disabler()
   has_egl_headers = false
 endif
-has_egl_streams = has_egl_headers
-if not has_egl_streams and not streams_feature.disabled()
-  message('drm-cxx: EGL headers not found — drm::scene EGL Streams support will be a runtime no-op')
+has_egl_streams = has_egl_headers and not streams_feature.disabled()
+# Streams implies egl; otherwise egl follows its own (auto/enabled) feature.
+has_egl = has_egl_headers and (has_egl_streams or not egl_feature.disabled())
+if not has_egl_headers and (not streams_feature.disabled() or not egl_feature.disabled())
+  message('drm-cxx: EGL headers not found — EGL render-offload + EGL Streams support will be a runtime no-op')
 endif
 
 

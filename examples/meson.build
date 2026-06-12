@@ -314,10 +314,15 @@ if egl_scene_egl_dep.found() and egl_scene_gles_dep.found()
     dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep],
   )
   # gl_present — GlScanoutProducer demo (EGL/GLES render -> ScanoutBackend).
-  executable('gl_present',
-    'advanced/gl_present/main.cpp',
-    dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep],
-  )
+  # Needs the library's GlScanoutProducer, so additionally gate on has_egl
+  # (the `egl` feature) — egl_scene above only needs GbmSurfaceSource, which
+  # is always in the library.
+  if has_egl
+    executable('gl_present',
+      'advanced/gl_present/main.cpp',
+      dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep],
+    )
+  endif
 endif
 
 # vk_present — VkScanoutProducer demo. The producer encapsulates Vulkan
