@@ -1041,9 +1041,23 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
     }
   }
 
-  // Legacy path: alloc immediately, no probe possible (drmModeSetCursor
-  // has no TEST equivalent and is 64×64 on every driver anyway).
+  // Legacy path: drmModeSetCursor has no TEST_ONLY, so fail fast with a
+  // cursor *disable* (handle 0) as a probe. It's a harmless no-op on a
+  // driver that actually has a legacy/emulated cursor (returns 0), but the
+  // kernel rejects it with -ENXIO/-EINVAL on a controller that has no cursor
+  // hardware at all (i.MX LCDIF/LCDIFv3, tilcdc) — exactly the case where
+  // select_plane fell through to legacy because no CURSOR/OVERLAY plane
+  // exists. Failing create() here lets the caller fall back to a composited
+  // cursor instead of getting a Renderer that dies on its first show. A
+  // permission failure (no DRM master) is reported distinctly so the caller
+  // doesn't mistake "not master" for "no cursor hardware".
   if (impl->path == PlanePath::kLegacy) {
+    if (drmModeSetCursor(dev.fd(), impl->crtc_id, 0, 0, 0) != 0) {
+      const int probe_errno = errno;
+      const bool denied = probe_errno == EACCES || probe_errno == EPERM;
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(denied ? std::errc::permission_denied : std::errc::no_such_device));
+    }
     if (auto r = impl->alloc_buffer(w, h); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
