@@ -15,6 +15,7 @@
 #include <drm-cxx/scene/cursor_source.hpp>
 
 #include <drm_fourcc.h>
+#include <xf86drmMode.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -51,6 +52,18 @@ std::optional<drm::Device> open_dumb_device() {
   for (int i = 0; i < 8; ++i) {
     auto dev = drm::Device::open("/dev/dri/card" + std::to_string(i));
     if (!dev) {
+      continue;
+    }
+    // Skip render-only nodes (e.g. PowerVR pvrsrvkm on StarFive): they accept
+    // CREATE_DUMB but have no CRTC to scan out, so the cursor FB/paint path
+    // later fails. A scanout test must land on a KMS-capable card.
+    drmModeRes* res = drmModeGetResources(dev->fd());
+    if (res == nullptr) {
+      continue;
+    }
+    const bool kms_capable = res->count_crtcs > 0;
+    drmModeFreeResources(res);
+    if (!kms_capable) {
       continue;
     }
     auto probe = drm::scene::CursorSource::create_argb(*dev, pattern, kW, kH, 0, 0);
