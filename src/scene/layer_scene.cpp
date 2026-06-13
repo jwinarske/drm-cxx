@@ -7,7 +7,9 @@
 #include "commit_report.hpp"
 #include "compatibility_report.hpp"
 #include "composite_canvas.hpp"
+#include "composition_target.hpp"
 #include "display_params.hpp"
+#include "gl_compositor.hpp"
 #include "layer.hpp"
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
@@ -92,7 +94,8 @@ class LayerScene::Impl {
         mode_(cfg.mode),
         registry_(std::move(registry)),
         output_(cfg.crtc_id, composition_planes_layer_),
-        stream_capability_(cfg.stream_capability) {
+        stream_capability_(cfg.stream_capability),
+        composition_mode_(cfg.composition) {
     allocator_.emplace(*dev_, registry_);
   }
 
@@ -1642,6 +1645,34 @@ class LayerScene::Impl {
         modifier, *fmt);
   }
 
+  // Build the composition target for compose_unassigned. In Auto mode, try the
+  // GPU (GlCompositor) once when EGL is built into the library and a GLES
+  // context can be created on this device; on failure, cache the verdict and
+  // fall back to the CPU CompositeCanvas. ForceCpu and no-EGL builds always use
+  // the CPU canvas. Either way the returned target satisfies CompositionTarget,
+  // so compose_unassigned / arm_composition_canvas don't care which it is.
+  drm::expected<std::unique_ptr<CompositionTarget>, std::error_code> make_composition_target(
+      const CompositeCanvasConfig& cfg) {
+#if DRM_CXX_HAS_EGL
+    if (composition_mode_ == LayerScene::Composition::Auto && !gpu_composition_unavailable_) {
+      auto gpu = GlCompositor::create(*dev_, cfg);
+      if (gpu) {
+        drm::log_info("scene::LayerScene: GPU composition active ({}x{})", cfg.canvas_width,
+                      cfg.canvas_height);
+        return std::unique_ptr<CompositionTarget>(std::move(*gpu));
+      }
+      gpu_composition_unavailable_ = true;
+      drm::log_debug("scene::LayerScene: GPU composition unavailable ({}); using CPU canvas",
+                     gpu.error().message());
+    }
+#endif
+    auto cpu = CompositeCanvas::create(*dev_, cfg);
+    if (!cpu) {
+      return drm::unexpected<std::error_code>(cpu.error());
+    }
+    return std::unique_ptr<CompositionTarget>(std::move(*cpu));
+  }
+
   // Best-effort composition. Updates `report.layers_composited` and
   // `report.composition_buckets` for layers it absorbs.
   void compose_unassigned(std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
@@ -1722,9 +1753,9 @@ class LayerScene::Impl {
       // this is always set. On the common path it's ARGB8888 (no
       // conversion); on tilcdc-class controllers it's XBGR8888 / RGB565.
       cfg.output_fourcc = canvas_format_for_plane(*target_plane).value_or(DRM_FORMAT_ARGB8888);
-      auto canvas = CompositeCanvas::create(*dev_, cfg);
+      auto canvas = make_composition_target(cfg);
       if (!canvas) {
-        drm::log_warn("scene::LayerScene: CompositeCanvas::create failed: {}",
+        drm::log_warn("scene::LayerScene: composition target create failed: {}",
                       canvas.error().message());
         return;
       }
@@ -1788,8 +1819,12 @@ class LayerScene::Impl {
     // dumb buffer. The shadow tracks a per-frame dirty rect (union of
     // clear+blend regions), so the flush only writes the touched area
     // rather than the full canvas — typically a few percent of the
-    // canvas size for dashboard-style scenes.
-    composition_canvas_->flush();
+    // canvas size for dashboard-style scenes. On the GPU path this is the
+    // eglSwapBuffers + front-buffer lock; a failure there drops the frame.
+    if (auto r = composition_canvas_->flush(); !r) {
+      drm::log_warn("scene::LayerScene: composition flush failed: {}", r.error().message());
+      return;
+    }
 
     const std::int32_t canvas_zpos = choose_canvas_zpos(acquisitions, scratch_composited_);
     if (auto r = arm_composition_canvas(req, *target_plane, canvas_zpos, report); !r) {
@@ -2705,13 +2740,21 @@ class LayerScene::Impl {
   // session resume because the new CRTC / fresh fd would need its
   // own empirical confirmation.
   bool mixing_probe_ran_{false};
+  // Composition backend selection (Config::composition) + a sticky GPU-failure
+  // latch. [[maybe_unused]]: only consulted in the DRM_CXX_HAS_EGL branch of
+  // make_composition_target. Placed in the bool cluster so they pack.
+  [[maybe_unused]] LayerScene::Composition composition_mode_{LayerScene::Composition::Auto};
+  // Set once GlCompositor::create (or a GPU canvas commit) fails so the GPU path
+  // isn't retried every frame; thereafter compose_unassigned uses the CPU
+  // CompositeCanvas. Also short-circuited by Config::Composition::ForceCpu.
+  [[maybe_unused]] bool gpu_composition_unavailable_{false};
 
   // Lazy composition canvas. Allocated on first compose_unassigned()
   // call that actually needs it; survives across frames so the dumb
   // buffer + fb_id are reused. on_session_paused() forgets the kernel
   // handles; on_session_resumed re-creates the canvas against the new
   // device.
-  std::unique_ptr<CompositeCanvas> composition_canvas_;
+  std::unique_ptr<CompositionTarget> composition_canvas_;
 
   // CRTC index in drmModeRes::crtcs, cached at create() / on resume —
   // saves a drmModeGetResources ioctl per composing frame. nullopt

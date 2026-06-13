@@ -4,6 +4,7 @@
 #include "composite_canvas.hpp"
 
 #include "buffer_source.hpp"
+#include "composition_target.hpp"
 
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -563,15 +564,15 @@ void CompositeCanvas::clear() noexcept {
   current_dirty_ = {};
 }
 
-void CompositeCanvas::flush() noexcept {
+drm::expected<void, std::error_code> CompositeCanvas::flush() noexcept {
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
   auto& buf = buffers_[back_index_];
   if (buf.empty() || buf.data() == nullptr) {
-    return;
+    return {};
   }
   const std::size_t shadow_bytes = static_cast<std::size_t>(shadow_stride_bytes_) * height_;
   if (shadow_.empty() || shadow_.size() != shadow_bytes) {
-    return;
+    return {};
   }
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
   const DirtyRect flush_rect_unclipped = dirty_union(current_dirty_, prev_flush_[back_index_]);
@@ -588,6 +589,7 @@ void CompositeCanvas::flush() noexcept {
   }
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
   prev_flush_[back_index_] = current_dirty_;
+  return {};
 }
 
 void CompositeCanvas::clear_into(drm::span<std::uint8_t> dst, std::uint32_t dst_stride_bytes,

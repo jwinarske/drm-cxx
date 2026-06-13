@@ -614,6 +614,14 @@ test('test_composite_canvas',
   ),
 )
 
+# GlCompositor pure quad/texcoord math — no GL context, builds regardless of EGL.
+test('test_gl_compositor_math',
+  executable('test_gl_compositor_math',
+    'unit/test_gl_compositor_math.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # Connector-rank helper test. select_connector.hpp lives under
 # examples/common, so include_directories points at examples/ to
 # resolve "common/select_connector.hpp".

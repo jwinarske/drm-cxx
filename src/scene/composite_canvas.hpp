@@ -25,6 +25,8 @@
 
 #pragma once
 
+#include "composition_target.hpp"
+
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
@@ -70,48 +72,8 @@ struct CompositeCanvasConfig {
   std::uint32_t output_fourcc{0};
 };
 
-/// Source-pixel descriptor for blend operations. Packs the four
-/// coordinates the blender needs into one struct so the entry-point
-/// signature stays manageable.
-struct CompositeSrc {
-  /// CPU-mapped source pixels. Must be at least
-  /// `src_height * src_stride_bytes` bytes.
-  drm::span<const std::uint8_t> pixels;
-  std::uint32_t src_stride_bytes{0};
-  /// Source-buffer dimensions; the source rect is clamped against
-  /// these.
-  std::uint32_t src_width{0};
-  std::uint32_t src_height{0};
-  /// DRM FourCC of the source pixels. V1 supports DRM_FORMAT_ARGB8888
-  /// (treated as straight alpha) and DRM_FORMAT_XRGB8888 (treated as
-  /// fully opaque, alpha byte ignored). Other formats are no-ops.
-  std::uint32_t drm_fourcc{0};
-  /// Per-layer alpha modulation in KMS plane units (0 = fully
-  /// transparent, 0xFFFF = fully opaque). Mirrors what the kernel
-  /// would multiply through the per-plane "alpha" property on a
-  /// hardware-placed layer; applying it here keeps the visual effect
-  /// of `Layer::set_alpha` consistent regardless of whether the layer
-  /// landed on a hardware plane or fell through to composition.
-  /// Default 0xFFFF (no modulation).
-  std::uint16_t plane_alpha{0xFFFF};
-
-  /// optional CPU tone-map applied per pixel before
-  /// SRC_OVER blend. When set and the source's `drm_fourcc` is
-  /// ARGB8888 / XRGB8888, each pixel is expanded to 16-bit-per-
-  /// channel, run through the mapper, downconverted, and blended.
-  /// nullptr leaves the source pixels untouched (the existing
-  /// fast path).
-  const drm::display::ToneMapper* tone_mapper{nullptr};
-};
-
-/// Rectangles passed to blend(). Both are signed because dst_rect can
-/// land partially off-screen on either edge — the blender clips.
-struct CompositeRect {
-  std::int32_t x{0};
-  std::int32_t y{0};
-  std::uint32_t w{0};
-  std::uint32_t h{0};
-};
+// CompositeSrc / CompositeRect are defined in composition_target.hpp (shared
+// with the GPU compositor) and visible via the include above.
 
 /// Software composition target for layers the allocator could not
 /// place on a hardware plane. Owns a pair of ARGB8888 dumb buffers and
@@ -119,7 +81,7 @@ struct CompositeRect {
 /// while the kernel scans the front. The static `blend_into` /
 /// `clear_into` helpers are exposed so unit tests can exercise the
 /// blend math against stack buffers without a live DRM device.
-class CompositeCanvas {
+class CompositeCanvas : public CompositionTarget {
  public:
   /// Allocate a pair of ARGB8888 dumb buffers at the requested size.
   /// Width / height come from `cfg.canvas_width / canvas_height`;
@@ -133,12 +95,12 @@ class CompositeCanvas {
   CompositeCanvas& operator=(const CompositeCanvas&) = delete;
   CompositeCanvas(CompositeCanvas&&) = delete;
   CompositeCanvas& operator=(CompositeCanvas&&) = delete;
-  ~CompositeCanvas() = default;
+  ~CompositeCanvas() override = default;
 
   /// Zero-fill the canvas (transparent black, all bytes = 0). Cheap;
   /// the caller invokes this once per frame before blending the
   /// per-layer sources on top.
-  void clear() noexcept;
+  void clear() noexcept override;
 
   /// Zero-fill only the rectangle `rect` (canvas coordinates,
   /// half-open extents). Bounds-clipped to the canvas; degenerate
@@ -190,7 +152,7 @@ class CompositeCanvas {
   /// isn't supported (XRGB / ARGB8888 only in v1) or either rect
   /// degenerates to zero area after clipping.
   void blend(const CompositeSrc& src, const CompositeRect& src_rect,
-             const CompositeRect& dst_rect) noexcept;
+             const CompositeRect& dst_rect) noexcept override;
 
   /// Copy this frame's painted shadow buffer into the back dumb buffer
   /// in one bulk memcpy. clear() / blend() write into a cached
@@ -198,8 +160,10 @@ class CompositeCanvas {
   /// write-combined by the kernel, so per-pixel writes inside the blend
   /// loop are slow but a single linear memcpy hits the WC write
   /// streaming bandwidth ceiling. Call once per frame after the last
-  /// blend(), before arming the canvas plane.
-  void flush() noexcept;
+  /// blend(), before arming the canvas plane. Always succeeds (returns
+  /// {}); the expected return exists to satisfy the CompositionTarget
+  /// interface, whose GPU implementation can fail on swap/acquire.
+  [[nodiscard]] drm::expected<void, std::error_code> flush() noexcept override;
 
   // ── Frame lifecycle ─────────────────────────────────────────────────
   //
@@ -225,14 +189,14 @@ class CompositeCanvas {
   /// All subsequent paint operations (clear / clear_rect / blend)
   /// write into the new back. Idempotent within a single frame: each
   /// `compose_unassigned` call should `begin_frame` exactly once.
-  void begin_frame() noexcept;
+  void begin_frame() noexcept override;
 
   /// Returns the fb_id of the buffer we're currently painting into
   /// (i.e. the back). After `begin_frame`, this is what the scene
   /// arms onto the canvas plane — once committed, the kernel's next
   /// vblank flips scanout to that buffer and `begin_frame` will swap
   /// roles again on the next frame.
-  [[nodiscard]] std::uint32_t fb_id() const noexcept {
+  [[nodiscard]] std::uint32_t fb_id() const noexcept override {
     // back_index_ is bounded to {0, 1} by construction (begin_frame
     // is the only mutator and just toggles between the two values),
     // so .at()'s bounds check is always-true overhead. NOLINT
@@ -243,9 +207,9 @@ class CompositeCanvas {
   }
   /// Canvas width in pixels (CRTC mode size by default; explicit for
   /// headless / offscreen scenes).
-  [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
+  [[nodiscard]] std::uint32_t width() const noexcept override { return width_; }
   /// Canvas height in pixels.
-  [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
+  [[nodiscard]] std::uint32_t height() const noexcept override { return height_; }
   /// Bytes per row of the back buffer. Both buffers were allocated to
   /// the same size; the kernel may pad above `width * 4`.
   [[nodiscard]] std::uint32_t stride_bytes() const noexcept {
@@ -257,14 +221,14 @@ class CompositeCanvas {
   /// the negotiated `CompositeCanvasConfig::output_fourcc` (ARGB8888 by
   /// default). The internal blend is always ARGB8888 regardless; this is
   /// what the armed plane scans out.
-  [[nodiscard]] std::uint32_t drm_fourcc() const noexcept { return output_fourcc_; }
+  [[nodiscard]] std::uint32_t drm_fourcc() const noexcept override { return output_fourcc_; }
   /// DRM modifier for canvas pixels (`DRM_FORMAT_MOD_LINEAR`; dumb
   /// buffers are linear by construction).
   [[nodiscard]] static std::uint64_t modifier() noexcept;
 
   /// True when the canvas can be armed — both buffers were allocated
   /// and neither has been forgotten via `on_session_paused`.
-  [[nodiscard]] bool armable() const noexcept {
+  [[nodiscard]] bool armable() const noexcept override {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
     return !buffers_[0].empty() && !buffers_[1].empty() && buffers_[back_index_].fb_id() != 0;
   }
@@ -275,12 +239,13 @@ class CompositeCanvas {
   /// libseat-revoked fd cannot service them. Pairs with
   /// `on_session_resumed`. After this call `armable()` is false until
   /// the resume completes.
-  void on_session_paused() noexcept;
+  void on_session_paused() noexcept override;
 
   /// Re-allocate both ARGB8888 dumb buffers against `new_dev`.
   /// Dimensions and back/front orientation are preserved; pixel
   /// content is not. Caller's responsibility to repaint.
-  [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(const drm::Device& new_dev);
+  [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
+      const drm::Device& new_dev) override;
 
   /// Half-open axis-aligned rect, in canvas pixels. Used internally by
   /// clear/blend/flush to amortize the per-frame WC memcpy down to just
