@@ -18,6 +18,7 @@
 #include <drm-cxx/scene/buffer_source.hpp>
 
 #include <drm_fourcc.h>
+#include <xf86drmMode.h>
 
 #include <cstdio>
 #include <cstring>
@@ -42,6 +43,19 @@ std::optional<drm::Device> open_dumb_device() {
   for (int i = 0; i < 8; ++i) {
     auto dev = drm::Device::open("/dev/dri/card" + std::to_string(i));
     if (!dev) {
+      continue;
+    }
+    // Skip render-only nodes (e.g. PowerVR pvrsrvkm on StarFive, which is card0
+    // there): they accept CREATE_DUMB so the probe below would pass, but they
+    // have no CRTC to scan out and the FB/paint path later fails with ENOSYS.
+    // A scanout test must land on a KMS-capable card.
+    drmModeRes* res = drmModeGetResources(dev->fd());
+    if (res == nullptr) {
+      continue;
+    }
+    const bool kms_capable = res->count_crtcs > 0;
+    drmModeFreeResources(res);
+    if (!kms_capable) {
       continue;
     }
     auto probe = drm::present::DumbRingSource::create(*dev, 64, 64, DRM_FORMAT_XRGB8888, 3);
