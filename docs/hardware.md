@@ -319,6 +319,189 @@ render node).
   `-dev` headers; bring drm-cxx's headers (or carry the API headers) and
   compile the needed sources directly when validating on this board.
 
+### TI AM335x (BeagleBone Black, tilcdc)
+
+Validation board: **BeagleBone Black**, TI AM335x (single Cortex-A8, **ARMv7 /
+armhf, 32-bit**), BeagleBoard.org **Debian 13.5 base/console image (2026-05-19),
+kernel 6.18.32-bone35**. `card0` is `tilcdc` (the LCD controller); HDMI is driven
+through the on-board NXP **TDA19988 (TDA998x)** encoder. There is **no GPU
+acceleration** — the PowerVR SGX530 has no open 3D and no Vulkan — so the
+software/dumb-buffer present path (`software_present`, `ring_present`) is the
+target; GL examples only run on Mesa llvmpipe. Cross-build with
+`scripts/build_beaglebone_black.sh` (podman + `debian:trixie` armhf multiarch +
+meson, vulkan off).
+
+`driver_caps` reports: addfb2_modifiers=true, **async_page_flip=false**,
+prime import/export=true, cursor 64×64, **fb_damage_clips=false**, psr=none.
+
+- **Plane formats: RGB565/XBGR8888/BGR888 — no XRGB8888.** The single plane
+  (id 33) advertises only `RG16` (RGB565), `XB24` (XBGR8888), `BG24` (BGR888),
+  all LINEAR. drm-cxx's default XRGB8888 (`XR24`) is **not** in the list and is
+  rejected at commit, so present with **RGB565** (`software_present --rgb565`, or
+  `DumbScanoutSink` Config `drm_format=DRM_FORMAT_RGB565`).
+- **Low pixel-clock ceiling; modes self-downgrade.** The LCDC ceiling sits below
+  ~168 MHz, so `tilcdc`'s `mode_valid` filters the EDID automatically — e.g. an
+  LG HDR DQHD offering native 1280×1440@60 (168.9 MHz) and 4K@30 (297 MHz) is
+  downgraded to **1280×1024@60 (108 MHz)** with no manual `video=` forcing.
+- **HDMI overlay path mismatch (no `/dev/dri` on first boot).** The factory eMMC
+  U-Boot (2019.04) searches `/lib/firmware/` for `.dtbo` overlays, but the 2026
+  image ships them under `/boot/dtbs/$(uname -r)/overlays/` — so the HDMI virtual
+  cape (`BB-HDMI-TDA998x-00A0.dtbo`) fails to load, the `lcdc` node never
+  appears, and there is no DRM device (U-Boot log: `uboot_overlays: unable to
+  find [...]`). Fix without reflashing U-Boot:
+  `sudo cp /boot/dtbs/$(uname -r)/overlays/*.dtbo /lib/firmware/ && sudo reboot`.
+- **Seat/VT on a headless serial-console image.** There is no `seatd.service`;
+  libseat falls back to its in-process builtin backend, which must open the VT
+  (`/dev/tty0`) and therefore needs **root** — so DRM-master examples fail as the
+  `debian` user over SSH (`Could not open target tty: Permission denied`). Run
+  them as root (`sudo env LD_LIBRARY_PATH="$PWD" ./<example>`) or pass
+  **`--no-seat`** (skips libseat, opens DRM directly + takes master as the first
+  opener — handled by the common `open_output` helper). Read-only tools
+  (`driver_caps`, `plane_caps`) need neither.
+- **Minimal base image.** The console image ships none of the userspace libs
+  drm-cxx links — install them once:
+  `sudo apt install libdrm2 libfmt10 libgbm1 libinput10 libseat1 libxkbcommon0 libdisplay-info2`.
+  Cursor demos additionally need a theme: `sudo apt install dmz-cursor-theme`.
+- **Single-plane composition fallback.** tilcdc has exactly one plane (PRIMARY,
+  no overlay), so any scene with more layers than planes must composite the
+  overflow onto a canvas armed on that one plane. The `LayerScene` composition
+  canvas was hard-coded ARGB8888, which tilcdc doesn't scan out, so the canvas
+  could never be armed and the overflow layers were dropped. The canvas now
+  adopts a plane-supported format (here **XBGR8888**, R↔B-swapped from the
+  internal ARGB8888 blend); `minimal_kms_probe /dev/dri/card0 3` reports
+  **composited 3 / dropped 0** onto the single plane (was assigned 1 / dropped 2).
+- **No hardware cursor at all.** `DRM_CAP_CURSOR_*` reports 64×64, but that is a
+  legacy default that lies: the plane registry has **no CURSOR plane**, and the
+  legacy `drmModeSetCursor` ioctl returns **ENXIO**. The cursor renderer
+  correctly gates on the registry and falls back to the legacy path (it does
+  *not* try to arm a nonexistent plane — `mouse_cursor` logs `Cursor path:
+  legacy drmModeSetCursor`), but legacy then fails on this controller, so a HW
+  cursor is impossible — the cursor must be software-composited (a `CursorSource`
+  layer through the now-working single-plane composition path). Gate HW-cursor
+  use on the registry, never on `DRM_CAP_CURSOR_*`.
+- **Working example set** (verified on-device; what `build_beaglebone_black.sh`
+  installs): `software_present`, `ring_present`, `idle_present`, `damage_present`
+  (all present via the RGB565 negotiation) + `driver_caps`, `plane_caps`,
+  `stream_probe`, `minimal_kms_probe` (read-only diagnostics). The rest are
+  excluded — they need XRGB8888 (rejected by tilcdc at `AddFB2`, not just absent
+  from `IN_FORMATS`), a GPU, multiple CRTCs, a cursor plane, HDR, compression, or
+  a camera. Any present example works here only if it calls
+  `present::negotiate_scanout_format()` rather than hardcoding XRGB8888.
+
+### StarFive JH7110 (VisionFive 2, riscv64)
+
+Validation board: **StarFive VisionFive 2**, JH7110 (quad SiFive U74, **64-bit
+RISC-V, rv64gc, riscv64**), **Ubuntu 24.04.3 LTS, kernel 6.12.5-starfive**.
+`card1` is the `starfive` display subsystem (Verisilicon **dc8200** controller +
+Innosilicon **inno-hdmi**); `card0`/`renderD128` is the Imagination PowerVR GPU
+(`pvrsrvkm`, render-only). Cross-build with `scripts/build_visionfive2.sh`
+(podman + `debian:trixie` riscv64 multiarch + meson, vulkan off). This is the
+project's primary **riscv64** target, so it exercises the scalar (non-NEON)
+fallbacks — `composite_canvas`'s `convert_row` shadow→scanout packing among them
+(`test_composite_canvas`, `test_negotiate` and the full on-device test suite
+pass: 63 gtest/assert binaries green, the rest skip for "no dumb-capable card"
+when the desktop holds the device).
+
+- **Cross-distro runtime soname gap.** The container builds against trixie
+  (`libfmt.so.10`, `libdisplay-info.so.2`) but the board runs Ubuntu 24.04
+  (`libfmt.so.9`, `libdisplay-info.so.1`). Ship the trixie `.so`s next to the
+  binaries (the build leaves `libtomlplusplus.so.3` in the tree; extract
+  `libfmt10`/`libdisplay-info2`/`libseat1` from a `debian:trixie` riscv64
+  container) and point `LD_LIBRARY_PATH` at them, or rebuild against an Ubuntu
+  base. `libinput.so.10`/`libdrm`/`libgbm` already match.
+- **Rich multi-plane controller.** Two CRTCs; planes report PRIMARY×2,
+  OVERLAY×4, CURSOR×2 (per-plane `zpos [0,5]`, rotation + scaling on most).
+  `minimal_kms_probe /dev/dri/card1 3` assigns **3/3 to hardware planes, 0
+  composited** — confirms the single-plane canvas-format change does not regress
+  native assignment on a plane-rich controller (ARGB8888 stays the first canvas
+  preference). The cursor renderer takes the **atomic CURSOR plane** path here
+  (`mouse_cursor` logs `Cursor path: atomic CURSOR plane`), unlike tilcdc's
+  legacy fallback.
+- **inno-hdmi EDID read needs a live pipe.** With no forced mode the connector
+  hotplug-detects (`status=connected`) but EDID reads back **`EDID has corrupt
+  header`**, so the kernel populates **0 modes** and leaves the pipe disabled —
+  no desktop, and KMS clients see "no usable output". Forcing any low-clock mode
+  on the kernel cmdline powers the PHY/DDC enough that **EDID then reads
+  correctly**; the desktop subsequently renegotiates the monitor's native mode
+  (e.g. 3840×2160@30) from the now-valid EDID. **1080p60 is rejected** by the
+  driver (`[drm] User-defined mode not supported "1920x1080"` for both the
+  148.5 MHz CEA and the CVT-RB timing); **720p60 works** as the bootstrap.
+  Persist it via `/etc/default/u-boot` `U_BOOT_PARAMETERS+=" video=HDMI-A-1:1280x720@60"`
+  then `sudo u-boot-update` (this board uses U-Boot + extlinux, regenerated by
+  `u-boot-update`).
+- **Cold-KMS output resolution.** The desktop (gdm) owns DRM master on `card1`;
+  stop it (`sudo systemctl stop gdm`) to run KMS examples (then `sudo … --no-seat`).
+  Once gdm is stopped nothing has a bound encoder, so the example helper's old
+  "first connected connector **with an attached encoder**" rule failed. The
+  `open_and_pick_output` helper now resolves a CRTC from the connector's
+  *possible* encoders when none is bound — so the present examples work on a
+  freshly-booted / headless-but-connected board, not just under a running
+  compositor.
+- **Present path validated (riscv64, 4K@30).** With gdm stopped, `software_present`,
+  `ring_present`, `idle_present` (frame-economy: 1 committed / 59 skipped) and
+  `damage_present` all scan out via the dumb-ring + atomic-flip path. First-run
+  `software_present` is occasionally a no-op (inno-hdmi pipe still settling after
+  master changes hands); a retry presents — not a drm-cxx issue.
+  `DRM_FORCE_MODE=WxH` (honored by `kms_present`) runs at a lower mode than the
+  4K preferred — useful for bandwidth-limited bring-up.
+- **GPU-accelerated scanout works via the GBM-on-display (kmsro) path — open
+  EGL/GBM on the *display* node, not the GPU.** `card0`/`renderD128` (`pvrsrvkm`)
+  is render-only; its Mesa stack (`pvr_dri.so`, `libGLESv2_PVR_MESA`, `libgbm`,
+  RGX firmware loaded) does GLES/EGL/GBM. The correct pattern is to create the
+  GBM/EGL renderer on the **display** node (`card1`), not the GPU: Mesa's
+  **kmsro** layer transparently routes rendering to the PowerVR and allocates a
+  display-native (LINEAR) scanout buffer, so the display never imports a foreign
+  buffer. (This is the standard split-SoC compositor setup — the display node is
+  the primary GBM device and the render GPU is secondary.) Build with the `egl` feature on (`-Degl=enabled`, decoupled from
+  `-Dstreams`) and run on `card1`:
+  - `egl_scene /dev/dri/card1` — GBM-surface EGL producer: **90 frames / 3 s (30 fps)**.
+  - `gl_present /dev/dri/card1` — library `GlScanoutProducer`: **120 frames**.
+  - `gbm_surface_scanout` — EGL swapchain: `display TEST_ONLY of LINEAR: ACCEPTED`,
+    LINEAR scanned out.
+- **`egl_offload_scanout` (manual cross-device import) does NOT work here — wrong
+  direction for a kmsro display.** It allocates on the GPU node and asks the
+  display to import, which **fails at `drmPrimeFDToHandle` with ENOSYS**: the
+  `starfive` display advertises `DRM_PRIME_CAP_IMPORT` but cannot import a
+  *foreign* (PowerVR) dma-buf. The GPU and display also share only `LINEAR`
+  (PowerVR renders `LINEAR` + `0x92…` tiled; the dc8200 scans out `LINEAR` +
+  `0x0b…` tiled). That manual-import path is for displays that import the GPU's
+  buffer (e.g. Rockchip VOP2 + Mali AFBC); for a kmsro display use the
+  GBM-on-display path above. (The two robustness fixes it prompted are still
+  correct and kept: the example's LINEAR fallback when `gbm_bo_create_with_modifiers2`
+  is rejected, and `import_dmabuf` using plain `AddFB2` for `INVALID`/LINEAR so
+  import lands on minimal controllers that *do* import.)
+- **Other examples validated on `card1` (multi-plane, atomic):** `scene_priority`
+  / `scene_formats` (allocator + per-plane format probe — ARGB8888 scaler-required,
+  ABGR8888 channel-swap, XRGB8888 no-scale), `cursor_scene` (atomic CURSOR plane),
+  `atomic_modeset` (page flips on CRTC 32).
+- **PRIME is directional here — don't read the offload ENOSYS as "no PRIME".**
+  *GPU imports the display's buffer* (the kmsro direction) **works** — that's how
+  `egl_scene` / `gl_present` render on the PowerVR into a card1-allocated
+  buffer. Only *display imports the GPU's buffer* fails (`drmPrimeFDToHandle`
+  ENOSYS), which is exactly the direction the GBM-on-display path avoids. The
+  `DRM_PRIME_CAP_IMPORT` bit being set does not imply the driver can import a
+  buffer allocated by a *different* device.
+- **No HW compression is achievable for drm-cxx-produced content on this pairing.**
+  `compressed_scanout /dev/dri/card1` negotiates correctly — it enumerates the
+  dc8200's modifiers and ranks compression/tiling first (seven `0x0b…` candidates
+  ahead of `LINEAR`) — but the chosen result is **`LINEAR`** ("no scanout saving").
+  Two separate reasons, depending on who produces the pixels:
+  - **GPU-produced content** (`GbmSurfaceSource` / the EGL producers): drm-cxx
+    *does* negotiate modifiers here, and on amdgpu / Rockchip this path picks
+    **DCC / AFBC** — so the negotiation itself is sound. On *this* board it still
+    resolves to `LINEAR` because the GPU and display share **no** compressed/tiled
+    modifier (PowerVR renders `LINEAR + 0x92…`; the dc8200 scans out
+    `LINEAR + 0x0b…`; intersection = `LINEAR`). That's a hardware-pairing limit,
+    not a drm-cxx one — no shared modifier exists to choose.
+  - **CPU-produced content** (`dumb::Buffer` → `CompositeCanvas`, the software
+    present path): always `LINEAR` *by construction*. `DRM_IOCTL_MODE_CREATE_DUMB`
+    has no modifier concept (there is no "tiled dumb buffer"), and emitting a
+    tiled/compressed layout would mean encoding an AFBC/DCC/tiling swizzle on the
+    CPU — impractical (compression is a fixed-function HW block). The achievable
+    bandwidth wins for the CPU path are a smaller-bpp format (RGB565 vs ARGB8888)
+    and damage/dirty-rect (`FB_DAMAGE_CLIPS` + the canvas's per-frame dirty flush),
+    not modifier compression.
+
 ### NVIDIA EGL Streams
 
 - **EGL needs `EGL_DRM_MASTER_FD_EXT`.** Without it,
