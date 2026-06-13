@@ -333,6 +333,12 @@ meson, vulkan off).
 
 `driver_caps` reports: addfb2_modifiers=true, **async_page_flip=false**,
 prime import/export=true, cursor 64×64, **fb_damage_clips=false**, psr=none.
+Its plane census reads `PRIMARY=1 OVERLAY=0 CURSOR=0`, so the cursor 64×64 is
+the `DRM_CAP_CURSOR_*` default with **no backing CURSOR plane** — `driver_caps`
+emits its cap/registry mismatch **`[WARN]`** here. This is the canonical case
+the warning exists for: gate HW-cursor use on an actual CURSOR plane in the
+registry, not on the cap (the cursor must otherwise be composited). The same
+census + WARN are expected on the i.MX LCDIF / LCDIFv3 controllers.
 
 - **Plane formats: RGB565/XBGR8888/BGR888 — no XRGB8888.** The single plane
   (id 33) advertises only `RG16` (RGB565), `XB24` (XBGR8888), `BG24` (BGR888),
