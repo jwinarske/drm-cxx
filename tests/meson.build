@@ -286,6 +286,13 @@ if has_xcursor
       dependencies : test_deps,
     ),
   )
+
+  test('test_cursor_renderer_legacy',
+    executable('test_cursor_renderer_legacy',
+      'integration/test_cursor_renderer_legacy.cpp',
+      dependencies : test_deps,
+    ),
+  )
 endif
 
 if has_blend2d

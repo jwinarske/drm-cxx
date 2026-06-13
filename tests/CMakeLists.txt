@@ -103,6 +103,10 @@ if(DRM_CXX_HAS_XCURSOR)
   add_executable(test_cursor_source integration/test_cursor_source.cpp)
   target_link_libraries(test_cursor_source PRIVATE drm-cxx::drm-cxx)
   add_test(NAME test_cursor_source COMMAND test_cursor_source)
+
+  add_executable(test_cursor_renderer_legacy integration/test_cursor_renderer_legacy.cpp)
+  target_link_libraries(test_cursor_renderer_legacy PRIVATE drm-cxx::drm-cxx)
+  add_test(NAME test_cursor_renderer_legacy COMMAND test_cursor_renderer_legacy)
 endif()
 
 # VKMS integration test — self-skips when vkms is absent. Kept out of
