@@ -20,7 +20,16 @@
 //     Works on CMA-backed capture (RPi unicam, RK3588 ISP1, vivid with
 //     dma-buf export); fails on amdgpu when the producer is a foreign
 //     vmalloc-backed dma-buf (UVC), per
-//     `reference_amdgpu_rejects_foreign_vmalloc_dmabuf`.
+//     `reference_amdgpu_rejects_foreign_vmalloc_dmabuf`. Also fails on
+//     display engines with no scanout-side IOMMU/scatter-gather
+//     (Verisilicon DC8200): drmModeAddFB2 succeeds but the kernel's
+//     prime-import (vs_gen_prime_import_sg_table) rejects the
+//     non-contiguous UVC sg_table, so the plane scans out an empty
+//     buffer (uniform green for YUYV). The on-SoC ISP/camss path is
+//     CMA-contiguous and zero-copies fine; for UVC on such displays use
+//     MmapCopy. (Hardware-validated: UVC zero-copy is unachievable on
+//     DC8200 by export — the device is CPU-filled — so MmapCopy, which
+//     copies into a display-owned dumb buffer, is the correct boundary.)
 //
 //   * BufferMode::MmapCopy — VIDIOC_REQBUFS(MMAP) + mmap per buffer +
 //     per-frame memcpy into a DumbBuffer the scene scans out. Universal
