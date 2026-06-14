@@ -273,6 +273,14 @@ target_link_libraries(test_gl_compositor_math PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_gl_compositor_math)
 
+add_executable(test_gl_compositor_readback integration/test_gl_compositor_readback.cpp)
+target_link_libraries(test_gl_compositor_readback PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+target_include_directories(test_gl_compositor_readback PRIVATE ${CMAKE_SOURCE_DIR}/src)
+gtest_discover_tests(test_gl_compositor_readback)
+
 add_executable(test_external_dma_buf_source unit/test_external_dma_buf_source.cpp)
 target_link_libraries(test_external_dma_buf_source PRIVATE
   drm-cxx::drm-cxx

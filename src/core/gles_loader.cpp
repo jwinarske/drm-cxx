@@ -85,6 +85,7 @@ void initialize_runtime(GlesLoader& rt) noexcept {
   rt.draw_arrays = resolve_gl<decltype(rt.draw_arrays)>(rt.handle, "glDrawArrays");
   rt.finish = resolve_gl<decltype(rt.finish)>(rt.handle, "glFinish");
   rt.get_error = resolve_gl<decltype(rt.get_error)>(rt.handle, "glGetError");
+  rt.get_string = resolve_gl<decltype(rt.get_string)>(rt.handle, "glGetString");
 
   // All entry points are mandatory for the compositor; if any is missing treat
   // the whole stack as unusable so the caller falls back to the CPU path.
@@ -106,7 +107,8 @@ void initialize_runtime(GlesLoader& rt) noexcept {
       (rt.uniform1i != nullptr) && (rt.uniform1f != nullptr) && (rt.uniform4f != nullptr) &&
       (rt.viewport != nullptr) && (rt.clear_color != nullptr) && (rt.clear != nullptr) &&
       (rt.enable != nullptr) && (rt.disable != nullptr) && (rt.blend_func != nullptr) &&
-      (rt.draw_arrays != nullptr) && (rt.finish != nullptr) && (rt.get_error != nullptr);
+      (rt.draw_arrays != nullptr) && (rt.finish != nullptr) && (rt.get_error != nullptr) &&
+      (rt.get_string != nullptr);
   if (!all_present) {
     drm::log_warn("gles_loader: libGLESv2.so.2 loaded but missing entry points — unsupported");
     rt.handle = nullptr;

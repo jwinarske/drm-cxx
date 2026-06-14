@@ -30,6 +30,7 @@
 #include <memory>
 #include <optional>
 #include <system_error>
+#include <vector>
 
 namespace drm {
 class Device;
@@ -69,6 +70,14 @@ class GlCompositor : public CompositionTarget {
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
 
+  /// Inspection hook: copy the most-recently-flushed front buffer's pixels into
+  /// `out` (tightly packed, `drm_fourcc()` layout, width()*height()*4 bytes) by
+  /// mapping the gbm bo for read. Returns not_connected if nothing has been
+  /// flushed. Used by the gpu_compose_readback probe to verify pixel
+  /// correctness (Y-orientation, channel order, blend) without a screen; it
+  /// CPU-maps the GPU buffer, so it is not a per-frame fast path.
+  [[nodiscard]] drm::expected<void, std::error_code> read_back(std::vector<std::uint8_t>& out);
+
  private:
   GlCompositor() = default;
 
@@ -101,6 +110,7 @@ class GlCompositor : public CompositionTarget {
   std::uint32_t fb_id_{0};
   bool armable_{false};
   bool frame_open_{false};
+  bool allow_software_{false};  // test seam: accept llvmpipe/softpipe/swrast
 };
 
 }  // namespace drm::scene

@@ -70,6 +70,15 @@ struct CompositeCanvasConfig {
   /// output format per row. Supported: ARGB/XRGB/XBGR/ABGR8888 and
   /// RGB565 / BGR565; anything else fails create() with invalid_argument.
   std::uint32_t output_fourcc{0};
+
+  /// GPU compositor only (ignored by the CPU CompositeCanvas): allow a
+  /// software GL renderer (llvmpipe/softpipe/swrast). Default false, so
+  /// LayerScene's Auto mode rejects a software context and falls back to the
+  /// CPU canvas — software GL is no faster than the CPU blit it would replace.
+  /// Tests set this true to exercise the renderer-independent GL pixel
+  /// pipeline (Y-orientation, swizzle, blend) where only llvmpipe is available
+  /// (CI, or a host whose GPU is held by the desktop).
+  bool allow_software_renderer{false};
 };
 
 // CompositeSrc / CompositeRect are defined in composition_target.hpp (shared

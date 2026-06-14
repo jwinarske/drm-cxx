@@ -49,6 +49,15 @@ test('test_dumb_ring_source',
   ),
 )
 
+# GPU compositor pixel-correctness check. Needs a GL-capable KMS card; skips on
+# vkms/CI and GPU-less builds (GTEST_SKIP). HW check on StarFive / Steam Deck.
+test('test_gl_compositor_readback',
+  executable('test_gl_compositor_readback',
+    'integration/test_gl_compositor_readback.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_scanout_target',
   executable('test_scanout_target',
     'unit/test_scanout_target.cpp',

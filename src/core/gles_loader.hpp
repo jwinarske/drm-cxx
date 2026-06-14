@@ -62,6 +62,7 @@ inline constexpr GLenum k_blend = 0x0BE2;
 inline constexpr GLenum k_one = 1;
 inline constexpr GLenum k_one_minus_src_alpha = 0x0303;
 inline constexpr GLbitfield k_color_buffer_bit = 0x00004000;
+inline constexpr GLenum k_renderer = 0x1F01;
 }  // namespace gl
 
 // ── Function-pointer typedefs ────────────────────────────────────────────
@@ -106,6 +107,7 @@ using PFN_glBlendFunc = void (*)(GLenum, GLenum);
 using PFN_glDrawArrays = void (*)(GLenum, GLint, GLsizei);
 using PFN_glFinish = void (*)();
 using PFN_glGetError = GLenum (*)();
+using PFN_glGetString = const unsigned char* (*)(GLenum);
 
 /// Resolved GLES2 entry-point table. `loaded == true` iff libGLESv2.so.2
 /// dlopened and every entry point below resolved.
@@ -153,6 +155,7 @@ struct GlesLoader {
   PFN_glDrawArrays draw_arrays{nullptr};
   PFN_glFinish finish{nullptr};
   PFN_glGetError get_error{nullptr};
+  PFN_glGetString get_string{nullptr};
 };
 
 /// Process-singleton GLES2 runtime accessor. First call dlopens +

@@ -26,9 +26,12 @@
 #include <EGL/eglplatform.h>
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <sys/mman.h>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -139,6 +142,7 @@ drm::expected<std::unique_ptr<GlCompositor>, std::error_code> GlCompositor::crea
   out->width_ = cfg.canvas_width;
   out->height_ = cfg.canvas_height;
   out->fourcc_ = (cfg.output_fourcc != 0U) ? cfg.output_fourcc : DRM_FORMAT_ARGB8888;
+  out->allow_software_ = cfg.allow_software_renderer;
 
   GbmSurfaceConfig gcfg;
   gcfg.width = out->width_;
@@ -238,6 +242,30 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
   if (egl.make_current(display, surface, surface, context) != EGL_TRUE) {
     teardown_egl();
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
+  }
+
+  // Reject software renderers (llvmpipe/softpipe/swrast): a software GL path is
+  // no faster than — and usually slower than — the CPU CompositeCanvas it would
+  // displace, so Auto mode must fall back to the CPU canvas rather than compose
+  // through software GL. This is what keeps a GPU-down boot (e.g. PowerVR init
+  // failure on JH7110, where Mesa offers only llvmpipe on the display node) off
+  // the GPU path.
+  if (!allow_software_ && (gl.get_string != nullptr)) {
+    const auto* renderer =
+        reinterpret_cast<const char*>(gl.get_string(drm::detail::gl::k_renderer));
+    if (renderer != nullptr) {
+      std::string name(renderer);
+      std::transform(name.begin(), name.end(), name.begin(),
+                     [](unsigned char chr) { return static_cast<char>(std::tolower(chr)); });
+      if (name.find("llvmpipe") != std::string::npos ||
+          name.find("softpipe") != std::string::npos || name.find("swrast") != std::string::npos ||
+          name.find("software") != std::string::npos) {
+        drm::log_info("GlCompositor: software renderer ({}) — using CPU composition instead",
+                      renderer);
+        teardown_egl();
+        return drm::unexpected<std::error_code>(err(std::errc::not_supported));
+      }
+    }
   }
 
   program_ = build_program(gl);
@@ -420,6 +448,27 @@ void GlCompositor::on_session_paused() noexcept {
   if (source_) {
     source_->on_session_paused();
   }
+}
+
+drm::expected<void, std::error_code> GlCompositor::read_back(std::vector<std::uint8_t>& out) {
+  if (!held_ || (held_->opaque == nullptr)) {
+    return drm::unexpected<std::error_code>(err(std::errc::not_connected));
+  }
+  auto* bo = static_cast<gbm_bo*>(held_->opaque);
+  std::uint32_t stride = 0;
+  void* map_data = nullptr;
+  void* ptr = gbm_bo_map(bo, 0, 0, width_, height_, GBM_BO_TRANSFER_READ, &stride, &map_data);
+  if ((ptr == nullptr) || (ptr == MAP_FAILED)) {
+    return drm::unexpected<std::error_code>(err(std::errc::io_error));
+  }
+  const std::size_t row = static_cast<std::size_t>(width_) * 4U;  // canvas is 32bpp
+  out.resize(row * height_);
+  const auto* src = static_cast<const std::uint8_t*>(ptr);
+  for (std::uint32_t y = 0; y < height_; ++y) {
+    std::copy_n(src + (static_cast<std::size_t>(y) * stride), row, out.data() + (y * row));
+  }
+  gbm_bo_unmap(bo, map_data);
+  return {};
 }
 
 drm::expected<void, std::error_code> GlCompositor::on_session_resumed(const drm::Device& new_dev) {
