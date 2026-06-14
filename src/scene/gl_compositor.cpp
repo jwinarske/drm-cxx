@@ -244,12 +244,14 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }
 
-  // Reject software renderers (llvmpipe/softpipe/swrast): a software GL path is
-  // no faster than — and usually slower than — the CPU CompositeCanvas it would
-  // displace, so Auto mode must fall back to the CPU canvas rather than compose
-  // through software GL. This is what keeps a GPU-down boot (e.g. PowerVR init
-  // failure on JH7110, where Mesa offers only llvmpipe on the display node) off
-  // the GPU path.
+  // Reject software renderers: a software GL path is no faster than — and usually
+  // slower than — the CPU CompositeCanvas it would displace, so Auto mode must
+  // fall back to the CPU canvas rather than compose through software GL. This is
+  // what keeps a GPU-down boot off the GPU path (e.g. PowerVR init failure on
+  // JH7110, where Mesa offers only llvmpipe on the display node). The markers
+  // also catch GL-on-Vulkan (zink): `zink (PowerVR Rogue ...)` on a real GPU is
+  // accepted, while zink over a software Vulkan reports the SW device in its
+  // GL_RENDERER — lavapipe ("llvmpipe"), SwiftShader — and is rejected.
   if (!allow_software_ && (gl.get_string != nullptr)) {
     const auto* renderer =
         reinterpret_cast<const char*>(gl.get_string(drm::detail::gl::k_renderer));
@@ -257,9 +259,12 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
       std::string name(renderer);
       std::transform(name.begin(), name.end(), name.begin(),
                      [](unsigned char chr) { return static_cast<char>(std::tolower(chr)); });
-      if (name.find("llvmpipe") != std::string::npos ||
-          name.find("softpipe") != std::string::npos || name.find("swrast") != std::string::npos ||
-          name.find("software") != std::string::npos) {
+      constexpr std::array<const char*, 6> k_software_markers{
+          "llvmpipe", "softpipe", "swrast", "software", "lavapipe", "swiftshader"};
+      const bool is_software = std::any_of(
+          k_software_markers.begin(), k_software_markers.end(),
+          [&name](const char* marker) { return name.find(marker) != std::string::npos; });
+      if (is_software) {
         drm::log_info("GlCompositor: software renderer ({}) — using CPU composition instead",
                       renderer);
         teardown_egl();
