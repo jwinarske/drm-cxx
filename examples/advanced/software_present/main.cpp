@@ -113,7 +113,10 @@ int main(int argc, char** argv) {
   const std::uint32_t stride = w * bytes_pp;
   std::vector<std::byte> frame(static_cast<std::size_t>(stride) * h);
 
-  constexpr std::int32_t k_box = 200;
+  // Box scaled to ~1/4 of the panel's smaller dimension, so it stays a small
+  // moving box on tiny displays (e.g. 128x128 SPI panels) instead of a fixed
+  // 200px box that overflows the frame buffer (negative `by`) and segfaults.
+  const std::int32_t k_box = static_cast<std::int32_t>(w < h ? w : h) / 4;
   const std::int32_t span_x =
       (static_cast<std::int32_t>(w) > k_box) ? static_cast<std::int32_t>(w) - k_box : 1;
   const std::int32_t by = (static_cast<std::int32_t>(h) - k_box) / 2;
