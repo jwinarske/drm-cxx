@@ -2427,11 +2427,29 @@ class LayerScene::Impl {
         return r;
       }
     }
+    // Clamp the requested canvas zpos into the plane's advertised range.
+    // choose_canvas_zpos() returns (max assigned/composited zpos + 1), which
+    // can exceed the plane's zpos_max on controllers with a tight range — TI
+    // tidss advertises zpos [0,3], yet a scene using app-level zpos like
+    // layered_demo's 3..10 asks for a canvas zpos of 11. Writing an
+    // out-of-range value to a range property is rejected by the kernel with
+    // EINVAL at property-set time, *before* atomic_check, so the whole commit
+    // fails silently (no driver log). The canvas only needs to sit above the
+    // assigned layers, and on such a plane "topmost" is zpos_max, so clamping
+    // preserves the stacking intent while staying in range. Desktop GPUs
+    // advertise wide ranges (0..255), so this is a no-op there.
+    std::int32_t canvas_zpos = zpos;
+    if (plane.zpos_max.has_value()) {
+      canvas_zpos = std::min(canvas_zpos, static_cast<std::int32_t>(*plane.zpos_max));
+    }
+    if (plane.zpos_min.has_value()) {
+      canvas_zpos = std::max(canvas_zpos, static_cast<std::int32_t>(*plane.zpos_min));
+    }
     // zpos is best-effort — skipped silently when the plane doesn't
     // expose it or pins it immutable (amdgpu PRIMARY at 2). The canvas
     // still scans out at whatever the kernel gives us.
-    if (zpos > 0) {
-      if (auto r = write("zpos", static_cast<std::uint64_t>(zpos)); !r) {
+    if (canvas_zpos > 0) {
+      if (auto r = write("zpos", static_cast<std::uint64_t>(canvas_zpos)); !r) {
         return r;
       }
     }
