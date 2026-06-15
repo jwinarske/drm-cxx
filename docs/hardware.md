@@ -487,9 +487,10 @@ when the desktop holds the device).
   `fillModeNonSolid`/`EXT_line_rasterization` and is too immature). So there is
   **no usable hardware GL on the JH7110** today; `drm::scene`'s GPU compositor
   (`GlCompositor`) rejects the software renderer and falls back to the CPU
-  `CompositeCanvas` (the production-correct choice on this board). Contrast the
-  TI J721E below, where zink-on-PowerVR-Rogue does work. The CPU present/scanout
-  paths above are unaffected.
+  `CompositeCanvas` (the production-correct choice on this board). **Leave
+  `DRM_CXX_COMPOSITOR_ZINK` unset here** — it would force the crashing zink path.
+  Contrast the TI J721E below, where zink-on-PowerVR-Rogue does work. The CPU
+  present/scanout paths above are unaffected.
 - **`egl_offload_scanout` (manual cross-device import) does NOT work here — wrong
   direction for a kmsro display.** It allocates on the GPU node and asks the
   display to import, which **fails at `drmPrimeFDToHandle` with ENOSYS**: the
@@ -567,9 +568,19 @@ initializes **at boot** (RGX firmware `rgx.fw.22.104.…` loads cleanly).
   canvas top-left, in the **red channel**, over a transparent-black clear —
   confirming Y-orientation, the BGRA swizzle and the premultiplied blend on real
   GPU hardware. The software-renderer guard correctly **accepts** `zink (PowerVR
-  Rogue …)` and rejects software (so on these embedded split-GPU boards the GPU
-  path is opt-in: set `MESA_LOADER_DRIVER_OVERRIDE=zink`, since Mesa's default is
-  `llvmpipe` → guard → CPU canvas).
+  Rogue …)` and rejects software, so on these embedded split-GPU boards the GPU
+  path is **opt-in** (Mesa's default is `llvmpipe` → guard → CPU canvas):
+  - **`DRM_CXX_COMPOSITOR_ZINK=1` (preferred).** `GlCompositor` retries with zink
+    **only when the default renderer is software**, so it never overrides a
+    board's native hardware GL (amdgpu/i915 keep radeonsi/iris), and it scopes
+    the override to the compositor's own context. Off by default.
+  - `MESA_LOADER_DRIVER_OVERRIDE=zink` — the lower-level Mesa knob; forces zink
+    for **all** GL in the process (including GBM producers), even where native GL
+    is hardware, so prefer the drm-cxx knob. If this is already set, `GlCompositor`
+    leaves it untouched.
+
+  Do **not** set either on the JH7110 — zink-on-the-B-series segfaults; leave it
+  on the CPU canvas there.
 - **Build (bullseye/aarch64).** glibc 2.31 + gcc 10 — drm-cxx builds under
   `cpp_std=c++17` (the `detail/` polyfills cover `std::expected`/`span`/`format`).
   A full lib build additionally needs `libdisplay-info ≥0.2.0` (not packaged in

@@ -29,8 +29,10 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <sys/mman.h>
 #include <system_error>
 #include <utility>
@@ -42,6 +44,21 @@ namespace {
 
 [[nodiscard]] std::error_code err(std::errc code) noexcept {
   return std::make_error_code(code);
+}
+
+// Opt-in: when the default GL renderer is software, retry the context with
+// MESA_LOADER_DRIVER_OVERRIDE=zink to reach hardware GL via zink (GL-on-Vulkan)
+// on embedded split-GPU boards whose Mesa GL on the display node is software
+// (the kmsro display stub is missing) but which ship a hardware Vulkan driver.
+// Off by default because zink over some PowerVR Vulkan drivers (e.g. the B-series
+// on JH7110) segfaults during render; enable per-board where zink is known good.
+[[nodiscard]] bool zink_retry_requested() noexcept {
+  const char* val = std::getenv("DRM_CXX_COMPOSITOR_ZINK");
+  if (val == nullptr) {
+    return false;
+  }
+  const std::string_view sval(val);
+  return sval == "1" || sval == "true" || sval == "yes";
 }
 
 constexpr const char* k_vertex_src = R"(
@@ -156,7 +173,27 @@ drm::expected<std::unique_ptr<GlCompositor>, std::error_code> GlCompositor::crea
   }
   out->source_ = std::move(*src);
 
-  if (auto r = out->init_egl(); !r) {
+  auto r = out->init_egl();
+  // Auto-zink: if the default renderer was software (init_egl rejected it) and
+  // the caller opted in via DRM_CXX_COMPOSITOR_ZINK, retry once forcing zink —
+  // unless the user already pinned a driver via MESA_LOADER_DRIVER_OVERRIDE. The
+  // switch needs a fresh gbm device (validated on PowerVR Rogue), so recreate the
+  // source. If zink also lands on software (e.g. lavapipe), init_egl's guard
+  // rejects it again and we fall back to the CPU canvas.
+  if (!r && !out->allow_software_ && zink_retry_requested() &&
+      (std::getenv("MESA_LOADER_DRIVER_OVERRIDE") == nullptr)) {
+    drm::log_info("GlCompositor: software renderer — retrying with zink for hardware GL");
+    // setenv is POSIX (declared via <cstdlib> on glibc); include-cleaner maps it
+    // to <stdlib.h>, which modernize-deprecated-headers forbids — NOLINT the call.
+    // NOLINTNEXTLINE(misc-include-cleaner)
+    static_cast<void>(::setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1));
+    auto src2 = GbmSurfaceSource::create(dev, gcfg);
+    if (src2) {
+      out->source_ = std::move(*src2);
+      r = out->init_egl();
+    }
+  }
+  if (!r) {
     return drm::unexpected<std::error_code>(r.error());
   }
   return out;
@@ -265,8 +302,16 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
           k_software_markers.begin(), k_software_markers.end(),
           [&name](const char* marker) { return name.find(marker) != std::string::npos; });
       if (is_software) {
-        drm::log_info("GlCompositor: software renderer ({}) — using CPU composition instead",
-                      renderer);
+        if (!zink_retry_requested() && (std::getenv("MESA_LOADER_DRIVER_OVERRIDE") == nullptr)) {
+          drm::log_info(
+              "GlCompositor: software renderer ({}) — using CPU composition. Set "
+              "DRM_CXX_COMPOSITOR_ZINK=1 to try hardware GL via zink if this board has a "
+              "Vulkan driver.",
+              renderer);
+        } else {
+          drm::log_info("GlCompositor: software renderer ({}) — using CPU composition instead",
+                        renderer);
+        }
         teardown_egl();
         return drm::unexpected<std::error_code>(err(std::errc::not_supported));
       }
