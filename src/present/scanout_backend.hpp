@@ -15,6 +15,7 @@
 #include <drm-cxx/display/driver_profile.hpp>
 #include <drm-cxx/display/scanout_target.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
+#include <drm-cxx/present/frame_economy.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/layer_handle.hpp>
 
@@ -61,6 +62,29 @@ class ScanoutBackend {
   [[nodiscard]] drm::expected<scene::CommitReport, std::error_code> present(
       std::uint32_t flags = 0, drm::sync::SyncFence* out_fence = nullptr);
 
+  // Present consulting the backend's FrameEconomy. When `content_changed` is
+  // false and this is not the first frame, NO atomic commit is issued (the
+  // idle-Skip: no page flip, no scanout reprogram — a power win on every panel,
+  // and it lets a PSR-capable panel stay in self-refresh) and the returned
+  // report has `skipped_idle == true` with every other field zero. Otherwise it
+  // commits exactly like present(): the scene already emits FB_DAMAGE_CLIPS iff
+  // the producer reported bounded per-frame damage, so damaged-vs-full needs no
+  // extra signal here. The first call after create() always commits (the
+  // scanout buffer is otherwise undefined); call force_full_present() after a
+  // mode change / rebind to force the next frame to commit regardless.
+  [[nodiscard]] drm::expected<scene::CommitReport, std::error_code> present_if_changed(
+      bool content_changed, std::uint32_t flags = 0, drm::sync::SyncFence* out_fence = nullptr);
+
+  // Force the next present_if_changed() to commit regardless of content_changed
+  // — call after a modeset / mode change / rebind, where the previous scanout
+  // contents no longer apply.
+  void force_full_present() noexcept { economy_.force_full(); }
+
+  // FrameEconomy counters (committed vs idle-skipped frames) for telemetry and
+  // tests. Both are 0 until the first present_if_changed().
+  [[nodiscard]] std::uint64_t frames_committed() const noexcept { return economy_.committed(); }
+  [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return economy_.skipped(); }
+
   [[nodiscard]] const display::ScanoutTarget& target() const noexcept { return target_; }
   [[nodiscard]] const display::DriverProfile& profile() const noexcept { return profile_; }
   [[nodiscard]] scene::LayerScene& scene() noexcept { return *scene_; }
@@ -86,6 +110,7 @@ class ScanoutBackend {
   std::vector<fmt::Modifier> modifiers_;
   std::unique_ptr<scene::LayerScene> scene_;
   scene::LayerHandle layer_;
+  FrameEconomy economy_;
 };
 
 }  // namespace drm::present

@@ -7,6 +7,7 @@
 #include <drm-cxx/display/driver_profile.hpp>
 #include <drm-cxx/display/scanout_target.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
+#include <drm-cxx/present/frame_economy.hpp>
 #include <drm-cxx/present/negotiate.hpp>
 #include <drm-cxx/present/scanout_backend.hpp>
 #include <drm-cxx/present/scanout_producer.hpp>
@@ -123,6 +124,20 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
 drm::expected<scene::CommitReport, std::error_code> ScanoutBackend::present(
     std::uint32_t flags, drm::sync::SyncFence* out_fence) {
   return scene_->commit(flags, nullptr, out_fence);
+}
+
+drm::expected<scene::CommitReport, std::error_code> ScanoutBackend::present_if_changed(
+    bool content_changed, std::uint32_t flags, drm::sync::SyncFence* out_fence) {
+  // Damaged-vs-full is decided by the scene from the producer's per-frame damage
+  // report (arm_layer_damage_clips), so the economy only owns the Skip here; the
+  // `full` field of the decision is intentionally unused.
+  const FrameDecision decision = economy_.decide(content_changed, /*damage_available=*/false);
+  if (decision.action == FrameAction::Skip) {
+    scene::CommitReport report;
+    report.skipped_idle = true;
+    return report;
+  }
+  return present(flags, out_fence);
 }
 
 }  // namespace drm::present
