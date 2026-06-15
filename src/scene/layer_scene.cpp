@@ -1154,31 +1154,11 @@ class LayerScene::Impl {
     return std::nullopt;
   }
 
-  // Best canvas output format `p` can scan out, in descending
-  // preference: ARGB8888 first (byte-identical to the internal blend —
-  // no per-row conversion in flush()), then the other 8888 channel
-  // orders, then the 16bpp packs. nullopt when the plane advertises none
-  // of them — it can't host a composition canvas. Minimal controllers
-  // (tilcdc) expose no ARGB8888 but do scan out XBGR8888 / RGB565, so the
-  // canvas adopts one of those rather than being stuck with an
-  // un-armable ARGB8888 buffer and dropping every overflow layer.
-  static std::optional<std::uint32_t> canvas_format_for_plane(
-      const drm::planes::PlaneCapabilities& p) {
-    static constexpr std::array<std::uint32_t, 6> k_canvas_formats{
-        DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_FORMAT_XBGR8888,
-        DRM_FORMAT_ABGR8888, DRM_FORMAT_RGB565,   DRM_FORMAT_BGR565};
-    for (const std::uint32_t f : k_canvas_formats) {
-      if (p.supports_format(f)) {
-        return f;
-      }
-    }
-    return std::nullopt;
-  }
-
   // Whether `p` can host the composition canvas this frame. Once the
   // canvas exists its format is fixed (its dumb buffers are already
   // allocated), so the plane must scan out that exact format; before it
-  // exists, any canvas-capable format qualifies.
+  // exists, any canvas-capable format qualifies. The format-selection
+  // policy lives in drm::scene::canvas_format_for_plane (composite_canvas).
   bool plane_hosts_canvas(const drm::planes::PlaneCapabilities& p) const {
     if (composition_canvas_) {
       return p.supports_format(composition_canvas_->drm_fourcc());

@@ -11,14 +11,17 @@
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/display/tone_mapper.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
+#include <drm-cxx/planes/plane_registry.hpp>
 
 #include <drm_fourcc.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <utility>
 
@@ -222,6 +225,25 @@ std::uint32_t canvas_output_bpp(std::uint32_t fourcc) noexcept {
 bool aligned4(const void* p) noexcept {
   return (reinterpret_cast<std::uintptr_t>(p) & 3U) == 0U;
 }
+
+}  // namespace
+
+std::optional<std::uint32_t> canvas_format_for_plane(const drm::planes::PlaneCapabilities& plane) {
+  // Descending preference; see the header. The canvas_output_bpp() guard keeps
+  // this list and flush()'s convertible-format set from silently drifting apart:
+  // a candidate the canvas can't emit is skipped even if the plane advertises it.
+  static constexpr std::array<std::uint32_t, 6> k_canvas_formats{
+      DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_FORMAT_XBGR8888,
+      DRM_FORMAT_ABGR8888, DRM_FORMAT_RGB565,   DRM_FORMAT_BGR565};
+  for (const std::uint32_t fourcc : k_canvas_formats) {
+    if (canvas_output_bpp(fourcc) != 0U && plane.supports_format(fourcc)) {
+      return fourcc;
+    }
+  }
+  return std::nullopt;
+}
+
+namespace {
 
 // height * stride_bytes without overflow. Returns false (and out left
 // untouched) on wrap. Both operands are uint32; the product can exceed

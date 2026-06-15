@@ -623,6 +623,14 @@ test('test_composite_canvas',
   ),
 )
 
+# Composition-canvas format negotiation (single-plane fallback core) — device-free.
+test('test_canvas_format',
+  executable('test_canvas_format',
+    'unit/test_canvas_format.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # GlCompositor pure quad/texcoord math — no GL context, builds regardless of EGL.
 test('test_gl_compositor_math',
   executable('test_gl_compositor_math',

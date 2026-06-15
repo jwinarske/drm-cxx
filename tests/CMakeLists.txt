@@ -266,6 +266,14 @@ target_link_libraries(test_composite_canvas PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_composite_canvas)
 
+add_executable(test_canvas_format unit/test_canvas_format.cpp)
+target_link_libraries(test_canvas_format PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+target_include_directories(test_canvas_format PRIVATE ${CMAKE_SOURCE_DIR}/src)
+gtest_discover_tests(test_canvas_format)
+
 add_executable(test_gl_compositor_math unit/test_gl_compositor_math.cpp)
 target_link_libraries(test_gl_compositor_math PRIVATE
   drm-cxx::drm-cxx
