@@ -12,10 +12,14 @@
 // With --vsync the loop paces to the display via a page-flip event instead of a
 // fixed timer. With --rgb565 the sink scans out RGB565 (16 bpp) instead of
 // XRGB8888 (32 bpp), halving the dumb-buffer footprint and copy bandwidth — the
-// classic embedded software-display trade. Needs DRM master; run from a free VT,
-// or pass --no-seat on a headless board (skips libseat, opens DRM directly).
+// classic embedded software-display trade. By default it reports per-frame damage
+// (the moving box's old + new bands) so a damage-aware driver repaints only those
+// rows — on an mipi-dbi SPI panel this cuts the flush from the full frame to a
+// band, shrinking the tear window; --no-damage forces full-frame commits. Needs
+// DRM master; run from a free VT, or pass --no-seat on a headless board (skips
+// libseat, opens DRM directly).
 //
-//   ./software_present [/dev/dri/cardN] [frames] [--vsync] [--rgb565] [--no-seat]
+//   ./software_present [/dev/dri/cardN] [frames] [--vsync] [--rgb565] [--no-damage] [--no-seat]
 
 #include "../../common/open_output.hpp"
 
@@ -23,6 +27,7 @@
 #include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/present/dumb_scanout_sink.hpp>
 #include <drm-cxx/present/scanout_format.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>
 
 #include <drm_fourcc.h>
 #include <drm_mode.h>
@@ -54,12 +59,15 @@ constexpr std::uint32_t argb_px(std::uint8_t r, std::uint8_t g, std::uint8_t b) 
 int main(int argc, char** argv) {
   bool vsync = false;
   bool force_rgb565 = false;
+  bool use_damage = true;
   int frames = 120;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--vsync") == 0) {
       vsync = true;
     } else if (std::strcmp(argv[i], "--rgb565") == 0) {
       force_rgb565 = true;
+    } else if (std::strcmp(argv[i], "--no-damage") == 0) {  // force full-frame commits
+      use_damage = false;
     } else if (std::strcmp(argv[i], "--no-seat") == 0) {   // handled by open_output
     } else if (const int n = std::atoi(argv[i]); n > 0) {  // device path atoi's to 0
       frames = n;
@@ -122,6 +130,12 @@ int main(int argc, char** argv) {
   const std::int32_t by = (static_cast<std::int32_t>(h) - k_box) / 2;
   const std::size_t pixels = static_cast<std::size_t>(w) * h;
 
+  // Only the box moves frame-to-frame (the grey background is constant), so the
+  // damage is the box's old and new positions — report those so a damage-aware
+  // driver (e.g. an mipi-dbi SPI panel) repaints ~one band instead of the whole
+  // frame, cutting bandwidth and the tear window. --no-damage forces full frames.
+  std::int32_t prev_bx = 0;
+
   for (int f = 0; f < frames; ++f) {
     // Software render the whole frame: grey background + a moving green box. The
     // green channel animates so a static screenshot still shows motion stepping.
@@ -159,7 +173,13 @@ int main(int argc, char** argv) {
       flip_done = false;
     }
 
-    auto r = sink->present({frame.data(), frame.size()}, stride, flags, pf);
+    // Damage = the erased (old) box band + the redrawn (new) box band.
+    const std::array<drm::scene::DamageRect, 2> damage{{
+        {prev_bx, by, static_cast<std::uint32_t>(k_box), static_cast<std::uint32_t>(k_box)},
+        {bx, by, static_cast<std::uint32_t>(k_box), static_cast<std::uint32_t>(k_box)},
+    }};
+    auto r = use_damage ? sink->present({frame.data(), frame.size()}, stride, damage, flags, pf)
+                        : sink->present({frame.data(), frame.size()}, stride, flags, pf);
     if (!r) {
       if (r.error() == std::make_error_code(std::errc::resource_unavailable_try_again)) {
         // Ring momentarily full — drain a pending flip (vsync) or sleep, then retry.
@@ -174,6 +194,7 @@ int main(int argc, char** argv) {
       drm::println(stderr, "software_present: present f={}: {}", f, r.error().message());
       return EXIT_FAILURE;
     }
+    prev_bx = bx;  // the box now on screen — next frame's damage erases from here
 
     if (vsync) {
       // Pace to the display: wait for the flip-complete event.
