@@ -67,3 +67,41 @@ TEST(ScanoutBackendVkms, PresentFullScreen) {
   EXPECT_GE(report->layers_total, 1U);
   EXPECT_GE(report->layers_assigned, 1U);  // the full-screen layer lands on a plane
 }
+
+TEST(ScanoutBackendVkms, IdleSuppression) {
+  const auto path = find_vkms_node();
+  if (!path.has_value()) {
+    GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
+  }
+
+  auto dev = drm::Device::open(*path);
+  ASSERT_TRUE(dev.has_value()) << "Device::open: " << dev.error().message();
+
+  drm::present::GbmScanoutProducer producer(*dev);
+  auto backend = drm::present::ScanoutBackend::create(*dev, producer);
+  ASSERT_TRUE(backend.has_value()) << "ScanoutBackend::create: " << backend.error().message();
+
+  // First frame always commits (scanout contents are otherwise undefined),
+  // even when flagged unchanged.
+  auto first = (*backend)->present_if_changed(/*content_changed=*/false);
+  ASSERT_TRUE(first.has_value()) << "present_if_changed: " << first.error().message();
+  EXPECT_FALSE(first->skipped_idle);
+  EXPECT_GE(first->layers_assigned, 1U);
+
+  // A subsequent unchanged frame is suppressed: no commit, skipped_idle set,
+  // every other count zero.
+  auto idle = (*backend)->present_if_changed(/*content_changed=*/false);
+  ASSERT_TRUE(idle.has_value()) << "present_if_changed: " << idle.error().message();
+  EXPECT_TRUE(idle->skipped_idle);
+  EXPECT_EQ(idle->layers_total, 0U);
+  EXPECT_TRUE(idle->placements.empty());
+
+  // A changed frame commits again.
+  auto changed = (*backend)->present_if_changed(/*content_changed=*/true);
+  ASSERT_TRUE(changed.has_value()) << "present_if_changed: " << changed.error().message();
+  EXPECT_FALSE(changed->skipped_idle);
+  EXPECT_GE(changed->layers_assigned, 1U);
+
+  EXPECT_EQ((*backend)->frames_committed(), 2U);
+  EXPECT_EQ((*backend)->frames_skipped(), 1U);
+}

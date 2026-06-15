@@ -114,6 +114,16 @@ struct CommitReport {
   /// constraint check).
   bool hdr_downgraded_no_max_bpc{false};
 
+  /// true when a FrameEconomy-driven presenter suppressed this frame's
+  /// commit because nothing changed since the last committed frame (the
+  /// idle-Skip: no atomic commit, no page flip, no scanout reprogram — a
+  /// power win on every panel, and it lets a PSR-capable panel stay in
+  /// self-refresh). When set, every count above is 0 and `placements` is
+  /// empty: no commit was issued. Only `ScanoutBackend::present_if_changed()`
+  /// (and other economy-aware presenters) set this; `LayerScene::commit()`
+  /// itself always commits and never sets it.
+  bool skipped_idle{false};
+
   /// One entry per layer the scene attempted to place this commit, in
   /// the scene's layer-iteration order. Empty when the scene had no
   /// layers or the commit failed before placement ran. Same ordering
