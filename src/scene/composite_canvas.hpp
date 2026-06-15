@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -47,7 +48,23 @@ namespace drm::display {
 class ToneMapper;
 }  // namespace drm::display
 
+namespace drm::planes {
+struct PlaneCapabilities;
+}  // namespace drm::planes
+
 namespace drm::scene {
+
+/// Best canvas output (scanout) format `plane` can host, in descending
+/// preference — ARGB8888 first (byte-identical to the internal ARGB8888 blend,
+/// so flush() copies with no per-row conversion), then the other 8888 channel
+/// orders, then the 16bpp packs. Returns nullopt when the plane advertises none
+/// of them (it can't host a composition canvas). Every candidate is a format
+/// flush() can emit. This is what lets the composition fallback work on minimal
+/// single-plane controllers (e.g. tilcdc) that expose no ARGB8888 but do scan
+/// out XBGR8888 / RGB565, instead of being stuck with an un-armable ARGB8888
+/// buffer and dropping every overflow layer.
+[[nodiscard]] std::optional<std::uint32_t> canvas_format_for_plane(
+    const drm::planes::PlaneCapabilities& plane);
 
 struct CompositeCanvasConfig {
   /// How many ARGB8888 dumb buffers the canvas pool may allocate.
