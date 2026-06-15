@@ -90,7 +90,10 @@ int main(int argc, char** argv) {
                drm::format_name(fourcc));
 
   const int frames = (argc > 2) ? std::atoi(argv[2]) : 120;
-  constexpr std::int32_t k_box = 256;
+  // Box scaled to ~1/4 of the panel's smaller dimension so it stays a small
+  // moving box on tiny displays (e.g. 240x240 SPI panels) rather than a fixed
+  // 256px box that overflows the buffer (negative `by`) and segfaults.
+  const std::int32_t k_box = static_cast<std::int32_t>(w < h ? w : h) / 4;
   const std::int32_t span_x = (w > k_box) ? (w - k_box) : 1;
   const std::int32_t by = (h - k_box) / 2;
   std::int32_t prev_x = 0;
