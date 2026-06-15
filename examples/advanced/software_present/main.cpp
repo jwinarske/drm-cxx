@@ -19,7 +19,12 @@
 // DRM master; run from a free VT, or pass --no-seat on a headless board (skips
 // libseat, opens DRM directly).
 //
-//   ./software_present [/dev/dri/cardN] [frames] [--vsync] [--rgb565] [--no-damage] [--no-seat]
+// --pattern presents a static checkerboard/color-bar/ramp frame instead of the
+// moving box — a signal-integrity test for panel bring-up (an over-clocked SPI
+// bus shows as corrupted pixels a moving box would hide).
+//
+//   ./software_present [/dev/dri/cardN] [frames] [--vsync] [--rgb565] [--no-damage]
+//                      [--pattern] [--no-seat]
 
 #include "../../common/open_output.hpp"
 
@@ -54,12 +59,64 @@ constexpr std::uint32_t argb_px(std::uint8_t r, std::uint8_t g, std::uint8_t b) 
          (static_cast<std::uint32_t>(g) << 8) | b;
 }
 
+// A static bring-up / signal-integrity pattern: top third is a vertical-stripe
+// frequency sweep — four stacked bands of 1/2/3/4-px black/white stripes (finest
+// at the top). Vertical stripes toggle the SPI data line every pixel clock along
+// the scan direction, so an over-clocked bus smears the finest band to grey
+// first; the narrowest band that still resolves as crisp lines is the usable
+// detail. Middle third is eight color bars (dropped/swapped bits show as wrong
+// colors), bottom third is a horizontal grey ramp (value errors show as
+// banding/jumps). Static, so nothing tears.
+void render_test_pattern(std::byte* frame, std::uint32_t w, std::uint32_t h, bool rgb565) {
+  constexpr std::array<std::array<std::uint8_t, 3>, 8> bars{{
+      {0xFF, 0x00, 0x00},
+      {0x00, 0xFF, 0x00},
+      {0x00, 0x00, 0xFF},
+      {0x00, 0xFF, 0xFF},
+      {0xFF, 0x00, 0xFF},
+      {0xFF, 0xFF, 0x00},
+      {0xFF, 0xFF, 0xFF},
+      {0x00, 0x00, 0x00},
+  }};
+  const std::uint32_t band = h / 3;
+  const std::uint32_t sub = band / 4 != 0 ? band / 4 : 1;  // height of each stripe-width band
+  auto* p16 = reinterpret_cast<std::uint16_t*>(frame);
+  auto* p32 = reinterpret_cast<std::uint32_t*>(frame);
+  for (std::uint32_t y = 0; y < h; ++y) {
+    for (std::uint32_t x = 0; x < w; ++x) {
+      std::uint8_t r = 0;
+      std::uint8_t g = 0;
+      std::uint8_t b = 0;
+      if (y < band) {  // vertical-stripe sweep: stripe width 1..4 px, finest on top
+        std::uint32_t sw = (y / sub) + 1;
+        sw = sw < 4 ? sw : 4;
+        const std::uint8_t v = ((x / sw) & 1U) != 0 ? 0xFF : 0x00;
+        r = g = b = v;
+      } else if (y < 2 * band) {  // color bars
+        const auto& c = bars.at((x * bars.size()) / w);
+        r = c[0];
+        g = c[1];
+        b = c[2];
+      } else {  // grey ramp
+        r = g = b = static_cast<std::uint8_t>((x * 255U) / (w - 1));
+      }
+      const std::size_t i = (static_cast<std::size_t>(y) * w) + x;
+      if (rgb565) {
+        p16[i] = rgb565_px(r, g, b);
+      } else {
+        p32[i] = argb_px(r, g, b);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   bool vsync = false;
   bool force_rgb565 = false;
   bool use_damage = true;
+  bool pattern = false;
   int frames = 120;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--vsync") == 0) {
@@ -68,10 +125,15 @@ int main(int argc, char** argv) {
       force_rgb565 = true;
     } else if (std::strcmp(argv[i], "--no-damage") == 0) {  // force full-frame commits
       use_damage = false;
+    } else if (std::strcmp(argv[i], "--pattern") == 0) {  // static bring-up/corruption pattern
+      pattern = true;
     } else if (std::strcmp(argv[i], "--no-seat") == 0) {   // handled by open_output
     } else if (const int n = std::atoi(argv[i]); n > 0) {  // device path atoi's to 0
       frames = n;
     }
+  }
+  if (pattern) {
+    use_damage = false;  // a static full-screen pattern is a full-frame present
   }
 
   auto output = drm::examples::open_and_pick_output(argc, argv);
@@ -136,12 +198,21 @@ int main(int argc, char** argv) {
   // frame, cutting bandwidth and the tear window. --no-damage forces full frames.
   std::int32_t prev_bx = 0;
 
+  // --pattern draws a static signal-integrity frame once; the loop then just
+  // re-presents it (handy for panel bring-up and spotting over-clocked-SPI
+  // corruption, which a moving box hides).
+  if (pattern) {
+    render_test_pattern(frame.data(), w, h, rgb565);
+  }
+
   for (int f = 0; f < frames; ++f) {
     // Software render the whole frame: grey background + a moving green box. The
     // green channel animates so a static screenshot still shows motion stepping.
     const std::int32_t bx = (f * 13) % span_x;
     const auto g = static_cast<std::uint8_t>(0x80 + ((f * 2) & 0x7F));
-    if (rgb565) {
+    if (pattern) {
+      // static frame already rendered; nothing to redraw
+    } else if (rgb565) {
       auto* p = reinterpret_cast<std::uint16_t*>(frame.data());
       const std::uint16_t bg = rgb565_px(0x20, 0x20, 0x20);
       const std::uint16_t box = rgb565_px(0, g, 0);
