@@ -41,6 +41,8 @@ set(DRM_CXX_SOURCES
   scene/composite_canvas.cpp
   scene/dumb_buffer_source.cpp
   core/egl_loader.cpp
+  core/gles_loader.cpp
+  scene/gl_compositor.cpp
   scene/egl_stream_builder.cpp
   scene/egl_stream_source.cpp
   scene/external_dma_buf_source.cpp
@@ -191,17 +193,20 @@ endif()
 # systems that have egl.h installed but no libEGL.so.1 (or no NVIDIA
 # stack at all). PkgConfig::egl carries -lEGL on most distros, so we
 # only adopt its include dirs rather than linking it.
-if(DRM_CXX_HAS_EGL_STREAMS)
+# DRM_CXX_HAS_EGL (render-offload + GPU composition) and DRM_CXX_HAS_EGL_STREAMS
+# are computed independently in the root CMakeLists (streams implies egl). Adopt
+# EGL include dirs when either is on; libEGL/libGLESv2 stay dlopen-only.
+if(DRM_CXX_HAS_EGL)
   if(TARGET PkgConfig::egl)
     get_target_property(_egl_incs PkgConfig::egl INTERFACE_INCLUDE_DIRECTORIES)
     if(_egl_incs)
       target_include_directories(drm-cxx SYSTEM PRIVATE ${_egl_incs})
     endif()
   endif()
-  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=1 DRM_CXX_HAS_EGL=1)
-else()
-  target_compile_definitions(drm-cxx PUBLIC DRM_CXX_HAS_EGL_STREAMS=0 DRM_CXX_HAS_EGL=0)
 endif()
+target_compile_definitions(drm-cxx PUBLIC
+  DRM_CXX_HAS_EGL_STREAMS=${DRM_CXX_HAS_EGL_STREAMS}
+  DRM_CXX_HAS_EGL=${DRM_CXX_HAS_EGL})
 
 # Vulkan headers for VkScanoutProducer. vulkan.hpp's dynamic dispatcher dlopen's
 # libvulkan at runtime, so we adopt its include dirs only and never add it to
@@ -393,6 +398,7 @@ install(FILES
     scene/commit_report.hpp
     scene/compatibility_report.hpp
     scene/composite_canvas.hpp
+    scene/composition_target.hpp
     scene/display_params.hpp
     scene/dumb_buffer_source.hpp
     scene/external_dma_buf_source.hpp

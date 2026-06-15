@@ -60,6 +60,13 @@ set(DRM_CXX_STREAMS "AUTO" CACHE STRING
     "Build drm::scene EGL Streams support (NVIDIA proprietary / Tegra): AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_STREAMS PROPERTY STRINGS AUTO ON OFF)
 
+# EGL render-offload + GPU composition (GlScanoutProducer / GlCompositor).
+# Needs EGL headers; libEGL/libGLESv2 are dlopen'd at runtime, never linked.
+# Independent of streams (streams implies egl). AUTO probes for EGL headers.
+set(DRM_CXX_EGL "AUTO" CACHE STRING
+    "Build drm::present/drm::scene EGL render-offload + GPU composition: AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_EGL PROPERTY STRINGS AUTO ON OFF)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -222,6 +229,46 @@ else()
 endif()
 if(NOT DRM_CXX_HAS_EGL_STREAMS AND NOT DRM_CXX_STREAMS STREQUAL "OFF")
   message(STATUS "drm-cxx: EGL headers not found — drm::scene EGL Streams support will be a runtime no-op")
+endif()
+
+# EGL feature (render-offload + GPU composition), independent of streams.
+# Mirrors the streams probe: egl.pc first (reusing PkgConfig::egl when the
+# streams probe already found it), then a bare <EGL/egl.h> fallback (eglext.h is
+# not standalone-includable, so it isn't checked separately). libEGL/libGLESv2
+# are never linked. streams implies egl, so DRM_CXX_HAS_EGL is the union.
+if(NOT DRM_CXX_EGL STREQUAL "OFF")
+  if(NOT TARGET PkgConfig::egl)
+    if(DRM_CXX_EGL STREQUAL "ON")
+      pkg_check_modules(egl REQUIRED IMPORTED_TARGET egl)
+    else()
+      pkg_check_modules(egl IMPORTED_TARGET egl)
+    endif()
+  endif()
+  if(TARGET PkgConfig::egl)
+    _drm_cxx_promote_system_includes(PkgConfig::egl)
+    set(DRM_CXX_EGL_FEATURE 1)
+  else()
+    include(CheckIncludeFileCXX)
+    check_include_file_cxx("EGL/egl.h" DRM_CXX_HAS_EGL_HEADER)
+    if(DRM_CXX_HAS_EGL_HEADER)
+      set(DRM_CXX_EGL_FEATURE 1)
+    else()
+      set(DRM_CXX_EGL_FEATURE 0)
+      if(DRM_CXX_EGL STREQUAL "ON")
+        message(FATAL_ERROR
+          "drm-cxx: DRM_CXX_EGL=ON requested but EGL headers (<EGL/egl.h>) are "
+          "not on the include path. Install libegl-dev / mesa-libEGL-devel and "
+          "reconfigure.")
+      endif()
+    endif()
+  endif()
+else()
+  set(DRM_CXX_EGL_FEATURE 0)
+endif()
+if(DRM_CXX_HAS_EGL_STREAMS OR DRM_CXX_EGL_FEATURE)
+  set(DRM_CXX_HAS_EGL 1)
+else()
+  set(DRM_CXX_HAS_EGL 0)
 endif()
 
 # drm::cursor's .xcursor loader is vendored, X11-free, and static

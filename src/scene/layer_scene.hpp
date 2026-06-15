@@ -66,10 +66,25 @@ using FrameBuildPtr = std::unique_ptr<FrameBuildState, FrameBuildStateDeleter>;
 
 class LayerScene {
  public:
+  /// Composition-fallback backend selection. The fallback composites
+  /// layers the allocator couldn't place on a hardware plane.
+  enum class Composition : std::uint8_t {
+    /// Use the GPU (GLES via EGL) when a context can be created on this
+    /// device, else fall back to the CPU CompositeCanvas. The default.
+    Auto,
+    /// Always use the CPU CompositeCanvas — the software-only path. For
+    /// GPU-less targets, deterministic output, or avoiding EGL entirely.
+    ForceCpu,
+  };
+
   struct Config {
     std::uint32_t crtc_id{0};
     std::uint32_t connector_id{0};
     drmModeModeInfo mode{};
+
+    /// Which composition backend the fallback uses (see Composition).
+    /// Auto by default: GPU when available, CPU otherwise.
+    Composition composition{Composition::Auto};
 
     /// EGL Streams capability for this scene. Defaults to
     /// `StreamMixingMode::Unsupported` so `EglStreamSource` layers

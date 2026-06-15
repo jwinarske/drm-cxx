@@ -49,6 +49,15 @@ test('test_dumb_ring_source',
   ),
 )
 
+# GPU compositor pixel-correctness check. Needs a GL-capable KMS card; skips on
+# vkms/CI and GPU-less builds (GTEST_SKIP). HW check on StarFive / Steam Deck.
+test('test_gl_compositor_readback',
+  executable('test_gl_compositor_readback',
+    'integration/test_gl_compositor_readback.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_scanout_target',
   executable('test_scanout_target',
     'unit/test_scanout_target.cpp',
@@ -610,6 +619,14 @@ test('test_page_flip',
 test('test_composite_canvas',
   executable('test_composite_canvas',
     'unit/test_composite_canvas.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+# GlCompositor pure quad/texcoord math — no GL context, builds regardless of EGL.
+test('test_gl_compositor_math',
+  executable('test_gl_compositor_math',
+    'unit/test_gl_compositor_math.cpp',
     dependencies : test_deps,
   ),
 )
