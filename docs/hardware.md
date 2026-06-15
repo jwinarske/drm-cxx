@@ -450,6 +450,17 @@ when the desktop holds the device).
   master changes hands); a retry presents — not a drm-cxx issue.
   `DRM_FORCE_MODE=WxH` (honored by `kms_present`) runs at a lower mode than the
   4K preferred — useful for bandwidth-limited bring-up.
+- **PowerVR can fail to initialize at boot (firmware-load race) — recover
+  without a reboot.** On some boots `pvrsrvkm` probes (~4 s) before the rootfs
+  `/lib/firmware` is mounted, so `Direct firmware load for rgx.fw.… failed with
+  error -2` and the GPU/render node **never appears** — only the dc8200 display
+  node is present, and it enumerates as `card0` (numbering shifts vs the GPU-up
+  case). A reboot just re-runs the same race. Recover live (the firmware is
+  readable post-boot) by rebinding the driver:
+  `echo 18000000.gpu | sudo tee /sys/bus/platform/drivers/pvrsrvkm/bind` — the
+  RGX firmware + shader then load and `card1`/`renderD128` appear (reversed
+  numbering: display `card0`, GPU `card1`). A permanent fix is firmware in the
+  initramfs or a boot-time rebind unit (board provisioning).
 - **GPU-accelerated scanout works via the GBM-on-display (kmsro) path — open
   EGL/GBM on the *display* node, not the GPU.** `card0`/`renderD128` (`pvrsrvkm`)
   is render-only; its Mesa stack (`pvr_dri.so`, `libGLESv2_PVR_MESA`, `libgbm`,
@@ -464,6 +475,21 @@ when the desktop holds the device).
   - `gl_present /dev/dri/card1` — library `GlScanoutProducer`: **120 frames**.
   - `gbm_surface_scanout` — EGL swapchain: `display TEST_ONLY of LINEAR: ACCEPTED`,
     LINEAR scanned out.
+
+  **Verify the renderer — the open PowerVR GL is software-class here.** Mesa's
+  open PowerVR Gallium driver (`pvr_dri.so`) is incomplete, so GBM/EGL on the
+  display node can resolve to `softpipe`/`llvmpipe` (software) rather than the
+  GPU — check `glGetString(GL_RENDERER)`. Hardware GL is in principle reachable
+  via **zink** (GL-on-Vulkan) over the PowerVR Vulkan driver (`libVK_IMG.so`,
+  registered in `/etc/vulkan/icd.d/`; `vulkaninfo` shows "PowerVR B-Series
+  BXE-4-32"), forced with `MESA_LOADER_DRIVER_OVERRIDE=zink` — **but zink over
+  the B-series Vulkan currently segfaults during render** (the driver lacks
+  `fillModeNonSolid`/`EXT_line_rasterization` and is too immature). So there is
+  **no usable hardware GL on the JH7110** today; `drm::scene`'s GPU compositor
+  (`GlCompositor`) rejects the software renderer and falls back to the CPU
+  `CompositeCanvas` (the production-correct choice on this board). Contrast the
+  TI J721E below, where zink-on-PowerVR-Rogue does work. The CPU present/scanout
+  paths above are unaffected.
 - **`egl_offload_scanout` (manual cross-device import) does NOT work here — wrong
   direction for a kmsro display.** It allocates on the GPU node and asks the
   display to import, which **fails at `drmPrimeFDToHandle` with ENOSYS**: the
@@ -507,6 +533,48 @@ when the desktop holds the device).
     bandwidth wins for the CPU path are a smaller-bpp format (RGB565 vs ARGB8888)
     and damage/dirty-rect (`FB_DAMAGE_CLIPS` + the canvas's per-frame dirty flush),
     not modifier compression.
+
+### TI J721E (BeagleBone AI-64, aarch64)
+
+Validation board: **BeagleBone AI-64**, TI J721E (dual Cortex-A72, **aarch64**),
+**Debian 11 Bullseye, kernel 5.10-ti-arm64**. `card0` is `tidss` (the TI K3
+Display SubSystem, has a CRTC); `card1`/`renderD128` is the Imagination
+**PowerVR Rogue GE8430** (`pvrsrvkm`). Unlike the JH7110 above, the GPU
+initializes **at boot** (RGX firmware `rgx.fw.22.104.…` loads cleanly).
+
+- **Native Mesa GL on the display node is software (`llvmpipe`).** GBM/EGL on
+  `card0` falls back to `llvmpipe` because Mesa wants `tidss_dri.so` — the kmsro
+  display stub — and it is **not in this Mesa 22.3.5 build** (`MESA-LOADER:
+  failed to open tidss`), so kmsro cannot pair the display with the PowerVR
+  render node. Verify with `glGetString(GL_RENDERER)` before assuming hardware.
+- **Hardware GL is reached via zink (GL-on-Vulkan).**
+  `MESA_LOADER_DRIVER_OVERRIDE=zink` →`GL_RENDERER = zink (PowerVR Rogue
+  GE8430)` — a real GPU. The PowerVR **Vulkan** driver is the enabler
+  (`powervr_mesa_icd` + TI's `libVK_IMG.so`; `vulkaninfo` shows the Rogue).
+  zink warns it lacks `fillModeNonSolid` / `EXT_line_rasterization` — irrelevant
+  for the filled textured quads `GlCompositor` draws. (This is where the JH7110's
+  zink path crashes but the Rogue's works.)
+- **GPU→display dma-buf import is ENOSYS but non-fatal for readback.** zink logs
+  `failed drmPrimeFDToHandle Function not implemented` (the PowerVR Vulkan device
+  cannot import the tidss gbm buffer — the same directional-PRIME limit as the
+  dc8200), but Mesa **CPU-copies** its render into the gbm front buffer, so
+  `gbm_surface_lock_front_buffer` + `gbm_bo_map` reads correct pixels. Real KMS
+  scanout of a GPU-rendered buffer would still hit the import wall →
+  commit-failure → CPU demotion (handled by `LayerScene`).
+- **`drm::scene` GPU composition — hardware pixel readback validated.** Running
+  `GlCompositor`'s exact shader/geometry/blend on the PowerVR Rogue under zink
+  and reading the result back via gbm map lands an opaque-red square at the
+  canvas top-left, in the **red channel**, over a transparent-black clear —
+  confirming Y-orientation, the BGRA swizzle and the premultiplied blend on real
+  GPU hardware. The software-renderer guard correctly **accepts** `zink (PowerVR
+  Rogue …)` and rejects software (so on these embedded split-GPU boards the GPU
+  path is opt-in: set `MESA_LOADER_DRIVER_OVERRIDE=zink`, since Mesa's default is
+  `llvmpipe` → guard → CPU canvas).
+- **Build (bullseye/aarch64).** glibc 2.31 + gcc 10 — drm-cxx builds under
+  `cpp_std=c++17` (the `detail/` polyfills cover `std::expected`/`span`/`format`).
+  A full lib build additionally needs `libdisplay-info ≥0.2.0` (not packaged in
+  bullseye — build from source) and `fmt` (meson auto-fetches it as a CMake
+  subproject); `session`/`vulkan` can be disabled.
 
 ### NVIDIA EGL Streams
 
