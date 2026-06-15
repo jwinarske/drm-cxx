@@ -17,6 +17,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 
 #include <xf86drmMode.h>
@@ -73,6 +74,20 @@ class DumbScanoutSink {
   /// is shorter than height * src_stride.
   [[nodiscard]] drm::expected<scene::CommitReport, std::error_code> present(
       drm::span<const std::byte> src, std::uint32_t src_stride, std::uint32_t flags = 0,
+      drm::PageFlip* flip = nullptr);
+
+  /// As present(), but reports `damage` — the regions that changed since the
+  /// previous present, in destination pixels — so the scene emits FB_DAMAGE_CLIPS
+  /// and a damage-aware driver (e.g. mipi-dbi SPI panels) repaints only those
+  /// rows instead of the whole frame. `src` must still be the full frame (it is
+  /// always copied in full, keeping a reused ring slot current); `damage` is only
+  /// a hint, so under-reporting it leaves stale pixels on screen. Empty `damage`
+  /// is a full-frame present, identical to the overload above. The ring unions
+  /// the reported regions across buffer age, so the emitted clips stay correct
+  /// even when a slot was last scanned out several frames ago.
+  [[nodiscard]] drm::expected<scene::CommitReport, std::error_code> present(
+      drm::span<const std::byte> src, std::uint32_t src_stride,
+      drm::span<const scene::DamageRect> damage, std::uint32_t flags = 0,
       drm::PageFlip* flip = nullptr);
 
   [[nodiscard]] std::uint32_t width() const noexcept { return width_; }

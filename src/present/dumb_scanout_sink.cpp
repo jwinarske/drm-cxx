@@ -9,6 +9,7 @@
 #include <drm-cxx/present/buffer_ring.hpp>
 #include <drm-cxx/present/dumb_ring_source.hpp>
 #include <drm-cxx/present/scanout_format.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -92,6 +93,12 @@ drm::expected<std::unique_ptr<DumbScanoutSink>, std::error_code> DumbScanoutSink
 drm::expected<scene::CommitReport, std::error_code> DumbScanoutSink::present(
     drm::span<const std::byte> src, std::uint32_t src_stride, std::uint32_t flags,
     drm::PageFlip* flip) {
+  return present(src, src_stride, drm::span<const scene::DamageRect>{}, flags, flip);
+}
+
+drm::expected<scene::CommitReport, std::error_code> DumbScanoutSink::present(
+    drm::span<const std::byte> src, std::uint32_t src_stride,
+    drm::span<const scene::DamageRect> damage, std::uint32_t flags, drm::PageFlip* flip) {
   if (src.size() < static_cast<std::size_t>(height_) * src_stride) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
@@ -103,8 +110,19 @@ drm::expected<scene::CommitReport, std::error_code> DumbScanoutSink::present(
       std::memcpy(dst.data() + (static_cast<std::size_t>(y) * dst_stride),
                   src.data() + (static_cast<std::size_t>(y) * src_stride), row_bytes);
     }
-    // A finished CPU frame is a full repaint.
-    return std::vector<Rect>{Rect{0, 0, width_, height_}};
+    // The full copy above keeps a reused (stale) slot current regardless of what
+    // we report. With no damage a finished CPU frame is a full repaint; otherwise
+    // hand the ring exactly this frame's changed regions, which it unions across
+    // buffer age into FB_DAMAGE_CLIPS.
+    if (damage.empty()) {
+      return std::vector<Rect>{Rect{0, 0, width_, height_}};
+    }
+    std::vector<Rect> rects;
+    rects.reserve(damage.size());
+    for (const scene::DamageRect& d : damage) {
+      rects.push_back(Rect{d.x, d.y, d.w, d.h});
+    }
+    return rects;
   });
   if (!painted) {
     return drm::unexpected<std::error_code>(painted.error());
