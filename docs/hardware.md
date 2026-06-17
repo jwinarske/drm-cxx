@@ -42,6 +42,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `rockchip-drm` + libmali | Mali-G610 (RK3588 / NanoPC-T6) | 6.1.141      | `drm::fmt`: AFBC `IN_FORMATS` decode validated; compressed offload falls back to LINEAR (libmali limitation — see quirks). |
 | `vc4`        | VideoCore (RPi4 / RPi5)             | 6.12.75-rpt         | `drm::fmt`: Broadcom SAND / VC4-T-tiled `IN_FORMATS` decode validated; LINEAR scanout. |
 | `imx-drm`    | i.MX8M Mini LCDIF (Nitrogen8M Mini, NXP BSP) | 6.1.22 (Yocto) | `drm::fmt`: **no-`IN_FORMATS` fallback** — `FormatTable::from_plane` returns `ENOENT`, caller assumes LINEAR-only (legacy fourccs, no modifier surface). |
+| `imx-drm`    | i.MX93 LCDIFv3 (FRDM-IMX93, NXP BSP) | 6.18.2 (Yocto) | Software/dumb-buffer scanout @ 720p60 (`software_present`, `damage_present`, `ring_present`, `idle_present`, `atomic_modeset`), single-plane CPU composition (`minimal_kms_probe`, `scene_*`, `layered_demo`), present-path profiling matrix. No GPU. |
 
 What's **not** validated:
 
@@ -318,6 +319,108 @@ render node).
   `gcc`/`g++` and `libdrm`/`libgbm` runtime but no meson/ninja and no
   `-dev` headers; bring drm-cxx's headers (or carry the API headers) and
   compile the needed sources directly when validating on this board.
+
+### i.MX93 LCDIFv3 (FRDM-IMX93)
+
+Validation board: **NXP FRDM-IMX93** (i.MX93, dual Cortex-A55, **aarch64**),
+NXP i.MX Yocto BSP (`fsl-imx-xwayland`, "whinlatter"), **kernel 6.18.2**.
+`card0` is `imx-drm` (the **LCDIFv3** display controller feeding an on-board
+HDMI bridge). The i.MX93 has **no GPU at all** — no Vivante 3D, no Mesa render
+node, only the 2D PXP and the LCDIF — so the software / dumb-buffer present
+path is the *only* path; there are no GL/Vulkan/`egl` examples to run here.
+Validated against an LG HDMI monitor that the LCDIF clamps to **1280×720@60**
+(the single EDID mode it offers; higher modes exceed the LCDIFv3 pixel-clock
+budget on this bridge).
+
+`driver_caps` reports: `addfb2_modifiers=false`, **`async_page_flip=false`**,
+prime import/export=true, cursor 64×64 (cap only), **`fb_damage_clips=false`**,
+**`vrr_capable=true`**, psr=none. Plane census `PRIMARY=1 OVERLAY=0 CURSOR=0`
+— the same single-plane / no-cursor shape as the i.MX8MM LCDIF and tilcdc, so
+`driver_caps` emits the cap/registry-mismatch **`[WARN]`** (gate HW-cursor use
+on the registry, never on `DRM_CAP_CURSOR_*`). The one PRIMARY plane (id 33)
+advertises **`XR24 AR24 RG16 XB24 AB24 AR15 XR15`** with **no `IN_FORMATS`**
+(LINEAR-only). Unlike tilcdc, **XRGB8888 (`XR24`) is present**, so the default
+present path works with no `--rgb565` negotiation.
+
+- **Build is native on-target, C++23, software-only.** The BSP ships `gcc`
+  15.2.0 + `cmake` but no meson/ninja and is short several `-dev` packages, so
+  the build runs *on the board*: `pip install meson ninja`, then `meson …
+  -Dcpp_std=c++23`. Under C++23 + libstdc++ 15 the format adapter aliases
+  `std::format`/`std::print` directly, so **`fmt` is never needed** (no `-dev`,
+  no subproject build). Turn all GPU/heavy features off (`-Degl=disabled
+  -Dvulkan=false -Dblend2d=disabled -Dgstreamer=disabled -Dcamera=disabled
+  -Dstreams=disabled -Dsession=disabled -Dcursor=disabled -Dtests=false`). Three
+  examples (`mouse_cursor`, `xcursor_smoke`, `egl_scene`) are still emitted by
+  the examples list even with their feature disabled and fail to build, so build
+  the working binaries by target name rather than `ninja all`.
+- **`libdisplay-info` ≥0.2.0 is a hard dependency the BSP can't satisfy.** The
+  image ships only `libdisplay-info.so.1` (0.1.1) and no headers; drm-cxx pins
+  `>=0.2.0` for the HDR/colorimetry EDID APIs. The build script builds 0.2.0
+  from source into `/usr/local` (it also drops a `pnp.ids` into
+  `/usr/share/hwdata` first, which the BSP lacks), then points
+  `PKG_CONFIG_PATH`/`LD_LIBRARY_PATH` at it. This is the same side-by-side
+  install `scripts/build-deps.sh libdisplay-info` performs for short distros.
+- **Headless over SSH → `--no-seat`.** The BSP runs `weston` on tty7 holding
+  DRM master; `systemctl stop weston` frees the card, then DRM-master examples
+  run as root with **`--no-seat`** (opens DRM directly + takes master as the
+  first opener). `systemctl start weston` restores the desktop. Read-only tools
+  (`driver_caps`, `plane_caps`) need neither stop nor seat.
+- **Single-plane composition fallback works.** `minimal_kms_probe /dev/dri/card0
+  3` rescues all 3 overlapping layers via CPU composition onto the one PRIMARY
+  plane (`composited 3 / dropped 0`); `scene_formats`, `layered_demo`,
+  `scene_priority` all composite onto plane 33. No overlay/cursor plane, so any
+  scene with more layers than planes (i.e. >1) composites the overflow.
+- **`VRR_ENABLED` is advertised but does nothing.** `vrr_capable=true`, the CRTC
+  exposes `VRR_ENABLED`, and the EDID gives a vrefresh range (48–61 Hz), but
+  `vrr_sweep --vrr` measures **byte-identical jitter to the control** at every
+  off-vblank target (40 Hz: 8.34 ms vs 8.33 ms; 48 Hz: 7.19 ms vs 7.19 ms) — the
+  LCDIFv3+bridge accepts the property on commit but never varies the porch
+  timing. **Do not rely on VRR here.** The real jitter lever is `--rt`
+  (SCHED_FIFO + mlockall): it took 30 Hz jitter from 1.76 ms to 0.02 ms.
+- **Working example set** (verified on-device): `software_present`,
+  `damage_present`, `ring_present`, `idle_present`,
+  `atomic_modeset` (present + modeset), `driver_caps`, `plane_caps`,
+  `minimal_kms_probe`, `multi_crtc_probe`, `stream_probe`, `compressed_scanout`,
+  `scene_formats` (read-only diagnostics), `layered_demo`, `scene_priority`,
+  `overlay_planes`, `scene_warm_start`, `vrr_sweep`. Excluded: anything needing
+  a GPU, a cursor plane, multiple CRTCs, compression, or a camera.
+
+#### Present-path profiling (decision guide)
+
+All numbers at **1280×720**, single A55 thread, kernel 6.18.2. CPU/frame is
+`user+sys` measured over the run (the per-frame `usleep`/flip-wait consumes no
+CPU, so this is pure render+blit+commit work); **load@60** is the share of one
+A55 core needed to sustain 60 fps (the board has 2 cores). 60 Hz flips are
+rock-solid (0.02 ms jitter); the synchronous (non-`--vsync`) commit blocks ~½ a
+vblank, so timer-mode wall-rate sits near 29 fps even though the CPU has headroom
+to ~90+ fps.
+
+| Workload (`software_present` unless noted) | render scope        | CPU/frame | load@60 (1 core) | takeaway |
+|--------------------------------------------|---------------------|-----------|------------------|----------|
+| XRGB8888, full redraw (default)            | full 720p           | 10.8 ms   | ~65 %            | baseline |
+| XRGB8888, `--no-damage`                    | full 720p           | 10.7 ms   | ~64 %            | damage hint is a **no-op** (`fb_damage_clips=false` + full redraw) |
+| RGB565 (`--rgb565`)                         | full 720p           | 10.2 ms   | ~61 %            | half the bytes → only ~5–6 % cheaper (per-pixel loop dominates) |
+| `ring_present`                              | buffer-age repaint  | 8.1 ms    | ~49 %            | 3-slot ring repaints the aged region |
+| `damage_present`                            | partial (box only)  | 2.45 ms   | ~15 %            | **incremental rendering is ~4× cheaper** than full redraw |
+| `idle_present` (static, 96 % skipped)       | skip unchanged      | ~0.5 ms avg | ~3 %           | **idle-skip is ~100× cheaper** when the scene is static |
+
+Guidance for an i.MX93 UI:
+
+- **Format:** use XRGB8888 (it's supported and avoids RGB565 banding); RGB565's
+  CPU saving (~5 %) rarely justifies the quality loss. There is no modifier /
+  compression path — everything is LINEAR.
+- **Damage:** the `FB_DAMAGE_CLIPS` *hint* does nothing (`fb_damage_clips=false`).
+  The win is real only when the **application renders incrementally** so the
+  dumb-BO blit shrinks — `damage_present` (true partial update) is 4× cheaper
+  than a full redraw. A toolkit that repaints the whole frame each tick gets no
+  benefit from passing damage rects.
+- **Idle-skip** (`present::FrameEconomy`) is the single biggest lever: a static
+  or rarely-changing screen (cluster, signage, status panel) drops to a few
+  percent of one core. Prefer change-driven repaint over a fixed loop.
+- **Refresh / pacing:** present at **60 Hz** (0.02 ms jitter) or a clean divisor
+  (**30 Hz**); off-multiple rates (40/48 Hz) beat against the fixed 60 Hz vblank
+  for ~7–8 ms jitter and **VRR will not fix it**. For tight pacing use
+  `--rt`-style SCHED_FIFO + `mlockall`, not VRR.
 
 ### TI AM335x (BeagleBone Black, tilcdc)
 
