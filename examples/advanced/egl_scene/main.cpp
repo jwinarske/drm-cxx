@@ -363,7 +363,7 @@ int main(int argc, char* argv[]) {
         reinterpret_cast<EGLNativeWindowType>(src_ptr->native_surface()), nullptr);
   }
   if (egl_surface == EGL_NO_SURFACE) {
-    drm::println(stderr, "egl_scene: eglCreate{Platform,}WindowSurface: {}",
+    drm::println(stderr, "egl_scene: eglCreate{{Platform,}}WindowSurface: {}",
                  gl_strerror(eglGetError()));
     eglDestroyContext(display, context);
     eglTerminate(display);
