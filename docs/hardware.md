@@ -41,6 +41,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `panfrost`   | Mali-G52 (Radxa Zero 3 / RK3566)    | 6.1.84-rk2410       | `drm::fmt`: **real ARM AFBC `16x16\|YTR\|SPARSE` scanout** via EGL on a VOP2 cluster plane (`egl_offload_scanout`). |
 | `rockchip-drm` + libmali | Mali-G610 (RK3588 / NanoPC-T6) | 6.1.141      | `drm::fmt`: AFBC `IN_FORMATS` decode validated; compressed offload falls back to LINEAR (libmali limitation — see quirks). |
 | `vc4`        | VideoCore (RPi4 / RPi5)             | 6.12.75-rpt         | `drm::fmt`: Broadcom SAND / VC4-T-tiled `IN_FORMATS` decode validated; LINEAR scanout. |
+| `vc4`        | VideoCore IV (RPi Zero 2 W)         | 6.18.33-rpt (trixie)| Software/dumb scanout @ 1600x900, **hardware GLES present** (`egl_scene` ~60fps, `gl_present`, `gbm_surface_scanout` VC4-T-tiled), single-plane→56-plane scene/composition, present-path profiling. No hardware Vulkan (llvmpipe only). |
 | `imx-drm`    | i.MX8M Mini LCDIF (Nitrogen8M Mini, NXP BSP) | 6.1.22 (Yocto) | `drm::fmt`: **no-`IN_FORMATS` fallback** — `FormatTable::from_plane` returns `ENOENT`, caller assumes LINEAR-only (legacy fourccs, no modifier surface). |
 | `imx-drm`    | i.MX93 LCDIFv3 (FRDM-IMX93, NXP BSP) | 6.18.2 (Yocto) | Software/dumb-buffer scanout @ 720p60 (`software_present`, `damage_present`, `ring_present`, `idle_present`, `atomic_modeset`), single-plane CPU composition (`minimal_kms_probe`, `scene_*`, `layered_demo`), present-path profiling matrix. No GPU. |
 
@@ -297,6 +298,82 @@ hits the cached answer first.
   `classify()` correctly reports these as `Tiling`, not `Compression`.
   vc4 advertises no AFBC, so there is no compressed-scanout path to
   exercise on the Pi — only tiling/LINEAR.
+
+#### Raspberry Pi Zero 2 W (VideoCore IV) — validated + profiled
+
+Validation board: **Raspberry Pi Zero 2 W** (BCM2710A1, quad Cortex-A55-class
+**A53, aarch64**, **415 MiB RAM**), Debian 13 trixie (`6.18.33-rpt`). `card0` and
+`renderD128` are both `vc4` (VideoCore IV — GLES2/EGL via Mesa vc4, **no V3D /
+no hardware Vulkan**). HDMI clamps to **1600x900@60** (an LG monitor's first of
+14 modes). No compositor runs by default, so DRM master is free; run examples
+with **`--no-seat`** (DRM opened directly, master taken as first opener).
+
+`driver_caps` reports a far richer device than the LCDIF SoCs:
+`addfb2_modifiers=true`, **`async_page_flip=true`**, `fb_damage_clips=false`,
+`vrr_capable=true`, cursor 64×64, plane census **`PRIMARY=4 OVERLAY=48
+CURSOR=4`** (56 planes). `plane_caps` shows real modifier support — Broadcom
+`SAND64/128/256` on NV12/NV21 and `VC4_T_TILED` on the 8888 formats — so the
+tiled-scanout path is exercisable here (it is tiling, not compression).
+
+- **Build is cross, via `emb`** (the board's 415 MiB RAM rules out an on-target
+  build). An `emb.yaml` (`cross.provider: arm-gnu`, **`generator: cmake`**,
+  raspios-bookworm image sysroot + the `-dev` closure layered in, libdisplay-info
+  0.2.0 as a source `augment`) cross-builds the examples; the glibc-2.36 binaries
+  run forward-compatibly on the trixie board. **Use the CMake generator, not
+  meson:** the arm-gnu provider emits a CMake toolchain file but no meson cross
+  file, so a meson generator silently falls back to the host compiler (host
+  libstdc++ vs sysroot glibc → `L_tmpnam`-style header errors). Under gcc-12
+  (no `<print>`) the format adapter uses {fmt}, pulled by CMake FetchContent as
+  a shared `libfmt.so.11` — ship it next to the binaries (the board has
+  `libfmt.so.10`).
+- **Software / dumb-buffer scanout works** — `software_present` presents 120
+  frames XRGB8888 @ 1600x900. Single-plane→multi-plane composition,
+  `minimal_kms_probe`, `scene_*` all run.
+- **Hardware GLES present works and is the cheap path** — `egl_scene` runs at
+  ~60 fps (301 frames / 5 s), `gl_present` (GlScanoutProducer) presents 120
+  frames, and `gbm_surface_scanout` arms a **`VC4_T_TILED`** front buffer
+  (TEST_ONLY accepted, on screen). Rendering on the vc4 GPU costs ~5× less CPU
+  than a CPU full-frame present (see table).
+- **Vulkan is not usable.** VideoCore IV has no V3D, so there is no hardware
+  Vulkan; the only ICD is **llvmpipe (CPU)**, which `vulkan_display` finds 0
+  displays on and which fails `vk_present` / `vulkan_scene` at
+  `createDevice` (`ErrorExtensionNotPresent` — it lacks the dmabuf /
+  external-memory device extensions the scanout path needs). Vulkan examples
+  build but do not run here.
+- **`VRR_ENABLED` is advertised but inert** — same as the LCDIF SoCs:
+  `vrr_capable=true` and the property is accepted, but `vrr_sweep --vrr` gives
+  jitter identical to the control at every off-vblank target (40 Hz 8.33 ms,
+  48 Hz 7.19 ms, unchanged). Present at 60 Hz or a clean divisor.
+
+##### Present-path profiling (decision guide)
+
+All at **1600x900**, single A53 thread (the SoC has 4). CPU/frame is `user+sys`
+(the per-frame `usleep`/flip-wait consumes no CPU, so it is pure
+render+blit+commit work); **load@60** is the share of one A53 core to sustain
+60 fps. The synchronous (non-`--vsync`) commit caps the CPU paths near 29 fps
+wall even where the CPU has headroom for more.
+
+| Workload                                   | render scope       | CPU/frame | load@60 (1 core) | takeaway |
+|--------------------------------------------|--------------------|-----------|------------------|----------|
+| `software_present` XRGB8888 (full *or* damage) | full 1600x900  | ~11.8 ms  | ~71 %            | damage hint is a **no-op** (`fb_damage_clips=false` + full redraw) |
+| `software_present` RGB565                  | full 1600x900      | ~6.1 ms   | ~36 %            | 16 bpp **~halves** the cost — the A53 is memory-bandwidth bound at this size |
+| `damage_present` (partial)                 | partial            | ~4.8 ms   | ~29 %            | incremental rendering ~2.5× cheaper than a full CPU redraw |
+| `ring_present`                             | full ring repaint  | ~12.8 ms  | ~77 %            | heaviest CPU path |
+| **`gl_present` (GLES → KMS)**              | **vc4 GPU**        | **~2.2 ms** | **~13 %**      | **hardware offload — ~5× less CPU; ~55 fps** |
+| `idle_present` (static, 96 % skipped)      | skip unchanged     | ~0.8 ms avg | ~5 %           | idle-skip collapses CPU when the scene is static |
+
+Guidance for a Pi Zero 2 W UI:
+
+- **Render on the GPU.** `gl_present` / `egl_scene` (GLES via vc4) cost ~13 % of
+  a core vs ~71 % for a CPU full-frame present — on a 415 MiB / 4×A53 board that
+  headroom matters. Use a `GbmSurfaceSource` and let the HVS scan out a
+  `VC4_T_TILED` buffer.
+- **If CPU-only, prefer RGB565** (≈half the cost of XRGB8888 here — memory
+  bound) and render incrementally; the `FB_DAMAGE_CLIPS` hint itself does
+  nothing (`fb_damage_clips=false`).
+- **Idle-skip** (`present::FrameEconomy`) for static screens.
+- **Don't rely on VRR**, and **don't plan on Vulkan** (CPU-only, and the scanout
+  path doesn't run).
 
 ### imx-drm (i.MX8M Mini)
 

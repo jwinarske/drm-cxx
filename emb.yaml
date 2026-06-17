@@ -1,0 +1,70 @@
+# drm-cxx — cross-build the examples for a Raspberry Pi Zero 2 W via emb.
+#
+#   emb cross . --target rpi-zero-2w --list-targets
+#   emb cross . --target rpi-zero-2w --build      # cross-compile
+#
+# Sysroot is unpacked from the raspios bookworm arm64 image (the same image
+# ivi-homescreen's rpi-zero-2w target uses) — deterministic and host-side,
+# unlike rsync'ing the live board's rootfs (a full pull over the Zero 2 W's
+# WiFi / 415 MiB RAM resets mid-transfer). The arm-gnu 12.3 toolchain (gcc 12,
+# glibc 2.36) is forward-compatible with the board's Debian 13 trixie runtime.
+#
+# Generator is CMake: the arm-gnu provider emits a CMake toolchain file but no
+# meson cross file, so a meson generator would silently fall back to the host
+# compiler. gcc 12 doesn't expose <print>, so the detail/format.hpp adapter
+# takes the {fmt} path; CMake FetchContent builds fmt, so the on-target binaries
+# carry no extra runtime dep. bookworm ships libdisplay-info 0.1.1 (< drm-cxx's
+# 0.2.0 floor), so 0.2.0 is built from source into the overlay (augment, static).
+#
+# The Pi Zero 2 W is VideoCore IV: GLES2/EGL via Mesa vc4, no hardware Vulkan
+# (Vulkan resolves to llvmpipe/lavapipe — software). vulkan=true still builds
+# the Vulkan examples; they run on the CPU ICD on-target.
+id: drm-cxx
+type: app
+supported_archs: [arm64]
+supported_host_types: [fedora, ubuntu]
+
+cross:
+  provider: arm-gnu
+  toolchain_version: 12.3.rel1      # bookworm -> gcc 12 / glibc 2.36
+  generator: cmake
+
+  sysroot:
+    partition: 2
+    dev_packages:
+      - libdrm-dev
+      - libgbm-dev
+      - libinput-dev
+      - libudev-dev
+      - libxkbcommon-dev
+      - libseat-dev
+      - libxcursor-dev            # mouse_cursor/xcursor_smoke link the cursor module
+      - libegl-dev
+      - libgles2-mesa-dev         # egl_scene / gl_present
+      - libvulkan-dev             # vk_present / vulkan_scene (llvmpipe at runtime)
+
+  augment:
+    - pkg: libdisplay-info
+      min: "0.2.0"
+      url: https://gitlab.freedesktop.org/emersion/libdisplay-info/-/archive/0.2.0/libdisplay-info-0.2.0.tar.gz
+      build: meson
+      static: true
+
+  defines:
+    DRM_CXX_BUILD_EXAMPLES: 'ON'
+    DRM_CXX_BUILD_TESTS: 'OFF'
+    DRM_CXX_VULKAN: 'ON'
+    DRM_CXX_EGL: 'ON'
+    DRM_CXX_SESSION: 'ON'
+    DRM_CXX_CURSOR: 'ON'
+    DRM_CXX_BLEND2D: 'OFF'
+    DRM_CXX_GSTREAMER: 'OFF'
+    DRM_CXX_STREAMS: 'OFF'
+
+  backends:
+    examples: {}                   # all options shared via defines; one build
+
+  targets:
+    rpi-zero-2w:
+      image_url: https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2024-11-19/2024-11-19-raspios-bookworm-arm64-lite.img.xz
+      cpu_flags: [-mcpu=cortex-a53]
