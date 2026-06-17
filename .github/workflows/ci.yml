@@ -100,6 +100,81 @@ jobs:
         run: meson test -C builddir --no-rebuild
         if: false  # Enable when tests are implemented
 
+  # C++23 lane. Every matrix above compiles with the default cpp_std=c++17, so
+  # the std::format / std::println path that detail/format.hpp selects under
+  # C++23 (libstdc++ 14+) is otherwise never exercised in CI. std::format's
+  # compile-time format-string checker is stricter than {fmt} — e.g. an
+  # unescaped literal brace is a hard error, not a runtime surprise — so this
+  # lane builds the library AND examples under -Dcpp_std=c++23 to catch those
+  # before merge. (egl_scene shipped exactly that bug.) gcc-14 is the floor that
+  # exposes <print> on ubuntu-24.04; gcc-12/13 don't, so they'd silently fall
+  # back to the {fmt} path and guard nothing.
+  build-cxx23:
+    runs-on: ubuntu-24.04
+    name: gcc-14-cxx23
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+
+      - name: Install dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          # Examples are built here (the std::format path is used heavily in
+          # examples — the bug this lane guards lived in egl_scene), so pull the
+          # example-facing deps too: libegl/libgles (egl_scene + gl_present land
+          # on a present `egl`/`glesv2` dependency, independent of -Degl),
+          # libxcursor (mouse_cursor/xcursor_smoke link the library's cursor
+          # module unconditionally), libseat (session), libgstreamer
+          # (GstAppsinkSource + video_player). blend2d / libcamera / thorvg
+          # examples auto-skip without their deps (they're feature-gated), which
+          # is fine — the std::format coverage they'd add is verified elsewhere.
+          # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
+          packages: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libegl1-mesa-dev libgles2-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev hwdata g++-14
+          version: 1.0
+
+      # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
+      # 0.1.1). Same source-build + cache pattern as the other jobs.
+      - name: Cache libdisplay-info install
+        id: cache-libdisplay-info
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/libdisplay-info-install
+          key: libdisplay-info-0.2.0-${{ runner.os }}-gcc-14
+
+      - name: Build libdisplay-info from source
+        if: steps.cache-libdisplay-info.outputs.cache-hit != 'true'
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          git clone --depth 1 --branch 0.2.0 https://gitlab.freedesktop.org/emersion/libdisplay-info.git libdisplay-info-src
+          meson setup libdisplay-info-src/build libdisplay-info-src \
+            --prefix="$GITHUB_WORKSPACE/libdisplay-info-install" \
+            --buildtype=release \
+            -Ddefault_library=shared
+          meson install -C libdisplay-info-src/build
+
+      - name: Export third-party environment
+        run: |
+          echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/libdisplay-info-install/lib/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib64/pkgconfig:$GITHUB_WORKSPACE/libdisplay-info-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/libdisplay-info-install/lib:$GITHUB_WORKSPACE/libdisplay-info-install/lib64:$GITHUB_WORKSPACE/libdisplay-info-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      - name: Configure (C++23)
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          meson setup builddir \
+            -Dcpp_std=c++23 \
+            -Dvulkan=true \
+            -Dexamples=true \
+            -Dtests=false
+
+      - name: Build
+        run: ninja -C builddir
+
   build-cmake:
     runs-on: ubuntu-24.04
     strategy:
