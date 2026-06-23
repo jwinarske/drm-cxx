@@ -323,6 +323,25 @@ if egl_scene_egl_dep.found() and egl_scene_gles_dep.found()
       dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep],
     )
   endif
+
+  # shadertoy_egl — Shadertoy player (shadertoy-cxx GlRenderer) scanned out via
+  # a GbmSurfaceSource. Resolves shadertoy-cxx from the system or the
+  # subprojects/shadertoy-cxx.wrap fallback.
+  # include_type: 'system' pushes shadertoy-cxx's public headers behind
+  # -isystem so clang-tidy doesn't lint third-party code (matches the
+  # libcamera/libva treatment below).
+  shadertoy_dep = dependency('shadertoy-cxx',
+    fallback : ['shadertoy-cxx', 'shadertoy_dep'],
+    include_type : 'system',
+    required : false,
+  )
+  if shadertoy_dep.found()
+    executable('shadertoy_egl',
+      'advanced/shadertoy_egl/main.cpp',
+      dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep,
+                      shadertoy_dep],
+    )
+  endif
 endif
 
 # vk_present — VkScanoutProducer demo. The producer encapsulates Vulkan
