@@ -227,6 +227,21 @@ if(TARGET PkgConfig::egl_scene_egl AND TARGET PkgConfig::egl_scene_gles)
     PkgConfig::egl_scene_egl
     PkgConfig::egl_scene_gles)
   target_include_directories(gl_present PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # shadertoy_egl — Shadertoy player (shadertoy-cxx GlRenderer) scanned out via
+  # a GbmSurfaceSource. Built only when shadertoy-cxx is installed.
+  find_package(shadertoy-cxx QUIET)
+  if(TARGET shadertoy-cxx::shadertoy)
+    add_executable(shadertoy_egl advanced/shadertoy_egl/main.cpp)
+    target_link_libraries(shadertoy_egl PRIVATE
+      drm-cxx::drm-cxx
+      shadertoy-cxx::shadertoy
+      PkgConfig::egl_scene_egl
+      PkgConfig::egl_scene_gles)
+    target_include_directories(shadertoy_egl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  else()
+    message(STATUS "shadertoy_egl: skipped (shadertoy-cxx not found)")
+  endif()
 endif()
 
 # vk_present — VkScanoutProducer demo. The producer encapsulates Vulkan

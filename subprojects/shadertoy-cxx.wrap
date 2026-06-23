@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://github.com/jwinarske/shadertoy-cxx.git
+revision = main
+depth = 1
+
+[provide]
+shadertoy-cxx = shadertoy_dep
