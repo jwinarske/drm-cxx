@@ -1,0 +1,53 @@
+# drm-cxx examples on Raspberry Pi (PiOS aarch64).
+#
+# Hardware/OS facts (toolchain, sysroot image, partition, cpu tuning, base
+# DRM/input/EGL/GBM/seat stack) come from emb's shipped board library
+# (boards/raspberry-pi.emb.yaml); each target `extends` a board and overlays the
+# one extra dev package drm-cxx needs on top of that base: libdisplay-info
+# >= 0.2.0, which trixie ships.
+#
+#   emb cross . --target rpi4-trixie --build
+#
+# v4l2_decode exercises the stateful V4L2 decoder -> KMS path on the Pi 4's
+# bcm2835-codec (/dev/video10). The Pi 5 has no hardware H.264 decoder, so the
+# example builds there but finds no decoder at run time.
+id: drm-cxx
+type: app
+supported_archs: [arm64]
+supported_host_types: [ubuntu, fedora]
+
+build:
+  app_path: .
+  archs: [arm64]
+  modes: [release]
+  output: bundles
+
+cross:
+  package:
+    name: drm-cxx-examples
+    version: 0.1.0
+    maintainer: "Joel Winarske <joel.winarske@gmail.com>"
+    description: "drm-cxx example programs, cross-built by emb"
+    section: utils
+    bin: examples/v4l2_decode   # relative to the backend build dir
+    install_dir: /usr/bin
+
+  targets:
+    rpi4-trixie:
+      extends: rpi4-trixie
+      sysroot:
+        dev_packages:
+          - libdisplay-info-dev   # trixie ships >= 0.2.0
+      backends: &backends_examples
+        examples:
+          DRM_CXX_BUILD_EXAMPLES: 'ON'
+          DRM_CXX_BUILD_TESTS: 'OFF'
+          DRM_CXX_BUILD_BENCHMARKS: 'OFF'
+          DRM_CXX_VULKAN: 'OFF'
+
+    rpi5-trixie:
+      extends: rpi5-trixie
+      sysroot:
+        dev_packages:
+          - libdisplay-info-dev
+      backends: *backends_examples

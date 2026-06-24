@@ -1,0 +1,29 @@
+# Shared base for the drm-cxx example cross-builds in this .emb/ directory.
+#
+# emb (emb_cli) auto-discovers `.emb/` when you run `emb cross` from the repo
+# root and deep-merges each <board>.emb.yaml over this base. Build from the repo
+# root (the directory that holds CMakeLists.txt):
+#
+#   emb cross . --list-targets
+#   emb cross . --target rpi4-trixie --build      # cross-build the examples
+#
+# `base.emb.yaml` is the reserved base filename and is never itself a target.
+id: drm-cxx
+type: app
+supported_archs: [arm64, x86_64]
+supported_host_types: [fedora, ubuntu]
+
+cross:
+  # `provider` is required only to parse this block; every board target
+  # overrides it with its own provider.
+  provider: arm-gnu
+  # One CMake build of the example programs. Tests, benchmarks, and Vulkan are
+  # off to keep the example set lean — the decoder examples need only the core
+  # library, and the Vulkan/GStreamer/libcamera examples self-skip when their
+  # dependencies are absent from the sysroot.
+  backends:
+    examples:
+      DRM_CXX_BUILD_EXAMPLES: 'ON'
+      DRM_CXX_BUILD_TESTS: 'OFF'
+      DRM_CXX_BUILD_BENCHMARKS: 'OFF'
+      DRM_CXX_VULKAN: 'OFF'

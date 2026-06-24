@@ -127,6 +127,12 @@ struct V4l2CaptureBuffer {
   std::uint32_t fb_id{0};
   std::array<std::uint32_t, k_drm_max_planes> drm_handles{};
 
+  // True while the consumer holds this slot between acquire() and release().
+  // Several slots can be acquired at once so a KMS present loop can keep the
+  // displayed frame acquired while it acquires the next (LayerScene defers the
+  // previous frame's release until after the flip).
+  bool acquired{false};
+
   V4l2CaptureBuffer() noexcept { dmabuf_fd.fill(-1); }
   ~V4l2CaptureBuffer() {
     if (drm_fd >= 0) {
@@ -203,16 +209,25 @@ struct DrmPlaneLayout {
 [[nodiscard]] std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mplane,
                                                       std::uint32_t drm_fourcc,
                                                       DrmPlaneLayout& out) noexcept {
-  // Special case: single-V4L2-plane semi-planar 4:2:0 -> 2 DRM
-  // planes via offset math. Covers NV12 (8-bit) plus the
-  // 16-bit-per-sample HDR variants (P010 / P012 / P016) — they
-  // share the storage shape; only the per-sample bit width differs
-  // and that's already baked into bytesperline by V4L2.
+  // Special case: a SINGLE V4L2 plane holding semi-planar 4:2:0 (Y then
+  // interleaved UV) -> 2 DRM planes via offset math. Covers NV12 (8-bit) plus
+  // the 16-bit-per-sample HDR variants (P010 / P012 / P016) — they share the
+  // storage shape; only the per-sample bit width differs and that's already
+  // baked into bytesperline by V4L2.
+  //
+  // This is true for single-planar (pix) AND for MPLANE decoders that pack the
+  // whole frame into one CAPTURE plane (num_planes == 1) — e.g. the Raspberry
+  // Pi bcm2835-codec. Those echo num_planes == 1, but DRM_FORMAT_NV12 still
+  // needs 2 plane handles, so the 1:1 mapping below would build a 1-plane FB and
+  // drmModeAddFB2 would EINVAL. Read the dims from the matching union member.
   const bool is_semiplanar_420 = drm_fourcc == DRM_FORMAT_NV12 || drm_fourcc == DRM_FORMAT_P010 ||
                                  drm_fourcc == DRM_FORMAT_P012 || drm_fourcc == DRM_FORMAT_P016;
-  if (is_semiplanar_420 && !is_mplane) {
-    std::uint32_t const bpl = cap_fmt.fmt.pix.bytesperline;
-    std::uint32_t const h = cap_fmt.fmt.pix.height;
+  const std::uint32_t v4l2_num_planes = is_mplane ? cap_fmt.fmt.pix_mp.num_planes : 1U;
+  if (is_semiplanar_420 && v4l2_num_planes == 1U) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+    std::uint32_t const bpl =
+        is_mplane ? cap_fmt.fmt.pix_mp.plane_fmt[0].bytesperline : cap_fmt.fmt.pix.bytesperline;
+    std::uint32_t const h = is_mplane ? cap_fmt.fmt.pix_mp.height : cap_fmt.fmt.pix.height;
     // Caps + u64-promoted multiply so a hostile / quirky driver
     // can't wrap `bpl * h` in u32. AddFB2's offset field is u32; we
     // reject if the chroma-plane offset would truncate, and clamp
@@ -580,10 +595,10 @@ struct V4l2DecoderSource::Impl {
 
   // CAPTURE-side latest-frame-wins state. capture_ready_idx is the
   // most-recently-decoded slot waiting for acquire(); -1 sentinel
-  // means no frame is ready. capture_acquired_idx is held by the
-  // consumer between acquire() and release().
+  // means no frame is ready. Acquired buffers are tracked per-slot
+  // (V4l2CaptureBuffer::acquired) so several can be outstanding at once -- a KMS
+  // present loop keeps the displayed frame acquired while acquiring the next.
   int capture_ready_idx{-1};
-  int capture_acquired_idx{-1};
 
   // Sticky decoder-state flags surfaced by drive() and queried by
   // acquire(). source_change_seen disables the source permanently
@@ -863,16 +878,111 @@ int V4l2DecoderSource::fd() const noexcept {
   return impl_ ? impl_->v4l2_fd : -1;
 }
 
+// Dynamic-resolution-change handler. The kernel fires V4L2_EVENT_SOURCE_CHANGE
+// once the decoder has parsed enough bitstream to know the CAPTURE resolution
+// (every stateful decoder does this at least once, at stream start). The
+// sequence below is the standard V4L2 stateful-decoder DRC flush: STREAMOFF
+// CAPTURE, release the old ring, read the new size, then rebuild CAPTURE. OUTPUT
+// is untouched so the in-flight bitstream keeps flowing.
+std::error_code V4l2DecoderSource::reconfigure_capture_for_source_change() noexcept {
+  const int fd = impl_->v4l2_fd;
+  const bool mp = impl_->is_mplane;
+  const std::uint32_t cap_type = capture_buf_type(mp);
+
+  // Stop CAPTURE and release the old ring: each V4l2CaptureBuffer dtor drops its
+  // KMS fb_id + GEM handles, munmaps, and closes its dmabuf fds; REQBUFS(0) then
+  // reclaims the kernel-side allocation. Reset the latest-frame bookkeeping --
+  // the old slot indices no longer refer to anything.
+  streamoff(fd, cap_type);
+  impl_->capture_streaming = false;
+  impl_->capture_ready_idx = -1;
+  impl_->capture_buffers.clear();  // drops any still-acquired slots with them
+  release_queue(fd, cap_type);
+
+  // Read the decoder's newly-detected resolution, then S_FMT our pixel format at
+  // that size so the rebuilt CAPTURE buffers come back in the format the scene
+  // expects (G_FMT alone might echo the decoder's preferred/tiled default).
+  v4l2_format probe{};
+  probe.type = cap_type;
+  if (int const e = xioctl(fd, VIDIOC_G_FMT, &probe); e != 0) {
+    return make_errno(e);
+  }
+  const std::uint32_t new_w = mp ? probe.fmt.pix_mp.width : probe.fmt.pix.width;
+  const std::uint32_t new_h = mp ? probe.fmt.pix_mp.height : probe.fmt.pix.height;
+
+  v4l2_format cap_fmt{};
+  cap_fmt.type = cap_type;
+  if (mp) {
+    cap_fmt.fmt.pix_mp.pixelformat = impl_->cfg.capture_fourcc;
+    cap_fmt.fmt.pix_mp.width = new_w;
+    cap_fmt.fmt.pix_mp.height = new_h;
+  } else {
+    cap_fmt.fmt.pix.pixelformat = impl_->cfg.capture_fourcc;
+    cap_fmt.fmt.pix.width = new_w;
+    cap_fmt.fmt.pix.height = new_h;
+  }
+  if (int const e = xioctl(fd, VIDIOC_S_FMT, &cap_fmt); e != 0) {
+    return make_errno(e);
+  }
+  const std::uint32_t cap_w = mp ? cap_fmt.fmt.pix_mp.width : cap_fmt.fmt.pix.width;
+  const std::uint32_t cap_h = mp ? cap_fmt.fmt.pix_mp.height : cap_fmt.fmt.pix.height;
+  const std::uint32_t cap_num_planes = mp ? cap_fmt.fmt.pix_mp.num_planes : 1U;
+  if (cap_num_planes == 0 || cap_num_planes > VIDEO_MAX_PLANES) {
+    return std::make_error_code(std::errc::not_supported);
+  }
+
+  // Re-allocate, re-import to KMS, re-queue, and restart CAPTURE. Mirrors the
+  // create()-time CAPTURE bring-up; `bufs` is local so a mid-way failure unwinds
+  // via std::vector destruction before we commit anything to impl_.
+  std::vector<V4l2CaptureBuffer> bufs;
+  if (auto ec =
+          allocate_capture_buffers(fd, mp, cap_num_planes, impl_->cfg.capture_buffer_count, bufs);
+      ec) {
+    return ec;
+  }
+  if (bufs.size() < k_min_buffers) {
+    return std::make_error_code(std::errc::not_enough_memory);
+  }
+  if (impl_->drm_fd < 0) {
+    return std::make_error_code(std::errc::bad_file_descriptor);
+  }
+  DrmPlaneLayout layout{};
+  if (auto ec = derive_drm_plane_layout(cap_fmt, mp, impl_->cfg.capture_fourcc, layout); ec) {
+    return ec;
+  }
+  for (auto& slot : bufs) {
+    if (auto ec = import_capture_buffer_to_drm(impl_->drm_fd, cap_w, cap_h,
+                                               impl_->cfg.capture_fourcc, layout, slot);
+        ec) {
+      return ec;
+    }
+  }
+  for (std::uint32_t i = 0; i < bufs.size(); ++i) {
+    if (auto ec = queue_capture_buffer(fd, mp, i, cap_num_planes); ec) {
+      return ec;
+    }
+  }
+  if (auto ec = streamon(fd, cap_type); ec) {
+    return ec;
+  }
+
+  // Commit. format() now reports the new dimensions to the scene.
+  impl_->capture_buffers = std::move(bufs);
+  impl_->capture_num_planes = cap_num_planes;
+  impl_->capture_format_echo = cap_fmt;
+  impl_->capture_format = SourceFormat{impl_->cfg.capture_fourcc, 0, cap_w, cap_h};
+  impl_->capture_streaming = true;
+  return {};
+}
+
 drm::expected<void, std::error_code> V4l2DecoderSource::drive() noexcept {
   if (!impl_) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
 
-  // Sticky once seen: a SOURCE_CHANGE event means the bitstream's
-  // resolution doesn't match what create() negotiated, and the
-  // contract is that the caller destroys + recreates with the new
-  // dimensions. Keep returning operation_canceled so a polling loop
-  // stops trying to feed the decoder.
+  // Sticky once seen: a SOURCE_CHANGE we could not handle in place (the
+  // reconfigure below failed) permanently spends the source. Keep returning
+  // operation_canceled so a polling loop stops trying to feed the decoder.
   if (impl_->source_change_seen) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::operation_canceled));
   }
@@ -893,8 +1003,14 @@ drm::expected<void, std::error_code> V4l2DecoderSource::drive() noexcept {
       return drm::unexpected<std::error_code>(make_errno(e));
     }
     if (ev.type == V4L2_EVENT_SOURCE_CHANGE) {
-      impl_->source_change_seen = true;
-      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::operation_canceled));
+      // Re-negotiate the CAPTURE ring in place at the new resolution and keep
+      // going. Only go sticky (spend the source) if the reconfigure itself
+      // fails -- a partial rebuild can't safely resume.
+      if (auto ec = reconfigure_capture_for_source_change(); ec) {
+        impl_->source_change_seen = true;
+        return drm::unexpected<std::error_code>(ec);
+      }
+      continue;
     }
     if (ev.type == V4L2_EVENT_EOS) {
       impl_->eos_seen = true;
@@ -905,7 +1021,13 @@ drm::expected<void, std::error_code> V4l2DecoderSource::drive() noexcept {
   // decoder copies bitstream out of these as it consumes them, so
   // dequeueing with EAGAIN simply means "kernel hasn't finished any
   // more this tick".
-  while (true) {
+  //
+  // Only once OUTPUT is streaming: STREAMON is lazy (deferred to the first
+  // submit_bitstream so the kernel sees a queued buffer on the streaming
+  // transition). DQBUF on a not-yet-streaming queue returns EINVAL, which would
+  // otherwise fail drive() whenever the caller polls/drives before submitting
+  // any bitstream (e.g. a pump-thread loop that drives before its first feed).
+  while (impl_->output_streaming) {
     v4l2_buffer buf{};
     std::array<v4l2_plane, VIDEO_MAX_PLANES> planes{};
     buf.type = output_buf_type(impl_->is_mplane);
@@ -1037,14 +1159,6 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2DecoderSource::acquire() {
   if (impl_->source_change_seen) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::operation_canceled));
   }
-  if (impl_->capture_acquired_idx >= 0) {
-    // The contract is "valid until matched by release()" -- a second
-    // acquire without intervening release would hand back the same
-    // slot and break the scene's pair-up bookkeeping. Surface as
-    // device_or_resource_busy so callers can spot the misuse.
-    return drm::unexpected<std::error_code>(
-        std::make_error_code(std::errc::device_or_resource_busy));
-  }
   if (impl_->capture_ready_idx < 0) {
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::resource_unavailable_try_again));
@@ -1064,20 +1178,32 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2DecoderSource::acquire() {
         std::make_error_code(std::errc::resource_unavailable_try_again));
   }
 
-  impl_->capture_acquired_idx = impl_->capture_ready_idx;
+  // Mark the slot acquired (several may be outstanding) and hand its index back
+  // through opaque as a 1-based token so release() knows which slot to re-queue.
+  // capture_ready_idx clears -- the next decoded frame refills it.
+  impl_->capture_buffers.at(idx).acquired = true;
   impl_->capture_ready_idx = -1;
   AcquiredBuffer acq;
   acq.fb_id = fb_id;
-  acq.opaque = nullptr;  // capture_acquired_idx is the source-side bookkeeping
+  // NOLINTNEXTLINE(performance-no-int-to-ptr) -- opaque cookie, not a real address.
+  acq.opaque = reinterpret_cast<void*>(static_cast<std::uintptr_t>(idx) + 1U);
   return acq;
 }
 
-void V4l2DecoderSource::release(AcquiredBuffer /*acquired*/) noexcept {
-  if (!impl_ || impl_->capture_acquired_idx < 0) {
+void V4l2DecoderSource::release(AcquiredBuffer acquired) noexcept {
+  if (!impl_) {
     return;
   }
-  auto const idx = static_cast<std::uint32_t>(impl_->capture_acquired_idx);
-  impl_->capture_acquired_idx = -1;
+  // opaque is the 1-based slot index acquire() handed out; 0 means "no slot".
+  auto const token = reinterpret_cast<std::uintptr_t>(acquired.opaque);
+  if (token == 0) {
+    return;
+  }
+  auto const idx = static_cast<std::uint32_t>(token - 1U);
+  if (idx >= impl_->capture_buffers.size() || !impl_->capture_buffers.at(idx).acquired) {
+    return;  // already released, or not a token we handed out
+  }
+  impl_->capture_buffers.at(idx).acquired = false;
   // Best-effort re-QBUF. release() must be infallible per the
   // LayerBufferSource contract; if the kernel rejects the QBUF
   // (degraded queue state), the slot stays unqueued and the source

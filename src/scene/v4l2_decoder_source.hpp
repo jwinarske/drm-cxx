@@ -196,6 +196,14 @@ class V4l2DecoderSource : public LayerBufferSource {
  private:
   V4l2DecoderSource();
 
+  // Re-negotiate the CAPTURE queue after a V4L2_EVENT_SOURCE_CHANGE: stop
+  // CAPTURE, drop the old buffers + their KMS framebuffers, read the decoder's
+  // newly-detected resolution, then re-allocate / re-import / re-queue / restart
+  // CAPTURE so drive() keeps producing frames at the new size. OUTPUT keeps
+  // streaming. On success format() reflects the new dimensions; on failure the
+  // caller treats the source as spent (drive() goes sticky on the error).
+  std::error_code reconfigure_capture_for_source_change() noexcept;
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
