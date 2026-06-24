@@ -240,6 +240,11 @@ if(TARGET PkgConfig::egl_scene_egl AND TARGET PkgConfig::egl_scene_gles)
       PkgConfig::egl_scene_egl
       PkgConfig::egl_scene_gles)
     target_include_directories(shadertoy_egl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    # Compile the drm::capture screenshot path only when blend2d (the capture
+    # backend) is present; libdrm-cxx carries the capture symbols.
+    if(TARGET blend2d::blend2d)
+      target_compile_definitions(shadertoy_egl PRIVATE SHADERTOY_EGL_CAPTURE=1)
+    endif()
   else()
     message(STATUS "shadertoy_egl: skipped (shadertoy-cxx not found)")
   endif()

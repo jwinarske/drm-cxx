@@ -38,6 +38,27 @@ cross:
       sysroot:
         dev_packages:
           - libdisplay-info-dev   # trixie ships >= 0.2.0
+      augment: &augment_libs
+        # blend2d (Zlib license) backs drm::capture's PNG screenshots. Build it
+        # static + no-JIT (skips the asmjit dependency) and PIC so it links into
+        # the shared libdrm-cxx -- no extra shared object to deploy.
+        - pkg: blend2d
+          min: "0"
+          url: https://github.com/blend2d/blend2d/archive/refs/heads/master.tar.gz
+          build: cmake
+          static: true
+          defines:
+            BLEND2D_STATIC: "ON"
+            BLEND2D_NO_JIT: "ON"
+            CMAKE_POSITION_INDEPENDENT_CODE: "ON"
+        # shadertoy-cxx is a meson-wrap dependency that shadertoy_egl links via
+        # find_package; cross-build + install it into the sysroot here so a plain
+        # `emb cross --build` picks up shadertoy_egl instead of skipping it.
+        - pkg: shadertoy-cxx
+          min: "0.3.0"
+          url: https://github.com/jwinarske/shadertoy-cxx/archive/refs/heads/main.tar.gz
+          build: cmake
+          static: true
       backends: &backends_examples
         examples:
           DRM_CXX_BUILD_EXAMPLES: 'ON'
@@ -50,4 +71,5 @@ cross:
       sysroot:
         dev_packages:
           - libdisplay-info-dev
+      augment: *augment_libs
       backends: *backends_examples

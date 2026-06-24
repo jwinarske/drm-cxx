@@ -336,10 +336,13 @@ if egl_scene_egl_dep.found() and egl_scene_gles_dep.found()
     required : false,
   )
   if shadertoy_dep.found()
+    # Compile the drm::capture screenshot path only when blend2d is present
+    # (capture is built on top of blend2d).
     executable('shadertoy_egl',
       'advanced/shadertoy_egl/main.cpp',
       dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep,
                       shadertoy_dep],
+      cpp_args : has_blend2d ? ['-DSHADERTOY_EGL_CAPTURE=1'] : [],
     )
   endif
 endif
