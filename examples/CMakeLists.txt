@@ -26,7 +26,8 @@ foreach(_path
     scene/layered_demo
     scene/video_grid
     scene/dual_display
-    scene/video_wall_multi)
+    scene/video_wall_multi
+    scene/v4l2_decode)
   get_filename_component(_ex ${_path} NAME)
   add_executable(${_ex} ${_path}/main.cpp)
   target_link_libraries(${_ex} PRIVATE drm-cxx::drm-cxx)
