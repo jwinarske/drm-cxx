@@ -24,19 +24,29 @@
 //
 // CLI:
 //
-//   shadertoy_egl [--cycle N] [--seconds N] [shader ...] [/dev/dri/cardN]
+//   shadertoy_egl [--cycle N] [--seconds N] [--out DIR] [--shot] [shader ...] \
+//                 [/dev/dri/cardN]
 //
 //   shader        One or more Shadertoy exports (.json, multi-pass) or bare
 //                 Image .frag/.glsl. With none, the installed bundled set is
 //                 used. Advance with SPACE/RIGHT (LEFT = prev) or a touch tap.
 //   --cycle N     Auto-advance every N seconds (default: off).
 //   --seconds N   Total runtime; exit after N seconds (default: until SIGINT).
+//   --out DIR     Directory for screenshots (default: current directory).
+//   --shot        Capture one PNG of the composited screen shortly after start;
+//                 the C key captures on demand at any time (drm::capture).
 //
 // Run from a free VT (it holds DRM master and modesets); sudo on a bare TTY,
 // or membership in the seat group on a seatd-managed system.
 //
 // Build gate: libEGL + glesv2 + shadertoy-cxx. The library never links these.
 
+// drm::capture (and its blend2d backend) is optional; the build defines
+// SHADERTOY_EGL_CAPTURE only when it is available.
+#if SHADERTOY_EGL_CAPTURE
+#include "capture/png.hpp"
+#include "capture/snapshot.hpp"
+#endif
 #include "common/open_output.hpp"
 
 #include <drm-cxx/detail/format.hpp>
@@ -54,6 +64,9 @@
 #include <EGL/eglext.h>
 #include <EGL/eglplatform.h>
 #include <algorithm>
+#if SHADERTOY_EGL_CAPTURE
+#include <array>  // make_capture_path
+#endif
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -61,6 +74,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#if SHADERTOY_EGL_CAPTURE
+#include <filesystem>  // create_directories
+#endif
 #include <linux/input-event-codes.h>  // BTN_LEFT
 #include <optional>
 #include <shadertoy/gl_renderer.hpp>
@@ -70,6 +86,9 @@
 #include <string>
 #include <string_view>
 #include <sys/poll.h>  // pollfd, POLLIN, poll
+#if SHADERTOY_EGL_CAPTURE
+#include <system_error>  // std::error_code
+#endif
 #include <utility>
 #include <variant>
 #include <vector>
@@ -87,7 +106,22 @@ struct Args {
   int seconds{0};        // total runtime; 0 = run until SIGINT
   int cycle_seconds{0};  // per-shader auto-advance; 0 = off
   std::vector<std::string> shaders;
+  std::string out_dir{"."};  // directory for captured PNGs
+  bool shot{false};          // capture one frame shortly after start, then continue
 };
+
+#if SHADERTOY_EGL_CAPTURE
+// "capture_YYYYMMDD_HHMMSS_NNN.png" -- the counter tie-breaks back-to-back grabs.
+[[nodiscard]] std::string make_capture_path(const std::string& dir, unsigned counter) {
+  const std::time_t tt = std::time(nullptr);
+  std::tm tm_buf{};
+  std::array<char, 24> stamp{};
+  if (localtime_r(&tt, &tm_buf) != nullptr) {
+    std::strftime(stamp.data(), stamp.size(), "%Y%m%d_%H%M%S", &tm_buf);
+  }
+  return drm::format("{}/capture_{}_{:03d}.png", dir, stamp.data(), counter);
+}
+#endif
 
 // Recognise a Shadertoy shader argument (.json export or bare .frag/.glsl).
 [[nodiscard]] bool is_shader_arg(std::string_view a) {
@@ -106,6 +140,10 @@ struct Args {
       a.seconds = std::atoi(argv[++i]);
     } else if (arg == "--cycle" && (i + 1) < argc) {
       a.cycle_seconds = std::atoi(argv[++i]);
+    } else if (arg == "--out" && (i + 1) < argc) {
+      a.out_dir = argv[++i];
+    } else if (arg == "--shot") {
+      a.shot = true;
     } else if (is_shader_arg(arg)) {
       a.shaders.emplace_back(argv[i]);
     } else {
@@ -410,6 +448,10 @@ int main(int argc, char* argv[]) {
   // Set to +1/-1 by input (key or touch tap) to step the playlist; applied in
   // the render loop where the GL context is current.
   int pending_step = 0;
+#if SHADERTOY_EGL_CAPTURE
+  bool pending_capture = false;  // C key / --shot: grab a PNG of the screen
+  unsigned capture_counter = 0;
+#endif
 
   // ── libinput mouse/touch → iMouse ──────────────────────────────
   MouseState mouse;
@@ -443,6 +485,11 @@ int main(int argc, char* argv[]) {
             case KEY_LEFT:
               pending_step = -1;
               break;
+#if SHADERTOY_EGL_CAPTURE
+            case KEY_C:
+              pending_capture = true;
+              break;
+#endif
             default:
               break;
           }
@@ -527,6 +574,31 @@ int main(int argc, char* argv[]) {
   const int input_fd = input_seat ? input_seat->fd() : -1;
   std::uint64_t frames = 0;
 
+#if SHADERTOY_EGL_CAPTURE
+  // Make sure the capture directory exists (matches capture_demo).
+  std::error_code mkdir_ec;
+  std::filesystem::create_directories(args.out_dir, mkdir_ec);
+  if (mkdir_ec) {
+    drm::println(stderr, "shadertoy_egl: cannot create --out dir '{}': {}", args.out_dir,
+                 mkdir_ec.message());
+  }
+
+  // Screenshot: read back the composited CRTC (all planes) and write a PNG.
+  auto do_capture = [&]() {
+    auto img = drm::capture::snapshot(device, out->crtc_id);
+    if (!img) {
+      drm::println(stderr, "shadertoy_egl: snapshot failed: {}", img.error().message());
+      return;
+    }
+    const std::string path = make_capture_path(args.out_dir, capture_counter++);
+    if (auto w = drm::capture::write_png(*img, path); !w) {
+      drm::println(stderr, "shadertoy_egl: write_png({}): {}", path, w.error().message());
+      return;
+    }
+    drm::println("shadertoy_egl: captured {} ({}x{})", path, img->width(), img->height());
+  };
+#endif
+
   while (g_stop == 0) {
     // Drain pending input (non-blocking); commit() below paces to vblank.
     if (input_fd >= 0) {
@@ -602,6 +674,17 @@ int main(int argc, char* argv[]) {
     }
     ++inputs.frame;
     ++frames;
+#if SHADERTOY_EGL_CAPTURE
+    // --shot grabs one frame a few in (once the shader has output); the C key
+    // grabs on demand. Capture after commit so the frame is actually on screen.
+    if (args.shot && frames == 3) {
+      pending_capture = true;
+    }
+    if (pending_capture) {
+      pending_capture = false;
+      do_capture();
+    }
+#endif
   }
   drm::println("shadertoy_egl: {} frames", frames);
 
