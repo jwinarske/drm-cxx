@@ -300,14 +300,22 @@ if(DRM_CXX_HAS_XCURSOR)
 
   # Same two public include roots as drm-cxx (see above): the build-tree
   # drm-cxx -> src symlink for <drm-cxx/...>, src/ for internal "detail/..."
-  # includes, and the install-tree dirs (incl. the vendored polyfills).
+  # includes, and the install-tree dirs.
   target_include_directories(cursor-load
     PUBLIC
       $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
       $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx>)
+
+  # The vendored span/expected polyfills only install (under drm-cxx/vendor)
+  # when the toolchain lacks the std versions. Reference that include dir in
+  # the install interface only then — otherwise CMake errors on an imported
+  # target pointing at a directory the std-path install never created.
+  if(NOT DRM_CXX_HAS_STD_EXPECTED OR NOT DRM_CXX_HAS_STD_SPAN)
+    target_include_directories(cursor-load PUBLIC
       $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/vendor>)
+  endif()
 
   target_compile_features(cursor-load PUBLIC cxx_std_17)
 
