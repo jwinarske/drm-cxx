@@ -364,6 +364,14 @@ jobs:
           test -f stage/lib/pkgconfig/drm-cxx.pc \
             || test -f stage/lib64/pkgconfig/drm-cxx.pc
           test -f stage/include/drm-cxx/core/device.hpp
+          # cursor-load ships its own archive, pkg-config file, and the two
+          # public headers a loader-only consumer needs.
+          test -f stage/lib/libdrm-cxx-cursor-load.a \
+            || test -f stage/lib64/libdrm-cxx-cursor-load.a
+          test -f stage/lib/pkgconfig/drm-cxx-cursor-load.pc \
+            || test -f stage/lib64/pkgconfig/drm-cxx-cursor-load.pc
+          test -f stage/include/drm-cxx/cursor/cursor.hpp
+          test -f stage/include/drm-cxx/cursor/theme.hpp
 
       - name: Consumer smoke test (find_package)
         env:
@@ -404,6 +412,72 @@ jobs:
           EOF
           cmake -S . -B build -G Ninja
           cmake --build build
+
+      # The whole point of cursor-load is that a consumer can resolve and
+      # rasterize XCursor themes without the display stack. The matrix above
+      # only proves it compiles inside the full library; this step proves the
+      # standalone-link guarantee — via both the CMake export target and the
+      # pkg-config file — by asserting the linked binary pulls in no
+      # drm/gbm/input/udev/xkb/EGL/vulkan/seat shared library.
+      - name: Consumer smoke test (cursor-load, no display deps)
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          set -euo pipefail
+          assert_no_display_deps() {
+            echo "== ldd $1 =="
+            ldd "$1" || true
+            if ldd "$1" | grep -Eiq 'libdrm|libgbm|libinput|libudev|libxkb|libEGL|libGLES|libvulkan|libseat'; then
+              echo "ERROR: $1 pulled in a display-stack library"; exit 1
+            fi
+            echo "OK: $1 links no display-stack libraries"
+          }
+
+          cat > cl.cpp <<'EOF'
+          #include "cursor/cursor.hpp"
+          #include "cursor/theme.hpp"
+          #include <cstdint>
+          #include <cstdio>
+          int main() {
+            (void)drm::cursor::Theme::discover();  // absent theme on a headless runner is fine
+            std::uint32_t px[4] = {0xFFFFFFFFu, 0u, 0u, 0xFFFFFFFFu};
+            auto cur = drm::cursor::Cursor::from_argb(
+                drm::span<const std::uint32_t>(px, 4), 2, 2, 0, 0);
+            if (!cur) { std::puts("from_argb failed"); return 1; }
+            std::printf("frames=%zu %ux%u\n", cur->frame_count(),
+                        cur->first().width, cur->first().height);
+            return 0;
+          }
+          EOF
+
+          # CMake export path: find_package -> drm-cxx::cursor-load.
+          mkdir -p cl-cmake && cp cl.cpp cl-cmake/
+          cat > cl-cmake/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.21)
+          project(cursor_load_consumer LANGUAGES CXX)
+          find_package(drm-cxx REQUIRED)
+          add_executable(cl cl.cpp)
+          target_link_libraries(cl PRIVATE drm-cxx::cursor-load)
+          EOF
+          cmake -S cl-cmake -B cl-cmake/build -G Ninja -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/stage"
+          cmake --build cl-cmake/build
+          ./cl-cmake/build/cl
+          assert_no_display_deps ./cl-cmake/build/cl
+
+          # pkg-config path: drm-cxx-cursor-load.pc, standalone. --define-prefix
+          # recomputes ${prefix} from the .pc location, since cmake bakes the
+          # configure-time prefix into the generated file.
+          pc_dir="$(dirname "$(find "$GITHUB_WORKSPACE/stage" -name drm-cxx-cursor-load.pc | head -n1)")"
+          export PKG_CONFIG_PATH="$pc_dir:${PKG_CONFIG_PATH:-}"
+          pkg-config --define-prefix --exists drm-cxx-cursor-load
+          "$CXX" -std=c++17 -Wall -Wextra \
+            $(pkg-config --define-prefix --cflags drm-cxx-cursor-load) \
+            cl.cpp \
+            $(pkg-config --define-prefix --libs drm-cxx-cursor-load) \
+            -o cl-pc
+          ./cl-pc
+          assert_no_display_deps ./cl-pc
 
   lint:
     runs-on: ubuntu-24.04

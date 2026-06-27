@@ -273,6 +273,75 @@ if(NOT DRM_CXX_HAS_STD_SPAN)
   target_link_libraries(drm-cxx PUBLIC $<BUILD_INTERFACE:tcb::span>)
 endif()
 
+# ---------------------------------------------------------------------------
+# drm-cxx::cursor-load — the XCursor loader (Theme + Cursor) WITHOUT the
+# display stack. Compiles only cursor/theme.cpp + cursor/cursor.cpp + the
+# vendored X11-free .xcursor loader; it links nothing beyond the standard
+# library (or the header-only span/expected polyfill under C++17). It
+# deliberately omits cursor/renderer.cpp and scene/cursor_source.cpp — the
+# parts that pull in libdrm/gbm/KMS — so a consumer can resolve a theme and
+# rasterize cursor frames into its own ARGB8888 buffers without dragging in
+# the whole DRM display dependency chain. Built alongside drm-cxx whenever
+# the cursor feature is on.
+# ---------------------------------------------------------------------------
+if(DRM_CXX_HAS_XCURSOR)
+  add_library(cursor-load STATIC
+    cursor/theme.cpp
+    cursor/cursor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xcursor-mini/xcursor_file.c)
+  add_library(drm-cxx::cursor-load ALIAS cursor-load)
+
+  set_target_properties(cursor-load PROPERTIES
+    # libdrm-cxx-cursor-load.a — namespaced so the installed archive can't
+    # collide with an unrelated libcursor-load, and matches the meson name.
+    OUTPUT_NAME               drm-cxx-cursor-load
+    POSITION_INDEPENDENT_CODE ON
+    EXPORT_NAME               cursor-load)
+
+  # Same two public include roots as drm-cxx (see above): the build-tree
+  # drm-cxx -> src symlink for <drm-cxx/...>, src/ for internal "detail/..."
+  # includes, and the install-tree dirs.
+  target_include_directories(cursor-load
+    PUBLIC
+      $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx>)
+
+  # The vendored span/expected polyfills only install (under drm-cxx/vendor)
+  # when the toolchain lacks the std versions. Reference that include dir in
+  # the install interface only then — otherwise CMake errors on an imported
+  # target pointing at a directory the std-path install never created.
+  if(NOT DRM_CXX_HAS_STD_EXPECTED OR NOT DRM_CXX_HAS_STD_SPAN)
+    target_include_directories(cursor-load PUBLIC
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/vendor>)
+  endif()
+
+  target_compile_features(cursor-load PUBLIC cxx_std_17)
+
+  target_compile_options(cursor-load PRIVATE
+    -Wall -Wextra -Wpedantic
+    -Wno-unused-parameter
+    -Wno-missing-field-initializers)
+
+  # Vendored loader header on the private -isystem path (matches drm-cxx).
+  target_include_directories(cursor-load SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/xcursor-mini)
+  if(DRM_CXX_HAS_XCURSOR_DELAY)
+    target_compile_definitions(cursor-load PRIVATE HAS_XCURSOR_DELAY)
+  endif()
+
+  # Header-only C++17 polyfills, build-interface only — the install tree
+  # ships vendored copies under drm-cxx/vendor (handled below), exactly as
+  # for drm-cxx, so downstream consumers need no polyfill packages.
+  if(NOT DRM_CXX_HAS_STD_EXPECTED)
+    target_link_libraries(cursor-load PUBLIC $<BUILD_INTERFACE:tl::expected>)
+  endif()
+  if(NOT DRM_CXX_HAS_STD_SPAN)
+    target_link_libraries(cursor-load PUBLIC $<BUILD_INTERFACE:tcb::span>)
+  endif()
+endif()
+
 if(NOT DRM_CXX_INSTALL)
   return()
 endif()
@@ -462,6 +531,25 @@ install(TARGETS drm-cxx
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# cursor-load rides the same export set so find_package(drm-cxx) yields
+# drm-cxx::cursor-load. Its public headers (cursor/theme.hpp, cursor/cursor.hpp)
+# already install under the DRM_CXX_HAS_XCURSOR block above; the vendored
+# span/expected polyfills install under drm-cxx/vendor below.
+if(DRM_CXX_HAS_XCURSOR)
+  install(TARGETS cursor-load
+    EXPORT  drm-cxx-targets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+  # Standalone pkg-config so non-CMake consumers can link the loader alone
+  # without pulling drm-cxx.pc's drm/gbm/input Requires.
+  configure_file(
+    "${PROJECT_SOURCE_DIR}/cmake/drm-cxx-cursor-load.pc.in"
+    "${PROJECT_BINARY_DIR}/drm-cxx-cursor-load.pc"
+    @ONLY)
+  install(FILES "${PROJECT_BINARY_DIR}/drm-cxx-cursor-load.pc"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+endif()
 
 install(EXPORT drm-cxx-targets
   FILE        drm-cxx-targets.cmake
