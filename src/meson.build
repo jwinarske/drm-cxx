@@ -238,6 +238,36 @@ drm_cxx_dep = declare_dependency(
   compile_args : streams_cpp_args + vulkan_cpp_args,
 )
 
+# drm-cxx::cursor-load — the XCursor loader (Theme + Cursor) WITHOUT the
+# display stack. Only cursor/theme.cpp + cursor/cursor.cpp + the vendored
+# X11-free .xcursor loader, depending on nothing but the header-only
+# span/expected polyfill. It omits cursor/renderer.cpp and
+# scene/cursor_source.cpp (the libdrm/gbm/KMS parts), so a consumer can
+# resolve themes and rasterize cursor frames into its own ARGB8888 buffers
+# without linking the DRM display chain. Built whenever the cursor feature
+# is on. Consume it from a meson subproject via the `cursor_load_dep`
+# variable, or — once installed — via pkg-config `drm-cxx-cursor-load`.
+if has_xcursor
+  cursor_load_lib = static_library('drm-cxx-cursor-load',
+    files(
+      'cursor/theme.cpp',
+      'cursor/cursor.cpp',
+      '../third_party/xcursor-mini/xcursor_file.c',
+    ),
+    dependencies : [tl_expected_dep, tcb_span_dep],
+    include_directories : [drm_cxx_inc],
+    cpp_args : cursor_cpp_args,
+    install : true,
+  )
+
+  cursor_load_dep = declare_dependency(
+    link_with : cursor_load_lib,
+    dependencies : [tl_expected_dep, tcb_span_dep],
+    include_directories : [drm_cxx_inc],
+  )
+  meson.override_dependency('drm-cxx-cursor-load', cursor_load_dep)
+endif
+
 # Install public headers
 install_headers(
   'buffer_mapping.hpp',
@@ -461,3 +491,17 @@ pkg.generate(drm_cxx_lib,
   description : 'C++17 DRM/KMS library',
   version : meson.project_version(),
 )
+
+# Standalone .pc for the cursor loader so non-meson consumers can link it
+# without drm-cxx's drm/gbm/input Requires (the polyfills are header-only).
+if has_xcursor
+  pkg.generate(cursor_load_lib,
+    name : 'drm-cxx-cursor-load',
+    description : 'drm-cxx XCursor loader (Theme + Cursor), no display stack',
+    version : meson.project_version(),
+    # The installed cursor headers #include "detail/..." and the vendored
+    # span/expected polyfill (<tl/...>, <tcb/...>); a pkg-config-only
+    # consumer needs those roots on its include path.
+    subdirs : ['.', 'drm-cxx', 'drm-cxx/vendor'],
+  )
+endif
