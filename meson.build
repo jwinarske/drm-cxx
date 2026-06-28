@@ -58,22 +58,34 @@ di_dep = dependency('libdisplay-info', version : '>=0.2.0',
 # versions when the compiler provides them (__cpp_lib_expected /
 # __cpp_lib_span are set), otherwise they fall back to these subprojects
 # — so under cpp_std=c++17 they activate, under c++23 they are dead code.
+# Prefer a system install; otherwise fall back to the vendored, version-pinned
+# git submodule (third_party/{tl-expected,tcb-span}). Header-only, so no fetch
+# or build step is needed — just an -isystem include dir.
 tl_expected_dep = dependency('tl-expected', required : false)
 if not tl_expected_dep.found()
-  tl_expected_proj = subproject('tl-expected')
-  tl_expected_dep = tl_expected_proj.get_variable('tl_expected_dep')
+  tl_expected_dep = declare_dependency(
+    include_directories : include_directories(
+      'third_party/tl-expected/include', is_system : true),
+  )
 endif
 
 tcb_span_dep = dependency('tcb-span', required : false)
 if not tcb_span_dep.found()
-  tcb_span_proj = subproject('tcb-span')
-  tcb_span_dep = tcb_span_proj.get_variable('tcb_span_dep')
+  tcb_span_dep = declare_dependency(
+    include_directories : include_directories(
+      'third_party/tcb-span/include', is_system : true),
+  )
 endif
 
 # {fmt} backs the drm-cxx/detail/format.hpp adapter when the toolchain lacks
 # std::print / std::format (i.e. anything below C++23 / libstdc++ 14). Under
-# cpp_std=c++17 this path is always taken; under c++23 on libstdc++ 14+
-# the adapter aliases std::* directly and fmt is unused.
+# cpp_std=c++17 this path is always taken; under c++23 on libstdc++ 14+ the
+# adapter aliases std::* directly and fmt is unused. We deliberately NEVER probe
+# for a system {fmt}: a system copy older than the fmt::println the adapter uses
+# would otherwise be picked up and break the build. Instead we always use our
+# vendored header-only git submodule (third_party/fmt) — no fetch, no compiled
+# library. A parent meson project that must supply its own fmt can override the
+# dependency before configuring drm-cxx.
 has_std_print = cpp.compiles(
   '#include <print>\nint main(){ std::println("{}", 1); }',
   name : 'std::print / std::println available',
@@ -81,32 +93,11 @@ has_std_print = cpp.compiles(
 if has_std_print
   fmt_dep = dependency('', required : false)
 else
-  fmt_dep = dependency('fmt', required : false)
-  if not fmt_dep.found()
-    # fmt ships only a CMakeLists.txt, so wrap it as a CMake subproject.
-    cmake = import('cmake')
-    fmt_opts = cmake.subproject_options()
-    fmt_opts.add_cmake_defines({
-      'FMT_TEST'                 : 'OFF',
-      'FMT_DOC'                  : 'OFF',
-      'CMAKE_POSITION_INDEPENDENT_CODE' : 'ON',
-    })
-    fmt_opts.set_override_option('werror', 'false')
-    fmt_opts.set_override_option('warning_level', '0')
-    fmt_proj = cmake.subproject('fmt', options : fmt_opts)
-    # Wrap the subproject's static fmt target with link_whole so every
-    # archive member lands in the final library. Under clang + LTO,
-    # archive-based linking can fail to pull in members referenced
-    # only from late-instantiated templates — e.g. fmt::vprintln from
-    # a fmt::println<std::string>(FILE*, ...) call site that inlines
-    # after archive resolution has finished — so the final link ends
-    # with an undefined-reference error even though the symbol is in
-    # libfmt.a. link_whole unconditionally pulls every member.
-    fmt_dep = declare_dependency(
-      link_whole : fmt_proj.target('fmt'),
-      include_directories : include_directories('subprojects/fmt/include'),
-    )
-  endif
+  fmt_dep = declare_dependency(
+    include_directories : include_directories(
+      'third_party/fmt/include', is_system : true),
+    compile_args : ['-DFMT_HEADER_ONLY'],
+  )
 endif
 
 # Vulkan headers come from the vendored, version-pinned submodule
@@ -181,14 +172,17 @@ endif
 # toml++ backs drm::csd theme loading. Header-only, C++17, and only
 # pulled when the Blend2D gate resolves on. Prefer a system install
 # (Fedora ships tomlplusplus-devel, Arch ships tomlplusplus); fall back
-# to the vendored subproject. Treated as -isystem so the header pile
-# doesn't leak warnings into our -Werror build.
+# to the vendored, version-pinned git submodule (third_party/tomlplusplus).
+# Treated as -isystem so the header pile doesn't leak warnings into our
+# -Werror build. No fetch step — the submodule is checked out in tree.
 if has_blend2d
   tomlplusplus_dep = dependency('tomlplusplus', required : false,
                                 include_type : 'system')
   if not tomlplusplus_dep.found()
-    tomlplusplus_proj = subproject('tomlplusplus')
-    tomlplusplus_dep = tomlplusplus_proj.get_variable('tomlplusplus_dep')
+    tomlplusplus_dep = declare_dependency(
+      include_directories : include_directories(
+        'third_party/tomlplusplus/include', is_system : true),
+    )
   endif
 else
   tomlplusplus_dep = disabler()

@@ -4,18 +4,24 @@
 # signage_player — four-layer LayerScene demo driven by a toml playlist.
 # Included from examples/CMakeLists.txt.
 
-include(FetchContent)
-
-# Prefer system / CMake-installed tomlplusplus; otherwise fetch upstream.
-# Header-only, so no build configuration to carry through.
-find_package(tomlplusplus CONFIG QUIET)
-if(NOT tomlplusplus_FOUND AND NOT TARGET tomlplusplus::tomlplusplus)
-  FetchContent_Declare(tomlplusplus
-    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
-    GIT_TAG        v3.4.0
-    GIT_SHALLOW    TRUE
-    SOURCE_DIR     "${PROJECT_SOURCE_DIR}/subprojects/tomlplusplus")
-  FetchContent_MakeAvailable(tomlplusplus)
+# toml++ backs the playlist parser regardless of the blend2d gate. The root
+# CMakeLists already exposes tomlplusplus::tomlplusplus when blend2d is on;
+# otherwise resolve it here, preferring a system install and falling back to
+# the vendored git submodule (third_party/tomlplusplus). Header-only — no
+# fetch.
+if(NOT TARGET tomlplusplus::tomlplusplus)
+  find_package(tomlplusplus CONFIG QUIET)
+endif()
+if(NOT TARGET tomlplusplus::tomlplusplus)
+  set(_tpp_inc "${PROJECT_SOURCE_DIR}/third_party/tomlplusplus/include")
+  if(NOT EXISTS "${_tpp_inc}/toml++/toml.hpp")
+    message(FATAL_ERROR
+      "drm-cxx: third_party/tomlplusplus is missing — the git submodule is not "
+      "checked out. Run: git submodule update --init --recursive")
+  endif()
+  add_library(drm-cxx-signage-tomlplusplus INTERFACE)
+  target_include_directories(drm-cxx-signage-tomlplusplus SYSTEM INTERFACE "${_tpp_inc}")
+  add_library(tomlplusplus::tomlplusplus ALIAS drm-cxx-signage-tomlplusplus)
 endif()
 
 # tomlplusplus emits -Wweak-vtables and similar noise the library core

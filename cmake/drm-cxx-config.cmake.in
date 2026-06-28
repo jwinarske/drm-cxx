@@ -17,12 +17,15 @@ if(DRM_CXX_VULKAN)
 endif()
 
 set(DRM_CXX_HAS_STD_PRINT @DRM_CXX_HAS_STD_PRINT@)
-if(NOT DRM_CXX_HAS_STD_PRINT)
-  # drm-cxx may have linked fmt via {find_package(fmt CONFIG),
-  # pkg_check_modules, FetchContent}, and the exported targets file
-  # therefore references either fmt::fmt or PkgConfig::fmt. Try both
-  # providers and then bridge the two names so whichever form is
-  # referenced resolves.
+# When fmt was vendored from drm-cxx's own submodule (header-only), its headers
+# ship under drm-cxx/vendor and FMT_HEADER_ONLY is baked into the exported
+# drm-cxx usage requirements — so the consumer needs no external fmt at all.
+set(DRM_CXX_FMT_VENDORED @DRM_CXX_FMT_VENDORED@)
+if(NOT DRM_CXX_HAS_STD_PRINT AND NOT DRM_CXX_FMT_VENDORED)
+  # drm-cxx may have linked fmt via find_package(fmt CONFIG) or
+  # pkg_check_modules, and the exported targets file therefore references
+  # either fmt::fmt or PkgConfig::fmt. Try both providers and then bridge
+  # the two names so whichever form is referenced resolves.
   find_package(fmt CONFIG QUIET)
   if(NOT TARGET fmt::fmt)
     pkg_check_modules(fmt QUIET IMPORTED_TARGET fmt)
