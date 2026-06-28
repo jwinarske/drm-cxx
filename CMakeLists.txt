@@ -326,10 +326,17 @@ else()
 endif()
 
 # {fmt} backs the drm-cxx/detail/format.hpp adapter when the toolchain lacks
-# std::print / std::format. Probe the compiler with the currently selected
-# C++ standard; on failure, pull fmt via pkg-config. Under C++17 the probe
-# fails and {fmt} is used; under C++23 the adapter aliases std::* directly
-# and fmt is unused.
+# std::print / std::format. Probe the compiler with the currently selected C++
+# standard. Under C++17 the probe fails and {fmt} is needed; under C++23 the
+# adapter aliases std::* directly and fmt is unused.
+#
+# Resolution order: an already-present fmt::fmt (e.g. a parent project that
+# pulled drm-cxx in via add_subdirectory and brought its own fmt) wins first;
+# then a system {fmt} >= 10 (the release that added fmt::println, which the
+# adapter uses); and only if neither exists do we fall back to the vendored,
+# header-only git submodule (third_party/fmt). The submodule branch is guarded
+# on `NOT TARGET fmt::fmt` so it can never collide with a parent's fmt target.
+# No FetchContent, no compiled fmt library.
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -std=c++${CMAKE_CXX_STANDARD}")
 check_cxx_source_compiles([=[
@@ -338,56 +345,55 @@ check_cxx_source_compiles([=[
 ]=] DRM_CXX_HAS_STD_PRINT)
 unset(CMAKE_REQUIRED_FLAGS)
 if(NOT DRM_CXX_HAS_STD_PRINT)
-  pkg_check_modules(fmt IMPORTED_TARGET fmt)
-  if(NOT fmt_FOUND)
-    find_package(fmt CONFIG QUIET)
-  endif()
-  if(NOT fmt_FOUND AND NOT TARGET fmt::fmt)
-    include(FetchContent)
-    set(FMT_TEST  OFF CACHE BOOL "" FORCE)
-    set(FMT_DOC   OFF CACHE BOOL "" FORCE)
-    set(FMT_INSTALL ON CACHE BOOL "" FORCE)
-    FetchContent_Declare(fmt
-      GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-      GIT_TAG        11.0.2
-      GIT_SHALLOW    TRUE
-      SOURCE_DIR     "${PROJECT_SOURCE_DIR}/subprojects/fmt")
-    FetchContent_MakeAvailable(fmt)
-  endif()
-
-  # Promote whichever fmt target we ended up with to system-include so
-  # its own -Werror-visible diagnostics (readability-named-parameter,
-  # missing-std-forward in fmt/format.h) don't hit consumers running
-  # clang-tidy under the project's strict config. Mirrors the libseat
-  # and libxcursor treatment in src/CMakeLists.txt. Meson already does
-  # this automatically for its subproject wraps, which is why CI tidy
-  # is clean there; this brings the CMake build to parity.
-  #
-  # fmt::fmt from FetchContent is an ALIAS to the `fmt` target — we
-  # resolve the alias before setting properties, since set_property
-  # refuses to touch aliases directly.
-  foreach(_fmt_target PkgConfig::fmt fmt::fmt)
-    if(TARGET ${_fmt_target})
-      get_target_property(_fmt_alias ${_fmt_target} ALIASED_TARGET)
-      if(_fmt_alias)
-        set(_fmt_real ${_fmt_alias})
-      else()
-        set(_fmt_real ${_fmt_target})
-      endif()
-      get_target_property(_fmt_incs ${_fmt_real} INTERFACE_INCLUDE_DIRECTORIES)
-      if(_fmt_incs)
-        set_property(TARGET ${_fmt_real}
-                     APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_fmt_incs})
-      endif()
+  # Either a parent project already provides fmt::fmt (e.g. it pulled drm-cxx in
+  # via add_subdirectory with its own fmt), or we use our vendored header-only
+  # submodule. We deliberately NEVER probe for a system {fmt}: a system copy
+  # older than the fmt::println the adapter uses would otherwise be picked up
+  # and break the build. Guarded on `NOT TARGET fmt::fmt` so we always defer to
+  # a parent's fmt and never collide with it.
+  if(NOT TARGET fmt::fmt)
+    set(_fmt_inc "${PROJECT_SOURCE_DIR}/third_party/fmt/include")
+    if(NOT EXISTS "${_fmt_inc}/fmt/format.h")
+      message(FATAL_ERROR
+        "drm-cxx: no fmt::fmt target was provided and the vendored fallback "
+        "third_party/fmt is missing — the git submodule is not checked out. "
+        "Run: git submodule update --init --recursive (or build with C++23).")
     endif()
-  endforeach()
+    # Header-only INTERFACE target. FMT_HEADER_ONLY + the vendored include flow
+    # to the drm-cxx library (and, via the vendored headers + public define in
+    # src/CMakeLists.txt, to installed consumers). drm-cxx-fmt is our own name
+    # so it never shadows a parent's fmt; we alias it to fmt::fmt for uniform
+    # consumption.
+    add_library(drm-cxx-fmt INTERFACE)
+    target_compile_definitions(drm-cxx-fmt INTERFACE FMT_HEADER_ONLY)
+    target_include_directories(drm-cxx-fmt SYSTEM INTERFACE
+      $<BUILD_INTERFACE:${_fmt_inc}>)
+    add_library(fmt::fmt ALIAS drm-cxx-fmt)
+    set(DRM_CXX_FMT_VENDORED 1)
+  else()
+    # A parent-provided fmt::fmt: promote its includes to -isystem so its own
+    # -Werror-visible diagnostics don't hit consumers running clang-tidy under
+    # the project's strict config. ALIAS targets refuse set_property, so resolve
+    # the aliased real target first.
+    get_target_property(_fmt_alias fmt::fmt ALIASED_TARGET)
+    if(_fmt_alias)
+      set(_fmt_real ${_fmt_alias})
+    else()
+      set(_fmt_real fmt::fmt)
+    endif()
+    get_target_property(_fmt_incs ${_fmt_real} INTERFACE_INCLUDE_DIRECTORIES)
+    if(_fmt_incs)
+      set_property(TARGET ${_fmt_real}
+                   APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${_fmt_incs})
+    endif()
+  endif()
 endif()
 
 # C++17 polyfills for std::expected (C++23) and std::span (C++20). The
 # drm-cxx/detail/{expected,span}.hpp adapter headers alias the std::*
 # versions when the compiler provides them; otherwise they fall back to
-# tl::expected and tcb::span, pulled here via find_package with a
-# FetchContent fallback (mirrors the meson subproject wraps).
+# tl::expected and tcb::span, preferring a system install and otherwise
+# using the vendored, version-pinned git submodules in third_party/.
 set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -std=c++${CMAKE_CXX_STANDARD}")
 check_cxx_source_compiles([=[
   #include <expected>
@@ -400,24 +406,16 @@ check_cxx_source_compiles([=[
 unset(CMAKE_REQUIRED_FLAGS)
 
 # Both polyfill libs are header-only; prefer a system-installed target,
-# otherwise download their source tree (reusing subprojects/ if already
-# populated by `meson subprojects download`) and wrap the include dir in
-# a local INTERFACE target. We deliberately avoid add_subdirectory on the
-# upstream CMakeLists — their install/test rules would leak into this
-# project's export set.
-function(_drm_cxx_fetch_header_only name url tag relpath)
-  set(_dir "${PROJECT_SOURCE_DIR}/subprojects/${name}")
+# otherwise use the vendored git submodule's include dir wrapped in a local
+# INTERFACE target. No fetch — the submodules are checked out in tree. We
+# deliberately avoid add_subdirectory on the upstream CMakeLists; their
+# install/test rules would leak into this project's export set.
+function(_drm_cxx_vendor_header_only name relpath)
+  set(_dir "${PROJECT_SOURCE_DIR}/third_party/${name}")
   if(NOT EXISTS "${_dir}/${relpath}")
-    message(STATUS "drm-cxx: cloning ${name} (${tag}) into ${_dir}")
-    execute_process(
-      COMMAND ${CMAKE_COMMAND} -E make_directory "${PROJECT_SOURCE_DIR}/subprojects"
-      RESULT_VARIABLE _rc)
-    execute_process(
-      COMMAND git clone --depth=1 --branch ${tag} ${url} "${_dir}"
-      RESULT_VARIABLE _rc)
-    if(NOT _rc EQUAL 0)
-      message(FATAL_ERROR "drm-cxx: failed to clone ${name} from ${url}")
-    endif()
+    message(FATAL_ERROR
+      "drm-cxx: ${_dir}/${relpath} is missing — the git submodule is not "
+      "checked out. Run: git submodule update --init --recursive")
   endif()
   set(_drm_cxx_${name}_dir "${_dir}" PARENT_SCOPE)
 endfunction()
@@ -425,9 +423,7 @@ endfunction()
 if(NOT DRM_CXX_HAS_STD_EXPECTED AND NOT TARGET tl::expected)
   find_package(tl-expected CONFIG QUIET)
   if(NOT tl-expected_FOUND)
-    _drm_cxx_fetch_header_only(tl-expected
-      https://github.com/TartanLlama/expected.git v1.1.0
-      include/tl/expected.hpp)
+    _drm_cxx_vendor_header_only(tl-expected include/tl/expected.hpp)
     add_library(drm-cxx-tl-expected INTERFACE)
     target_include_directories(drm-cxx-tl-expected SYSTEM INTERFACE
       $<BUILD_INTERFACE:${_drm_cxx_tl-expected_dir}/include>)
@@ -438,23 +434,10 @@ endif()
 if(NOT DRM_CXX_HAS_STD_SPAN AND NOT TARGET tcb::span)
   find_package(tcb-span CONFIG QUIET)
   if(NOT tcb-span_FOUND)
-    # tcb/span uses a commit rev; git clone --branch accepts tags but not
-    # bare SHAs, so do a full clone when this path is taken at all.
-    set(_tcb_dir "${PROJECT_SOURCE_DIR}/subprojects/tcb-span")
-    if(NOT EXISTS "${_tcb_dir}/include/tcb/span.hpp")
-      execute_process(
-        COMMAND git clone https://github.com/tcbrindle/span.git "${_tcb_dir}"
-        RESULT_VARIABLE _rc)
-      if(NOT _rc EQUAL 0)
-        message(FATAL_ERROR "drm-cxx: failed to clone tcb-span")
-      endif()
-      execute_process(
-        COMMAND git -C "${_tcb_dir}" checkout --detach
-                836dc6a0efd9849cb194e88e4aa2387436bb079b)
-    endif()
+    _drm_cxx_vendor_header_only(tcb-span include/tcb/span.hpp)
     add_library(drm-cxx-tcb-span INTERFACE)
     target_include_directories(drm-cxx-tcb-span SYSTEM INTERFACE
-      $<BUILD_INTERFACE:${_tcb_dir}/include>)
+      $<BUILD_INTERFACE:${_drm_cxx_tcb-span_dir}/include>)
     add_library(tcb::span ALIAS drm-cxx-tcb-span)
   endif()
 endif()
@@ -462,15 +445,13 @@ endif()
 # toml++ backs drm::csd theme loading. Header-only, C++17, only pulled
 # when the Blend2D gate resolves on. Prefer a system install
 # (Fedora tomlplusplus-devel, Arch tomlplusplus); fall back to the
-# vendored subproject the meson wrap also points at. INTERFACE target
+# vendored git submodule (third_party/tomlplusplus). INTERFACE target
 # with SYSTEM include dirs so toml++'s own warnings stay quiet under
 # -Werror clang-tidy (same treatment as tl-expected / tcb-span above).
 if(DRM_CXX_HAS_BLEND2D AND NOT TARGET tomlplusplus::tomlplusplus)
   find_package(tomlplusplus CONFIG QUIET)
   if(NOT tomlplusplus_FOUND)
-    _drm_cxx_fetch_header_only(tomlplusplus
-      https://github.com/marzer/tomlplusplus.git v3.4.0
-      include/toml++/toml.hpp)
+    _drm_cxx_vendor_header_only(tomlplusplus include/toml++/toml.hpp)
     add_library(drm-cxx-tomlplusplus INTERFACE)
     target_include_directories(drm-cxx-tomlplusplus SYSTEM INTERFACE
       $<BUILD_INTERFACE:${_drm_cxx_tomlplusplus_dir}/include>)

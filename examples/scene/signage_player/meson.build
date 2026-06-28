@@ -3,7 +3,16 @@
 #
 # signage_player — four-layer LayerScene demo driven by a toml playlist.
 
-tomlplusplus_dep = dependency('tomlplusplus', required : true)
+# toml++ backs the playlist parser regardless of the blend2d gate. Prefer a
+# system install; otherwise fall back to the vendored git submodule
+# (third_party/tomlplusplus). Header-only — no fetch.
+tomlplusplus_dep = dependency('tomlplusplus', required : false, include_type : 'system')
+if not tomlplusplus_dep.found()
+  tomlplusplus_dep = declare_dependency(
+    include_directories : include_directories(
+      '../../../third_party/tomlplusplus/include', is_system : true),
+  )
+endif
 
 # Playlist parser carved out so test binaries can link against it
 # without rebuilding the toml++ wiring.
