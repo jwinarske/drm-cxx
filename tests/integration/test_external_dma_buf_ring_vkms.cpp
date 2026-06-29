@@ -16,6 +16,7 @@
 
 #include <drm-cxx/display/scanout_target.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>  // DamageRect
 #include <drm-cxx/scene/external_dma_buf_ring.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
 #include <drm-cxx/sync/fence.hpp>
@@ -221,6 +222,76 @@ TEST(ExternalDmaBufRingVkms, RotatesSlotsAndHoldsIdle) {
   EXPECT_EQ(released[1], 1U);
 
   r.release(std::move(*a2));
+}
+
+// submit(slot, fence, damage) round-trips the dirty-region list onto
+// AcquiredBuffer::damage for the scene's FB_DAMAGE_CLIPS path, and honors the
+// two contract rules: replace-not-union on re-submit, and over-cap -> whole-frame
+// (empty). The idle hold-last-frame re-hand reports whole-frame (empty) too.
+TEST(ExternalDmaBufRingVkms, CarriesDamageThroughAcquire) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+
+  std::vector<std::array<drm::scene::ExternalPlaneInfo, 1>> storage;
+  auto slots = slots_of(*probe, storage);
+  auto ring = drm::scene::ExternalDmaBufRing::create(
+      probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+      drm::span<const drm::scene::ExternalSlotDesc>(slots.data(), slots.size()));
+  ASSERT_TRUE(ring.has_value()) << ring.error().message();
+  auto& r = **ring;
+
+  // (a) submit with damage -> acquire emits exactly those rects.
+  const std::array<drm::scene::DamageRect, 2> rects{drm::scene::DamageRect{1, 2, 3, 4},
+                                                    drm::scene::DamageRect{10, 20, 30, 40}};
+  r.submit(0, std::nullopt, drm::span<const drm::scene::DamageRect>(rects.data(), rects.size()));
+  auto a0 = r.acquire();
+  ASSERT_TRUE(a0.has_value()) << a0.error().message();
+  ASSERT_EQ(a0->damage.size(), 2U);
+  EXPECT_EQ(a0->damage[0].x, 1);
+  EXPECT_EQ(a0->damage[0].y, 2);
+  EXPECT_EQ(a0->damage[0].w, 3U);
+  EXPECT_EQ(a0->damage[0].h, 4U);
+  EXPECT_EQ(a0->damage[1].x, 10);
+  EXPECT_EQ(a0->damage[1].h, 40U);
+
+  // (b) idle hold (no fresh submit) -> whole-frame (empty), not the last list.
+  auto hold = r.acquire();
+  ASSERT_TRUE(hold.has_value()) << hold.error().message();
+  EXPECT_TRUE(hold->damage.empty());
+  r.release(std::move(*hold));
+
+  // (c) re-submit replaces, not unions: a single new rect wins outright.
+  const std::array<drm::scene::DamageRect, 1> one{drm::scene::DamageRect{5, 6, 7, 8}};
+  r.submit(1, std::nullopt, drm::span<const drm::scene::DamageRect>(one.data(), one.size()));
+  auto a1 = r.acquire();
+  ASSERT_TRUE(a1.has_value()) << a1.error().message();
+  ASSERT_EQ(a1->damage.size(), 1U);
+  EXPECT_EQ(a1->damage[0].x, 5);
+  EXPECT_EQ(a1->damage[0].w, 7U);
+  r.release(std::move(*a0));
+  r.release(std::move(*a1));
+
+  // (d) submit with no damage -> whole-frame (empty).
+  r.submit(0);
+  auto a2 = r.acquire();
+  ASSERT_TRUE(a2.has_value()) << a2.error().message();
+  EXPECT_TRUE(a2->damage.empty());
+
+  // (e) over-cap (>16 rects) -> degrade to whole-frame (empty), never truncate.
+  std::array<drm::scene::DamageRect, 17> too_many{};
+  std::int32_t x = 0;
+  for (auto& d : too_many) {
+    d = drm::scene::DamageRect{x++, 0, 1, 1};
+  }
+  r.submit(1, std::nullopt,
+           drm::span<const drm::scene::DamageRect>(too_many.data(), too_many.size()));
+  auto a3 = r.acquire();
+  ASSERT_TRUE(a3.has_value()) << a3.error().message();
+  EXPECT_TRUE(a3->damage.empty());
+  r.release(std::move(*a2));
+  r.release(std::move(*a3));
 }
 
 // Fault isolation: a deadline-configured ring still advances normally when a submit

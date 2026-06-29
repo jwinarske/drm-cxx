@@ -17,6 +17,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -210,8 +211,8 @@ ExternalDmaBufRing::~ExternalDmaBufRing() {
   // not a destruction signal — the producer owns its buffers and is going away.
 }
 
-void ExternalDmaBufRing::submit(std::size_t slot,
-                                std::optional<drm::sync::SyncFence> acquire) noexcept {
+void ExternalDmaBufRing::submit(std::size_t slot, std::optional<drm::sync::SyncFence> acquire,
+                                drm::span<const DamageRect> damage) noexcept {
   if (slot >= slots_.size()) {
     debug_step("submit() slot out of range — ignored");
     return;
@@ -219,16 +220,33 @@ void ExternalDmaBufRing::submit(std::size_t slot,
   const std::scoped_lock lock(mu_);
   pending_slot_ = slot;
   pending_fence_ = std::move(acquire);
+  // Replace, not union (see submit() contract). Over-cap degrades to whole-frame
+  // (count 0) rather than truncating — a short list under-reports the dirty area.
+  if (damage.size() > k_max_damage) {
+    debug_step("submit() damage over cap — degrading to whole-frame");
+    pending_damage_count_ = 0;
+  } else {
+    pending_damage_count_ = damage.size();
+    std::copy_n(damage.begin(), damage.size(), pending_damage_.begin());
+  }
 }
 
 drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufRing::acquire() {
   std::optional<std::size_t> slot;
   std::optional<drm::sync::SyncFence> fence;
+  std::vector<DamageRect> damage;
   {
     const std::scoped_lock lock(mu_);
     if (pending_slot_.has_value()) {
       slot = std::exchange(pending_slot_, std::nullopt);
       fence = std::exchange(pending_fence_, std::nullopt);
+      // Drain the damage store atomically with the slot. count 0 (whole-frame)
+      // leaves `damage` empty. The allocation lives here, not in noexcept submit().
+      if (pending_damage_count_ > 0) {
+        damage.assign(pending_damage_.begin(),
+                      pending_damage_.begin() + static_cast<std::ptrdiff_t>(pending_damage_count_));
+        pending_damage_count_ = 0;
+      }
     }
   }
 
@@ -273,6 +291,7 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufRing::acquire() {
     acq.fb_id = slots_.at(*slot).fb_id;
     acq.opaque = token_to_opaque(scanning_token_);
     acq.acquire_fence = std::move(fence);
+    acq.damage = std::move(damage);  // empty = whole-frame
     return acq;
   }
 
