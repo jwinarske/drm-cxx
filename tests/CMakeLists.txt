@@ -91,6 +91,16 @@ target_link_libraries(test_dma_buf_source_cache_vkms PRIVATE
   drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
 gtest_discover_tests(test_dma_buf_source_cache_vkms)
 
+add_executable(test_external_dma_buf_ring_vkms integration/test_external_dma_buf_ring_vkms.cpp)
+target_link_libraries(test_external_dma_buf_ring_vkms PRIVATE
+  drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
+gtest_discover_tests(test_external_dma_buf_ring_vkms)
+
+add_executable(test_external_dma_buf_ring_scene_vkms integration/test_external_dma_buf_ring_scene_vkms.cpp)
+target_link_libraries(test_external_dma_buf_ring_scene_vkms PRIVATE
+  drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
+gtest_discover_tests(test_external_dma_buf_ring_scene_vkms)
+
 # DumbScanoutSink page-flip integration test (gtest) — needs vkms; skips if none.
 add_executable(test_dumb_scanout_sink_vkms integration/test_dumb_scanout_sink_vkms.cpp)
 target_link_libraries(test_dumb_scanout_sink_vkms PRIVATE
@@ -295,6 +305,20 @@ target_link_libraries(test_external_dma_buf_source PRIVATE
   GTest::gtest
   GTest::gtest_main)
 gtest_discover_tests(test_external_dma_buf_source)
+
+add_executable(test_external_dma_buf_ring unit/test_external_dma_buf_ring.cpp)
+target_link_libraries(test_external_dma_buf_ring PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_external_dma_buf_ring)
+
+add_executable(test_commit_report unit/test_commit_report.cpp)
+target_link_libraries(test_commit_report PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_commit_report)
 
 # GstAppsinkSource validation test — exercises the same argument
 # validation in both build modes. Real build also needs gstreamer +

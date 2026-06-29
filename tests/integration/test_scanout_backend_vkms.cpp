@@ -11,6 +11,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/present/gbm_producer.hpp>
 #include <drm-cxx/present/scanout_backend.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <xf86drm.h>
 
@@ -104,4 +105,34 @@ TEST(ScanoutBackendVkms, IdleSuppression) {
 
   EXPECT_EQ((*backend)->frames_committed(), 2U);
   EXPECT_EQ((*backend)->frames_skipped(), 1U);
+}
+
+// A non-null out_fence is filled in with this commit's OUT_FENCE on a CRTC that
+// advertises OUT_FENCE_PTR (vkms does, for flips). Guards the public-caller path
+// in do_commit: with no internal release-fence consumer (GbmScanoutProducer is a
+// plain source) the captured fence is moved straight into *out_fence.
+TEST(ScanoutBackendVkms, PresentDeliversOutFence) {
+  const auto path = find_vkms_node();
+  if (!path.has_value()) {
+    GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
+  }
+
+  auto dev = drm::Device::open(*path);
+  ASSERT_TRUE(dev.has_value()) << "Device::open: " << dev.error().message();
+
+  drm::present::GbmScanoutProducer producer(*dev);
+  auto backend = drm::present::ScanoutBackend::create(*dev, producer);
+  ASSERT_TRUE(backend.has_value()) << "ScanoutBackend::create: " << backend.error().message();
+
+  // First present brings the CRTC up (modeset). Assert the out_fence on the
+  // second (a flip), which is the steady-state buffer-reuse case the fence is for.
+  drm::sync::SyncFence first_fence;
+  auto first = (*backend)->present(0, &first_fence);
+  ASSERT_TRUE(first.has_value()) << "present: " << first.error().message();
+
+  drm::sync::SyncFence flip_fence;
+  auto flip = (*backend)->present(0, &flip_fence);
+  ASSERT_TRUE(flip.has_value()) << "present: " << flip.error().message();
+  EXPECT_TRUE(flip_fence.valid())
+      << "public out_fence must be delivered when the CRTC advertises OUT_FENCE_PTR";
 }

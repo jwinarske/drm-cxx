@@ -145,6 +145,16 @@ class LayerScene {
 
   [[nodiscard]] std::size_t layer_count() const noexcept;
 
+  /// True if committing this frame would change scanout: the layer set changed
+  /// since the last commit, a layer's params are dirty, or a live source has a
+  /// fresh frame. False only when every layer is clean and every source idle —
+  /// the all-idle whole-commit Skip condition. Drive a present loop with it:
+  /// `if (!scene.content_changed()) { /* no commit this vblank */ } else
+  /// scene.commit();` (or hand it to `ScanoutBackend::present_if_changed`). Note
+  /// the first commit must still happen (the scanout buffer is undefined); a
+  /// fresh scene reports true via its dirty layers / structural change.
+  [[nodiscard]] bool content_changed() const noexcept;
+
   /// The stream capability the scene was constructed with. Callers
   /// inspect this to decide whether to add `EglStreamSource`-backed
   /// layers (when `mixing != StreamMixingMode::Unsupported`) and to
@@ -296,6 +306,11 @@ class LayerScene {
   /// merging multiple scenes into one commit collect these and OR
   /// them before passing the combined flags to req.commit().
   [[nodiscard]] static std::uint32_t effective_flags_of(const FrameBuildState& state) noexcept;
+
+  /// True if any acquired source wants a per-buffer release fence.
+  /// Lets do_commit decide whether to request an internal OUT_FENCE without
+  /// touching the (incomplete-at-that-point) FrameBuildState internals.
+  [[nodiscard]] static bool wants_release_fence_of(const FrameBuildState& state) noexcept;
 
   /// Conservative pre-build peek: would the next `build_frame_into`
   /// pass OR `DRM_MODE_ATOMIC_ALLOW_MODESET` into its effective_flags?

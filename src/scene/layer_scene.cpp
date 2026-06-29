@@ -370,7 +370,28 @@ class LayerScene::Impl {
     slot.scene_layer =
         std::make_unique<Layer>(handle, std::move(desc.source), desc.display, desc.content_type,
                                 desc.update_hint_hz, desc.identity_tag);
+    structure_dirty_ = true;  // a new layer must be committed (content_changed)
     return handle;
+  }
+
+  // True if this frame would change scanout: the layer set changed since the
+  // last commit, any live layer's params are dirty, or any live source has a
+  // fresh frame to present. False only when every layer is clean AND every
+  // source is idle — the all-idle whole-commit Skip condition (no commit, no
+  // flip; a PSR panel stays in self-refresh). See LayerScene::content_changed.
+  [[nodiscard]] bool content_changed() const noexcept {
+    if (structure_dirty_) {
+      return true;
+    }
+    for (const auto& slot : slots_) {
+      if (!slot.alive || !slot.scene_layer) {
+        continue;
+      }
+      if (slot.scene_layer->is_dirty() || slot.scene_layer->source().has_fresh_content()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   Layer* find_by_identity_tag(void* tag) noexcept {
@@ -402,6 +423,9 @@ class LayerScene::Impl {
     if (slot == nullptr) {
       return;
     }
+    // Removing a layer changes scanout (its plane must be disabled) even if
+    // every remaining layer is idle — force the next commit, don't Skip.
+    structure_dirty_ = true;
     // If the source's stream consumer is currently bound to a plane,
     // tear that binding down before the source unique_ptr is reset.
     // unbind_from_plane is noexcept; failures are logged inside the
@@ -503,13 +527,16 @@ class LayerScene::Impl {
     const std::uint32_t kernel_flags = LayerScene::effective_flags_of(*state);
 
     // OUT_FENCE: request a sync_file the kernel writes during the real commit; it
-    // signals when this frame is scanned out. The caller (a producer doing its
-    // own buffer reuse) waits on it before overwriting the just-committed buffer.
-    // Opt-in (out_fence != nullptr), real commits only, and only where the CRTC
-    // advertises OUT_FENCE_PTR. out_fd must outlive req.commit() (the kernel
-    // writes through the pointer).
+    // signals when this frame is scanned out. Two consumers: the public caller
+    // (out_fence != nullptr, doing its own buffer reuse) and, internally, any
+    // live source that wants per-buffer release fences — e.g. an
+    // ExternalDmaBufRing with an on_release callback. Real commits only, and only
+    // where the CRTC advertises OUT_FENCE_PTR. out_fd must outlive req.commit()
+    // (the kernel writes through the pointer).
+    const bool want_out_fence =
+        (out_fence != nullptr) || LayerScene::wants_release_fence_of(*state);
     int out_fd = -1;
-    if ((out_fence != nullptr) && !test_only) {
+    if (want_out_fence && !test_only) {
       if (const auto prop = props_.property_id(crtc_id_, "OUT_FENCE_PTR"); prop.has_value()) {
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         (void)req.add_property(
@@ -524,13 +551,31 @@ class LayerScene::Impl {
       kr = req.commit(kernel_flags, user_data);
     }
 
-    if ((out_fence != nullptr) && !test_only && kr.has_value() && (out_fd >= 0)) {
+    drm::sync::SyncFence committed_fence;  // empty unless this commit produced one
+    if (want_out_fence && !test_only && kr.has_value() && (out_fd >= 0)) {
       if (auto fence = drm::sync::SyncFence::import_fd(out_fd); fence.has_value()) {
-        *out_fence = std::move(*fence);  // import_fd dups; close the kernel's fd
+        committed_fence = std::move(*fence);  // import_fd dups; close the kernel's fd
       }
       ::close(out_fd);
     }
-    return finalize_frame(std::move(state), kr);
+    // Hand the public caller the fence. When an internal consumer also wants it
+    // (a source needs the per-buffer release fence), give the caller its own dup
+    // and keep committed_fence for stamping below. Otherwise move it straight in —
+    // no extra dup syscall (and no second fd that could fail under fd pressure).
+    const bool internal_wants = LayerScene::wants_release_fence_of(*state);
+    // Decide the per-buffer stamping source before any move of committed_fence.
+    drm::sync::SyncFence* release_src = committed_fence.valid() ? &committed_fence : nullptr;
+    if ((out_fence != nullptr) && committed_fence.valid()) {
+      if (internal_wants) {
+        if (auto dup = drm::sync::SyncFence::import_fd(committed_fence.fd()); dup.has_value()) {
+          *out_fence = std::move(*dup);
+        }
+      } else {
+        *out_fence = std::move(committed_fence);  // no internal consumer
+        release_src = nullptr;                    // moved out — nothing to stamp from
+      }
+    }
+    return finalize_frame(std::move(state), kr, release_src);
   }
 
   // Build the frame's property writes onto the caller-supplied
@@ -556,8 +601,13 @@ class LayerScene::Impl {
   // already complete.
   //
   // Defined out-of-line below FrameBuildState.
+  // `release_fence_src`, when non-null and valid, is this commit's OUT_FENCE; on
+  // a successful real commit it is dup'd onto the in-flight (prev) acquisitions
+  // of sources that want it, to be handed back when they retire next frame
+  //. nullptr for test commits and the split-API path.
   [[nodiscard]] drm::expected<CommitReport, std::error_code> finalize_frame(
-      FrameBuildPtr state, drm::expected<void, std::error_code> kernel_result);
+      FrameBuildPtr state, drm::expected<void, std::error_code> kernel_result,
+      const drm::sync::SyncFence* release_fence_src = nullptr);
 
   // Driver-quirk forwarder. Stored on Impl so on_session_resumed can
   // re-propagate it after the allocator is rebuilt against the new
@@ -940,6 +990,11 @@ class LayerScene::Impl {
     // didn't assign the layer (which is always the case for stream
     // layers — they're filtered out of the bipartite match).
     std::optional<std::uint32_t> stream_pinned_plane_id;
+    // Release fence: the OUT_FENCE of the commit that displaced this buffer,
+    // stamped by finalize_frame one frame before this buffer retires. Handed to
+    // the source via release_with_fence so a GPU producer can wait on it instead
+    // of CPU-blocking. nullopt unless the source opted in (wants_release_fence).
+    std::optional<drm::sync::SyncFence> release_fence;
   };
 
   // Slot-table helpers — return nullptr on any handle that doesn't
@@ -991,7 +1046,9 @@ class LayerScene::Impl {
   static void release_all(std::vector<AcquisitionSlot>& acquisitions) noexcept {
     for (auto& a : acquisitions) {
       if (a.scene_layer != nullptr) {
-        a.scene_layer->source().release(std::move(a.buffer));
+        // release_with_fence carries the release fence when one was
+        // stamped (else nullopt); the base default forwards to release().
+        a.scene_layer->source().release_with_fence(std::move(a.buffer), std::move(a.release_fence));
       }
     }
     acquisitions.clear();
@@ -2714,6 +2771,10 @@ class LayerScene::Impl {
   std::vector<std::uint32_t> ephemeral_blobs_;
   bool first_commit_{true};
   bool suspended_{false};
+  // Set when the layer set changes (add/remove); cleared on a successful real
+  // commit. Forces content_changed() true so an all-idle Skip can't drop a
+  // structural change (e.g. a removed layer's plane left armed).
+  bool structure_dirty_{false};
   // Mirror of the allocator's force-full-writes flag — kept on Impl
   // so it survives across the allocator teardown/rebuild that
   // on_session_resumed performs.
@@ -2896,6 +2957,7 @@ class FrameBuildState {
   std::vector<LayerScene::Impl::AcquisitionSlot> acquisitions;
   std::uint32_t effective_flags{0};
   bool test_only{false};
+  bool wants_release_fence{false};  // any source opted into release fences
   CommitReport report{};
 };
 
@@ -3249,12 +3311,20 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   out->acquisitions = std::move(acquisitions);
   out->effective_flags = effective_flags;
   out->test_only = test_only;
+  // Release fence: precompute whether any acquired source wants a release fence, so
+  // do_commit can decide to request an internal OUT_FENCE without reaching into
+  // the (incomplete-there) FrameBuildState.
+  out->wants_release_fence =
+      std::any_of(out->acquisitions.begin(), out->acquisitions.end(), [](const auto& a) {
+        return a.scene_layer != nullptr && a.scene_layer->source().wants_release_fence();
+      });
   out->report = std::move(report);
   return out;
 }
 
 drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
-    FrameBuildPtr state, drm::expected<void, std::error_code> kernel_result) {
+    FrameBuildPtr state, drm::expected<void, std::error_code> kernel_result,
+    const drm::sync::SyncFence* release_fence_src) {
   CommitReport report = std::move(state->report);
   // EACCES from the kernel means the seat just lost master (compositor
   // foregrounded, libseat is about to fire pause_cb). Mirror the old
@@ -3295,6 +3365,7 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
     }
     record_layer_placements(state->acquisitions);
     output_.mark_clean();
+    structure_dirty_ = false;  // the layer-set change (if any) is now committed
 
     // Deferred release: rotate the in-flight ring. See
     // prev_acquisitions_ / prev_prev_acquisitions_ member docs for the
@@ -3308,6 +3379,23 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
     // The empty vector that was prev_prev becomes the new prev's
     // backing storage on its way through. The ex-state vector goes
     // back to scratch for next frame's build to fill.
+    //
+    // Release fence: this commit's OUT_FENCE signals when buf_N is scanned out,
+    // i.e. when the previous frame's buffers (buf_(N-1), currently in
+    // prev_acquisitions_) leave the screen — so it is exactly their release
+    // fence. Stamp a per-source dup now; it rides buf_(N-1) down to prev_prev and
+    // is handed back via release_with_fence when those buffers retire next frame.
+    // Only sources that opted in get a dup (zero cost otherwise).
+    if (release_fence_src != nullptr && release_fence_src->valid()) {
+      for (auto& a : prev_acquisitions_) {
+        if (a.scene_layer != nullptr && a.scene_layer->source().wants_release_fence()) {
+          if (auto dup = drm::sync::SyncFence::import_fd(release_fence_src->fd());
+              dup.has_value()) {
+            a.release_fence = std::move(*dup);
+          }
+        }
+      }
+    }
     release_all(prev_prev_acquisitions_);
     std::swap(prev_prev_acquisitions_, prev_acquisitions_);
     std::swap(prev_acquisitions_, state->acquisitions);
@@ -3387,6 +3475,10 @@ std::size_t LayerScene::layer_count() const noexcept {
   return impl_->layer_count();
 }
 
+bool LayerScene::content_changed() const noexcept {
+  return impl_->content_changed();
+}
+
 const StreamCapability& LayerScene::stream_capability() const noexcept {
   return impl_->stream_capability();
 }
@@ -3425,6 +3517,10 @@ drm::expected<CommitReport, std::error_code> LayerScene::finalize_frame(
 
 std::uint32_t LayerScene::effective_flags_of(const FrameBuildState& state) noexcept {
   return state.effective_flags;
+}
+
+bool LayerScene::wants_release_fence_of(const FrameBuildState& state) noexcept {
+  return state.wants_release_fence;
 }
 
 bool LayerScene::would_request_modeset() const noexcept {

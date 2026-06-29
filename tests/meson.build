@@ -103,6 +103,22 @@ test('test_dma_buf_source_cache_vkms',
   is_parallel : false,
 )
 
+test('test_external_dma_buf_ring_vkms',
+  executable('test_external_dma_buf_ring_vkms',
+    'integration/test_external_dma_buf_ring_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
+test('test_external_dma_buf_ring_scene_vkms',
+  executable('test_external_dma_buf_ring_scene_vkms',
+    'integration/test_external_dma_buf_ring_scene_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
 # Integration: DumbScanoutSink present -> flip -> page-flip event on vkms. Serial
 # (modesets); self-skips when vkms is absent.
 test('test_dumb_scanout_sink_vkms',
@@ -518,6 +534,20 @@ test('test_egl_stream_source',
 test('test_external_dma_buf_source',
   executable('test_external_dma_buf_source',
     'unit/test_external_dma_buf_source.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_external_dma_buf_ring',
+  executable('test_external_dma_buf_ring',
+    'unit/test_external_dma_buf_ring.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_commit_report',
+  executable('test_commit_report',
+    'unit/test_commit_report.cpp',
     dependencies : test_deps,
   ),
 )
