@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace drm::scene {
@@ -131,6 +132,28 @@ struct CommitReport {
   /// can pair a `--probe` `test()` report against a real `commit()`
   /// report verbatim.
   std::vector<LayerPlacementEntry> placements;
+
+  /// This layer's placement outcome this commit, or nullopt when it isn't in
+  /// `placements` (removed, EAGAIN-skipped, or the commit produced none). Saves
+  /// every consumer from re-scanning `placements` by hand.
+  [[nodiscard]] std::optional<LayerPlacementEntry> placement_of(LayerHandle handle) const {
+    for (const LayerPlacementEntry& entry : placements) {
+      if (entry.handle == handle) {
+        return entry;
+      }
+    }
+    return std::nullopt;
+  }
+
+  /// True iff the layer was demoted to software composition (the composition
+  /// fallback) rather than reaching its own hardware plane. A zero-copy producer
+  /// (e.g. an ExternalDmaBufRing carrying a tiled/AFBC buffer) watches this to
+  /// notice it has silently dropped to a LINEAR canvas copy and react —
+  /// re-negotiate a scannable modifier, drop resolution, etc.
+  [[nodiscard]] bool was_composited(LayerHandle handle) const {
+    const std::optional<LayerPlacementEntry> entry = placement_of(handle);
+    return entry.has_value() && entry->placement == LayerPlacement::Composited;
+  }
 };
 
 }  // namespace drm::scene

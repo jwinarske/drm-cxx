@@ -170,6 +170,40 @@ class LayerBufferSource {
   /// omitted to guarantee the scene's cleanup paths are simple.
   virtual void release(AcquiredBuffer acquired) noexcept = 0;
 
+  /// Release variant carrying the OUT_FENCE of the commit that displaced this
+  /// buffer — once it signals, the buffer is off-screen and safe to
+  /// render into again, so a GPU producer can wait on it GPU-side instead of
+  /// CPU-blocking on the (later) release edge. `release_fence` is nullopt when
+  /// the CRTC has no OUT_FENCE_PTR or the source didn't opt in. The scene calls
+  /// this for deferred releases; the default ignores the fence and forwards to
+  /// `release()`, so only sources that want it (see `wants_release_fence`)
+  /// override. Must be infallible.
+  virtual void release_with_fence(AcquiredBuffer acquired,
+                                  std::optional<drm::sync::SyncFence> release_fence) noexcept {
+    (void)release_fence;
+    release(std::move(acquired));
+  }
+
+  /// True if this source wants the per-buffer release fence delivered via
+  /// `release_with_fence`. The scene only requests an internal OUT_FENCE (and
+  /// stamps it onto in-flight buffers) when some live source returns true here —
+  /// zero cost otherwise. Default false.
+  [[nodiscard]] virtual bool wants_release_fence() const noexcept { return false; }
+
+  /// True if this source has new content to present this frame (a producer
+  /// submitted a fresh buffer since the last commit). Drives the scene's all-idle
+  /// whole-commit Skip (`LayerScene::content_changed`): when every live source
+  /// returns false and no layer is dirty, the present loop issues no atomic
+  /// commit at all — a power win, and lets a PSR panel stay in self-refresh.
+  ///
+  /// Default true is the conservative answer: a source that can't tell whether
+  /// its backing buffer changed (a CPU producer painting a dumb buffer the scene
+  /// can't introspect) must report "changed" so a real update is never skipped.
+  /// Only sources that *know* they are idle — a rotating producer with nothing
+  /// submitted (ExternalDmaBufRing, DumbRingSource) — override to return false,
+  /// which is what enables the Skip.
+  [[nodiscard]] virtual bool has_fresh_content() const noexcept { return true; }
+
   /// Which binding contract this source participates in.
   [[nodiscard]] virtual BindingModel binding_model() const noexcept = 0;
 
