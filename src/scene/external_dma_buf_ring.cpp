@@ -270,7 +270,12 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufRing::acquire() {
     const bool signaled = fence->wait(ms).has_value();
     fence.reset();  // either way, do not also wire IN_FENCE_FD (mutual exclusion)
     if (!signaled) {
-      slot.reset();  // deadline missed -> hold the last good slot below
+      // Deadline missed: drop this not-ready frame and hold the last good slot
+      // below. Its dirty regions were never presented, so carry them into the
+      // next presented frame — here the *ring* is the dropper, so accumulation
+      // is the ring's job (unlike the producer-side replace in submit()).
+      accumulate_carried_damage(damage_buf, damage_count);
+      slot.reset();
     }
   }
 
@@ -292,9 +297,9 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufRing::acquire() {
     acq.fb_id = slots_.at(*slot).fb_id;
     acq.opaque = token_to_opaque(scanning_token_);
     acq.acquire_fence = std::move(fence);
-    // Build the damage vector outside the lock (count 0 -> empty = whole-frame).
-    acq.damage.assign(damage_buf.begin(),
-                      damage_buf.begin() + static_cast<std::ptrdiff_t>(damage_count));
+    // Build the damage vector outside the lock, folding in any damage carried
+    // from frames this ring dropped on a deadline miss (empty -> whole-frame).
+    take_damage_with_carry(acq.damage, damage_buf, damage_count);
     return acq;
   }
 
@@ -313,6 +318,43 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufRing::acquire() {
 
   // First frame, nothing ever submitted: no buffer to contribute this vblank.
   return drm::unexpected<std::error_code>(err(std::errc::resource_unavailable_try_again));
+}
+
+void ExternalDmaBufRing::accumulate_carried_damage(const std::array<DamageRect, k_max_damage>& buf,
+                                                   std::size_t count) noexcept {
+  if (carried_damage_whole_) {
+    return;  // already whole-frame; nothing finer to track
+  }
+  // A whole-frame drop (count 0) forces the carry to whole-frame: we can't know
+  // which regions changed, so the next presented frame must repaint everything.
+  // An accumulation past the cap collapses the same way (never truncate).
+  if (count == 0 || carried_damage_count_ + count > k_max_damage) {
+    carried_damage_whole_ = true;
+    carried_damage_count_ = 0;
+    return;
+  }
+  std::copy_n(buf.begin(), count,
+              carried_damage_.begin() + static_cast<std::ptrdiff_t>(carried_damage_count_));
+  carried_damage_count_ += count;
+}
+
+void ExternalDmaBufRing::take_damage_with_carry(std::vector<DamageRect>& out,
+                                                const std::array<DamageRect, k_max_damage>& buf,
+                                                std::size_t count) {
+  // Whole-frame if either side is whole-frame (a carried whole-frame, or this
+  // frame's own count 0), or if the union would overflow the cap. Otherwise
+  // concatenate carried (older) ++ this frame's rects; order is irrelevant to
+  // FB_DAMAGE_CLIPS, which is an unordered set of dirty regions.
+  const bool whole =
+      carried_damage_whole_ || count == 0 || carried_damage_count_ + count > k_max_damage;
+  if (!whole) {
+    out.reserve(carried_damage_count_ + count);
+    out.assign(carried_damage_.begin(),
+               carried_damage_.begin() + static_cast<std::ptrdiff_t>(carried_damage_count_));
+    out.insert(out.end(), buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(count));
+  }
+  carried_damage_count_ = 0;
+  carried_damage_whole_ = false;
 }
 
 void ExternalDmaBufRing::release(AcquiredBuffer acquired) noexcept {
@@ -383,6 +425,10 @@ drm::expected<void, std::error_code> ExternalDmaBufRing::on_session_resumed(
   outstanding_.clear();
   next_token_ = 0;
   scanning_token_ = 0;
+  // Drop damage carried from pre-resume drops: those frames belong to the dead
+  // fd's session and must not bleed into the first post-resume presented frame.
+  carried_damage_count_ = 0;
+  carried_damage_whole_ = false;
 
   // The old fd is dead: drop cached FB IDs + GEM handles without ioctls (they
   // were reclaimed on fd close) and re-import every slot's duped fds on new_fd.
