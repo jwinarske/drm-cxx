@@ -20,6 +20,7 @@
 
 #include <drm-cxx/display/scanout_target.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>  // DamageRect
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/external_dma_buf_ring.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
@@ -33,6 +34,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -85,6 +87,13 @@ std::optional<std::string> find_vkms_node() {
 // first card whose discover() yields a connected output we can drive on real
 // hardware (e.g. vc4 on a Raspberry Pi). Requires DRM master at commit time.
 std::optional<std::string> find_scene_card() {
+  // Hardware-validation override: target a specific node (e.g.
+  // DRM_CXX_TEST_CARD=/dev/dri/card1 to drive a real GPU on a host that also has
+  // vkms loaded, where the vkms preference below would otherwise win). Honored
+  // first so a deliberate hardware run is never shadowed by the virtual output.
+  if (const char* node = std::getenv("DRM_CXX_TEST_CARD"); node != nullptr && *node != '\0') {
+    return std::string(node);
+  }
   if (auto vkms = find_vkms_node()) {
     return vkms;
   }
@@ -507,7 +516,10 @@ TEST(ExternalDmaBufRingSceneVkms, MultiLayerReleaseFenceAndRemove) {
   dumb_desc.source = std::move(*dumb_src);
   dumb_desc.display.src_rect = drm::scene::Rect{0, 0, ow, oh};
   dumb_desc.display.dst_rect = drm::scene::Rect{0, 0, ow, oh};
-  dumb_desc.display.zpos = 2;
+  // zpos >= 3: amdgpu DC pins its PRIMARY plane at zpos 2, so an explicit
+  // overlay zpos <= 2 collides with it and the multi-plane commit EINVALs on
+  // real amdgpu (vkms is permissive and accepts any zpos). 3 is portable to both.
+  dumb_desc.display.zpos = 3;
   auto dumb_handle = scene->add_layer(std::move(dumb_desc));
   ASSERT_TRUE(dumb_handle.has_value()) << dumb_handle.error().message();
 
@@ -537,10 +549,97 @@ TEST(ExternalDmaBufRingSceneVkms, MultiLayerReleaseFenceAndRemove) {
   // its plane, never be idle-skipped.
   scene->remove_layer(*dumb_handle);
   EXPECT_TRUE(scene->content_changed()) << "remove_layer must force a commit";
-  ASSERT_TRUE(scene->commit().has_value());
+  auto post_remove = scene->commit();
+  ASSERT_TRUE(post_remove.has_value()) << "post-remove commit: " << post_remove.error().message();
 
   // Only the (idle) ring remains: clean and idle -> the scene is now skippable.
   EXPECT_FALSE(scene->content_changed());
+
+  drmModeSetCrtc(dev->fd(), target->crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+}
+
+// Per-frame damage driven through real LayerScene commits: the ring reports a
+// dirty sub-rect each frame, the scene emits FB_DAMAGE_CLIPS on planes that
+// advertise it, and the commit must still succeed. On vkms this is a smoke test
+// (the property is ignored); on amdgpu (DRM_CXX_TEST_CARD=/dev/dri/card1) it
+// validates that a real driver accepts the damage blob end-to-end.
+TEST(ExternalDmaBufRingSceneVkms, PerFrameDamageCommits) {
+  const auto node = find_scene_card();
+  if (!node) {
+    GTEST_SKIP() << "no vkms or connected modeset card to drive a scene commit";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto dev = std::make_unique<Device>(std::move(*dev_r));
+  ASSERT_TRUE(dev->enable_universal_planes().has_value());
+  ASSERT_TRUE(dev->enable_atomic().has_value());
+
+  auto target = drm::display::ScanoutTarget::discover(*dev);
+  if (!target) {
+    GTEST_SKIP() << "no connected output: " << target.error().message();
+  }
+  const std::uint32_t w = target->mode.hdisplay;
+  const std::uint32_t h = target->mode.vdisplay;
+
+  constexpr std::size_t k_slots = 2;
+  std::vector<Slot> slots_storage;
+  std::vector<std::array<ExternalPlaneInfo, 1>> plane_storage;
+  std::vector<ExternalSlotDesc> slot_descs;
+  for (std::size_t i = 0; i < k_slots; ++i) {
+    drm::dumb::Config cfg;
+    cfg.width = w;
+    cfg.height = h;
+    cfg.drm_format = DRM_FORMAT_XRGB8888;
+    cfg.bpp = 32;
+    cfg.add_fb = false;
+    auto buf = drm::dumb::Buffer::create(*dev, cfg);
+    ASSERT_TRUE(buf.has_value()) << buf.error().message();
+    int fd = -1;
+    ASSERT_EQ(drmPrimeHandleToFD(dev->fd(), buf->handle(), O_CLOEXEC | O_RDWR, &fd), 0);
+    ASSERT_GE(fd, 0);
+    slots_storage.push_back(Slot{std::move(*buf), fd});
+  }
+  plane_storage.reserve(slots_storage.size());
+  for (auto& s : slots_storage) {
+    plane_storage.push_back({ExternalPlaneInfo{s.fd, 0, s.buf.stride()}});
+  }
+  slot_descs.reserve(plane_storage.size());
+  for (auto& planes : plane_storage) {
+    slot_descs.push_back(ExternalSlotDesc{
+        DRM_FORMAT_MOD_LINEAR, drm::span<const ExternalPlaneInfo>(planes.data(), planes.size())});
+  }
+
+  auto ring_r = ExternalDmaBufRing::create(
+      *dev, w, h, DRM_FORMAT_XRGB8888,
+      drm::span<const ExternalSlotDesc>(slot_descs.data(), slot_descs.size()));
+  ASSERT_TRUE(ring_r.has_value()) << ring_r.error().message();
+  ExternalDmaBufRing* ring = ring_r->get();
+
+  LayerDesc desc;
+  desc.source = std::move(*ring_r);
+  desc.display.src_rect = drm::scene::Rect{0, 0, w, h};
+  desc.display.dst_rect = drm::scene::Rect{0, 0, w, h};
+  desc.display.zpos = 1;
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = target->crtc_id;
+  cfg.connector_id = target->connector_id;
+  cfg.mode = target->mode;
+  auto scene_r = LayerScene::create(*dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto scene = std::move(*scene_r);
+  ASSERT_TRUE(scene->add_layer(std::move(desc)).has_value());
+
+  // A small dirty rect well inside the mode, varying per frame so each commit
+  // carries a distinct FB_DAMAGE_CLIPS blob.
+  for (std::size_t frame = 0; frame < 5; ++frame) {
+    const std::array<drm::scene::DamageRect, 1> dmg{
+        drm::scene::DamageRect{static_cast<std::int32_t>(frame * 8), 0, 32, 32}};
+    ring->submit(frame % k_slots, std::nullopt,
+                 drm::span<const drm::scene::DamageRect>(dmg.data(), dmg.size()));
+    auto c = scene->commit();
+    ASSERT_TRUE(c.has_value()) << "frame " << frame << " (damage commit): " << c.error().message();
+  }
 
   drmModeSetCrtc(dev->fd(), target->crtc_id, 0, 0, 0, nullptr, 0, nullptr);
 }
