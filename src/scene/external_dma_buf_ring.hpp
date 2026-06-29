@@ -211,6 +211,19 @@ class ExternalDmaBufRing : public LayerBufferSource {
   void close_duped_fds() noexcept;
   void fire_release(std::size_t slot, std::optional<drm::sync::SyncFence> release_fence) noexcept;
 
+  /// Accumulate the damage of a frame this ring just dropped on a fence-deadline
+  /// miss into carried_damage_, so the next presented frame repaints those never-
+  /// presented regions. `count == 0` (the dropped frame was whole-frame) collapses
+  /// the carry to whole-frame; so does an accumulation past k_max_damage.
+  /// Commit-thread only; no lock.
+  void accumulate_carried_damage(const std::array<DamageRect, k_max_damage>& buf,
+                                 std::size_t count) noexcept;
+  /// Fill `out` for a fresh frame: the union of carried_damage_ (dropped frames)
+  /// and this frame's own damage (`buf`/`count`). Empty `out` == whole-frame.
+  /// Clears the carry. Commit-thread only.
+  void take_damage_with_carry(std::vector<DamageRect>& out,
+                              const std::array<DamageRect, k_max_damage>& buf, std::size_t count);
+
   int fd_{-1};
   SourceFormat format_{};
   std::vector<SlotRecord> slots_;
@@ -243,6 +256,17 @@ class ExternalDmaBufRing : public LayerBufferSource {
   std::uintptr_t next_token_{0};
   std::uintptr_t scanning_token_{0};
   std::vector<Outstanding> outstanding_;
+
+  // Damage carried across this ring's own fence-deadline drops (commit-thread
+  // only, like scanning_slot_). A dropped frame's dirty regions were never
+  // presented, so they must be unioned into the next presented frame or it
+  // under-reports relative to the dropped one. `carried_damage_whole_` collapses
+  // the list to whole-frame when a dropped frame was itself whole-frame or the
+  // accumulation overflows k_max_damage. Empty/false unless fence_deadline_ is
+  // set and a drop occurred, so the no-deadline (CEF) path never touches it.
+  std::array<DamageRect, k_max_damage> carried_damage_{};
+  std::size_t carried_damage_count_{0};
+  bool carried_damage_whole_{false};
 };
 
 }  // namespace drm::scene

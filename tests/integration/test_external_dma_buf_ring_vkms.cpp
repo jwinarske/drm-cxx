@@ -392,6 +392,125 @@ TEST(ExternalDmaBufRingVkms, FenceDeadlineMissHoldsThenRecovers) {
   ::close(pipefd[1]);
 }
 
+// When the ring drops its own frame on a fence-deadline miss, that frame's dirty
+// regions were never presented, so they must be unioned into the next presented
+// frame — otherwise it under-reports relative to the dropped one. A whole-frame
+// drop (or an over-cap union) collapses the carry to whole-frame.
+TEST(ExternalDmaBufRingVkms, CarriesDamageAcrossFenceDeadlineDrop) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  drm::scene::ExternalDmaBufRing::Options opts;
+  opts.fence_deadline = std::chrono::milliseconds(30);
+
+  std::vector<std::array<drm::scene::ExternalPlaneInfo, 1>> storage;
+  auto slots = slots_of(*probe, storage);
+  auto ring = drm::scene::ExternalDmaBufRing::create(
+      probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+      drm::span<const drm::scene::ExternalSlotDesc>(slots.data(), slots.size()), std::move(opts));
+  ASSERT_TRUE(ring.has_value()) << ring.error().message();
+  auto& r = **ring;
+
+  // Establish a live slot 0 (no fence) so a later deadline miss can hold it.
+  r.submit(0);
+  auto a0 = r.acquire();
+  ASSERT_TRUE(a0.has_value()) << a0.error().message();
+
+  std::array<int, 2> pipefd{-1, -1};
+  ASSERT_EQ(::pipe(pipefd.data()), 0);
+
+  // Drop: submit slot 1 with damage dA (2 rects) behind a never-signaling fence.
+  const std::array<drm::scene::DamageRect, 2> d_a{drm::scene::DamageRect{1, 1, 2, 2},
+                                                  drm::scene::DamageRect{3, 3, 4, 4}};
+  auto unsignaled = drm::sync::SyncFence::import_fd(pipefd[0]);
+  ASSERT_TRUE(unsignaled.has_value());
+  r.submit(1, std::move(*unsignaled),
+           drm::span<const drm::scene::DamageRect>(d_a.data(), d_a.size()));
+  auto held = r.acquire();  // times out -> holds slot 0, carries dA
+  ASSERT_TRUE(held.has_value()) << held.error().message();
+  EXPECT_TRUE(held->damage.empty()) << "an idle/held frame reports whole-frame";
+
+  // Recover: signal the fence and submit slot 1 with damage dB (1 rect). The next
+  // presented frame must carry dA ∪ dB = 3 rects (carried first, then this frame).
+  ASSERT_EQ(::write(pipefd[1], "x", 1), 1);
+  const std::array<drm::scene::DamageRect, 1> d_b{drm::scene::DamageRect{5, 5, 6, 6}};
+  auto signaled = drm::sync::SyncFence::import_fd(pipefd[0]);
+  ASSERT_TRUE(signaled.has_value());
+  r.submit(1, std::move(*signaled),
+           drm::span<const drm::scene::DamageRect>(d_b.data(), d_b.size()));
+  auto adv = r.acquire();
+  ASSERT_TRUE(adv.has_value()) << adv.error().message();
+  ASSERT_EQ(adv->damage.size(), 3U) << "dropped frame's damage must be unioned in";
+  EXPECT_EQ(adv->damage[0].x, 1);  // dA[0]
+  EXPECT_EQ(adv->damage[1].x, 3);  // dA[1]
+  EXPECT_EQ(adv->damage[2].x, 5);  // dB[0]
+
+  // Carry is cleared after consumption: a plain fresh frame reports only its own.
+  r.submit(0, std::nullopt, drm::span<const drm::scene::DamageRect>(d_b.data(), d_b.size()));
+  auto plain = r.acquire();
+  ASSERT_TRUE(plain.has_value()) << plain.error().message();
+  EXPECT_EQ(plain->damage.size(), 1U) << "carry must not persist past one frame";
+
+  r.release(std::move(*a0));
+  r.release(std::move(*held));
+  r.release(std::move(*adv));
+  r.release(std::move(*plain));
+  ::close(pipefd[0]);
+  ::close(pipefd[1]);
+}
+
+// A dropped whole-frame frame (empty damage) forces the next presented frame to
+// whole-frame, since the ring can't know which regions the drop dirtied.
+TEST(ExternalDmaBufRingVkms, DroppedWholeFrameForcesWholeFrameCarry) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  drm::scene::ExternalDmaBufRing::Options opts;
+  opts.fence_deadline = std::chrono::milliseconds(30);
+
+  std::vector<std::array<drm::scene::ExternalPlaneInfo, 1>> storage;
+  auto slots = slots_of(*probe, storage);
+  auto ring = drm::scene::ExternalDmaBufRing::create(
+      probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+      drm::span<const drm::scene::ExternalSlotDesc>(slots.data(), slots.size()), std::move(opts));
+  ASSERT_TRUE(ring.has_value()) << ring.error().message();
+  auto& r = **ring;
+
+  r.submit(0);
+  auto a0 = r.acquire();
+  ASSERT_TRUE(a0.has_value()) << a0.error().message();
+
+  std::array<int, 2> pipefd{-1, -1};
+  ASSERT_EQ(::pipe(pipefd.data()), 0);
+
+  // Drop a whole-frame frame (no damage) behind a never-signaling fence.
+  auto unsignaled = drm::sync::SyncFence::import_fd(pipefd[0]);
+  ASSERT_TRUE(unsignaled.has_value());
+  r.submit(1, std::move(*unsignaled));
+  auto held = r.acquire();
+  ASSERT_TRUE(held.has_value()) << held.error().message();
+
+  // Recover with a small per-frame damage; the carried whole-frame dominates, so
+  // the presented frame is whole-frame (empty) despite this frame's 1 rect.
+  ASSERT_EQ(::write(pipefd[1], "x", 1), 1);
+  const std::array<drm::scene::DamageRect, 1> d_b{drm::scene::DamageRect{5, 5, 6, 6}};
+  auto signaled = drm::sync::SyncFence::import_fd(pipefd[0]);
+  ASSERT_TRUE(signaled.has_value());
+  r.submit(1, std::move(*signaled),
+           drm::span<const drm::scene::DamageRect>(d_b.data(), d_b.size()));
+  auto adv = r.acquire();
+  ASSERT_TRUE(adv.has_value()) << adv.error().message();
+  EXPECT_TRUE(adv->damage.empty()) << "a dropped whole-frame frame forces whole-frame";
+
+  r.release(std::move(*a0));
+  r.release(std::move(*held));
+  r.release(std::move(*adv));
+  ::close(pipefd[0]);
+  ::close(pipefd[1]);
+}
+
 // Output discovery: ScanoutTarget::discover() is the one-call output-selection API the harness
 // and real KMS share. On a connected card it returns a usable crtc + connector +
 // mode + primary plane; self-skips when nothing is hooked up (headless CI).
