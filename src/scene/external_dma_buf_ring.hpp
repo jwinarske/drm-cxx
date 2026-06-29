@@ -128,8 +128,21 @@ class ExternalDmaBufRing : public LayerBufferSource {
   /// Producer hands in the slot to scan out next and (optionally) its render-done
   /// fence. Thread-safe vs acquire()/release(). `slot` out of range is ignored
   /// (logged under DRM_EXT_DMABUF_DEBUG). The next acquire() returns this slot.
-  void submit(std::size_t slot,
-              std::optional<drm::sync::SyncFence> acquire = std::nullopt) noexcept;
+  ///
+  /// `damage` is the slot's per-frame dirty-region list (buffer pixels,
+  /// top-left origin); the next acquire() emits it as `AcquiredBuffer::damage`
+  /// so the scene can drive FB_DAMAGE_CLIPS. Empty = whole-frame. Two rules the
+  /// caller must know:
+  ///   * **Replace, not union** — each submit() overwrites the pending damage;
+  ///     the ring can't tell whether two submits are sequential, so accumulating
+  ///     damage across producer-side cross-drops is the *producer's* job (the
+  ///     harness FrameMailbox does it). The exception is the ring's own
+  ///     fence-deadline drop, which it accumulates itself (see fence_deadline).
+  ///   * **Over-cap → whole-frame** — more than k_max_damage rects degrades to
+  ///     empty (whole-frame), never truncates (a truncated list under-reports the
+  ///     dirty area and corrupts the scanout).
+  void submit(std::size_t slot, std::optional<drm::sync::SyncFence> acquire = std::nullopt,
+              drm::span<const DamageRect> damage = {}) noexcept;
 
   /// Fault isolation: the per-layer fence deadline the scene must enforce, if any.
   [[nodiscard]] std::optional<std::chrono::nanoseconds> fence_deadline() const noexcept {
@@ -170,6 +183,12 @@ class ExternalDmaBufRing : public LayerBufferSource {
 
   static constexpr std::size_t k_max_planes = 4;
 
+  // Fixed damage store so submit() stays alloc-free / noexcept; the vector copy
+  // into AcquiredBuffer::damage happens in acquire() (already non-noexcept).
+  // Above this count, submit() degrades to whole-frame (empty) rather than
+  // truncating — under-reporting the dirty area would corrupt the scanout.
+  static constexpr std::size_t k_max_damage = 16;
+
   struct PlaneRecord {
     int duped_fd{-1};
     std::uint32_t gem_handle{0};
@@ -203,6 +222,11 @@ class ExternalDmaBufRing : public LayerBufferSource {
   mutable std::mutex mu_;
   std::optional<std::size_t> pending_slot_;
   std::optional<drm::sync::SyncFence> pending_fence_;
+  // Per-frame damage for the pending slot, replaced on each submit(). count == 0
+  // means whole-frame — either the caller passed no rects, or an over-cap submit
+  // degraded to whole-frame. Drained atomically with pending_slot_ in acquire().
+  std::array<DamageRect, k_max_damage> pending_damage_{};
+  std::size_t pending_damage_count_{0};
 
   // Commit-thread only. Each fresh advance gets a new monotonic token (pointer-
   // width so it round-trips through AcquiredBuffer::opaque without truncation on

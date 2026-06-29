@@ -131,3 +131,45 @@ TEST(DmaBufSourceCacheVkms, HitStalenessEvict) {
 
   ::close(probe->dmabuf_fd);
 }
+
+// ExternalDmaBufSource::create forwards an *explicit* modifier through
+// drmModeAddFB2WithModifiers (DRM_MODE_FB_MODIFIERS set), as opposed to the
+// INVALID path that omits the flag — this is the code path the header contract
+// documents. We assert it with an explicit LINEAR modifier rather than a tiled
+// one: vkms advertises only LINEAR, so a genuinely tiled modifier (AFBC,
+// block-linear, V3D) would be *rejected* by the kernel here, not imported. The
+// forwarding-of-tiled-modifiers behavior is identical in the code (the modifier
+// is passed verbatim); proving it lands requires hardware whose planes list that
+// modifier, so that leg is hardware-validated, not asserted on vkms.
+TEST(DmaBufSourceCacheVkms, ForwardsExplicitModifierThroughAddFb2WithModifiers) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  auto& dev = probe->dev;
+  std::array<drm::scene::ExternalPlaneInfo, 1> planes{plane_of(probe->buf, probe->dmabuf_fd)};
+
+  // Explicit LINEAR -> use_modifiers == true -> drmModeAddFB2WithModifiers.
+  // A successful create() already means AddFB2WithModifiers accepted the import;
+  // acquire() exposes the cached fb_id so we confirm it is a live, non-zero FB.
+  auto with_mod = drm::scene::ExternalDmaBufSource::create(dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                           DRM_FORMAT_MOD_LINEAR, planes);
+  ASSERT_TRUE(with_mod.has_value()) << with_mod.error().message();
+  auto with_mod_acq = (*with_mod)->acquire();
+  ASSERT_TRUE(with_mod_acq.has_value()) << with_mod_acq.error().message();
+  EXPECT_NE(with_mod_acq->fb_id, 0U);
+  (*with_mod)->release(std::move(*with_mod_acq));
+
+  // INVALID -> use_modifiers == false -> plain drmModeAddFB2; same buffer still
+  // imports, confirming both branches are live and equivalent for LINEAR layout.
+  constexpr std::uint64_t k_mod_invalid = (1ULL << 56U) - 1U;  // DRM_FORMAT_MOD_INVALID
+  auto no_mod = drm::scene::ExternalDmaBufSource::create(dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                         k_mod_invalid, planes);
+  ASSERT_TRUE(no_mod.has_value()) << no_mod.error().message();
+  auto no_mod_acq = (*no_mod)->acquire();
+  ASSERT_TRUE(no_mod_acq.has_value()) << no_mod_acq.error().message();
+  EXPECT_NE(no_mod_acq->fb_id, 0U);
+  (*no_mod)->release(std::move(*no_mod_acq));
+
+  ::close(probe->dmabuf_fd);
+}

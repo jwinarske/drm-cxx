@@ -13,13 +13,21 @@
 // caller's; the caller is free to close their fds the moment the
 // factory returns.
 //
-// Format scope: 1 to 4 planes, modifier == LINEAR or INVALID. Covers
-// the layouts libcamera and V4L2 typically deliver — single-plane
-// ARGB / XRGB / ABGR / XBGR, two-plane NV12, three-plane YUV420 (I420).
-// Tiled modifiers (AFBC, X_TILED, Y_TILED, etc.) are out of scope:
-// the kernel's plane-format negotiation around modifiers is driver-
-// specific in ways the source can't validate up front, and producers
-// that need them can extend this type without breaking callers.
+// Format scope: 1 to 4 planes, any modifier. create() forwards whatever
+// modifier the caller supplies straight to drmModeAddFB2WithModifiers
+// (LINEAR/INVALID skip DRM_MODE_FB_MODIFIERS; anything else passes through
+// verbatim) — the kernel validates against its driver tables and rejects an
+// unsupported tiling at AddFB2 time, so the kernel is the ground truth here,
+// not this type. A caller that wants to know whether a tiled/compressed
+// modifier (AFBC, block-linear, V3D, X/Y_TILED) will land should consult
+// drm::fmt::FormatTable / a DRM_MODE_ATOMIC_TEST_ONLY commit up front rather
+// than discover it at AddFB2.
+//
+// This type is the simple, *single-use* path (one buffer, one cached fb_id;
+// see below). For a *rotating* external producer that hands in a fresh tiled
+// slot per frame — and wants validate-not-negotiate against a plane's
+// IN_FORMATS plus per-frame damage / fence handoff — use
+// scene/external_dma_buf_ring.hpp (ExternalDmaBufRing).
 //
 // Single-use semantics. The source caches one fb_id at create() time
 // and returns it from every acquire(). on_release fires exactly once
