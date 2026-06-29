@@ -234,19 +234,20 @@ void ExternalDmaBufRing::submit(std::size_t slot, std::optional<drm::sync::SyncF
 drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufRing::acquire() {
   std::optional<std::size_t> slot;
   std::optional<drm::sync::SyncFence> fence;
-  std::vector<DamageRect> damage;
+  // Drain the damage store into a stack buffer under the lock (a cheap POD copy,
+  // no allocation) so the producer-contended critical section stays alloc-free,
+  // matching submit()'s noexcept fixed-store design. The vector that backs
+  // AcquiredBuffer::damage is built below, after the lock is released.
+  std::array<DamageRect, k_max_damage> damage_buf{};
+  std::size_t damage_count = 0;
   {
     const std::scoped_lock lock(mu_);
     if (pending_slot_.has_value()) {
       slot = std::exchange(pending_slot_, std::nullopt);
       fence = std::exchange(pending_fence_, std::nullopt);
-      // Drain the damage store atomically with the slot. count 0 (whole-frame)
-      // leaves `damage` empty. The allocation lives here, not in noexcept submit().
-      if (pending_damage_count_ > 0) {
-        damage.assign(pending_damage_.begin(),
-                      pending_damage_.begin() + static_cast<std::ptrdiff_t>(pending_damage_count_));
-        pending_damage_count_ = 0;
-      }
+      // Drain atomically with the slot. count 0 (whole-frame) leaves it empty.
+      damage_count = std::exchange(pending_damage_count_, 0);
+      std::copy_n(pending_damage_.begin(), damage_count, damage_buf.begin());
     }
   }
 
@@ -291,7 +292,9 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufRing::acquire() {
     acq.fb_id = slots_.at(*slot).fb_id;
     acq.opaque = token_to_opaque(scanning_token_);
     acq.acquire_fence = std::move(fence);
-    acq.damage = std::move(damage);  // empty = whole-frame
+    // Build the damage vector outside the lock (count 0 -> empty = whole-frame).
+    acq.damage.assign(damage_buf.begin(),
+                      damage_buf.begin() + static_cast<std::ptrdiff_t>(damage_count));
     return acq;
   }
 
@@ -371,6 +374,7 @@ drm::expected<void, std::error_code> ExternalDmaBufRing::on_session_resumed(
     const std::scoped_lock lock(mu_);
     pending_slot_.reset();
     pending_fence_.reset();
+    pending_damage_count_ = 0;
   }
   scanning_slot_.reset();
   // Reset release tracking: pre-resume buffers are abandoned (the scene drains
