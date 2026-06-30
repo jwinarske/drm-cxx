@@ -70,6 +70,20 @@ struct VrefreshRange {
 
 struct ConnectorInfo {
   std::string name;
+
+  // EDID identity. `make` and `model` are also concatenated into `name` for a
+  // human-readable label; they are exposed separately here for matching and
+  // display. `serial` is the per-unit serial number (often absent). All are
+  // empty / nullopt when the EDID does not carry them.
+  std::string make;                   // manufacturer (company name or PNP ID)
+  std::string model;                  // product name / model
+  std::optional<std::string> serial;  // per-unit serial number
+
+  // Physical screen size in millimeters; zero when the EDID does not state it.
+  // EDID carries whole-centimeter precision, so these are multiples of 10.
+  int width_mm{0};
+  int height_mm{0};
+
   std::optional<ColorimetryInfo> colorimetry;
   std::optional<HdrStaticMetadata> hdr;
   std::optional<SupportedColorimetry> wide_gamut;

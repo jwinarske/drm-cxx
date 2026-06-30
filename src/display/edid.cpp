@@ -9,7 +9,9 @@
 #include <drm-cxx/detail/span.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <system_error>
 
 extern "C" {
@@ -21,18 +23,41 @@ namespace drm::display {
 
 namespace {
 
-void populate_name(ConnectorInfo& out, const struct di_info* info) {
-  const char* make = di_info_get_make(info);
-  const char* model = di_info_get_model(info);
+void populate_identity(ConnectorInfo& out, const struct di_info* info) {
+  // libdisplay-info hands back malloc'd strings the caller must free; own them
+  // with std::free as the deleter so they are released on every return path.
+  using CStr = std::unique_ptr<char, decltype(&std::free)>;
+  const CStr make(di_info_get_make(info), &std::free);
+  const CStr model(di_info_get_model(info), &std::free);
+  const CStr serial(di_info_get_serial(info), &std::free);
   if (make != nullptr) {
-    out.name += make;
+    out.make = make.get();
+    out.name += make.get();
   }
   if ((make != nullptr) && (model != nullptr)) {
     out.name += ' ';
   }
   if (model != nullptr) {
-    out.name += model;
+    out.model = model.get();
+    out.name += model.get();
   }
+  if (serial != nullptr) {
+    out.serial = serial.get();
+  }
+}
+
+void populate_physical_size(ConnectorInfo& out, const struct di_info* info) {
+  const struct di_edid* edid = di_info_get_edid(info);
+  if (edid == nullptr) {
+    return;
+  }
+  const struct di_edid_screen_size* size = di_edid_get_screen_size(edid);
+  if (size == nullptr) {
+    return;
+  }
+  // EDID carries whole-centimeter precision; normalize to millimeters.
+  out.width_mm = size->width_cm * 10;
+  out.height_mm = size->height_cm * 10;
 }
 
 void populate_colorimetry(ConnectorInfo& out, const struct di_info* info) {
@@ -134,7 +159,8 @@ drm::expected<ConnectorInfo, std::error_code> parse_edid(drm::span<const uint8_t
   }
 
   ConnectorInfo result;
-  populate_name(result, info);
+  populate_identity(result, info);
+  populate_physical_size(result, info);
   populate_colorimetry(result, info);
   populate_hdr(result, info);
   populate_wide_gamut(result, info);

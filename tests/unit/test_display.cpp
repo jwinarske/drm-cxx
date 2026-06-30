@@ -12,6 +12,11 @@
 TEST(ConnectorInfoTest, DefaultConstruction) {
   drm::display::ConnectorInfo const info;
   EXPECT_TRUE(info.name.empty());
+  EXPECT_TRUE(info.make.empty());
+  EXPECT_TRUE(info.model.empty());
+  EXPECT_FALSE(info.serial.has_value());
+  EXPECT_EQ(info.width_mm, 0);
+  EXPECT_EQ(info.height_mm, 0);
   EXPECT_FALSE(info.colorimetry.has_value());
   EXPECT_FALSE(info.hdr.has_value());
   EXPECT_FALSE(info.wide_gamut.has_value());
@@ -94,6 +99,13 @@ TEST(ParseEdidTest, ValidEdidParses) {
   if (result.has_value()) {
     // Verify we got some data
     EXPECT_FALSE(result->name.empty());
+    // Identity fields: this blob carries a monitor-name and serial-number
+    // descriptor, so make/model/serial are populated. The serial descriptor
+    // spells "FOOBAR"; make/model come from the vendor + monitor-name bytes.
+    EXPECT_FALSE(result->make.empty());
+    EXPECT_FALSE(result->model.empty());
+    ASSERT_TRUE(result->serial.has_value());
+    EXPECT_EQ(*result->serial, "FOOBAR");
     // Pre-CTA EDID 1.3 has no HDR / wide-gamut data blocks; those
     // optionals should remain empty. Default colorimetry from the
     // base EDID chromaticity bytes may or may not populate depending
