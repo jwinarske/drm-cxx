@@ -127,6 +127,20 @@ std::optional<std::string> find_scene_card() {
   return std::nullopt;
 }
 
+// First render node (e.g. /dev/dri/renderD128), if any. On split-GPU SoCs the
+// render GPU (v3d) is a separate node from the display engine (vc4); tiled
+// buffers must be allocated on the render node and imported to the display node
+// for scanout (the kmsro model — and the CEF/ANGLE-on-ARM topology).
+std::optional<std::string> first_render_node() {
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
+    if (entry.path().filename().string().rfind("renderD", 0) == 0) {
+      return entry.path().string();
+    }
+  }
+  return std::nullopt;
+}
+
 // A mode-sized dumb buffer plus its PRIME fd (owned; closed on destruction).
 struct Slot {
   drm::dumb::Buffer buf;
@@ -833,7 +847,23 @@ TEST(ExternalDmaBufRingSceneVkms, TiledModifierScansOut) {
   const std::uint32_t w = target->mode.hdisplay;
   const std::uint32_t h = target->mode.vdisplay;
 
-  auto gbm_r = drm::gbm::GbmDevice::create(dev->fd());
+  // Allocate on a render node when present (split-GPU SoCs: the vc4 display node
+  // only allocates LINEAR; v3d the render node produces the tiled layout vc4 then
+  // scans out). On unified GPUs the render node is the same device, so this is a
+  // no-op. The guard is declared before the GbmDevice so the fd outlives it.
+  struct FdGuard {
+    int fd{-1};
+    ~FdGuard() {
+      if (fd >= 0) {
+        ::close(fd);
+      }
+    }
+  };
+  FdGuard alloc_guard;
+  if (auto rnode = first_render_node()) {
+    alloc_guard.fd = ::open(rnode->c_str(), O_RDWR | O_CLOEXEC);
+  }
+  auto gbm_r = drm::gbm::GbmDevice::create(alloc_guard.fd >= 0 ? alloc_guard.fd : dev->fd());
   if (!gbm_r) {
     GTEST_SKIP() << "no gbm device: " << gbm_r.error().message();
   }
