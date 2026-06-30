@@ -95,11 +95,15 @@ FormatTable FormatTable::from_blob(const void* data, std::size_t size) {
     return t;
   }
 
-  const auto* formats = reinterpret_cast<const std::uint32_t*>(base + h->formats_offset);
-  const auto* mods = reinterpret_cast<const drm_format_modifier*>(base + h->modifiers_offset);
-
+  // The blob's modifier array can begin at an offset that is not 8-byte aligned
+  // (drm_format_modifier requires 8) and the format array at one not 4-aligned;
+  // binding a reference or indexing a typed pointer into the blob is UB and
+  // faults on strict-alignment arches (riscv64). memcpy each element out of the
+  // blob into an aligned local instead of reinterpret_cast-ing into it.
   for (std::uint32_t i = 0; i < h->count_modifiers; ++i) {
-    const drm_format_modifier& m = mods[i];
+    drm_format_modifier m{};
+    std::memcpy(&m, base + h->modifiers_offset + (static_cast<std::size_t>(i) * sizeof(m)),
+                sizeof(m));
     for (int b = 0; b < 64; ++b) {  // each set bit -> one fourcc
       if (((m.formats >> b) & 1ULL) == 0U) {
         continue;
@@ -108,7 +112,11 @@ FormatTable FormatTable::from_blob(const void* data, std::size_t size) {
       if (idx >= h->count_formats) {
         continue;  // malformed blob guard
       }
-      t.pairs_.push_back({formats[idx], Modifier{m.modifier}});
+      std::uint32_t fourcc = 0;
+      std::memcpy(&fourcc,
+                  base + h->formats_offset + (static_cast<std::size_t>(idx) * sizeof(fourcc)),
+                  sizeof(fourcc));
+      t.pairs_.push_back({fourcc, Modifier{m.modifier}});
     }
   }
 
