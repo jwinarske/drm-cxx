@@ -39,6 +39,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -974,4 +975,77 @@ TEST(ExternalDmaBufRingSceneVkms, TiledModifierScansOut) {
   for (const int fd : fds) {
     ::close(fd);
   }
+}
+
+// B7 allocator-decision differential: a hardware-placeable background plus a
+// force_composited overlay (both DumbBufferSource, hence compositable), driven
+// on vkms (the reference) and on any KMS device via DRM_CXX_TEST_CARD. The
+// allocator's decision must be vendor-neutral modulo plane count and must drop
+// no layer (unassigned == 0) even on the dc8200's single-plane budget. Logs the
+// split for cross-device comparison; no pixel readback (works without writeback).
+TEST(ExternalDmaBufRingSceneVkms, AllocatorDecisionDifferential) {
+  const auto node = find_scene_card();
+  if (!node) {
+    GTEST_SKIP() << "no vkms or connected modeset card to drive a scene commit";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto dev = std::make_unique<Device>(std::move(*dev_r));
+  ASSERT_TRUE(dev->enable_universal_planes().has_value());
+  ASSERT_TRUE(dev->enable_atomic().has_value());
+
+  auto target = drm::display::ScanoutTarget::discover(*dev);
+  if (!target) {
+    GTEST_SKIP() << "no connected output: " << target.error().message();
+  }
+  const std::uint32_t w = target->mode.hdisplay;
+  const std::uint32_t h = target->mode.vdisplay;
+
+  auto bg = drm::scene::DumbBufferSource::create(*dev, w, h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(bg.has_value()) << bg.error().message();
+  const std::uint32_t ow = w / 4U;
+  const std::uint32_t oh = h / 4U;
+  auto ov = drm::scene::DumbBufferSource::create(*dev, ow, oh, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(ov.has_value()) << ov.error().message();
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = target->crtc_id;
+  cfg.connector_id = target->connector_id;
+  cfg.mode = target->mode;
+  auto scene_r = LayerScene::create(*dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto scene = std::move(*scene_r);
+
+  LayerDesc bg_desc;
+  bg_desc.source = std::move(*bg);
+  bg_desc.display.src_rect = drm::scene::Rect{0, 0, w, h};
+  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, w, h};
+  bg_desc.display.zpos = 1;
+  ASSERT_TRUE(scene->add_layer(std::move(bg_desc)).has_value());
+
+  LayerDesc ov_desc;
+  ov_desc.source = std::move(*ov);
+  ov_desc.display.src_rect = drm::scene::Rect{0, 0, ow, oh};
+  ov_desc.display.dst_rect =
+      drm::scene::Rect{static_cast<std::int32_t>(ow), static_cast<std::int32_t>(oh), ow, oh};
+  ov_desc.display.zpos = 4;  // >= 3 to clear amdgpu PRIMARY pin; harmless elsewhere
+  ov_desc.force_composited = true;
+  ASSERT_TRUE(scene->add_layer(std::move(ov_desc)).has_value());
+
+  auto report = scene->commit();
+  ASSERT_TRUE(report.has_value()) << report.error().message();
+  const auto& r = *report;
+  std::fprintf(stderr,
+               "[B7] %s: total=%zu assigned=%zu composited=%zu unassigned=%zu buckets=%zu\n",
+               node->c_str(), r.layers_total, r.layers_assigned, r.layers_composited,
+               r.layers_unassigned, r.composition_buckets);
+
+  // Vendor-neutral invariants; the exact assigned/composited split may differ by
+  // plane count (the "modulo plane count" the differential allows).
+  EXPECT_EQ(r.layers_total, 2U);
+  EXPECT_EQ(r.layers_unassigned, 0U) << "no layer may be silently dropped";
+  EXPECT_GE(r.layers_composited, 1U) << "the force_composited overlay must be composited";
+  EXPECT_EQ(r.layers_assigned + r.layers_composited, 2U);
+
+  drmModeSetCrtc(dev->fd(), target->crtc_id, 0, 0, 0, nullptr, 0, nullptr);
 }
