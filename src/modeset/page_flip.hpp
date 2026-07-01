@@ -85,6 +85,14 @@ class PageFlip {
   // remove_source concurrently against the same instance.
   [[nodiscard]] drm::expected<void, std::error_code> dispatch(int timeout_ms = -1);
 
+  /// The internal epoll fd this dispatcher waits on. Exposed so a host event
+  /// loop (e.g. a compositor's own IO thread) can watch it for readability and
+  /// drive `dispatch(0)` itself instead of blocking in `dispatch(-1)`. The fd is
+  /// level-triggered — readable whenever the DRM fd or any `add_source` fd has a
+  /// pending event, and quiescent once `dispatch()` has drained them. PageFlip
+  /// retains ownership: do not read, close, or EPOLL_CTL it directly.
+  [[nodiscard]] int epoll_fd() const noexcept { return epfd_; }
+
   ~PageFlip();
   PageFlip(PageFlip&& other) noexcept;
   PageFlip& operator=(PageFlip&& other) noexcept;
