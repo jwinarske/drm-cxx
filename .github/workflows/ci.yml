@@ -606,3 +606,49 @@ jobs:
         run: |
           find src examples tests -name '*.cpp' -o -name '*.hpp' | \
             xargs clang-format-19 --dry-run --Werror
+
+  build-gn:
+    # Validates the GN target (drm_cxx_min) by compiling its exact source list
+    # under clang + libc++ — the toolchain a Chromium or Flutter Engine GN tree
+    # builds drm-cxx with. A full `gn gen` needs the consumer tree's //build, so
+    # this checks the load-bearing property: the sources are libc++-clean.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        std: [c++20, c++23]
+    name: gn-libc++-${{ matrix.std }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+
+      - name: Install dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: clang libc++-dev libc++abi-dev libdrm-dev libgbm-dev pkg-config
+          version: 1.0
+
+      - name: Compile drm_cxx_min sources under clang + libc++
+        run: |
+          set -euo pipefail
+          # Read the source list straight from drm_cxx.gni so this stays in sync
+          # with the GN target.
+          mapfile -t sources < <(grep -oE 'src/[a-z0-9_/]+\.cpp' drm_cxx.gni)
+          [ "${#sources[@]}" -gt 0 ] || { echo "no sources parsed from drm_cxx.gni" >&2; exit 1; }
+          echo "parsed ${#sources[@]} sources from drm_cxx.gni"
+          # <drm-cxx/...> include prefix, matching the GN include-symlink action.
+          mkdir -p gninc && ln -sfn "$PWD/src" gninc/drm-cxx
+          inc=(-Igninc -Isrc $(pkg-config --cflags libdrm gbm))
+          # C++20 pulls the vendored polyfills; C++23 uses libc++ std::*.
+          poly=()
+          if [ "${{ matrix.std }}" = "c++20" ]; then
+            poly=(-Ithird_party/tl-expected/include -Ithird_party/tcb-span/include
+                  -Ithird_party/fmt/include -DFMT_HEADER_ONLY)
+          fi
+          rc=0
+          for src in "${sources[@]}"; do
+            clang++ -std=${{ matrix.std }} -stdlib=libc++ -fsyntax-only \
+              "${inc[@]}" "${poly[@]}" "$src" || { echo "FAILED: $src" >&2; rc=1; }
+          done
+          exit $rc
