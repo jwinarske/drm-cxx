@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: MIT
+# GN build for drm-cxx — the minimal subset, consumable from Chromium or the Flutter
+# Engine (buildroot). See drm_cxx.gni and docs/gn-integration.md.
+#
+# The point of this build (vs CMake): it compiles drm-cxx WITH THE HOST GN
+# toolchain (Chromium's clang + bundled libc++), so drm-cxx links directly into
+# the GPU process with no ABI mismatch and no C shim.
+#
+# NOTE: CI (`build-gn` in .github/workflows/ci.yml) compiles drm_cxx_min_sources
+# under clang + libc++ — the consumer toolchain. A full `gn gen` runs in the
+# consumer tree, which supplies the //build pkg_config + toolchain configs used
+# here. Vendor this at //third_party/drm-cxx.
+
+import("//build/config/linux/pkg_config.gni")
+import("drm_cxx.gni")
+
+# ── system deps ──────────────────────────────────────────────────────────────
+# libdrm + gbm — the only externals the KMS subset needs. pkg_config is provided
+# by //build in both Chromium and the Flutter buildroot. (Chromium also vendors
+# //third_party/libdrm; swap the libdrm pkg_config for that dep if you prefer the
+# in-tree copy.)
+pkg_config("drm_cxx_libdrm") {
+  packages = [ "libdrm" ]
+}
+pkg_config("drm_cxx_gbm") {
+  packages = [ "gbm" ]
+}
+
+# ── generated config.h (mirrors CMake's configure_file → ${bin}/drm-cxx/config.h)
+action("drm_cxx_gen_config") {
+  script = "gn/gen_config.py"
+  inputs = [ "config.h.in" ]
+  _config_h = "$target_gen_dir/drm-cxx/config.h"
+  outputs = [ _config_h ]
+  args = [
+    "--in",
+    rebase_path("config.h.in", root_build_dir),
+    "--out",
+    rebase_path(_config_h, root_build_dir),
+    "--version",
+    drm_cxx_version,
+    "--have-vulkan",
+    "0",
+  ]
+}
+
+# ── build-tree `drm-cxx` -> `src` symlink so <drm-cxx/...> includes resolve ────
+action("drm_cxx_include_symlink") {
+  script = "gn/make_include_symlink.py"
+  _stamp = "$target_gen_dir/drm_cxx_include.stamp"
+  outputs = [ _stamp ]
+  args = [
+    "--target",
+    rebase_path("src", root_build_dir),
+    "--link",
+    rebase_path("$target_gen_dir/include/drm-cxx", root_build_dir),
+    "--stamp",
+    rebase_path(_stamp, root_build_dir),
+  ]
+}
+
+# ── public include + define config (carried to consumers) ─────────────────────
+config("drm_cxx_public_config") {
+  include_dirs = [
+    # <drm-cxx/...> headers (via the symlink) and <drm-cxx/config.h> (generated).
+    "$target_gen_dir/include",
+    "$target_gen_dir",
+    # "core/foo.hpp"-style relative cross-includes within drm-cxx's own sources.
+    "src",
+    # Vendored polyfills, selected by the headers' __cpp_lib_* checks: tl::expected
+    # / tcb::span / fmt are used at C++17/20; at C++23 the headers pick std::* and
+    # these are unused (harmless to keep on the path).
+    "third_party/tl-expected/include",
+    "third_party/tcb-span/include",
+    "third_party/fmt/include",
+  ]
+  defines = [ "FMT_HEADER_ONLY" ]
+}
+
+# ── the minimal subset ──────────────────────────────────────────────────────────────
+source_set("drm_cxx_min") {
+  sources = drm_cxx_min_sources
+  configs += [
+    ":drm_cxx_libdrm",
+    ":drm_cxx_gbm",
+  ]
+  public_configs = [ ":drm_cxx_public_config" ]
+  # Generated config.h + the include symlink must exist before compile; public so
+  # consumers that include <drm-cxx/...> also pull the symlink.
+  public_deps = [
+    ":drm_cxx_gen_config",
+    ":drm_cxx_include_symlink",
+  ]
+  # drm-cxx targets c++17 minimum; it also builds clean on the c++20 and c++23
+  # legs. Inherit the host standard (Chromium = c++20 → tl::expected + fmt via the
+  # vendored includes above; c++23 → std::expected/std::format, no vendored deps).
+}

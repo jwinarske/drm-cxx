@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: MIT
+# drm_cxx.gni — GN build description for drm-cxx, consumable from any GN tree
+# (Chromium, Flutter Engine / buildroot). Importing project does:
+#
+#   deps += [ "//third_party/drm-cxx:drm_cxx_min" ]
+#
+# and gets the dep-light KMS/scanout subset built WITH THE HOST TOOLCHAIN — i.e.
+# the same clang + libc++ as the embedder, so drm-cxx's C++ symbols link
+# directly into the GPU process with no ABI shim and no C ABI. That toolchain
+# match is the entire reason for a GN build (vs the CMake build, which would use
+# the system gcc/libstdc++ and mismatch Chromium's bundled libc++).
+#
+# Scope: this file ships ONLY the minimal subset — core/modeset/planes/present(core)/
+# gbm/dumb/sync/fmt/time — verified to need only libdrm + gbm (free of blend2d/
+# gstreamer/EGL/Vulkan/v4l2/scene/input/libdisplay-info deps). It is the surface a
+# KMS backend built on drm-cxx uses: atomic commit, plane assignment + TEST_ONLY,
+# GBM alloc + AddFB2, fences. display/ is excluded (it pulls libdisplay-info, and
+# a Chromium/Flutter consumer owns display config itself); the compositor/renderer
+# subsystems (scene/LayerScene, the GL/VK producers, gst/v4l2/blend2d/cursor) stay
+# CMake-only. See docs/gn-integration.md to extend.
+
+declare_args() {
+  # Keep in sync with the project() version in CMakeLists.txt. Surfaced into the
+  # generated config.h.
+  drm_cxx_version = "150.0.0"
+
+  # The KMS leaf never uses Vulkan; HAVE_VULKAN is forced 0 in the generated
+  # config.h. Flip only if you also add the vulkan/ sources (not in this subset).
+  drm_cxx_have_vulkan = false
+}
+
+# Verified dep-clean KMS subset (see the per-file heavy-dep sweep that produced
+# this list). Paths are relative to this .gni's directory; consumers prefix with
+# the drm-cxx vendor root via the target in BUILD.gn.
+drm_cxx_min_sources = [
+  # core/ (minus egl_loader/gles_loader — those pull EGL/GLES)
+  "src/core/device.cpp",
+  "src/core/resources.cpp",
+  "src/core/property_store.cpp",
+  "src/core/format.cpp",
+  # modeset/
+  "src/modeset/atomic.cpp",
+  "src/modeset/mode.cpp",
+  "src/modeset/modeset.cpp",
+  "src/modeset/page_flip.cpp",
+  # planes/
+  "src/planes/plane_registry.cpp",
+  "src/planes/layer.cpp",
+  "src/planes/output.cpp",
+  "src/planes/allocator.cpp",
+  "src/planes/matching.cpp",
+  # gbm/ (GBM alloc + dmabuf export/import)
+  "src/gbm/device.cpp",
+  "src/gbm/surface.cpp",
+  "src/gbm/buffer.cpp",
+  # dumb/
+  "src/dumb/buffer.cpp",
+  # sync/
+  "src/sync/fence.cpp",
+  # fmt/ (modifier classification)
+  "src/fmt/format_mod.cpp",
+  # time/
+  "src/time/clock.cpp",
+  # present/ (core only — negotiate/buffer_ring/scanout_format; the producers and
+  # scanout_backend pull scene/EGL/Vulkan and are excluded)
+  "src/present/negotiate.cpp",
+  "src/present/buffer_ring.cpp",
+  "src/present/scanout_format.cpp",
+]
