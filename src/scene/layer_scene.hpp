@@ -186,6 +186,15 @@ class LayerScene {
   /// (rare — only after `rebind()` failure).
   [[nodiscard]] std::vector<std::uint64_t> candidate_modifiers(std::uint32_t drm_format) const;
 
+  /// Union of supported rotation/reflect bits (DRM_MODE_ROTATE_* |
+  /// DRM_MODE_REFLECT_*) across every non-cursor plane on this CRTC that can
+  /// scan out `drm_format`. Lets a producer check whether the requested
+  /// angle can reach a plane at all before committing. 0 when no such plane
+  /// exposes a rotation property (or the CRTC index can't be resolved).
+  /// This is a connector-wide union; the plane the allocator actually binds
+  /// is reported per-layer via `CommitReport::placements[].plane_rotation_bits`.
+  [[nodiscard]] std::uint64_t candidate_rotation(std::uint32_t drm_format) const;
+
   /// Run the stream-layer plane-pin pre-pass that normally fires
   /// inside `commit()`. After this returns, every alive
   /// `DriverOwnsBinding` layer has its source bound to a plane (or

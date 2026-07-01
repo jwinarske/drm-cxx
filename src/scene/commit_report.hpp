@@ -49,6 +49,12 @@ struct LayerPlacementEntry {
   /// `placement == Unassigned`. For composited layers this is the
   /// canvas plane id, not a per-layer plane.
   std::uint32_t plane_id{0};
+  /// The assigned plane's supported rotation/reflect angles (a mask of
+  /// DRM_MODE_ROTATE_* | DRM_MODE_REFLECT_* bits) for `AssignedToPlane`
+  /// layers; 0 for `Composited`/`Unassigned` or a plane with no rotation
+  /// property. Lets a producer decide whether the layer's requested angle
+  /// can land on its bound plane or needs pre-rotation.
+  std::uint64_t plane_rotation_bits{0};
 };
 
 /// Diagnostic snapshot of a single `LayerScene::commit()` or `test()`

@@ -883,7 +883,10 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
     return false;
   }
 
-  if (layer.rotation() != 0 && !plane.supports_rotation) {
+  // The plane must expose every requested rotation/reflect bit, not merely
+  // have a rotation property: a plane can advertise rotation yet implement
+  // only 0/180 or reflect and would silently drop a 90/270 request.
+  if (layer.rotation() != 0 && (plane.rotation_bits & layer.rotation()) != layer.rotation()) {
     return false;
   }
 

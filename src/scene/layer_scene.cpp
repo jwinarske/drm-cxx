@@ -1409,6 +1409,26 @@ class LayerScene::Impl {
     return out;
   }
 
+  // Union of supported rotation/reflect bits across every non-cursor plane
+  // on this CRTC that can scan out drm_format — see
+  // LayerScene::candidate_rotation docstring.
+  std::uint64_t candidate_rotation(std::uint32_t drm_format) {
+    std::uint64_t bits = 0;
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return bits;
+    }
+    for (const auto* p : registry_.for_crtc(*crtc_index)) {
+      if (p == nullptr || p->type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      if (p->supports_format(drm_format)) {
+        bits |= p->rotation_bits;
+      }
+    }
+    return bits;
+  }
+
   void ensure_stream_layer_pins() {
     const auto crtc_index = resolve_crtc_index();
     if (!crtc_index.has_value()) {
@@ -1880,6 +1900,17 @@ class LayerScene::Impl {
   // and the compositor rescued shows up as Composited; a layer the
   // allocator dropped that compose_unassigned couldn't rescue (no CPU
   // mapping, no free canvas plane) shows up as Unassigned.
+  // rotation_bits of the plane with the given id, or 0 if not found — used
+  // to stamp the bound plane's rotation caps onto the commit report.
+  std::uint64_t plane_rotation_bits_for(std::uint32_t plane_id) const {
+    for (const auto& p : registry_.all()) {
+      if (p.id == plane_id) {
+        return p.rotation_bits;
+      }
+    }
+    return 0;
+  }
+
   void populate_report_placements(const std::vector<AcquisitionSlot>& acquisitions,
                                   CommitReport& report) const {
     report.placements.clear();
@@ -1894,6 +1925,7 @@ class LayerScene::Impl {
       if (pid.has_value()) {
         entry.placement = LayerPlacement::AssignedToPlane;
         entry.plane_id = *pid;
+        entry.plane_rotation_bits = plane_rotation_bits_for(*pid);
       } else if (acq.cached_mapping.has_value() && last_canvas_plane_id_.has_value()) {
         entry.placement = LayerPlacement::Composited;
         entry.plane_id = *last_canvas_plane_id_;
@@ -3485,6 +3517,10 @@ const StreamCapability& LayerScene::stream_capability() const noexcept {
 
 std::vector<std::uint64_t> LayerScene::candidate_modifiers(std::uint32_t drm_format) const {
   return impl_->candidate_modifiers(drm_format);
+}
+
+std::uint64_t LayerScene::candidate_rotation(std::uint32_t drm_format) const {
+  return impl_->candidate_rotation(drm_format);
 }
 
 drm::expected<StreamMixingMode, std::error_code> LayerScene::probe_stream_mixing() {

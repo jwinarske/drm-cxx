@@ -155,6 +155,17 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
       }
     } else if (std::strcmp(prop->name, "rotation") == 0) {
       caps.supports_rotation = true;
+      // Bitmask property: each enum names one DRM_MODE_ROTATE_*/REFLECT_*
+      // bit at index en.value. Harvest the union so callers can tell a
+      // 90/270-capable plane from a 0/180-or-reflect-only one.
+      if ((prop->flags & DRM_MODE_PROP_BITMASK) != 0U) {
+        const auto enums = drm::span<const drm_mode_property_enum>(prop->enums, prop->count_enums);
+        for (const auto& en : enums) {
+          if (en.value < 64U) {
+            caps.rotation_bits |= (uint64_t{1} << en.value);
+          }
+        }
+      }
     } else if (std::strcmp(prop->name, "SRC_W") == 0) {
       // If SRC_W exists and is different from CRTC_W range, scaling is supported
       caps.supports_scaling = true;
