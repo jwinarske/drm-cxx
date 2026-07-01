@@ -63,6 +63,12 @@ struct PlaneCapabilities {
   std::vector<std::pair<uint32_t, uint64_t>> format_modifiers;
   std::optional<uint64_t> zpos_min;
   std::optional<uint64_t> zpos_max;
+  /// Supported rotation/reflect angles as a mask of DRM_MODE_ROTATE_* |
+  /// DRM_MODE_REFLECT_* bits, harvested from the `"rotation"` bitmask
+  /// property; 0 when the plane exposes no rotation property. A plane can
+  /// have `supports_rotation == true` yet omit 90/270 here (0/180- or
+  /// reflect-only), which is why the allocator gates on these bits.
+  uint64_t rotation_bits{0};
   bool supports_rotation{false};
   bool supports_scaling{false};
   bool has_format_modifiers{false};
