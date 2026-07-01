@@ -17,8 +17,9 @@ namespace {
 // Canonical KMS-property name table, indexed by `static_cast<size_t>(PropTag)`.
 // Order must match the enum exactly — `prop_name` reads this directly.
 constexpr std::array<std::string_view, k_num_props> k_prop_names{
-    "FB_ID", "FB_MODIFIER", "CRTC_ID", "CRTC_X",   "CRTC_Y", "CRTC_W", "CRTC_H",       "SRC_X",
-    "SRC_Y", "SRC_W",       "SRC_H",   "rotation", "alpha",  "zpos",   "pixel_format",
+    "FB_ID",  "FB_MODIFIER", "CRTC_ID",      "CRTC_X",      "CRTC_Y", "CRTC_W",
+    "CRTC_H", "SRC_X",       "SRC_Y",        "SRC_W",       "SRC_H",  "rotation",
+    "alpha",  "zpos",        "pixel_format", "IN_FENCE_FD",
 };
 
 }  // namespace
@@ -32,7 +33,7 @@ std::string_view prop_name(PropTag tag) noexcept {
 }
 
 std::optional<PropTag> parse_prop_tag(std::string_view name) noexcept {
-  // Linear scan over k_num_props (currently 15). Branchless and
+  // Linear scan over k_num_props (currently 16). Branchless and
   // cache-friendly; faster than std::unordered_map<string,PropTag> at
   // this size.
   for (std::size_t i = 0; i < k_num_props; ++i) {
@@ -259,14 +260,17 @@ std::size_t Layer::property_hash() const {
     return *cached_hash_;
   }
   // Walk the set bits in tag order so two layers with the same logical
-  // property set always produce the same hash. FB_ID is skipped — it
-  // changes every frame and would dirty the failure cache uselessly.
+  // property set always produce the same hash. FB_ID and IN_FENCE_FD are
+  // skipped — both change every frame (new buffer / new fence fd) and neither
+  // affects plane compatibility, so including them would dirty the failure
+  // cache uselessly.
   std::size_t h = 0x9e3779b97f4a7c15ULL;  // Golden ratio seed
   for (std::size_t i = 0; i < k_num_props; ++i) {
     if (!set_mask_.test(i)) {
       continue;
     }
-    if (static_cast<PropTag>(i) == PropTag::FbId) {
+    const auto tag = static_cast<PropTag>(i);
+    if (tag == PropTag::FbId || tag == PropTag::InFenceFd) {
       continue;
     }
     // boost-style hash_combine, order-dependent (hence the tag-order walk above).

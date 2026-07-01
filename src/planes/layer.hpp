@@ -56,6 +56,7 @@ enum class PropTag : uint8_t {
   Alpha,
   Zpos,
   PixelFormat,
+  InFenceFd,
   Count,  ///< sentinel; not a valid property
 };
 

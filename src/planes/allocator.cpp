@@ -1242,7 +1242,10 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
     // properties (CRTC_*, SRC_*, alpha, zpos, rotation) still benefit
     // from the diff, which is the bulk of the per-frame property
     // traffic.
-    if (tag == PropTag::FbId) {
+    // IN_FENCE_FD is a per-frame one-shot the kernel consumes on each commit:
+    // an fd that the diff happens to see as unchanged (recycled value) must
+    // still be re-armed, or the plane scans out before its buffer is ready.
+    if (tag == PropTag::FbId || tag == PropTag::InFenceFd) {
       need_write = true;
     }
     if (!need_write) {
