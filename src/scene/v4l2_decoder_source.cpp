@@ -1190,6 +1190,13 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2DecoderSource::acquire() {
   return acq;
 }
 
+bool V4l2DecoderSource::has_fresh_content() const noexcept {
+  // capture_ready_idx holds a freshly decoded CAPTURE buffer (>= 0) until
+  // acquire() consumes it (-1 == nothing new since the last acquire). The
+  // caller serializes this against drive()/acquire() as it already does.
+  return impl_ && impl_->capture_ready_idx >= 0;
+}
+
 void V4l2DecoderSource::release(AcquiredBuffer acquired) noexcept {
   if (!impl_) {
     return;
