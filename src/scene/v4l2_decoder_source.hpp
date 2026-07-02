@@ -181,6 +181,10 @@ class V4l2DecoderSource : public LayerBufferSource {
     return BindingModel::SceneSubmitsFbId;
   }
   [[nodiscard]] SourceFormat format() const noexcept override;
+  // True while a freshly decoded CAPTURE buffer waits to be acquired, so a
+  // caller can skip re-committing an unchanged frame. Cleared by acquire(); the
+  // next decoded frame sets it again. Serialize with drive()/acquire() as usual.
+  [[nodiscard]] bool has_fresh_content() const noexcept override;
 
   // map() inherits the base default — decoder CAPTURE buffers are not
   // generally CPU-mappable in a useful way (NV12 with vendor strides,
