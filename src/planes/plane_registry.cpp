@@ -27,47 +27,6 @@ bool PlaneCapabilities::supports_format(const uint32_t fmt) const {
   return std::find(formats.begin(), formats.end(), fmt) != formats.end();
 }
 
-bool PlaneCapabilities::supports_format_modifier(const uint32_t fmt,
-                                                 const uint64_t modifier) const {
-  // INVALID is the legacy sentinel for "implementation-defined", which
-  // every driver lacking IN_FORMATS treats as linear. Normalize it so
-  // both code paths compare against a single LINEAR identity.
-  const bool is_linear = modifier == DRM_FORMAT_MOD_LINEAR || modifier == DRM_FORMAT_MOD_INVALID;
-
-  if (!has_format_modifiers) {
-    // No IN_FORMATS — accept LINEAR/INVALID against the bare format list,
-    // reject non-trivial modifiers (AFBC, DCC, tilings) outright. We have
-    // no evidence the plane can scan them out.
-    return is_linear && supports_format(fmt);
-  }
-
-  // format_modifiers is sorted by format ascending (parse_in_formats_blob
-  // sorts at the end of the parse). Bisect to the per-format slice in
-  // O(log N), then walk the (typically <10) modifiers within it. The
-  // allocator's bipartite/backtrack search hits this on every (plane,
-  // layer) pair — score_pair calls it once per ranking comparison and
-  // plane_statically_compatible once per static screening — so the
-  // hot-path cost matters even at modest blob sizes.
-  const auto cmp_format = [](const std::pair<uint32_t, uint64_t>& entry, uint32_t f) {
-    return entry.first < f;
-  };
-  const auto first =
-      std::lower_bound(format_modifiers.begin(), format_modifiers.end(), fmt, cmp_format);
-  for (auto it = first; it != format_modifiers.end() && it->first == fmt; ++it) {
-    if (it->second == modifier) {
-      return true;
-    }
-    // Treat LINEAR and INVALID as interchangeable on either side of the
-    // comparison: a layer tagged INVALID matches a plane entry of LINEAR
-    // and vice versa.
-    if (is_linear &&
-        (it->second == DRM_FORMAT_MOD_LINEAR || it->second == DRM_FORMAT_MOD_INVALID)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool PlaneCapabilities::compatible_with_crtc(const uint32_t crtc_index) const {
   return (possible_crtcs & (1U << crtc_index)) != 0;
 }
@@ -85,10 +44,11 @@ drm::fmt::BandwidthClass PlaneCapabilities::bandwidth_class(
 }
 
 void PlaneCapabilities::build_format_metadata() {
-  if (!format_modifiers.empty()) {
-    format_table = drm::fmt::FormatTable::from_pairs(format_modifiers);
-  } else {
-    // No IN_FORMATS: each advertised format is scannable LINEAR-only.
+  // parse_in_formats_blob() fills format_table directly from the IN_FORMATS blob
+  // (and sets has_format_modifiers). A plane that exposes no IN_FORMATS leaves it
+  // empty; synthesize LINEAR-only for each advertised format so the allocator can
+  // still place linear buffers on it.
+  if (format_table.all().empty() && !formats.empty()) {
     std::vector<std::pair<uint32_t, uint64_t>> linear_pairs;
     linear_pairs.reserve(formats.size());
     for (const uint32_t fmt : formats) {
@@ -150,19 +110,13 @@ void parse_in_formats_blob(const int fd, const uint32_t blob_id, PlaneCapabiliti
   if (blob == nullptr) {
     return;
   }
-
-  drmModeFormatModifierIterator iter{};
-  caps.format_modifiers.clear();
-  while (drmModeFormatModifierBlobIterNext(blob, &iter)) {
-    caps.format_modifiers.emplace_back(iter.fmt, iter.mod);
-  }
-  caps.has_format_modifiers = !caps.format_modifiers.empty();
-
-  // Sort by format first, then by modifier — supports_format_modifier()
-  // lower_bounds on format and walks the per-format slice. Sorting once
-  // here turns every per-(plane, layer) eligibility check into
-  // O(log N + K) instead of O(N).
-  std::sort(caps.format_modifiers.begin(), caps.format_modifiers.end());
+  // Decode the raw IN_FORMATS blob straight into the canonical FormatTable, which
+  // sorts + de-dups internally and parses alignment-safely (the same path
+  // FormatTable::from_plane uses). has_format_modifiers records that the driver
+  // exposed a real IN_FORMATS blob, distinct from the LINEAR-only synthesis
+  // build_format_metadata() applies to planes that expose none.
+  caps.format_table = drm::fmt::FormatTable::from_blob(blob->data, blob->length);
+  caps.has_format_modifiers = !caps.format_table.all().empty();
 
   drmModeFreePropertyBlob(blob);
 }
@@ -210,10 +164,10 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
       caps.supports_scaling = true;
     } else if (std::strcmp(prop->name, "IN_FORMATS") == 0) {
       // The property value is a blob id; the blob carries (format,
-      // modifier) pairs the plane can scan out. Drivers that don't
-      // expose IN_FORMATS (older kernels, some embedded stacks) leave
-      // has_format_modifiers false and the format-only fallback path in
-      // supports_format_modifier handles them.
+      // modifier) pairs the plane can scan out. Drivers that don't expose
+      // IN_FORMATS (older kernels, some embedded stacks) leave
+      // has_format_modifiers false, and build_format_metadata() then
+      // synthesizes a LINEAR-only FormatTable from the bare format list.
       parse_in_formats_blob(fd, static_cast<uint32_t>(prop_vals[i]), caps);
     } else if (std::strcmp(prop->name, "pixel blend mode") == 0) {
       // Enum property: kernel exposes blend modes as named integers.

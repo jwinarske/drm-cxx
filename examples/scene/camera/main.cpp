@@ -248,14 +248,15 @@ void print_plane(const drm::planes::PlaneCapabilities& p, std::vector<DisplayFmt
         out.push_back(DisplayFmt{p.id, is_overlay, cur, mods});
       }
     };
-    for (const auto& [fmt, mod] : p.format_modifiers) {
+    for (const auto& entry : p.format_table.all()) {
+      const std::uint32_t fmt = entry.fourcc;
       if (!have_cur || fmt != cur) {
         emit();
         cur = fmt;
         have_cur = true;
         mods.clear();
       }
-      mods.push_back(mod);
+      mods.push_back(entry.modifier.value);
     }
     emit();
   } else {
@@ -2567,6 +2568,9 @@ int run_show(int argc, char* argv[]) {
 
 }  // namespace
 
+// Demo entry point: a stray exception here just aborts the example, which is the
+// acceptable failure mode for a sample program (not a library API).
+// NOLINTNEXTLINE(bugprone-exception-escape)
 int main(int argc, char* argv[]) {
   // Pull `--probe` / `--show` off argv so the device-path positional
   // arg lands at argv[1] for select_device(). The two modes are

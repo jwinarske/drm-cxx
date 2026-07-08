@@ -232,9 +232,20 @@ class ScanoutBuffer {
 // ---------------------------------------------------------------------------
 
 // Edge eligibility for the Hopcroft-Karp pre-solve: pure IN_FORMATS check.
+// LINEAR and the legacy INVALID sentinel ("implementation-defined; treat as
+// linear") are interchangeable — a layer tagged either matches a plane entry of
+// either — mirroring the pre-FormatTable supports_format_modifier() semantics.
+// A non-trivial modifier (AFBC, DCC, vendor tiling) must match exactly.
 [[nodiscard]] inline bool layer_fits_plane(const FormatTable& plane_formats, std::uint32_t fourcc,
                                            Modifier m) noexcept {
-  return plane_formats.supports(fourcc, m);
+  if (plane_formats.supports(fourcc, m)) {
+    return true;
+  }
+  if (m.is_linear() || m.is_invalid()) {
+    return plane_formats.supports(fourcc, Modifier{DRM_FORMAT_MOD_LINEAR}) ||
+           plane_formats.supports(fourcc, Modifier{DRM_FORMAT_MOD_INVALID});
+  }
+  return false;
 }
 
 // Memoizes atomic TEST_ONLY verdicts so an IN_FORMATS that advertises a modifier

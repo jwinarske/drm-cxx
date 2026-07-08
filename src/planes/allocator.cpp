@@ -767,7 +767,8 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
   // the layer's exact (format, modifier) is strictly preferable to one
   // that supports the format only via the linear-fallback path.
   if (const auto fmt = layer.format();
-      fmt && plane.supports_format_modifier(*fmt, layer.modifier())) {
+      fmt &&
+      drm::fmt::layer_fits_plane(plane.format_table, *fmt, drm::fmt::Modifier{layer.modifier()})) {
     s += 4;
   }
 
@@ -877,9 +878,8 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
   // Honor the layer's modifier — AFBC, DCC, and vendor tilings only land
   // on planes whose IN_FORMATS blob explicitly advertises the
   // (format, modifier) pair. Layers that don't tag a modifier fall
-  // through the LINEAR/INVALID equivalence path inside
-  // supports_format_modifier.
-  if (!plane.supports_format_modifier(*fmt, layer.modifier())) {
+  // through the LINEAR/INVALID equivalence path inside layer_fits_plane.
+  if (!drm::fmt::layer_fits_plane(plane.format_table, *fmt, drm::fmt::Modifier{layer.modifier()})) {
     return false;
   }
 

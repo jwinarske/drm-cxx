@@ -53,20 +53,11 @@ struct PlaneCapabilities {
   uint32_t possible_crtcs{};
   DRMPlaneType type{DRMPlaneType::OVERLAY};
   std::vector<uint32_t> formats;
-  /// (format, modifier) pairs harvested from the IN_FORMATS blob, sorted
-  /// by format ascending so `supports_format_modifier()` can locate the
-  /// per-format slice in O(log N). Empty when the driver doesn't expose
-  /// IN_FORMATS at all (older legacy stacks); in that case
-  /// `has_format_modifiers` is false and `supports_format_modifier()`
-  /// falls back to format-only matching for the LINEAR / INVALID
-  /// modifiers. Non-trivial modifiers (AFBC, DCC, vendor tilings) are
-  /// rejected when this is empty.
-  std::vector<std::pair<uint32_t, uint64_t>> format_modifiers;
-  /// Canonical queryable view of the same IN_FORMATS data, built from
-  /// `format_modifiers` by `build_format_metadata()`. When the driver exposes no
-  /// IN_FORMATS, this records LINEAR for each advertised format (LINEAR-only).
-  /// The fmt-based allocator edge predicate queries this instead of the
-  /// hand-rolled `supports_format_modifier()`.
+  /// Canonical queryable view of the plane's IN_FORMATS: the (fourcc, modifier)
+  /// pairs the plane can scan out. Built directly from the IN_FORMATS blob at
+  /// enumeration; when the driver exposes no IN_FORMATS this records LINEAR for
+  /// each advertised format (LINEAR-only). The allocator's edge predicate and
+  /// scoring query this via `drm::fmt::layer_fits_plane()`.
   drm::fmt::FormatTable format_table;
   /// Precomputed bandwidth class for each distinct advertised modifier, sorted by
   /// modifier, so the allocator hot path never re-decodes modifier bits. Filled
@@ -149,12 +140,6 @@ struct PlaneCapabilities {
   uint32_t cursor_max_h{};
 
   [[nodiscard]] bool supports_format(uint32_t fmt) const;
-
-  /// Check `(format, modifier)` against IN_FORMATS data when present, or
-  /// against the bare format list when absent. LINEAR and INVALID are
-  /// treated as equivalent (INVALID is the legacy sentinel many drivers
-  /// still emit for "use whatever — typically linear").
-  [[nodiscard]] bool supports_format_modifier(uint32_t fmt, uint64_t modifier) const;
 
   [[nodiscard]] bool compatible_with_crtc(uint32_t crtc_index) const;
 

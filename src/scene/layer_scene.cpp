@@ -29,6 +29,7 @@
 #include <drm-cxx/display/hdr_metadata.hpp>
 #include <drm-cxx/display/hdr_metadata_cache.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
+#include <drm-cxx/fmt/format_mod.hpp>
 #include <drm-cxx/log.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
 #include <drm-cxx/planes/allocator.hpp>
@@ -1398,12 +1399,9 @@ class LayerScene::Impl {
         continue;
       }
       if (p->has_format_modifiers) {
-        for (const auto& [fmt, mod] : p->format_modifiers) {
-          if (fmt != drm_format) {
-            continue;
-          }
-          if (std::find(out.begin(), out.end(), mod) == out.end()) {
-            out.push_back(mod);
+        for (const drm::fmt::Modifier m : p->format_table.modifiers_for(drm_format)) {
+          if (std::find(out.begin(), out.end(), m.value) == out.end()) {
+            out.push_back(m.value);
           }
         }
       } else if (p->supports_format(drm_format)) {
