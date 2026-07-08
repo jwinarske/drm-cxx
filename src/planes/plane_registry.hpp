@@ -5,6 +5,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/fmt/format_mod.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -61,6 +62,16 @@ struct PlaneCapabilities {
   /// modifiers. Non-trivial modifiers (AFBC, DCC, vendor tilings) are
   /// rejected when this is empty.
   std::vector<std::pair<uint32_t, uint64_t>> format_modifiers;
+  /// Canonical queryable view of the same IN_FORMATS data, built from
+  /// `format_modifiers` by `build_format_metadata()`. When the driver exposes no
+  /// IN_FORMATS, this records LINEAR for each advertised format (LINEAR-only).
+  /// The fmt-based allocator edge predicate queries this instead of the
+  /// hand-rolled `supports_format_modifier()`.
+  drm::fmt::FormatTable format_table;
+  /// Precomputed bandwidth class for each distinct advertised modifier, sorted by
+  /// modifier, so the allocator hot path never re-decodes modifier bits. Filled
+  /// by `build_format_metadata()`; query via `bandwidth_class()`.
+  std::vector<std::pair<uint64_t, drm::fmt::BandwidthClass>> modifier_classes;
   std::optional<uint64_t> zpos_min;
   std::optional<uint64_t> zpos_max;
   /// Supported rotation/reflect angles as a mask of DRM_MODE_ROTATE_* |
@@ -146,6 +157,16 @@ struct PlaneCapabilities {
   [[nodiscard]] bool supports_format_modifier(uint32_t fmt, uint64_t modifier) const;
 
   [[nodiscard]] bool compatible_with_crtc(uint32_t crtc_index) const;
+
+  /// The precomputed bandwidth class for `modifier` (normally one of this plane's
+  /// advertised modifiers). Falls back to a live `fmt::classify()` for a modifier
+  /// not in the advertised set. O(log N) lookup.
+  [[nodiscard]] drm::fmt::BandwidthClass bandwidth_class(uint64_t modifier) const noexcept;
+
+  /// Populate `format_table` and `modifier_classes` from `format_modifiers` (or,
+  /// when IN_FORMATS is absent, from the bare `formats` list as LINEAR-only).
+  /// Called once per plane at registry construction; safe to re-run.
+  void build_format_metadata();
 };
 
 class PlaneRegistry {

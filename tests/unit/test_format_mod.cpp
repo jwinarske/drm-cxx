@@ -134,6 +134,28 @@ void test_cost() {
         std::uint64_t(1920) * 1080 * 3);
 }
 
+void test_from_pairs() {
+  // from_pairs builds the same queryable table as from_blob, from decoded pairs.
+  const std::pair<std::uint32_t, std::uint64_t> pairs[] = {
+      {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR},
+      {DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR},
+      {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16)},
+      {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR},  // duplicate -> deduped
+  };
+  const fmt::FormatTable t = fmt::FormatTable::from_pairs(
+      drm::span<const std::pair<std::uint32_t, std::uint64_t>>(pairs, 4));
+
+  CHECK(t.all().size() == 3);  // duplicate collapsed
+  const fmt::Modifier lin{DRM_FORMAT_MOD_LINEAR};
+  const fmt::Modifier afbc{DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_16x16)};
+  CHECK(t.supports(DRM_FORMAT_XRGB8888, lin));
+  CHECK(t.supports(DRM_FORMAT_ARGB8888, lin));
+  CHECK(t.supports(DRM_FORMAT_XRGB8888, afbc));
+  CHECK(!t.supports(DRM_FORMAT_ARGB8888, afbc));  // AFBC only listed for XRGB
+  CHECK(t.modifiers_for(DRM_FORMAT_XRGB8888).size() == 2);
+  CHECK(fmt::FormatTable::from_pairs({}).all().empty());  // empty input -> empty table
+}
+
 bool contains(const std::string& hay, const char* needle) {
   return hay.find(needle) != std::string::npos;
 }
@@ -233,6 +255,7 @@ void test_probe_cache() {
 int main() {
   test_format_table();
   test_format_table_malformed();
+  test_from_pairs();
   test_classify();
   test_rotation_compatible();
   test_cost();

@@ -7,6 +7,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/fmt/format_mod.hpp>
 
 #include <drm_fourcc.h>
 #include <drm_mode.h>
@@ -69,6 +70,44 @@ bool PlaneCapabilities::supports_format_modifier(const uint32_t fmt,
 
 bool PlaneCapabilities::compatible_with_crtc(const uint32_t crtc_index) const {
   return (possible_crtcs & (1U << crtc_index)) != 0;
+}
+
+drm::fmt::BandwidthClass PlaneCapabilities::bandwidth_class(
+    const uint64_t modifier) const noexcept {
+  const auto it = std::lower_bound(modifier_classes.begin(), modifier_classes.end(), modifier,
+                                   [](const std::pair<uint64_t, drm::fmt::BandwidthClass>& e,
+                                      uint64_t m) { return e.first < m; });
+  if (it != modifier_classes.end() && it->first == modifier) {
+    return it->second;
+  }
+  // Not an advertised modifier — decode it live rather than guess.
+  return drm::fmt::classify(drm::fmt::Modifier{modifier});
+}
+
+void PlaneCapabilities::build_format_metadata() {
+  if (!format_modifiers.empty()) {
+    format_table = drm::fmt::FormatTable::from_pairs(format_modifiers);
+  } else {
+    // No IN_FORMATS: each advertised format is scannable LINEAR-only.
+    std::vector<std::pair<uint32_t, uint64_t>> linear_pairs;
+    linear_pairs.reserve(formats.size());
+    for (const uint32_t fmt : formats) {
+      linear_pairs.emplace_back(fmt, DRM_FORMAT_MOD_LINEAR);
+    }
+    format_table = drm::fmt::FormatTable::from_pairs(linear_pairs);
+  }
+
+  // Precompute one bandwidth class per distinct advertised modifier.
+  modifier_classes.clear();
+  for (const drm::fmt::FormatMod& fm : format_table.all()) {
+    modifier_classes.emplace_back(fm.modifier.value, drm::fmt::classify(fm.modifier));
+  }
+  std::sort(modifier_classes.begin(), modifier_classes.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  modifier_classes.erase(
+      std::unique(modifier_classes.begin(), modifier_classes.end(),
+                  [](const auto& a, const auto& b) { return a.first == b.first; }),
+      modifier_classes.end());
 }
 
 namespace {
@@ -270,6 +309,7 @@ drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
     caps.type = parse_plane_type(fd, plane->plane_id);
 
     detect_plane_capabilities(fd, plane->plane_id, caps);
+    caps.build_format_metadata();
 
     drmModeFreePlane(plane);
     registry.planes_.push_back(std::move(caps));
@@ -282,6 +322,11 @@ drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
 PlaneRegistry PlaneRegistry::from_capabilities(std::vector<PlaneCapabilities> caps) {
   PlaneRegistry registry;
   registry.planes_ = std::move(caps);
+  // Callers (tests / replay) supply raw format_modifiers or formats; derive the
+  // FormatTable + bandwidth-class metadata the same way enumerate() does.
+  for (auto& plane : registry.planes_) {
+    plane.build_format_metadata();
+  }
   return registry;
 }
 

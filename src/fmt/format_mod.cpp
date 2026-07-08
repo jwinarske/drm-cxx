@@ -122,21 +122,38 @@ FormatTable FormatTable::from_blob(const void* data, std::size_t size) {
     }
   }
 
+  t.build_index();
+  return t;
+}
+
+FormatTable FormatTable::from_pairs(
+    drm::span<const std::pair<std::uint32_t, std::uint64_t>> pairs) {
+  FormatTable t;
+  t.pairs_.reserve(pairs.size());
+  for (const auto& fm : pairs) {
+    t.pairs_.push_back({fm.first, Modifier{fm.second}});
+  }
+  t.build_index();
+  return t;
+}
+
+void FormatTable::build_index() {
   // Sort + dedup (some kernels list a (fourcc, modifier) twice).
-  std::sort(t.pairs_.begin(), t.pairs_.end());
-  t.pairs_.erase(std::unique(t.pairs_.begin(), t.pairs_.end()), t.pairs_.end());
+  std::sort(pairs_.begin(), pairs_.end());
+  pairs_.erase(std::unique(pairs_.begin(), pairs_.end()), pairs_.end());
 
   // Build the contiguous per-fourcc modifier index that backs modifiers_for().
-  for (std::size_t i = 0; i < t.pairs_.size();) {
-    const std::uint32_t fourcc = t.pairs_[i].fourcc;
-    Group g{fourcc, static_cast<std::uint32_t>(t.mods_.size()), 0};
-    for (; i < t.pairs_.size() && t.pairs_[i].fourcc == fourcc; ++i) {
-      t.mods_.push_back(t.pairs_[i].modifier);
+  mods_.clear();
+  groups_.clear();
+  for (std::size_t i = 0; i < pairs_.size();) {
+    const std::uint32_t fourcc = pairs_[i].fourcc;
+    Group g{fourcc, static_cast<std::uint32_t>(mods_.size()), 0};
+    for (; i < pairs_.size() && pairs_[i].fourcc == fourcc; ++i) {
+      mods_.push_back(pairs_[i].modifier);
       ++g.count;
     }
-    t.groups_.push_back(g);
+    groups_.push_back(g);
   }
-  return t;
 }
 
 drm::expected<FormatTable, std::error_code> FormatTable::from_plane(int fd,
