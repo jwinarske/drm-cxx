@@ -393,6 +393,25 @@ target_link_libraries(test_scanout_backend_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_scanout_backend_vkms)
 
+# Explicit-sync IN_FENCE_FD validation against a real GPU + atomic KMS driver.
+# Renders a GL frame whose EGL native fence becomes the plane's IN_FENCE_FD;
+# self-skips where there is no GPU EGL / native-fence support (llvmpipe) or no
+# KMS card. Gated on egl + glesv2 like the gl_present example (the library never
+# links them itself); the source also guards on DRM_CXX_HAS_EGL.
+pkg_check_modules(test_fence_egl IMPORTED_TARGET egl)
+pkg_check_modules(test_fence_gles IMPORTED_TARGET glesv2)
+if(TARGET PkgConfig::test_fence_egl AND TARGET PkgConfig::test_fence_gles)
+  add_executable(test_explicit_sync_fence_gl
+    integration/test_explicit_sync_fence_gl.cpp)
+  target_link_libraries(test_explicit_sync_fence_gl PRIVATE
+    drm-cxx::drm-cxx
+    PkgConfig::test_fence_egl
+    PkgConfig::test_fence_gles
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_explicit_sync_fence_gl)
+endif()
+
 # V4l2CameraSource integration test. Self-skips when no V4L2 capture
 # device or vkms isn't loaded.
 add_executable(test_v4l2_camera_source_vivid

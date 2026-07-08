@@ -103,6 +103,23 @@ struct CommitReport {
   /// FB binding.
   std::size_t fbs_attached{0};
 
+  /// Layers whose acquire fence was handed to the kernel as the plane's
+  /// IN_FENCE_FD this commit — i.e. the real explicit-sync path: the display
+  /// engine waits on the producer's fence before sampling the buffer, no CPU
+  /// stall. One per natively-placed layer that carried an `acquire_fence` and
+  /// whose plane exposes a mutable IN_FENCE_FD property. The honest signal that
+  /// explicit sync is live on this driver — distinguishes it from the
+  /// `in_fence_cpu_waits` fallback below (a source may always produce a fence,
+  /// yet the plane not accept it).
+  std::size_t in_fences_armed{0};
+  /// Layers that carried an acquire fence but whose plane had no usable
+  /// IN_FENCE_FD property, so the scene blocked on a CPU wait for the fence
+  /// before committing (real commits only; a TEST pass never waits). Nonzero
+  /// means the driver/plane can't do KMS-side explicit sync for this layer and
+  /// the present path paid a CPU stall instead. `in_fences_armed == 0 &&
+  /// in_fence_cpu_waits == 0` means no source produced an acquire fence at all.
+  std::size_t in_fence_cpu_waits{0};
+
   /// Internal test commits issued by the allocator while searching
   /// for a valid plane assignment. Cold-start commits can spend the
   /// whole budget (default 16); warm-start commits should normally

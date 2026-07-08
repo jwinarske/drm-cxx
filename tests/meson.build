@@ -620,6 +620,23 @@ test('test_scanout_backend_vkms',
   is_parallel : false,
 )
 
+# Explicit-sync IN_FENCE_FD validation against a real GPU + atomic KMS driver.
+# A GL producer's EGL native fence becomes the plane's IN_FENCE_FD; self-skips
+# where no real GPU fence is produced (llvmpipe) or no KMS card. Gated on egl +
+# glesv2 (the library never links them itself); the source also guards on
+# DRM_CXX_HAS_EGL. Not parallel: it modesets.
+fence_egl_dep = dependency('egl', required : false)
+fence_glesv2_dep = dependency('glesv2', required : false)
+if fence_egl_dep.found() and fence_glesv2_dep.found()
+  test('test_explicit_sync_fence_gl',
+    executable('test_explicit_sync_fence_gl',
+      'integration/test_explicit_sync_fence_gl.cpp',
+      dependencies : test_deps + [fence_egl_dep, fence_glesv2_dep],
+    ),
+    is_parallel : false,
+  )
+endif
+
 # V4l2CameraSource integration test against any /dev/video* + vkms.
 # Self-skips at runtime when no usable CAPTURE device is present or
 # vkms isn't loaded.
