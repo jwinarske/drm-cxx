@@ -10,6 +10,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/fmt/format_mod.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -249,6 +250,12 @@ class Allocator {
   static bool plane_statically_compatible(const PlaneCapabilities& plane, const Layer& layer,
                                           uint32_t crtc_index);
 
+  // True if a prior single-plane TEST_ONLY proved this layer's (fourcc, modifier)
+  // can't scan out on this plane (a lying IN_FORMATS advertisement). Consulted
+  // alongside the property-hash failure_cache when filtering edge candidates.
+  [[nodiscard]] bool probe_rejected(uint32_t crtc_index, uint32_t plane_id,
+                                    const Layer& layer) const;
+
   // §13.1 Static upper bound
   static int static_upper_bound(drm::span<Layer* const> remaining_layers,
                                 const std::vector<const PlaneCapabilities*>& available_planes,
@@ -358,6 +365,13 @@ class Allocator {
 
   // §13.4 Test-commit failure cache
   TestCache failure_cache_;
+  // Modifier-level probe cache: when a single-plane TEST_ONLY fails for a
+  // (crtc, plane, fourcc, modifier) that passed IN_FORMATS, it is recorded
+  // Rejected so a lying IN_FORMATS entry (e.g. over-advertised AFBC) costs one
+  // probe, not a dropped edge re-probed every frame. Persists for the allocator's
+  // lifetime like failure_cache_; keyed on stable ids, so entries left behind by a
+  // hotplug are inert (never looked up again).
+  drm::fmt::ModifierProbeCache probe_cache_;
 
   std::size_t max_test_commits_{16};
   std::size_t test_commits_this_frame_{0};

@@ -681,6 +681,9 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
         cached.has_value() && !*cached) {
       continue;
     }
+    if (probe_rejected(crtc_index, cand.plane->id, *cand.layer)) {
+      continue;
+    }
     assignment.insert_or_assign(cand.plane->id, cand.layer);
     used_planes.insert_or_assign(cand.plane->id, true);
     assigned_layers.insert_or_assign(cand.layer, true);
@@ -997,6 +1000,16 @@ std::vector<std::vector<Layer*>> Allocator::split_independent_groups(std::vector
 
 // ── Test commit helpers ───────────────────────────────────────
 
+bool Allocator::probe_rejected(const uint32_t crtc_index, const uint32_t plane_id,
+                               const Layer& layer) const {
+  const auto fourcc = layer.format();
+  if (!fourcc.has_value()) {
+    return false;
+  }
+  return probe_cache_.lookup(crtc_index, plane_id, *fourcc, drm::fmt::Modifier{layer.modifier()}) ==
+         drm::fmt::ModifierProbeCache::Verdict::Rejected;
+}
+
 std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, const uint32_t flags,
                                            const uint32_t crtc_index) {
   if (test_commits_this_frame_ >= max_test_commits_) {
@@ -1063,6 +1076,19 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
   // Record in failure cache
   for (const auto& [plane_id, layer] : assignment) {
     failure_cache_.record(plane_id, layer->property_hash(), result.has_value());
+  }
+
+  // A single-plane assignment gives clean attribution: the verdict is
+  // unambiguously about this (plane, fourcc, modifier). Record it in the modifier
+  // probe cache so a lying IN_FORMATS entry costs one probe, not a re-probe every
+  // frame. Multi-plane failures can't be pinned on one modifier, so we leave the
+  // probe cache untouched for them (the property-hash failure_cache handles those).
+  if (assignment.size() == 1) {
+    const auto& [plane_id, layer] = *assignment.begin();
+    if (const auto fourcc = layer->format(); fourcc.has_value()) {
+      probe_cache_.record(crtc_index, plane_id, *fourcc, drm::fmt::Modifier{layer->modifier()},
+                          result.has_value());
+    }
   }
 
   if (!result.has_value()) {
@@ -1322,6 +1348,9 @@ bool Allocator::backtrack(std::vector<Layer*>& layers,
     // Check failure cache
     if (auto cached = failure_cache_.lookup(plane->id, layer->property_hash());
         cached.has_value() && !*cached) {
+      continue;
+    }
+    if (probe_rejected(crtc_index, plane->id, *layer)) {
       continue;
     }
 
