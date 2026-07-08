@@ -5,7 +5,9 @@ This document captures the *why* behind `drm::scene::LayerScene`. The
 lives in [`src/scene/README.md`](../src/scene/README.md). Read that
 first if you want to use the module; read this if you want to extend
 it, audit its boundaries, or understand which capabilities are
-deferred to v2.
+deferred to v2. For the practical guide to buffer sources — the full
+catalog, when to reach for each, and how to write a new one — see
+[`producers.md`](producers.md).
 
 ## Why a layer scene at all
 
@@ -45,7 +47,8 @@ KMS concept boundary. The same source can be displayed multiple ways;
 the same display configuration can scan different buffers.
 
 v1 implementations + the producer-side additions that landed on
-top of the v1 surface:
+top of the v1 surface ([`producers.md`](producers.md) is the full
+catalog, with a capabilities matrix and a how-to-write-a-source guide):
 
 | Source | Backing | Use case |
 |---|---|---|
