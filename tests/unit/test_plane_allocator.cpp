@@ -19,84 +19,49 @@ TEST(PlaneCapabilitiesTest, SupportsFormat) {
   EXPECT_FALSE(caps.supports_format(0x36314752));  // RGB565
 }
 
-TEST(PlaneCapabilitiesTest, SupportsFormatModifierFallsBackWhenInFormatsAbsent) {
-  // Driver doesn't expose IN_FORMATS — only the bare format list. The
-  // fallback path accepts LINEAR / INVALID against advertised formats and
-  // rejects everything else.
-  drm::planes::PlaneCapabilities caps;
-  caps.formats = {DRM_FORMAT_XRGB8888};
-  caps.has_format_modifiers = false;
-
-  EXPECT_TRUE(caps.supports_format_modifier(DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR));
-  EXPECT_TRUE(caps.supports_format_modifier(DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_INVALID));
-
-  // Format the plane doesn't carry — even with a linear modifier.
-  EXPECT_FALSE(caps.supports_format_modifier(DRM_FORMAT_RGB565, DRM_FORMAT_MOD_LINEAR));
-
-  // Non-trivial modifier without IN_FORMATS evidence: rejected.
-  constexpr uint64_t k_afbc_like = (1ULL << 56) | 1;
-  EXPECT_FALSE(caps.supports_format_modifier(DRM_FORMAT_XRGB8888, k_afbc_like));
-}
-
-TEST(PlaneCapabilitiesTest, SupportsFormatModifierFromInFormatsBlob) {
-  // Driver exposed IN_FORMATS — the (format, modifier) pair list is
-  // authoritative. Formats not listed are rejected even if `formats`
-  // happens to carry them; a non-trivial modifier is accepted only when
-  // the exact pair is in the IN_FORMATS list.
-  constexpr uint64_t k_afbc_like = (1ULL << 56) | 1;
-  drm::planes::PlaneCapabilities caps;
-  caps.formats = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888};
-  caps.format_modifiers = {
-      {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR},
-      {DRM_FORMAT_XRGB8888, k_afbc_like},
-      {DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR},
-  };
-  // PlaneCapabilities::format_modifiers must be sorted by format ascending —
-  // production code's lookup uses lower_bound. parse_in_formats_blob sorts
-  // for callers; tests that populate the field directly must mirror that.
-  std::sort(caps.format_modifiers.begin(), caps.format_modifiers.end());
-  caps.has_format_modifiers = true;
-
-  // Linear pair listed.
-  EXPECT_TRUE(caps.supports_format_modifier(DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR));
-  // INVALID treated as LINEAR-equivalent.
-  EXPECT_TRUE(caps.supports_format_modifier(DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_INVALID));
-  // Vendor tiling listed.
-  EXPECT_TRUE(caps.supports_format_modifier(DRM_FORMAT_XRGB8888, k_afbc_like));
-
-  // ARGB only listed for LINEAR — vendor tiling on ARGB rejected.
-  EXPECT_TRUE(caps.supports_format_modifier(DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR));
-  EXPECT_FALSE(caps.supports_format_modifier(DRM_FORMAT_ARGB8888, k_afbc_like));
-
-  // Format absent from the pair list — rejected even if `formats` lists it.
-  caps.formats.push_back(DRM_FORMAT_RGB565);
-  EXPECT_FALSE(caps.supports_format_modifier(DRM_FORMAT_RGB565, DRM_FORMAT_MOD_LINEAR));
-}
-
-TEST(PlaneCapabilitiesTest, FormatTableMirrorsSupportsFormatModifier) {
-  // Phase 1: the canonical FormatTable, built by build_format_metadata() from the
-  // same IN_FORMATS pairs, agrees with the hand-rolled supports_format_modifier()
-  // for real modifiers (LINEAR + a vendor tiling). INVALID is intentionally not
-  // mirrored — the table is exact where the legacy path folds INVALID onto LINEAR.
+TEST(PlaneCapabilitiesTest, LayerFitsPlaneFromInFormats) {
+  // IN_FORMATS present: the (format, modifier) pairs are authoritative. Exact
+  // pairs match; INVALID is LINEAR-equivalent; a vendor tiling matches only where
+  // it is listed; a format absent from the table is rejected.
   constexpr uint64_t k_afbc_like = (1ULL << 56) | 1;
   drm::planes::PlaneCapabilities caps;
   caps.formats = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_RGB565};
-  caps.format_modifiers = {
+  caps.format_table = drm::fmt::FormatTable::from_pairs(std::vector<std::pair<uint32_t, uint64_t>>{
       {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR},
       {DRM_FORMAT_XRGB8888, k_afbc_like},
       {DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR},
-  };
-  std::sort(caps.format_modifiers.begin(), caps.format_modifiers.end());
+  });
   caps.has_format_modifiers = true;
   caps.build_format_metadata();
 
-  for (const uint32_t fourcc : {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_RGB565}) {
-    for (const uint64_t mod : {uint64_t{DRM_FORMAT_MOD_LINEAR}, k_afbc_like}) {
-      EXPECT_EQ(caps.format_table.supports(fourcc, drm::fmt::Modifier{mod}),
-                caps.supports_format_modifier(fourcc, mod))
-          << "fourcc=" << fourcc << " mod=" << mod;
-    }
-  }
+  const auto fits = [&](uint32_t f, uint64_t m) {
+    return drm::fmt::layer_fits_plane(caps.format_table, f, drm::fmt::Modifier{m});
+  };
+  EXPECT_TRUE(fits(DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR));
+  EXPECT_TRUE(fits(DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_INVALID));  // INVALID == LINEAR
+  EXPECT_TRUE(fits(DRM_FORMAT_XRGB8888, k_afbc_like));             // vendor tiling listed
+  EXPECT_TRUE(fits(DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR));
+  EXPECT_FALSE(fits(DRM_FORMAT_ARGB8888, k_afbc_like));          // tiling not listed for ARGB
+  EXPECT_FALSE(fits(DRM_FORMAT_RGB565, DRM_FORMAT_MOD_LINEAR));  // format not in the table
+}
+
+TEST(PlaneCapabilitiesTest, LayerFitsPlaneLinearOnlyWhenNoInFormats) {
+  // No IN_FORMATS: build_format_metadata synthesizes LINEAR for each bare format.
+  // LINEAR / INVALID fit; a non-trivial modifier does not; an absent format does not.
+  drm::planes::PlaneCapabilities caps;
+  caps.formats = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888};
+  caps.has_format_modifiers = false;
+  caps.build_format_metadata();
+
+  const auto fits = [&](uint32_t f, uint64_t m) {
+    return drm::fmt::layer_fits_plane(caps.format_table, f, drm::fmt::Modifier{m});
+  };
+  EXPECT_TRUE(fits(DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR));
+  EXPECT_TRUE(fits(DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_INVALID));
+  EXPECT_TRUE(fits(DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR));
+  constexpr uint64_t k_afbc_like = (1ULL << 56) | 1;
+  EXPECT_FALSE(fits(DRM_FORMAT_XRGB8888, k_afbc_like));          // no IN_FORMATS evidence
+  EXPECT_FALSE(fits(DRM_FORMAT_RGB565, DRM_FORMAT_MOD_LINEAR));  // format not advertised
 }
 
 TEST(PlaneCapabilitiesTest, FormatTableLinearOnlyWhenNoInFormats) {
@@ -120,11 +85,10 @@ TEST(PlaneCapabilitiesTest, BandwidthClassMatchesClassify) {
   // modifier, and an unadvertised modifier falls back to classify() (not Linear).
   constexpr uint64_t k_afbc_like = (1ULL << 56) | 1;
   drm::planes::PlaneCapabilities caps;
-  caps.format_modifiers = {
+  caps.format_table = drm::fmt::FormatTable::from_pairs(std::vector<std::pair<uint32_t, uint64_t>>{
       {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR},
       {DRM_FORMAT_XRGB8888, k_afbc_like},
-  };
-  std::sort(caps.format_modifiers.begin(), caps.format_modifiers.end());
+  });
   caps.has_format_modifiers = true;
   caps.build_format_metadata();
 
