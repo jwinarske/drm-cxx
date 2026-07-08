@@ -100,6 +100,16 @@ void test_classify() {
 
   CHECK(fmt::classify(fmt::Modifier{DRM_FORMAT_MOD_QCOM_COMPRESSED}) == BC::Compression);
   CHECK(fmt::classify(fmt::Modifier{DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED}) == BC::Tiling);
+
+  // NVIDIA block-linear: the compression field is bits 25:23 (3 bits). c=0 is
+  // uncompressed (Tiling); c=1..4 are compressed. c=4 (CDE vertical, 0b100) is
+  // the case a 2-bit mask dropped, calling real compression Tiling -- guard it.
+  CHECK(fmt::classify(fmt::Modifier{DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, 0)}) ==
+        BC::Tiling);
+  CHECK(fmt::classify(fmt::Modifier{DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(1, 0, 0, 0xfe, 0)}) ==
+        BC::Compression);
+  CHECK(fmt::classify(fmt::Modifier{DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(4, 0, 0, 0xfe, 0)}) ==
+        BC::Compression);
 }
 
 void test_cost() {
@@ -113,6 +123,15 @@ void test_cost() {
   const std::uint64_t half =
       fmt::scanout_cost_bytes(1920, 1080, DRM_FORMAT_XRGB8888, BC::Compression, 0.5f);
   CHECK(half == lin / 2);
+
+  // Byte accounting is per-format, not a fixed 32bpp. Packed RGB565 is 2 B/px;
+  // planar NV12 (4:2:0 8-bit) is 1.5 B/px; P010 (4:2:0 16-bit) is 3 B/px.
+  CHECK(fmt::scanout_cost_bytes(1920, 1080, DRM_FORMAT_RGB565, BC::Linear) ==
+        std::uint64_t(1920) * 1080 * 2);
+  CHECK(fmt::scanout_cost_bytes(1920, 1080, DRM_FORMAT_NV12, BC::Linear) ==
+        std::uint64_t(1920) * 1080 * 3 / 2);
+  CHECK(fmt::scanout_cost_bytes(1920, 1080, DRM_FORMAT_P010, BC::Tiling) ==
+        std::uint64_t(1920) * 1080 * 3);
 }
 
 bool contains(const std::string& hay, const char* needle) {
