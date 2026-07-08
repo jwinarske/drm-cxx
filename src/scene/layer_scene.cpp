@@ -2014,7 +2014,9 @@ class LayerScene::Impl {
           return r;
         }
         ++report.properties_written;
+        ++report.in_fences_armed;
       } else if (!test_only) {
+        ++report.in_fence_cpu_waits;
         if (auto r = acq.buffer.acquire_fence->wait(std::chrono::seconds(1)); !r) {
           drm::log_warn("scene::LayerScene: acquire-fence CPU wait failed: {}",
                         r.error().message());

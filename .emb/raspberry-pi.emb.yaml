@@ -38,6 +38,7 @@ cross:
       sysroot:
         dev_packages:
           - libdisplay-info-dev   # trixie ships >= 0.2.0
+          - libgtest-dev          # GoogleTest for the on-target gtest binaries
       augment: &augment_libs
         # blend2d (Zlib license) backs drm::capture's PNG screenshots. Build it
         # static + no-JIT (skips the asmjit dependency) and PIC so it links into
@@ -59,17 +60,39 @@ cross:
           url: https://github.com/jwinarske/shadertoy-cxx/archive/refs/heads/main.tar.gz
           build: cmake
           static: true
+      # Pi 4 is the fence-validation DUT (real v3d GPU + vc4 atomic KMS): build the
+      # gtest suite so IN_FENCE_FD / OUT_FENCE_PTR can be exercised against a real
+      # KMS card that produces genuine GPU acquire fences. Mirrors the rpi5 block;
+      # only -mcpu differs (a72 vs a76), so the Pi 4 needs its own binaries.
       backends: &backends_examples
         examples:
           DRM_CXX_BUILD_EXAMPLES: 'ON'
-          DRM_CXX_BUILD_TESTS: 'OFF'
+          DRM_CXX_BUILD_TESTS: 'ON'
           DRM_CXX_BUILD_BENCHMARKS: 'OFF'
           DRM_CXX_VULKAN: 'OFF'
+          # PRE_TEST defers gtest discovery to ctest run-time on the target
+          # (aarch64 binaries can't be enumerated on the x86 host at build time).
+          CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE: 'PRE_TEST'
 
     rpi5-trixie:
       extends: rpi5-trixie
       sysroot:
         dev_packages:
           - libdisplay-info-dev
+          - libgtest-dev          # GoogleTest for the on-target gtest binaries
       augment: *augment_libs
-      backends: *backends_examples
+      # Own backend (not the shared examples anchor) so tests build on rpi5 only:
+      # DRM_CXX_BUILD_TESTS=ON cross-builds the gtest suite to run on the Pi's
+      # real vc4 KMS card (dumb+PRIME+AddFB2). Feature flags match the examples
+      # set so only feature-clean tests build.
+      backends:
+        examples:
+          DRM_CXX_BUILD_EXAMPLES: 'ON'
+          DRM_CXX_BUILD_TESTS: 'ON'
+          DRM_CXX_BUILD_BENCHMARKS: 'OFF'
+          DRM_CXX_VULKAN: 'OFF'
+          # Cross-compile: gtest_discover_tests defaults to running each binary at
+          # build time to enumerate cases — impossible for aarch64 on an x86 host.
+          # PRE_TEST defers discovery to ctest run-time on the target, so the
+          # cross-build only links the binaries (we run them directly on the Pi).
+          CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE: 'PRE_TEST'
