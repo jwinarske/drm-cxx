@@ -73,6 +73,69 @@ TEST(PlaneCapabilitiesTest, SupportsFormatModifierFromInFormatsBlob) {
   EXPECT_FALSE(caps.supports_format_modifier(DRM_FORMAT_RGB565, DRM_FORMAT_MOD_LINEAR));
 }
 
+TEST(PlaneCapabilitiesTest, FormatTableMirrorsSupportsFormatModifier) {
+  // Phase 1: the canonical FormatTable, built by build_format_metadata() from the
+  // same IN_FORMATS pairs, agrees with the hand-rolled supports_format_modifier()
+  // for real modifiers (LINEAR + a vendor tiling). INVALID is intentionally not
+  // mirrored — the table is exact where the legacy path folds INVALID onto LINEAR.
+  constexpr uint64_t k_afbc_like = (1ULL << 56) | 1;
+  drm::planes::PlaneCapabilities caps;
+  caps.formats = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_RGB565};
+  caps.format_modifiers = {
+      {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR},
+      {DRM_FORMAT_XRGB8888, k_afbc_like},
+      {DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR},
+  };
+  std::sort(caps.format_modifiers.begin(), caps.format_modifiers.end());
+  caps.has_format_modifiers = true;
+  caps.build_format_metadata();
+
+  for (const uint32_t fourcc : {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_RGB565}) {
+    for (const uint64_t mod : {uint64_t{DRM_FORMAT_MOD_LINEAR}, k_afbc_like}) {
+      EXPECT_EQ(caps.format_table.supports(fourcc, drm::fmt::Modifier{mod}),
+                caps.supports_format_modifier(fourcc, mod))
+          << "fourcc=" << fourcc << " mod=" << mod;
+    }
+  }
+}
+
+TEST(PlaneCapabilitiesTest, FormatTableLinearOnlyWhenNoInFormats) {
+  // No IN_FORMATS: build_format_metadata records LINEAR for each bare format.
+  drm::planes::PlaneCapabilities caps;
+  caps.formats = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888};
+  caps.has_format_modifiers = false;
+  caps.build_format_metadata();
+
+  EXPECT_TRUE(
+      caps.format_table.supports(DRM_FORMAT_XRGB8888, drm::fmt::Modifier{DRM_FORMAT_MOD_LINEAR}));
+  EXPECT_TRUE(
+      caps.format_table.supports(DRM_FORMAT_ARGB8888, drm::fmt::Modifier{DRM_FORMAT_MOD_LINEAR}));
+  constexpr uint64_t k_afbc_like = (1ULL << 56) | 1;
+  EXPECT_FALSE(caps.format_table.supports(DRM_FORMAT_XRGB8888, drm::fmt::Modifier{k_afbc_like}));
+  EXPECT_EQ(caps.bandwidth_class(DRM_FORMAT_MOD_LINEAR), drm::fmt::BandwidthClass::Linear);
+}
+
+TEST(PlaneCapabilitiesTest, BandwidthClassMatchesClassify) {
+  // Precomputed per-modifier class equals a live classify() for each advertised
+  // modifier, and an unadvertised modifier falls back to classify() (not Linear).
+  constexpr uint64_t k_afbc_like = (1ULL << 56) | 1;
+  drm::planes::PlaneCapabilities caps;
+  caps.format_modifiers = {
+      {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR},
+      {DRM_FORMAT_XRGB8888, k_afbc_like},
+  };
+  std::sort(caps.format_modifiers.begin(), caps.format_modifiers.end());
+  caps.has_format_modifiers = true;
+  caps.build_format_metadata();
+
+  EXPECT_EQ(caps.bandwidth_class(DRM_FORMAT_MOD_LINEAR),
+            drm::fmt::classify(drm::fmt::Modifier{DRM_FORMAT_MOD_LINEAR}));
+  EXPECT_EQ(caps.bandwidth_class(k_afbc_like), drm::fmt::classify(drm::fmt::Modifier{k_afbc_like}));
+  constexpr uint64_t k_unadvertised = (uint64_t{0x02} << 56) | 9;
+  EXPECT_EQ(caps.bandwidth_class(k_unadvertised),
+            drm::fmt::classify(drm::fmt::Modifier{k_unadvertised}));
+}
+
 TEST(PlaneCapabilitiesTest, CrtcCompatibility) {
   drm::planes::PlaneCapabilities caps;
   caps.possible_crtcs = 0b0101;  // CRTCs 0 and 2

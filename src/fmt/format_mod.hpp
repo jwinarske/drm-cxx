@@ -121,6 +121,12 @@ class FormatTable {
   // input yields an empty table rather than UB.
   static FormatTable from_blob(const void* data, std::size_t size);
 
+  // Build a table from already-decoded (fourcc, modifier) pairs — for a caller
+  // that parsed IN_FORMATS by other means (e.g. PlaneRegistry harvesting it into
+  // its own list) and wants the queryable table without re-reading the blob.
+  // Duplicates are de-duped; input order does not matter.
+  static FormatTable from_pairs(drm::span<const std::pair<std::uint32_t, std::uint64_t>> pairs);
+
   [[nodiscard]] bool supports(std::uint32_t fourcc, Modifier m) const noexcept;
   [[nodiscard]] drm::span<const Modifier> modifiers_for(std::uint32_t fourcc) const noexcept;
   [[nodiscard]] drm::span<const FormatMod> all() const noexcept {
@@ -136,6 +142,10 @@ class FormatTable {
     std::uint32_t count = 0;
   };
   std::vector<Group> groups_;
+
+  // Sort + dedup pairs_, then rebuild the per-fourcc groups_/mods_ index.
+  // Shared tail of from_blob() and from_pairs().
+  void build_index();
 };
 
 // ---------------------------------------------------------------------------

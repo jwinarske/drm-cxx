@@ -25,10 +25,13 @@ using format_string = std::format_string<Args...>;
 #else
 #include <fmt/format.h>
 namespace drm {
-using fmt::format;
-using fmt::print;
-using fmt::println;
+// Qualify the library namespace as ::fmt — drm::fmt (the format-modifier module)
+// is a sibling namespace, so an unqualified fmt:: here resolves to drm::fmt in
+// any translation unit that has made it visible, and the aliases break.
+using ::fmt::format;
+using ::fmt::print;
+using ::fmt::println;
 template <class... Args>
-using format_string = fmt::format_string<Args...>;
+using format_string = ::fmt::format_string<Args...>;
 }  // namespace drm
 #endif
