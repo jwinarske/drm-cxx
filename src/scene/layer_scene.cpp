@@ -50,6 +50,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -69,6 +70,15 @@ namespace {
 // subpixel source rects.
 constexpr std::uint64_t to_16_16(std::uint32_t v) noexcept {
   return static_cast<std::uint64_t>(v) << 16U;
+}
+
+// DRM_CXX_FENCE_DEBUG=1 traces per-commit explicit-sync fence arming (see
+// arm_layer_acquire_fences) so a user can confirm on real hardware whether a
+// producer's acquire fence reached the plane's IN_FENCE_FD or fell back to a
+// CPU wait. Cached once; zero cost when unset.
+bool fence_debug() noexcept {
+  static const bool enabled = std::getenv("DRM_CXX_FENCE_DEBUG") != nullptr;
+  return enabled;
 }
 
 }  // namespace
@@ -2054,6 +2064,14 @@ class LayerScene::Impl {
                         r.error().message());
         }
       }
+    }
+    // Trace the commit's explicit-sync outcome under DRM_CXX_FENCE_DEBUG: only on
+    // real commits (TEST probes re-run this) and only when a fence was actually
+    // present, so a fenceless or idle workload stays quiet. in_fence_cpu_waits > 0
+    // is the signal that a producer fence could not reach KMS-side sync.
+    if (fence_debug() && !test_only && (report.in_fences_armed + report.in_fence_cpu_waits) > 0) {
+      drm::log_info("scene::LayerScene: commit fences in_fences_armed={} in_fence_cpu_waits={}",
+                    report.in_fences_armed, report.in_fence_cpu_waits);
     }
     return {};
   }
