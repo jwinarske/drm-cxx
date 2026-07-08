@@ -3,9 +3,11 @@
 //
 // drm-cxx/fmt/format_mod.cpp
 //
-// Out-of-line implementations for format_mod.hpp. classify() and
-// scanout_cost_bytes() are header-inline; everything else lives here.
+// Out-of-line implementations for format_mod.hpp. classify() is header-inline;
+// everything else -- including scanout_cost_bytes() and its per-format byte
+// accounting -- lives here.
 
+#include <drm-cxx/core/format.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
@@ -596,6 +598,59 @@ std::string describe(Modifier m) {
     default:
       return std::string(vendor_name(vendor)) + hex_suffix(m.value);
   }
+}
+
+namespace {
+
+// Total bytes the display engine fetches for one frame at `fourcc`, summed over
+// all planes. Packed formats come straight from core format_bpp(); planar YUV
+// (which format_bpp reports as 0, since per-plane bpp differs) is expanded by
+// chroma subsampling and sample width. An unrecognized format falls back to a
+// conservative 32bpp so the cost model never scores an unknown layer as free.
+std::uint64_t frame_bytes(std::uint32_t fourcc, std::uint32_t w, std::uint32_t h) noexcept {
+  const std::uint64_t px = static_cast<std::uint64_t>(w) * h;
+  if (const std::uint32_t bpp = drm::format_bpp(fourcc); bpp != 0U) {
+    return px * (bpp / 8U);  // packed RGB / packed YUV; bpp is a multiple of 8
+  }
+  switch (fourcc) {
+    // 4:2:0, 8-bit (luma + half-res interleaved/planar chroma): 1.5 bytes/px.
+    case DRM_FORMAT_NV12:
+    case DRM_FORMAT_NV21:
+    case DRM_FORMAT_YUV420:
+    case DRM_FORMAT_YVU420:
+      return px * 3U / 2U;
+    // 4:2:2, 8-bit: 2 bytes/px.
+    case DRM_FORMAT_NV16:
+    case DRM_FORMAT_NV61:
+    case DRM_FORMAT_YUV422:
+    case DRM_FORMAT_YVU422:
+      return px * 2U;
+    // 3 bytes/px, two ways: 4:4:4 8-bit (NV24/YUV444 -> full-res Y+Cb+Cr) and
+    // 4:2:0 in 16-bit containers (P010/P012/P016 -> 2B luma + 1B half-res chroma).
+    case DRM_FORMAT_NV24:
+    case DRM_FORMAT_NV42:
+    case DRM_FORMAT_YUV444:
+    case DRM_FORMAT_YVU444:
+    case DRM_FORMAT_P010:
+    case DRM_FORMAT_P012:
+    case DRM_FORMAT_P016:
+      return px * 3U;
+    // Unknown layout (incl. 4:2:2 16-bit like P210, which is exactly 4 bytes/px):
+    // assume 32bpp rather than score it free.
+    default:
+      return px * 4U;
+  }
+}
+
+}  // namespace
+
+std::uint64_t scanout_cost_bytes(std::uint32_t w, std::uint32_t h, std::uint32_t fourcc,
+                                 BandwidthClass cls, float compressed_ratio) noexcept {
+  const std::uint64_t raw = frame_bytes(fourcc, w, h);
+  // Linear and Tiling move the same bytes; only real compression cuts the fetch.
+  return cls == BandwidthClass::Compression
+             ? static_cast<std::uint64_t>(static_cast<double>(raw) * compressed_ratio)
+             : raw;
 }
 
 }  // namespace drm::fmt

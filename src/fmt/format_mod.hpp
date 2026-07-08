@@ -294,15 +294,20 @@ inline BandwidthClass classify(Modifier m) noexcept {
       return (AMD_FMT_MOD_GET(DCC, m.value) != 0U) ? BandwidthClass::Compression
                                                    : BandwidthClass::Tiling;
 #else
-      // Fallback for a drm_fourcc.h without the AMD_FMT_MOD macros: approximate
-      // DCC bit (shift varies by GFX generation).
+      // Fallback for a drm_fourcc.h without the AMD_FMT_MOD macros. The DCC flag
+      // sits at a fixed bit (AMD_FMT_MOD_DCC_SHIFT == 13) across GFX generations --
+      // only the tile encoding is gen-specific -- so this reads exactly the bit the
+      // canonical AMD_FMT_MOD_GET(DCC, ...) path above extracts.
       return (((m.value >> 13) & 0x1) != 0U) ? BandwidthClass::Compression : BandwidthClass::Tiling;
 #endif
     case DRM_FORMAT_MOD_VENDOR_QCOM:
       return BandwidthClass::Compression;  // QCOM_COMPRESSED == UBWC
     case DRM_FORMAT_MOD_VENDOR_NVIDIA:
-      // Block-linear compression field (approximate; validate per target).
-      return (((m.value >> 23) & 0x3) != 0U) ? BandwidthClass::Compression : BandwidthClass::Tiling;
+      // Bits 25:23 are the NVIDIA block-linear "lossless framebuffer compression
+      // type" field (drm_fourcc.h): 0 = none; 1-4 = compressed (ROP/3D layouts 1
+      // and 2, CDE horizontal, CDE vertical). Mask the full 3-bit field -- a 2-bit
+      // mask misses CDE vertical (type 4 = 0b100) and calls it Tiling.
+      return (((m.value >> 23) & 0x7) != 0U) ? BandwidthClass::Compression : BandwidthClass::Tiling;
     case DRM_FORMAT_MOD_VENDOR_BROADCOM:  // UIF/SAND/T: locality only, no savings
     default:
       // Unknown non-linear: assume tiled, not free.
@@ -330,17 +335,6 @@ inline bool rotation_compatible(Modifier m, Rotation r) noexcept {
 #endif
   }
   return true;
-}
-
-inline std::uint64_t scanout_cost_bytes(std::uint32_t w, std::uint32_t h, std::uint32_t /*fourcc*/,
-                                        BandwidthClass cls, float compressed_ratio) noexcept {
-  // bytes-per-pixel: simplified to the common 32bpp scanout case. Replace with a
-  // fourcc->bpp lookup before trusting the cost model for placement decisions.
-  const std::uint64_t bpp = 4;
-  const std::uint64_t raw = static_cast<std::uint64_t>(w) * h * bpp;
-  return cls == BandwidthClass::Compression
-             ? static_cast<std::uint64_t>(static_cast<double>(raw) * compressed_ratio)
-             : raw;  // Linear and Tiling move the same number of bytes
 }
 
 }  // namespace drm::fmt
