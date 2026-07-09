@@ -34,6 +34,7 @@
 #include "../../common/vt_switch.hpp"
 #include "convert.hpp"
 #include "double_dumb_source.hpp"
+#include "imported_buffers.hpp"
 #include "libcamera_nv12_source.hpp"
 #include "status_overlay_renderer.hpp"
 #if CAMERA_HAS_VAAPI
@@ -796,6 +797,10 @@ struct CameraSlot {
   std::shared_ptr<libcamera::Camera> camera;
   std::unique_ptr<libcamera::CameraConfiguration> config;
   std::unique_ptr<libcamera::FrameBufferAllocator> allocator;
+  // Application-allocated capture buffers (Mode B dma-heap / Mode C GBM). Owns
+  // the pool for the slot's lifetime; null for the default libcamera-allocator
+  // path (Mode A). Set only when g_import_mode is present and allocation succeeds.
+  std::unique_ptr<drm::examples::camera::ImportedBufferPool> imported_pool;
   libcamera::Stream* stream{};
   NegotiatedTarget target;
   std::uint32_t src_stride{};
@@ -887,6 +892,12 @@ void release_va_display() {
 // the run loop just drains and re-queues. Returns nullptr (logging to
 // stderr) on any failure; the caller drops the camera from the active
 // set in that case.
+// Capture-buffer import mode from --dma-heap= / --gbm-import, parsed once in
+// main() and read by configure_slot. nullopt = Mode A (libcamera's own MMAP
+// allocator).
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::optional<drm::examples::camera::ImportMode> g_import_mode;
+
 std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::LayerScene& scene,
                                            const std::shared_ptr<libcamera::Camera>& camera,
                                            const std::vector<DisplayFmt>& display_formats,
@@ -964,13 +975,35 @@ std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::L
   slot->stream = sc.stream();
   slot->src_stride = sc.stride;
 
-  slot->allocator = std::make_unique<libcamera::FrameBufferAllocator>(camera);
-  if (slot->allocator->allocate(slot->stream) < 0) {
-    drm::println(stderr, "configure_slot[{}]: allocator failed", cam_index);
-    camera->release();
-    return nullptr;
+  // Buffer provisioning. Default (Mode A): libcamera's own V4L2-MMAP allocator.
+  // When --dma-heap= / --gbm-import is set, allocate scanout-capable buffers
+  // ourselves (Mode B/C) and hand libcamera the imported FrameBuffers so the ISP
+  // writes straight into display memory; on failure fall back to the allocator so
+  // the slot still streams (via a libyuv copy tier).
+  const std::vector<std::unique_ptr<libcamera::FrameBuffer>>* buffer_pool = nullptr;
+  if (g_import_mode.has_value()) {
+    slot->imported_pool =
+        drm::examples::camera::ImportedBufferPool::create(*g_import_mode, dev, sc, sc.bufferCount);
+    if (slot->imported_pool) {
+      buffer_pool = &slot->imported_pool->buffers();
+      drm::println(stderr, "configure_slot[{}]: importing {} buffer(s) via {}", cam_index,
+                   buffer_pool->size(), drm::examples::camera::import_mode_label(*g_import_mode));
+    } else {
+      drm::println(stderr,
+                   "configure_slot[{}]: {} import failed, falling back to libcamera allocator",
+                   cam_index, drm::examples::camera::import_mode_label(*g_import_mode));
+    }
   }
-  const auto& buffers = slot->allocator->buffers(slot->stream);
+  if (buffer_pool == nullptr) {
+    slot->allocator = std::make_unique<libcamera::FrameBufferAllocator>(camera);
+    if (slot->allocator->allocate(slot->stream) < 0) {
+      drm::println(stderr, "configure_slot[{}]: allocator failed", cam_index);
+      camera->release();
+      return nullptr;
+    }
+    buffer_pool = &slot->allocator->buffers(slot->stream);
+  }
+  const auto& buffers = *buffer_pool;
   if (buffers.empty()) {
     drm::println(stderr, "configure_slot[{}]: no buffers", cam_index);
     camera->release();
@@ -2410,7 +2443,17 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
 }
 
 void print_usage() {
-  drm::println(stderr, "usage: camera (--probe | --show) [--no-vaapi] [/dev/dri/cardN]");
+  drm::println(stderr,
+               "usage: camera (--probe | --show) [--no-vaapi] "
+               "[--dma-heap=system|cma | --gbm-import] [/dev/dri/cardN]");
+  drm::println(stderr,
+               "  --dma-heap=system|cma  allocate the zero-copy NV12 capture buffers from a "
+               "dma-heap and");
+  drm::println(stderr,
+               "                         hand them to libcamera (Mode B) — use when V4L2 MMAP "
+               "isn't scanout-capable");
+  drm::println(stderr,
+               "  --gbm-import           allocate them via GBM (SCANOUT|LINEAR) instead (Mode C)");
 }
 
 int run_probe(int argc, char* argv[]) {
@@ -2595,6 +2638,12 @@ int main(int argc, char* argv[]) {
       // example). Has no effect when CAMERA_HAS_VAAPI=0 — the VAAPI
       // path was already compiled out.
       g_no_vaapi.store(true, std::memory_order_relaxed);
+    } else if (arg == "--gbm-import") {
+      g_import_mode = drm::examples::camera::ImportMode::Gbm;
+    } else if (arg == "--dma-heap=system") {
+      g_import_mode = drm::examples::camera::ImportMode::DmaHeapSystem;
+    } else if (arg == "--dma-heap=cma") {
+      g_import_mode = drm::examples::camera::ImportMode::DmaHeapCma;
     } else if (arg == "--help" || arg == "-h") {
       print_usage();
       return EXIT_SUCCESS;

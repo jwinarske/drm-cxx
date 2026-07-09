@@ -60,6 +60,31 @@ cross:
           url: https://github.com/jwinarske/shadertoy-cxx/archive/refs/heads/main.tar.gz
           build: cmake
           static: true
+        # libcamera for the camera example, built from the exact raspios rpt tag
+        # the Pi runs (v0.7.1+rpt20260609) so the linked SONAME (.so.0.7) matches
+        # the target's runtime. Debian trixie only ships 0.4 (.so.0.4, ABI-
+        # incompatible), so we don't take it from apt. Only the *core* library is
+        # needed to link against -- the pipeline handlers + IPAs come from the
+        # Pi's own libcamera install at run time -- so everything optional is off.
+        - pkg: libcamera
+          # >= 0.7 so a base image that ships Debian's generic libcamera 0.4
+          # doesn't satisfy the check -- we need the rpt 0.7 built below.
+          min: "0.7"
+          url: https://github.com/raspberrypi/libcamera/archive/refs/tags/v0.7.1+rpt20260609.tar.gz
+          build: meson
+          static: false
+          defines:
+            pipelines: ""
+            ipas: ""
+            gstreamer: "disabled"
+            v4l2: "false"
+            cam: "disabled"
+            qcam: "disabled"
+            lc-compliance: "disabled"
+            documentation: "disabled"
+            pycamera: "disabled"
+            tracing: "disabled"
+            test: "false"
       # Pi 4 is the fence-validation DUT (real v3d GPU + vc4 atomic KMS): build the
       # gtest suite so IN_FENCE_FD / OUT_FENCE_PTR can be exercised against a real
       # KMS card that produces genuine GPU acquire fences. Mirrors the rpi5 block;
@@ -80,6 +105,9 @@ cross:
         dev_packages:
           - libdisplay-info-dev
           - libgtest-dev          # GoogleTest for the on-target gtest binaries
+          - libyuv-dev            # camera example: YUY2/MJPEG->NV12 libyuv fallback
+      # libcamera (0.7, matching the Pi 5's runtime) is built from source in the
+      # shared augment above, not taken from Debian apt (which only has 0.4).
       augment: *augment_libs
       # Own backend (not the shared examples anchor) so tests build on rpi5 only:
       # DRM_CXX_BUILD_TESTS=ON cross-builds the gtest suite to run on the Pi's

@@ -52,6 +52,31 @@ host VA driver is buggy on the GPU at hand — Ubuntu 20.04's
 segfaults inside `vaEndPicture` on UVC-emitted 4:2:2 MJPEGs; until the
 package is upgraded, `--no-vaapi` keeps the example streaming.
 
+## Application-allocated capture buffers (`--dma-heap=`, `--gbm-import`)
+
+By default the NV12 zero-copy tier uses libcamera's own
+`FrameBufferAllocator` (V4L2 MMAP). That memory isn't always
+scanout-capable — some ISPs (e.g. Rockchip `rkisp1`) hand back MMAP
+buffers the display can't `AddFB2`. Two flags make the *application*
+allocate the capture buffers from memory the display can scan out, then
+hand them to libcamera to fill (imported via `V4L2_MEMORY_DMABUF`, so the
+ISP still writes straight into scanout memory — no copy):
+
+- **`--dma-heap=system`** / **`--dma-heap=cma`** (Mode B) — allocate each
+  buffer from `/dev/dma_heap/{system,cma}`. The **CMA** heap gives
+  physically-contiguous memory, which an IOMMU-less display controller
+  (RPi `vc4`) needs. Requires `CONFIG_DMABUF_HEAPS=y`.
+- **`--gbm-import`** (Mode C) — allocate via GBM
+  (`GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR`) so the buffer is
+  GPU-driver-owned; use where only the GPU path reaches display memory
+  (some i.MX setups).
+
+Both only affect the NV12 zero-copy tier; the libyuv / VA-API copy tiers
+ignore them. If the allocation or import fails the example logs it and
+falls back to the libcamera allocator, so the slot still streams.
+Validated end-to-end on a Raspberry Pi 5 (IMX219 → `pisp` NV12 →
+`--dma-heap=cma` → `vc4` scanout).
+
 ## VA-API driver discovery
 
 The VA-API tier opens the loader via `vaGetDisplayDRM(card_fd)`, then
