@@ -58,6 +58,7 @@ drm_cxx_sources = files(
   'scene/stream_capability.cpp',
   'scene/v4l2_camera_source.cpp',
   'scene/v4l2_decoder_source.cpp',
+  'scene/v4l2_plane_layout.cpp',
   'sync/fence.cpp',
   'fmt/format_mod.cpp',
   'present/negotiate.cpp',

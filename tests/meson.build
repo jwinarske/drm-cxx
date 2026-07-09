@@ -20,6 +20,13 @@ test('test_format_mod',
   ),
 )
 
+test('test_v4l2_plane_layout',
+  executable('test_v4l2_plane_layout',
+    'unit/test_v4l2_plane_layout.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_negotiate',
   executable('test_negotiate',
     'unit/test_negotiate.cpp',
