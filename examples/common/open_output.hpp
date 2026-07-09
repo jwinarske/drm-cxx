@@ -31,6 +31,7 @@
 #include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/display/scanout_target.hpp>
 #include <drm-cxx/modeset/mode.hpp>
 #include <drm-cxx/session/seat.hpp>
 
@@ -159,29 +160,14 @@ struct Output {
   // as a modeset would. Without this the present examples report "no
   // usable output" on a headless / freshly-booted board with a monitor
   // attached (e.g. StarFive once gdm is stopped), even though the
-  // connector is connected and has modes.
-  std::uint32_t crtc_id = 0;
-  if (conn->encoder_id != 0) {
-    if (const auto enc = drm::get_encoder(dev.fd(), conn->encoder_id); enc && enc->crtc_id != 0) {
-      crtc_id = enc->crtc_id;
-    }
-  }
-  for (int e = 0; e < conn->count_encoders && crtc_id == 0; ++e) {
-    const auto enc = drm::get_encoder(dev.fd(), conn->encoders[e]);
-    if (!enc) {
-      continue;
-    }
-    for (int i = 0; i < res->count_crtcs; ++i) {
-      if ((enc->possible_crtcs & (1U << static_cast<unsigned>(i))) != 0U) {
-        crtc_id = res->crtcs[i];
-        break;
-      }
-    }
-  }
-  if (crtc_id == 0) {
+  // connector is connected and has modes. Shared with the library's
+  // ScanoutTarget::discover() via drm::display::crtc_for_connector.
+  const auto crtc = drm::display::crtc_for_connector(dev.fd(), conn.get(), res.get());
+  if (!crtc) {
     drm::println(stderr, "No usable CRTC for connector {}", conn->connector_id);
     return std::nullopt;
   }
+  const std::uint32_t crtc_id = crtc->crtc_id;
 
   const auto mode_res =
       drm::select_preferred_mode(drm::span<const drmModeModeInfo>(conn->modes, conn->count_modes));

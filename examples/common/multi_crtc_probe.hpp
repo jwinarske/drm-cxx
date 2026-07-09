@@ -23,6 +23,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/property_store.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/display/scanout_target.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
 #include <drm-cxx/modeset/modeset.hpp>
@@ -154,39 +155,11 @@ inline std::string connector_type_name(std::uint32_t type, std::uint32_t type_id
 
 /// Resolve a CRTC for `connector` — prefer the encoder it's already
 /// driving; fall back to scanning possible_crtcs from each compatible
-/// encoder.
+/// encoder. Thin adapter over the shared drm::display::crtc_for_connector.
 inline std::optional<std::pair<std::uint32_t, std::uint32_t>> pick_crtc_for_connector(
     int fd, drmModeConnectorPtr connector, drmModeResPtr res) {
-  // Existing assignment via the connector's current encoder.
-  if (connector->encoder_id != 0) {
-    drmModeEncoderPtr enc = drmModeGetEncoder(fd, connector->encoder_id);
-    if (enc != nullptr) {
-      const auto crtc_id = enc->crtc_id;
-      drmModeFreeEncoder(enc);
-      if (crtc_id != 0) {
-        for (int i = 0; i < res->count_crtcs; ++i) {
-          if (res->crtcs[i] == crtc_id) {
-            return std::make_pair(crtc_id, static_cast<std::uint32_t>(i));
-          }
-        }
-      }
-    }
-  }
-  // Scan every encoder this connector advertises and pick the first
-  // CRTC compatible with at least one of them.
-  for (int e = 0; e < connector->count_encoders; ++e) {
-    drmModeEncoderPtr enc = drmModeGetEncoder(fd, connector->encoders[e]);
-    if (enc == nullptr) {
-      continue;
-    }
-    for (int i = 0; i < res->count_crtcs; ++i) {
-      if ((enc->possible_crtcs & (1U << i)) != 0U) {
-        const auto crtc_id = res->crtcs[i];
-        drmModeFreeEncoder(enc);
-        return std::make_pair(crtc_id, static_cast<std::uint32_t>(i));
-      }
-    }
-    drmModeFreeEncoder(enc);
+  if (const auto crtc = drm::display::crtc_for_connector(fd, connector, res)) {
+    return std::make_pair(crtc->crtc_id, crtc->crtc_index);
   }
   return std::nullopt;
 }
