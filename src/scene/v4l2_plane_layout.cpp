@@ -15,20 +15,32 @@
 namespace drm::scene::detail {
 namespace {
 
-// Single-V4L2-plane semi-planar 4:2:0: Y plane then interleaved UV. NV12 (8-bit)
-// plus the 16-bit-per-sample HDR variants P010/P012/P016 share the storage shape
-// -- only the per-sample width differs, and that is already baked into
-// bytesperline by V4L2 -- so all four split the same way into 2 DRM planes.
-[[nodiscard]] bool is_semiplanar_420(std::uint32_t drm_fourcc) noexcept {
+// Single-V4L2-plane semi-planar YUV: Y plane then one interleaved chroma plane
+// at the full luma stride, starting at bytesperline*height -> 2 DRM planes. The
+// chroma plane's height follows from the format's vertical subsampling (half for
+// 4:2:0, full for 4:2:2), which AddFB2 derives itself, so the pitch/offset pair
+// is identical across all of these. Covers 4:2:0 NV12 and its 16-bit HDR
+// variants P010/P012/P016 (the extra bits are already in bytesperline), plus
+// 4:2:2 NV16/NV61.
+[[nodiscard]] bool is_semiplanar_yuv(std::uint32_t drm_fourcc) noexcept {
   return drm_fourcc == DRM_FORMAT_NV12 || drm_fourcc == DRM_FORMAT_P010 ||
-         drm_fourcc == DRM_FORMAT_P012 || drm_fourcc == DRM_FORMAT_P016;
+         drm_fourcc == DRM_FORMAT_P012 || drm_fourcc == DRM_FORMAT_P016 ||
+         drm_fourcc == DRM_FORMAT_NV16 || drm_fourcc == DRM_FORMAT_NV61;
 }
 
-// Single-V4L2-plane fully-planar 4:2:0: Y, then two quarter-resolution chroma
-// planes. YUV420 (I420) orders them Cb,Cr; YVU420 (YV12) orders them Cr,Cb --
-// both chroma planes are the same size, so the offset math is identical.
-[[nodiscard]] bool is_planar_420(std::uint32_t drm_fourcc) noexcept {
-  return drm_fourcc == DRM_FORMAT_YUV420 || drm_fourcc == DRM_FORMAT_YVU420;
+// Vertical chroma subsampling factor for the single-V4L2-plane fully-planar YUV
+// formats -> Y plus two equal-size chroma planes (3 DRM planes). Returns 2 for
+// 4:2:0 (YUV420/YVU420, chroma height ceil(h/2)), 1 for 4:2:2 (YUV422/YVU422,
+// full-height chroma), or 0 for a format that is not planar YUV. The Cb/Cr order
+// (I420 vs YV12) doesn't change the offsets since both chroma planes are equal.
+[[nodiscard]] unsigned planar_yuv_vsub(std::uint32_t drm_fourcc) noexcept {
+  if (drm_fourcc == DRM_FORMAT_YUV420 || drm_fourcc == DRM_FORMAT_YVU420) {
+    return 2;
+  }
+  if (drm_fourcc == DRM_FORMAT_YUV422 || drm_fourcc == DRM_FORMAT_YVU422) {
+    return 1;
+  }
+  return 0;
 }
 
 [[nodiscard]] std::uint32_t plane_bpl(const v4l2_format& f, bool is_mplane,
@@ -51,7 +63,9 @@ std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mpla
   // or an MPLANE decoder that packs everything into CAPTURE plane 0 -- e.g. the
   // Pi bcm2835-codec). DRM still needs 2 or 3 plane handles, so split by offset
   // math; all DRM planes import V4L2 plane 0 (the kernel dedups the prime handle).
-  if (num_v4l2 == 1 && (is_semiplanar_420(drm_fourcc) || is_planar_420(drm_fourcc))) {
+  const bool semiplanar = is_semiplanar_yuv(drm_fourcc);
+  const unsigned planar_vsub = planar_yuv_vsub(drm_fourcc);
+  if (num_v4l2 == 1 && (semiplanar || planar_vsub != 0)) {
     const std::uint32_t bpl = plane_bpl(cap_fmt, is_mplane, 0);
     if (bpl == 0 || bpl > k_max_bytes_per_line) {
       return std::make_error_code(std::errc::invalid_argument);
@@ -59,8 +73,8 @@ std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mpla
     // u64-promoted so a hostile echo can't wrap; AddFB2 offsets are u32.
     const auto y_size = static_cast<std::uint64_t>(bpl) * h;
 
-    if (is_semiplanar_420(drm_fourcc)) {
-      // Y at offset 0, interleaved UV (full luma stride) at bpl*h.
+    if (semiplanar) {
+      // Y at offset 0, interleaved chroma (full luma stride) at bpl*h.
       if (y_size > std::numeric_limits<std::uint32_t>::max()) {
         return std::make_error_code(std::errc::value_too_large);
       }
@@ -74,13 +88,15 @@ std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mpla
       return {};
     }
 
-    // Planar 4:2:0: two chroma planes, each stride bpl/2 and height ceil(h/2).
-    // 4:2:0 needs an even luma stride so it halves cleanly; odd is malformed.
+    // Planar YUV: two chroma planes, each stride bpl/2. Chroma height is
+    // ceil(h/vsub) -- half-height for 4:2:0, full-height for 4:2:2. Needs an even
+    // luma stride so it halves cleanly; odd is malformed.
     if ((bpl & 1U) != 0U) {
       return std::make_error_code(std::errc::invalid_argument);
     }
     const std::uint64_t chroma_bpl = bpl / 2;
-    const std::uint64_t chroma_h = (static_cast<std::uint64_t>(h) + 1) / 2;  // DIV_ROUND_UP(h, 2)
+    const std::uint64_t chroma_h =
+        (planar_vsub == 2) ? (static_cast<std::uint64_t>(h) + 1) / 2 : h;  // DIV_ROUND_UP(h, vsub)
     const std::uint64_t chroma_size = chroma_bpl * chroma_h;
     const std::uint64_t v_offset = y_size + chroma_size;
     // Largest offset (plane 2) plus its own extent must stay inside AddFB2's u32.
