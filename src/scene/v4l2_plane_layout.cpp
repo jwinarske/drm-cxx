@@ -15,17 +15,28 @@
 namespace drm::scene::detail {
 namespace {
 
-// Single-V4L2-plane semi-planar YUV: Y plane then one interleaved chroma plane
-// at the full luma stride, starting at bytesperline*height -> 2 DRM planes. The
-// chroma plane's height follows from the format's vertical subsampling (half for
-// 4:2:0, full for 4:2:2), which AddFB2 derives itself, so the pitch/offset pair
-// is identical across all of these. Covers 4:2:0 NV12 and its 16-bit HDR
-// variants P010/P012/P016 (the extra bits are already in bytesperline), plus
-// 4:2:2 NV16/NV61.
+// Single-V4L2-plane semi-planar YUV: Y plane then one interleaved chroma plane,
+// starting at bytesperline*height -> 2 DRM planes. The chroma plane's height
+// follows from vertical subsampling (half for 4:2:0, full for 4:2:2/4:4:4), which
+// AddFB2 derives itself. The chroma *stride* is the luma stride for the
+// horizontally-subsampled formats (4:2:0 NV12 + 16-bit P010/P012/P016, 4:2:2
+// NV16/NV61) but twice it for full-resolution 4:4:4 (NV24/NV42) -- see
+// semiplanar_chroma_pitch(). Covers all of those.
 [[nodiscard]] bool is_semiplanar_yuv(std::uint32_t drm_fourcc) noexcept {
   return drm_fourcc == DRM_FORMAT_NV12 || drm_fourcc == DRM_FORMAT_P010 ||
          drm_fourcc == DRM_FORMAT_P012 || drm_fourcc == DRM_FORMAT_P016 ||
-         drm_fourcc == DRM_FORMAT_NV16 || drm_fourcc == DRM_FORMAT_NV61;
+         drm_fourcc == DRM_FORMAT_NV16 || drm_fourcc == DRM_FORMAT_NV61 ||
+         drm_fourcc == DRM_FORMAT_NV24 || drm_fourcc == DRM_FORMAT_NV42;
+}
+
+// Stride of the interleaved chroma plane for a semi-planar format, given the luma
+// stride `bpl`. 4:4:4 (NV24/NV42) carries a full-resolution CbCr pair per column,
+// so its chroma row is twice the luma row; the horizontally-subsampled formats
+// (4:2:0 / 4:2:2, and the P0xx byte-doublings) match the luma stride.
+[[nodiscard]] std::uint32_t semiplanar_chroma_pitch(std::uint32_t drm_fourcc,
+                                                    std::uint32_t bpl) noexcept {
+  const bool full_width = (drm_fourcc == DRM_FORMAT_NV24 || drm_fourcc == DRM_FORMAT_NV42);
+  return full_width ? (bpl * 2U) : bpl;
 }
 
 // Chroma subsampling of the single-V4L2-plane fully-planar YUV formats -> Y plus
@@ -81,13 +92,14 @@ std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mpla
     const auto y_size = static_cast<std::uint64_t>(bpl) * h;
 
     if (semiplanar) {
-      // Y at offset 0, interleaved chroma (full luma stride) at bpl*h.
+      // Y at offset 0, interleaved chroma at bpl*h; chroma stride is the luma
+      // stride except for full-resolution 4:4:4 (NV24/NV42), which doubles it.
       if (y_size > std::numeric_limits<std::uint32_t>::max()) {
         return std::make_error_code(std::errc::value_too_large);
       }
       out.num_drm_planes = 2;
       out.pitch.at(0) = bpl;
-      out.pitch.at(1) = bpl;
+      out.pitch.at(1) = semiplanar_chroma_pitch(drm_fourcc, bpl);
       out.offset.at(0) = 0;
       out.offset.at(1) = static_cast<std::uint32_t>(y_size);
       out.v4l2_plane_idx.at(0) = 0;
