@@ -143,6 +143,31 @@ TEST(V4l2PlaneLayout, PlanarYvu422SameOffsetsAsYuv422) {
   EXPECT_EQ(out.offset.at(2), (640U * 480U) + (320U * 480U));
 }
 
+TEST(V4l2PlaneLayout, SemiplanarNv24IsDoubleStrideChroma) {
+  // NV24 is semi-planar 4:4:4: the interleaved CbCr chroma plane is
+  // full-resolution, so its stride is TWICE the luma stride (unlike NV12/NV16
+  // whose horizontally-subsampled chroma matches the luma stride). Chroma still
+  // starts at bpl*h; AddFB2 derives its (full) height.
+  DrmPlaneLayout out{};
+  const auto ec = derive_drm_plane_layout(single_plane(640, 480, 640), false, DRM_FORMAT_NV24, out);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(out.num_drm_planes, 2U);
+  EXPECT_EQ(out.pitch.at(0), 640U);
+  EXPECT_EQ(out.pitch.at(1), 1280U);  // 2 * luma stride
+  EXPECT_EQ(out.offset.at(1), 640U * 480U);
+  EXPECT_EQ(out.v4l2_plane_idx.at(1), 0U);
+}
+
+TEST(V4l2PlaneLayout, SemiplanarNv42AlsoDoubleStride) {
+  DrmPlaneLayout out{};
+  const auto ec =
+      derive_drm_plane_layout(single_plane(1280, 720, 1280), false, DRM_FORMAT_NV42, out);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(out.num_drm_planes, 2U);
+  EXPECT_EQ(out.pitch.at(1), 2560U);
+  EXPECT_EQ(out.offset.at(1), 1280U * 720U);
+}
+
 TEST(V4l2PlaneLayout, Planar444FullResolutionChroma) {
   // YUV444: no subsampling -- both chroma planes are full width AND full height
   // (stride bpl, height h), so plane 1 is at bpl*h and plane 2 at 2*bpl*h.
