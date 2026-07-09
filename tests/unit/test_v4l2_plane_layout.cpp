@@ -143,6 +143,32 @@ TEST(V4l2PlaneLayout, PlanarYvu422SameOffsetsAsYuv422) {
   EXPECT_EQ(out.offset.at(2), (640U * 480U) + (320U * 480U));
 }
 
+TEST(V4l2PlaneLayout, Planar444FullResolutionChroma) {
+  // YUV444: no subsampling -- both chroma planes are full width AND full height
+  // (stride bpl, height h), so plane 1 is at bpl*h and plane 2 at 2*bpl*h.
+  DrmPlaneLayout out{};
+  const auto ec =
+      derive_drm_plane_layout(single_plane(1280, 720, 1280), false, DRM_FORMAT_YUV444, out);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(out.num_drm_planes, 3U);
+  EXPECT_EQ(out.pitch.at(0), 1280U);
+  EXPECT_EQ(out.pitch.at(1), 1280U);  // full-width chroma
+  EXPECT_EQ(out.pitch.at(2), 1280U);
+  EXPECT_EQ(out.offset.at(1), 1280U * 720U);
+  EXPECT_EQ(out.offset.at(2), 2U * 1280U * 720U);
+}
+
+TEST(V4l2PlaneLayout, Planar444OddStrideAllowed) {
+  // 4:4:4 chroma stride equals the luma stride (no halving), so an odd bpl is
+  // fine -- unlike 4:2:0 / 4:2:2 which need an even luma stride.
+  DrmPlaneLayout out{};
+  const auto ec = derive_drm_plane_layout(single_plane(3, 2, 3), false, DRM_FORMAT_YVU444, out);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(out.num_drm_planes, 3U);
+  EXPECT_EQ(out.pitch.at(1), 3U);
+  EXPECT_EQ(out.offset.at(2), 2U * 3U * 2U);
+}
+
 TEST(V4l2PlaneLayout, Planar420OddStrideRejected) {
   DrmPlaneLayout out{};
   const auto ec = derive_drm_plane_layout(single_plane(3, 2, 3), false, DRM_FORMAT_YUV420, out);
