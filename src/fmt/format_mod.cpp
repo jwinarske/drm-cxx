@@ -432,6 +432,8 @@ const char* vendor_name(std::uint8_t vendor) {
       return "ARM";
     case DRM_FORMAT_MOD_VENDOR_QCOM:
       return "QCOM";
+    case DRM_FORMAT_MOD_VENDOR_VS:
+      return "VS";
 #ifdef DRM_FORMAT_MOD_VENDOR_VIVANTE
     case DRM_FORMAT_MOD_VENDOR_VIVANTE:
       return "VIVANTE";
@@ -587,6 +589,84 @@ std::string broadcom_describe(std::uint64_t mod) {
 }
 #endif  // DRM_FORMAT_MOD_BROADCOM_UIF
 
+// Name for a VeriSilicon NORMAL (non-compressed) tile mode -- the set the DC8200
+// advertises. Values from starfive-tech/linux uapi drm_fourcc.h. Returns nullptr
+// for reserved/unknown modes so the caller can fall back to a numeric form.
+const char* vs_norm_tile(std::uint64_t tile) noexcept {
+  switch (tile) {
+    case 0x00:
+      return "LINEAR";
+    case 0x01:
+      return "TILED4x4";
+    case 0x02:
+      return "SUPER_TILED_XMAJOR";
+    case 0x03:
+      return "SUPER_TILED_YMAJOR";
+    case 0x04:
+      return "TILE_8X8";
+    case 0x05:
+      return "TILE_MODE1";
+    case 0x06:
+      return "TILE_MODE2";
+    case 0x07:
+      return "TILE_8X4";
+    case 0x08:
+      return "TILE_MODE4";
+    case 0x09:
+      return "TILE_MODE5";
+    case 0x0a:
+      return "TILE_MODE6";
+    case 0x0b:
+      return "SUPER_TILED_XMAJOR_8X4";
+    case 0x0c:
+      return "SUPER_TILED_YMAJOR_4X8";
+    case 0x0d:
+      return "TILE_Y";
+    case 0x0f:
+      return "TILE_128X1";
+    case 0x10:
+      return "TILE_256X1";
+    case 0x11:
+      return "TILE_32X1";
+    case 0x12:
+      return "TILE_64X1";
+    case 0x15:
+      return "TILE_MODE4X4";
+    default:
+      return nullptr;
+  }
+}
+
+// Decode a VeriSilicon (StarFive DC8200) modifier. A 2-bit TYPE at bits 55:54
+// selects NORMAL (tiling) / COMPRESSED (DEC400) / CUSTOM_10BIT; the low bits hold
+// a tile-mode index. NORMAL modes are named; the DEC (compressed) path is decoded
+// structurally -- no available hardware advertises it.
+std::string vs_describe(std::uint64_t mod) {
+  switch ((mod >> 54) & 0x3ULL) {
+    case 0x0: {                                  // TYPE_NORMAL (tiling); VS_LINEAR is tile 0
+      const std::uint64_t tile = mod & 0x1fULL;  // NORM_MODE_MASK
+      if (const char* name = vs_norm_tile(tile); name != nullptr) {
+        return std::string("VS_") + name;
+      }
+      return "VS_TILED(mode=" + std::to_string(tile) + ")";
+    }
+    case 0x1: {  // TYPE_COMPRESSED (DEC400): 6-bit tile + align32/align64 flags
+      std::string s = "VS_DEC(tile=" + std::to_string(mod & 0x3fULL);  // DEC_TILE_MODE_MASK
+      if ((mod & (1ULL << 6)) != 0U) {
+        s += ", align32";  // DRM_FORMAT_MOD_VS_DEC_ALIGN_32
+      }
+      if ((mod & (1ULL << 7)) != 0U) {
+        s += ", align64";  // DRM_FORMAT_MOD_VS_DEC_ALIGN_64
+      }
+      return s + ")";
+    }
+    case 0x2:  // TYPE_CUSTOM_10BIT
+      return "VS_CUSTOM_10BIT" + hex_suffix(mod);
+    default:
+      return "VS" + hex_suffix(mod);
+  }
+}
+
 }  // namespace
 
 std::string describe(Modifier m) {
@@ -606,6 +686,8 @@ std::string describe(Modifier m) {
 #endif
     case DRM_FORMAT_MOD_VENDOR_QCOM:
       return "QCOM_COMPRESSED(UBWC)";
+    case DRM_FORMAT_MOD_VENDOR_VS:
+      return vs_describe(m.value);
     case DRM_FORMAT_MOD_VENDOR_NVIDIA:
       return "NVIDIA_BLOCK_LINEAR";
 #ifdef DRM_FORMAT_MOD_BROADCOM_UIF
