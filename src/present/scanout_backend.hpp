@@ -42,9 +42,20 @@ class ScanoutProducer;
 
 class ScanoutBackend {
  public:
+  // Variable-refresh-rate policy for the discovered CRTC. VRR lets the panel
+  // track the actual flip cadence, which pairs with the idle-Skip (flips stop
+  // when content is static). Off by default because VRR can cause visible
+  // brightness flicker on some panels, so it stays opt-in.
+  enum class VrrPolicy : std::uint8_t {
+    Off,   // never arm VRR_ENABLED (default)
+    Auto,  // arm VRR_ENABLED iff the driver profile reports vrr_capable
+    On,    // request VRR_ENABLED (a no-op on CRTCs that don't expose it)
+  };
+
   struct Config {
     std::uint32_t fourcc{DRM_FORMAT_XRGB8888};
     fmt::Rotation rotation{fmt::Rotation::Rotate0};
+    VrrPolicy vrr{VrrPolicy::Off};
   };
 
   // Discover an output on `dev`, set up a full-screen layer fed by `producer`,
@@ -84,6 +95,15 @@ class ScanoutBackend {
   // tests. Both are 0 until the first present_if_changed().
   [[nodiscard]] std::uint64_t frames_committed() const noexcept { return economy_.committed(); }
   [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return economy_.skipped(); }
+
+  // Arm or disarm the CRTC's VRR_ENABLED at runtime (e.g. enable during video /
+  // animation, disable when static). Forwards to LayerScene::set_vrr_enabled and
+  // takes effect on the next present(); a no-op on CRTCs without VRR_ENABLED (see
+  // vrr_capable()).
+  void set_vrr(bool enable);
+
+  // Whether the discovered CRTC advertises VRR_ENABLED (VRR is drivable here).
+  [[nodiscard]] bool vrr_capable() const noexcept { return profile_.vrr_capable; }
 
   [[nodiscard]] const display::ScanoutTarget& target() const noexcept { return target_; }
   [[nodiscard]] const display::DriverProfile& profile() const noexcept { return profile_; }
