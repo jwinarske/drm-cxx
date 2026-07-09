@@ -107,6 +107,42 @@ TEST(V4l2PlaneLayout, Planar420OddHeightRoundsChromaUp) {
   EXPECT_EQ(out.offset.at(2), (4U * 3U) + (2U * 2U));
 }
 
+TEST(V4l2PlaneLayout, SemiplanarNv16IsFullHeightChromaButSameLayout) {
+  // NV16 is 4:2:2: the chroma plane is full-height, but it still starts at bpl*h
+  // with the full luma stride, so the derived pitch/offset match NV12's. AddFB2
+  // derives the chroma height from the format itself.
+  DrmPlaneLayout out{};
+  const auto ec =
+      derive_drm_plane_layout(single_plane(1280, 720, 1280), false, DRM_FORMAT_NV16, out);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(out.num_drm_planes, 2U);
+  EXPECT_EQ(out.pitch.at(1), 1280U);
+  EXPECT_EQ(out.offset.at(1), 1280U * 720U);
+}
+
+TEST(V4l2PlaneLayout, Planar422FullHeightChroma) {
+  // YUV422: two chroma planes at stride bpl/2 and FULL height (vsub == 1), so
+  // plane 2 sits at bpl*h + (bpl/2)*h.
+  DrmPlaneLayout out{};
+  const auto ec =
+      derive_drm_plane_layout(single_plane(1280, 720, 1280), false, DRM_FORMAT_YUV422, out);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(out.num_drm_planes, 3U);
+  EXPECT_EQ(out.pitch.at(1), 640U);
+  EXPECT_EQ(out.pitch.at(2), 640U);
+  EXPECT_EQ(out.offset.at(1), 1280U * 720U);
+  EXPECT_EQ(out.offset.at(2), (1280U * 720U) + (640U * 720U));  // chroma full height
+}
+
+TEST(V4l2PlaneLayout, PlanarYvu422SameOffsetsAsYuv422) {
+  DrmPlaneLayout out{};
+  const auto ec =
+      derive_drm_plane_layout(single_plane(640, 480, 640), false, DRM_FORMAT_YVU422, out);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(out.num_drm_planes, 3U);
+  EXPECT_EQ(out.offset.at(2), (640U * 480U) + (320U * 480U));
+}
+
 TEST(V4l2PlaneLayout, Planar420OddStrideRejected) {
   DrmPlaneLayout out{};
   const auto ec = derive_drm_plane_layout(single_plane(3, 2, 3), false, DRM_FORMAT_YUV420, out);

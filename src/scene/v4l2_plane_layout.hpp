@@ -41,10 +41,10 @@ struct DrmPlaneLayout {
 
 // Derive the DRM plane layout for `drm_fourcc` from a V4L2 CAPTURE format echo.
 // Handles three shapes:
-//   * single-V4L2-plane semi-planar 4:2:0 (NV12 / P010 / P012 / P016) -> 2 DRM
-//     planes (Y, interleaved UV) via offset math;
-//   * single-V4L2-plane planar 4:2:0 (YUV420 / YVU420) -> 3 DRM planes (Y and
-//     two quarter-resolution chroma planes);
+//   * single-V4L2-plane semi-planar YUV -> 2 DRM planes (Y, interleaved chroma)
+//     via offset math: 4:2:0 NV12 / P010 / P012 / P016 and 4:2:2 NV16 / NV61;
+//   * single-V4L2-plane planar YUV -> 3 DRM planes (Y and two equal-size chroma
+//     planes): 4:2:0 YUV420 / YVU420 and 4:2:2 YUV422 / YVU422;
 //   * everything else -> 1 DRM plane per V4L2 plane (MPLANE 1:1, packed YUYV,
 //     RGB, ...).
 // Returns an error_code on malformed or hostile dims (zero/oversized height,
