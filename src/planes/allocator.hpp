@@ -38,6 +38,17 @@ namespace drm::planes {
 /// A small tiebreak below the structural scores. Exposed for unit testing.
 [[nodiscard]] int bandwidth_class_bonus(std::uint64_t modifier) noexcept;
 
+/// As above, from a precomputed `BandwidthClass` — lets `score_pair` reuse the
+/// plane's per-modifier class (Phase 1) instead of re-decoding the modifier bits.
+[[nodiscard]] int bandwidth_class_bonus(drm::fmt::BandwidthClass cls) noexcept;
+
+/// Bounded placement tiebreak by a layer's per-frame scanout byte cost
+/// (`drm::fmt::scanout_cost_bytes`): a layer that moves more bytes is costlier to
+/// demote to composition (which re-reads the source and the canvas), so bias it
+/// toward a plane when planes are contested. Bucketed to 0..3 so it stays below
+/// the structural scores. Exposed for unit testing.
+[[nodiscard]] int cost_bias(std::uint64_t scanout_bytes) noexcept;
+
 struct CandidatePair {
   const PlaneCapabilities* plane;
   Layer* layer;
