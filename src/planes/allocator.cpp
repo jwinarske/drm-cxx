@@ -751,14 +751,32 @@ const Layer* Allocator::pick_most_constrained(const std::vector<Layer*>& layers,
 
 // Power-aware placement bonus by buffer modifier bandwidth class. Exposed (not
 // in the anonymous namespace) so the mapping is unit-testable. See score_pair.
-int bandwidth_class_bonus(std::uint64_t modifier) noexcept {
-  switch (drm::fmt::classify(drm::fmt::Modifier{modifier})) {
+int bandwidth_class_bonus(drm::fmt::BandwidthClass cls) noexcept {
+  switch (cls) {
     case drm::fmt::BandwidthClass::Compression:
       return 2;  // DCC / AFBC / UBWC — biggest bandwidth + GPU-decompress saving
     case drm::fmt::BandwidthClass::Tiling:
       return 1;  // better DRAM locality, same byte count
     case drm::fmt::BandwidthClass::Linear:
       return 0;
+  }
+  return 0;
+}
+
+int bandwidth_class_bonus(std::uint64_t modifier) noexcept {
+  return bandwidth_class_bonus(drm::fmt::classify(drm::fmt::Modifier{modifier}));
+}
+
+int cost_bias(std::uint64_t scanout_bytes) noexcept {
+  constexpr std::uint64_t k_mb = std::uint64_t{1024} * 1024;
+  if (scanout_bytes >= 16U * k_mb) {
+    return 3;  // ~4K RGBA and up
+  }
+  if (scanout_bytes >= 4U * k_mb) {
+    return 2;  // ~1080p RGBA
+  }
+  if (scanout_bytes >= k_mb) {
+    return 1;  // small overlay
   }
   return 0;
 }
@@ -815,14 +833,19 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
     }
   }
 
-  // Power-aware bias: scanning a compressed/tiled buffer out directly saves the
-  // most — a composition pass would force the GPU to decompress (and re-encode)
-  // it, where a LINEAR layer composites cheaply. So when planes are contested,
-  // nudge the matcher to keep bandwidth-heavy layers on planes and composite the
-  // cheap LINEAR ones. A small tiebreak below the structural scores; the atomic
-  // TEST_ONLY during placement remains the correctness arbiter.
-  if (layer.format().has_value()) {
-    s += bandwidth_class_bonus(layer.modifier());
+  // Bandwidth-aware bias (a small tiebreak below the structural scores; the atomic
+  // TEST_ONLY during placement stays the correctness arbiter). Two nudges toward
+  // keeping the costliest layers on planes when planes are contested:
+  //   * class — a compressed/tiled buffer scanned out directly avoids the GPU
+  //     decompress a composition pass would force; a LINEAR layer composites cheaply.
+  //   * size — a layer that moves more bytes at scanout is the most expensive to
+  //     demote to composition, which re-reads the source and the canvas.
+  // The class comes from the scanout FB's own modifier (precomputed per plane),
+  // never a producer-internal compression state.
+  if (const auto fmt = layer.format(); fmt.has_value()) {
+    const auto cls = plane.bandwidth_class(layer.modifier());
+    s += bandwidth_class_bonus(cls);
+    s += cost_bias(drm::fmt::scanout_cost_bytes(layer.width(), layer.height(), *fmt, cls));
   }
 
   // §13.6 Content-type priority

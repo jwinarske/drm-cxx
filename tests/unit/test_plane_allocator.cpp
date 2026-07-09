@@ -4,11 +4,14 @@
 #include "planes/allocator.hpp"
 #include "planes/plane_registry.hpp"
 
+#include <drm-cxx/fmt/format_mod.hpp>
+
 #include <drm_fourcc.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <utility>
+#include <vector>
 
 TEST(PlaneCapabilitiesTest, SupportsFormat) {
   drm::planes::PlaneCapabilities caps;
@@ -138,4 +141,26 @@ TEST(PowerAwareBias, BandwidthClassBonus) {
             bandwidth_class_bonus(DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED));
   EXPECT_GT(bandwidth_class_bonus(DRM_FORMAT_MOD_BROADCOM_VC4_T_TILED),
             bandwidth_class_bonus(DRM_FORMAT_MOD_LINEAR));
+
+  // The BandwidthClass overload (used with the plane's precomputed class) maps
+  // identically to the modifier overload.
+  using drm::fmt::BandwidthClass;
+  EXPECT_EQ(bandwidth_class_bonus(BandwidthClass::Linear), 0);
+  EXPECT_EQ(bandwidth_class_bonus(BandwidthClass::Tiling), 1);
+  EXPECT_EQ(bandwidth_class_bonus(BandwidthClass::Compression), 2);
+}
+
+TEST(PowerAwareBias, CostBias) {
+  using drm::planes::cost_bias;
+  constexpr std::uint64_t k_mb = std::uint64_t{1024} * 1024;
+  // Bucketed 0..3 by per-frame scanout bytes: tiny overlays get nothing, a 1080p
+  // RGBA frame (~8 MB) biases toward a plane, a 4K frame (~33 MB) most of all.
+  EXPECT_EQ(cost_bias(0), 0);
+  EXPECT_EQ(cost_bias(k_mb / 2), 0);                        // < 1 MB
+  EXPECT_EQ(cost_bias(2U * k_mb), 1);                       // small overlay
+  EXPECT_EQ(cost_bias(std::uint64_t(1920) * 1080 * 4), 2);  // 1080p RGBA ~8 MB
+  EXPECT_EQ(cost_bias(std::uint64_t(3840) * 2160 * 4), 3);  // 4K RGBA ~33 MB
+  // Monotonic and bounded at 3.
+  EXPECT_GE(cost_bias(std::uint64_t(7680) * 4320 * 4), cost_bias(std::uint64_t(1920) * 1080 * 4));
+  EXPECT_EQ(cost_bias(std::uint64_t(1) << 40), 3);  // saturates
 }
