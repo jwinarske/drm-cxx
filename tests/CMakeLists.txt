@@ -49,6 +49,7 @@ set(DRM_CXX_TESTS
   test_dma_buf_source_cache
   test_dumb_scanout_sink
   test_acquire_fence
+  test_v4l2_plane_layout
   test_log)
 
 if(DRM_CXX_HAS_XCURSOR)

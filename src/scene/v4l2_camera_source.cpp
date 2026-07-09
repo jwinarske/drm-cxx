@@ -4,6 +4,7 @@
 #include "v4l2_camera_source.hpp"
 
 #include "buffer_source.hpp"
+#include "v4l2_plane_layout.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
@@ -22,7 +23,6 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
-#include <limits>
 #include <linux/videodev2.h>
 #include <memory>
 #include <optional>
@@ -40,7 +40,11 @@ namespace {
 constexpr std::uint32_t k_min_buffers = 2U;
 constexpr std::uint32_t k_max_buffers = 32U;
 
-constexpr std::size_t k_drm_max_planes = 4;
+// V4L2-CAPTURE-echo -> DRM plane-layout derivation is shared with the decoder
+// source (single-V4L2-plane NV12/P0xx and YUV420/YVU420 splits live there).
+using detail::derive_drm_plane_layout;
+using detail::DrmPlaneLayout;
+using detail::k_drm_max_planes;
 
 constexpr int k_max_ioctl_retries = 8;
 
@@ -154,87 +158,6 @@ struct V4l2CaptureBuffer {
   }
   V4l2CaptureBuffer& operator=(V4l2CaptureBuffer&&) = delete;
 };
-
-struct DrmPlaneLayout {
-  std::uint32_t num_drm_planes{0};
-  std::array<std::uint32_t, k_drm_max_planes> pitch{};
-  std::array<std::uint32_t, k_drm_max_planes> offset{};
-  std::array<std::uint8_t, k_drm_max_planes> v4l2_plane_idx{};
-};
-
-// Decide how the V4L2 CAPTURE format echo maps onto DRM AddFB2's
-// per-plane handle/pitch/offset arrays. Mirrors the decoder source's
-// helper. The shapes that come up in practice for cameras:
-//   * Single-V4L2-plane NV12 (UVC NV12 or single-plane MPLANE NV12):
-//     two DRM planes from one V4L2 plane via offset math.
-//   * MPLANE NV12 with num_planes == 2: 1:1 Y / UV mapping, distinct
-//     V4L2 planes back distinct DRM planes (separate dma-buf imports).
-//   * YUYV (single-V4L2-plane in either single-plane or MPLANE API):
-//     1 DRM plane, packed.
-// Ceiling on V4L2-echoed image dimensions and per-row byte counts. The
-// kernel's V4L2 ABI exposes plain u32 dims with no upper bound, and a
-// malicious or quirky USB capture device can return absurd values that
-// (a) make subsequent `bpl * h` math wrap in u32 and (b) point AddFB2
-// offsets at attacker-controlled byte ranges of the same buffer.
-// 16K is past every realistic camera + above every shipping display
-// max — anything beyond is either a driver bug or hostile input.
-constexpr std::uint32_t k_max_image_dim = 16384U;
-constexpr std::uint32_t k_max_bytes_per_line = 65536U;
-
-[[nodiscard]] std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mplane,
-                                                      std::uint32_t drm_fourcc,
-                                                      DrmPlaneLayout& out) noexcept {
-  std::uint32_t const h = is_mplane ? cap_fmt.fmt.pix_mp.height : cap_fmt.fmt.pix.height;
-  std::uint32_t const num_v4l2 = is_mplane ? cap_fmt.fmt.pix_mp.num_planes : 1U;
-  if (h == 0 || h > k_max_image_dim || num_v4l2 == 0 || num_v4l2 > k_drm_max_planes) {
-    return std::make_error_code(std::errc::invalid_argument);
-  }
-
-  if (is_semiplanar_nv12(drm_fourcc) && num_v4l2 == 1) {
-    std::uint32_t const bpl =
-        is_mplane
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-            ? cap_fmt.fmt.pix_mp.plane_fmt[0].bytesperline
-            : cap_fmt.fmt.pix.bytesperline;
-    if (bpl == 0 || bpl > k_max_bytes_per_line) {
-      return std::make_error_code(std::errc::invalid_argument);
-    }
-    // `bpl * h` is the chroma-plane offset into the same buffer.
-    // Computed in u64 so a hostile driver echo can't wrap u32; the
-    // DRM AddFB2 offset field is u32, so we also reject if the result
-    // would truncate.
-    const auto y_size = static_cast<std::uint64_t>(bpl) * static_cast<std::uint64_t>(h);
-    if (y_size > std::numeric_limits<std::uint32_t>::max()) {
-      return std::make_error_code(std::errc::value_too_large);
-    }
-    out.num_drm_planes = 2;
-    out.pitch.at(0) = bpl;
-    out.pitch.at(1) = bpl;
-    out.offset.at(0) = 0;
-    out.offset.at(1) = static_cast<std::uint32_t>(y_size);
-    out.v4l2_plane_idx.at(0) = 0;
-    out.v4l2_plane_idx.at(1) = 0;
-    return {};
-  }
-
-  // 1 DRM plane per V4L2 plane (1:1). Covers MPLANE NV12-with-2-planes,
-  // YUYV, and any future single-DRM-plane packed format.
-  out.num_drm_planes = num_v4l2;
-  for (std::uint32_t i = 0; i < num_v4l2; ++i) {
-    std::uint32_t const bpl =
-        is_mplane
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-            ? cap_fmt.fmt.pix_mp.plane_fmt[i].bytesperline
-            : cap_fmt.fmt.pix.bytesperline;
-    if (bpl == 0 || bpl > k_max_bytes_per_line) {
-      return std::make_error_code(std::errc::invalid_argument);
-    }
-    out.pitch.at(i) = bpl;
-    out.offset.at(i) = 0;
-    out.v4l2_plane_idx.at(i) = static_cast<std::uint8_t>(i);
-  }
-  return {};
-}
 
 [[nodiscard]] std::error_code import_capture_buffer_to_drm(
     int drm_fd, std::uint32_t width, std::uint32_t height, std::uint32_t drm_fourcc,
