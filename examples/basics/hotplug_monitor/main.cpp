@@ -37,6 +37,7 @@
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/display/scanout_target.hpp>
 
 #include <drm_fourcc.h>
 #include <xf86drmMode.h>
@@ -90,22 +91,12 @@ std::optional<ActiveConfig> find_active_config(int drm_fd) {
     if (!pref) {
       continue;
     }
-    for (int e = 0; e < conn->count_encoders; ++e) {
-      drmModeEncoderPtr enc = drmModeGetEncoder(drm_fd, conn->encoders[e]);
-      if (enc == nullptr) {
-        continue;
-      }
-      for (int c = 0; c < res->count_crtcs; ++c) {
-        if ((enc->possible_crtcs & (1U << static_cast<unsigned>(c))) != 0) {
-          ActiveConfig out;
-          out.connector_id = conn->connector_id;
-          out.crtc_id = res->crtcs[c];
-          out.mode = pref->drm_mode;
-          drmModeFreeEncoder(enc);
-          return out;
-        }
-      }
-      drmModeFreeEncoder(enc);
+    if (const auto crtc = drm::display::crtc_for_connector(drm_fd, conn.get(), res.get())) {
+      ActiveConfig out;
+      out.connector_id = conn->connector_id;
+      out.crtc_id = crtc->crtc_id;
+      out.mode = pref->drm_mode;
+      return out;
     }
   }
   return std::nullopt;
@@ -193,6 +184,9 @@ void print_active(const ActiveConfig& cfg) {
 
 }  // namespace
 
+// Demo entry point: a stray exception here just aborts the example, which is the
+// acceptable failure mode for a sample program (not a library API).
+// NOLINTNEXTLINE(bugprone-exception-escape)
 int main(const int argc, char* argv[]) {
   // Connector-to-CRTC routing here uses `find_active_config` (above),
   // which walks `conn->encoders` + `possible_crtcs` rather than just

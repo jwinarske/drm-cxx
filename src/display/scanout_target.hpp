@@ -47,4 +47,20 @@ struct ScanoutTarget {
 [[nodiscard]] std::optional<std::uint32_t> primary_plane_for_crtc(
     const planes::PlaneRegistry& planes, std::uint32_t crtc_index);
 
+// A connector's resolved CRTC: its object id and its index in the resources CRTC
+// table (the bit position used by encoder `possible_crtcs` and plane masks).
+struct CrtcForConnector {
+  std::uint32_t crtc_id{0};
+  std::uint32_t crtc_index{0};
+};
+
+// Resolve a CRTC that can drive `connector`: the CRTC currently bound to it (via
+// its active encoder) if any, otherwise the first CRTC any of the connector's
+// possible encoders allows. Returns nullopt if none is usable. Pure resources
+// walk over raw libdrm pointers (no state change), so both the library's
+// ScanoutTarget::discover() and the example output-pickers share one copy.
+[[nodiscard]] std::optional<CrtcForConnector> crtc_for_connector(int fd,
+                                                                 const drmModeConnector* connector,
+                                                                 const drmModeRes* res) noexcept;
+
 }  // namespace drm::display

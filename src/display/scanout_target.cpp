@@ -26,17 +26,44 @@ std::error_code no_device() {
   return std::make_error_code(std::errc::no_such_device);
 }
 
-// Index of `crtc_id` in the resources CRTC table, or nullopt.
-std::optional<std::uint32_t> crtc_index_of(const drmModeRes* res, std::uint32_t crtc_id) {
-  for (int i = 0; i < res->count_crtcs; ++i) {
-    if (res->crtcs[i] == crtc_id) {
-      return static_cast<std::uint32_t>(i);
+}  // namespace
+
+std::optional<CrtcForConnector> crtc_for_connector(int fd, const drmModeConnector* connector,
+                                                   const drmModeRes* res) noexcept {
+  if (connector == nullptr || res == nullptr) {
+    return std::nullopt;
+  }
+  // Prefer the CRTC already bound to the connector's active encoder (warm KMS).
+  if (connector->encoder_id != 0) {
+    drmModeEncoder* enc = drmModeGetEncoder(fd, connector->encoder_id);
+    const std::uint32_t bound = (enc != nullptr) ? enc->crtc_id : 0;
+    drmModeFreeEncoder(enc);
+    if (bound != 0) {
+      for (int i = 0; i < res->count_crtcs; ++i) {
+        if (res->crtcs[i] == bound) {
+          return CrtcForConnector{bound, static_cast<std::uint32_t>(i)};
+        }
+      }
     }
+  }
+  // Otherwise the first CRTC any of the connector's possible encoders allows
+  // (cold KMS — nothing bound yet; atomic modeset wires it up on first commit).
+  for (int e = 0; e < connector->count_encoders; ++e) {
+    drmModeEncoder* enc = drmModeGetEncoder(fd, connector->encoders[e]);
+    if (enc == nullptr) {
+      continue;
+    }
+    for (int i = 0; i < res->count_crtcs; ++i) {
+      if ((enc->possible_crtcs & (1U << static_cast<unsigned>(i))) != 0U) {
+        const std::uint32_t id = res->crtcs[i];
+        drmModeFreeEncoder(enc);
+        return CrtcForConnector{id, static_cast<std::uint32_t>(i)};
+      }
+    }
+    drmModeFreeEncoder(enc);
   }
   return std::nullopt;
 }
-
-}  // namespace
 
 std::optional<std::uint32_t> primary_plane_for_crtc(const planes::PlaneRegistry& planes,
                                                     std::uint32_t crtc_index) {
@@ -83,30 +110,12 @@ drm::expected<ScanoutTarget, std::error_code> ScanoutTarget::discover(const drm:
 
   // Prefer the CRTC already bound to the connector; otherwise the first CRTC any
   // of its encoders allows.
-  std::optional<std::uint32_t> crtc_index;
-  if (conn->encoder_id != 0) {
-    drm::Encoder enc = drm::get_encoder(fd, conn->encoder_id);
-    if (enc && enc->crtc_id != 0) {
-      crtc_index = crtc_index_of(res.get(), enc->crtc_id);
-    }
-  }
-  for (int e = 0; !crtc_index && e < conn->count_encoders; ++e) {
-    drm::Encoder enc = drm::get_encoder(fd, conn->encoders[e]);
-    if (!enc) {
-      continue;
-    }
-    for (int ci = 0; ci < res->count_crtcs; ++ci) {
-      if ((enc->possible_crtcs & (1U << static_cast<unsigned>(ci))) != 0U) {
-        crtc_index = static_cast<std::uint32_t>(ci);
-        break;
-      }
-    }
-  }
-  if (!crtc_index) {
+  auto crtc = crtc_for_connector(fd, conn.get(), res.get());
+  if (!crtc) {
     return drm::unexpected<std::error_code>(no_device());
   }
-  t.crtc_index = *crtc_index;
-  t.crtc_id = res->crtcs[*crtc_index];
+  t.crtc_index = crtc->crtc_index;
+  t.crtc_id = crtc->crtc_id;
 
   auto registry = drm::planes::PlaneRegistry::enumerate(dev);
   if (!registry) {
