@@ -123,6 +123,7 @@ if not camera_feature.disabled()
       'scene/camera/main.cpp',
       'scene/camera/convert.cpp',
       'scene/camera/double_dumb_source.cpp',
+      'scene/camera/imported_buffers.cpp',
       'scene/camera/libcamera_nv12_source.cpp',
       'scene/camera/status_overlay_renderer.cpp',
     ]
