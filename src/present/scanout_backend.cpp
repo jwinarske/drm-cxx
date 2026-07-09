@@ -112,6 +112,14 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
     return drm::unexpected<std::error_code>(layer.error());
   }
 
+  // Arm VRR from the driver profile per the caller's policy. On (unconditional)
+  // and Auto (only where the profile reports the capability) both drive the
+  // scene's VRR_ENABLED; the scene silently swallows it on CRTCs that lack the
+  // property, so On is safe even off a non-VRR target.
+  if (cfg.vrr == VrrPolicy::On || (cfg.vrr == VrrPolicy::Auto && profile->vrr_capable)) {
+    (*scene)->set_vrr_enabled(true);
+  }
+
   return std::unique_ptr<ScanoutBackend>(new ScanoutBackend(
       std::move(*target), std::move(*profile), std::move(negotiated), std::move(*scene), *layer));
 }
@@ -119,6 +127,10 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
 drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::create(
     drm::Device& dev, ScanoutProducer& producer) {
   return create(dev, producer, Config{});
+}
+
+void ScanoutBackend::set_vrr(bool enable) {
+  scene_->set_vrr_enabled(enable);
 }
 
 drm::expected<scene::CommitReport, std::error_code> ScanoutBackend::present(
