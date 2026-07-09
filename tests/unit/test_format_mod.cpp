@@ -191,6 +191,19 @@ void test_describe() {
 
   CHECK(fmt::describe(fmt::Modifier{DRM_FORMAT_MOD_QCOM_COMPRESSED}) == "QCOM_COMPRESSED(UBWC)");
 
+  // VeriSilicon (DC8200): NORMAL tile modes are named; VS_LINEAR is tile 0; the
+  // DEC (compressed) path is decoded structurally.
+  constexpr std::uint64_t k_vs = std::uint64_t{DRM_FORMAT_MOD_VENDOR_VS} << 56;
+  CHECK(fmt::describe(fmt::Modifier{k_vs | 0x00U}) == "VS_LINEAR");
+  CHECK(fmt::describe(fmt::Modifier{k_vs | 0x02U}) == "VS_SUPER_TILED_XMAJOR");
+  CHECK(fmt::describe(fmt::Modifier{k_vs | 0x04U}) == "VS_TILE_8X8");
+  CHECK(fmt::describe(fmt::Modifier{k_vs | 0x0cU}) == "VS_SUPER_TILED_YMAJOR_4X8");
+  const std::string vs_dec =
+      fmt::describe(fmt::Modifier{k_vs | (std::uint64_t{1} << 54) | 0x07U | (1U << 6)});
+  CHECK(contains(vs_dec, "VS_DEC"));
+  CHECK(contains(vs_dec, "tile=7"));
+  CHECK(contains(vs_dec, "align32"));
+
 #ifdef AMD_FMT_MOD
   // Displayable DCC: describe surfaces dcc=1 and classify reports Compression;
   // the same tile layout with DCC=0 is Tiling.
