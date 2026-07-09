@@ -44,6 +44,14 @@
 #ifndef DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED
 #define DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED fourcc_mod_code(ARM, 1)
 #endif
+// StarFive/VeriSilicon DC8200 vendor. Out-of-tree (starfive-tech/linux); not in
+// mainline drm_fourcc.h, whose vendor list stops at ALLWINNER 0x09 / AMLOGIC 0x0a.
+#ifndef DRM_FORMAT_MOD_VENDOR_VS
+// Mirrors the drm_fourcc.h DRM_FORMAT_MOD_VENDOR_* family (all macros); used as a
+// switch case label beside them.
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define DRM_FORMAT_MOD_VENDOR_VS 0x0b
+#endif
 
 namespace drm::fmt {
 
@@ -329,6 +337,17 @@ inline BandwidthClass classify(Modifier m) noexcept {
       // and 2, CDE horizontal, CDE vertical). Mask the full 3-bit field -- a 2-bit
       // mask misses CDE vertical (type 4 = 0b100) and calls it Tiling.
       return (((m.value >> 23) & 0x7) != 0U) ? BandwidthClass::Compression : BandwidthClass::Tiling;
+    case DRM_FORMAT_MOD_VENDOR_VS:
+      // StarFive/VeriSilicon DC8200. VS modifiers pack a 2-bit TYPE at bits 55:54
+      // -- NORMAL (tiling) vs COMPRESSED (DEC400 lossless FB compression) -- and
+      // VS_LINEAR is the all-zero body. (Layout from starfive-tech/linux uapi
+      // drm_fourcc.h; validated against the DC8200's IN_FORMATS, all TYPE_NORMAL
+      // tiling plus VS_LINEAR.)
+      if ((m.value & 0x00ffffffffffffffULL) == 0U) {
+        return BandwidthClass::Linear;  // DRM_FORMAT_MOD_VS_LINEAR
+      }
+      return (((m.value >> 54) & 0x3U) == 0x1U) ? BandwidthClass::Compression
+                                                : BandwidthClass::Tiling;
     case DRM_FORMAT_MOD_VENDOR_BROADCOM:  // UIF/SAND/T: locality only, no savings
     default:
       // Unknown non-linear: assume tiled, not free.

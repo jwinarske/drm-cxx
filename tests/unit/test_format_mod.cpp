@@ -110,6 +110,16 @@ void test_classify() {
         BC::Compression);
   CHECK(fmt::classify(fmt::Modifier{DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(4, 0, 0, 0xfe, 0)}) ==
         BC::Compression);
+
+  // StarFive/VeriSilicon DC8200 (vendor 0x0b): TYPE at bits 55:54 -- NORMAL
+  // (tiling) vs COMPRESSED (DEC400) -- and VS_LINEAR is the all-zero body.
+  constexpr std::uint64_t k_vs = std::uint64_t{DRM_FORMAT_MOD_VENDOR_VS} << 56;
+  CHECK(fmt::classify(fmt::Modifier{k_vs | 0x00U}) == BC::Linear);  // VS_LINEAR
+  // TYPE_NORMAL tile modes -- exactly what the DC8200 advertises (0x02..0x0c).
+  CHECK(fmt::classify(fmt::Modifier{k_vs | 0x04U}) == BC::Tiling);
+  CHECK(fmt::classify(fmt::Modifier{k_vs | 0x0cU}) == BC::Tiling);
+  // TYPE_COMPRESSED (bit 54 set) = DEC400 lossless FB compression.
+  CHECK(fmt::classify(fmt::Modifier{k_vs | (std::uint64_t{1} << 54) | 0x02U}) == BC::Compression);
 }
 
 void test_cost() {
