@@ -28,19 +28,26 @@ namespace {
          drm_fourcc == DRM_FORMAT_NV16 || drm_fourcc == DRM_FORMAT_NV61;
 }
 
-// Vertical chroma subsampling factor for the single-V4L2-plane fully-planar YUV
-// formats -> Y plus two equal-size chroma planes (3 DRM planes). Returns 2 for
-// 4:2:0 (YUV420/YVU420, chroma height ceil(h/2)), 1 for 4:2:2 (YUV422/YVU422,
-// full-height chroma), or 0 for a format that is not planar YUV. The Cb/Cr order
+// Chroma subsampling of the single-V4L2-plane fully-planar YUV formats -> Y plus
+// two equal-size chroma planes (3 DRM planes), each at stride bpl/hsub and height
+// ceil(h/vsub). {0,0} for a format that is not planar YUV. The Cb/Cr order
 // (I420 vs YV12) doesn't change the offsets since both chroma planes are equal.
-[[nodiscard]] unsigned planar_yuv_vsub(std::uint32_t drm_fourcc) noexcept {
+struct ChromaSubsampling {
+  unsigned hsub;  // horizontal (2 -> half-width chroma, 1 -> full-width)
+  unsigned vsub;  // vertical   (2 -> half-height chroma, 1 -> full-height)
+};
+
+[[nodiscard]] ChromaSubsampling planar_yuv_subsampling(std::uint32_t drm_fourcc) noexcept {
   if (drm_fourcc == DRM_FORMAT_YUV420 || drm_fourcc == DRM_FORMAT_YVU420) {
-    return 2;
+    return {2, 2};  // 4:2:0
   }
   if (drm_fourcc == DRM_FORMAT_YUV422 || drm_fourcc == DRM_FORMAT_YVU422) {
-    return 1;
+    return {2, 1};  // 4:2:2
   }
-  return 0;
+  if (drm_fourcc == DRM_FORMAT_YUV444 || drm_fourcc == DRM_FORMAT_YVU444) {
+    return {1, 1};  // 4:4:4 -- full-resolution chroma
+  }
+  return {0, 0};
 }
 
 [[nodiscard]] std::uint32_t plane_bpl(const v4l2_format& f, bool is_mplane,
@@ -64,8 +71,8 @@ std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mpla
   // Pi bcm2835-codec). DRM still needs 2 or 3 plane handles, so split by offset
   // math; all DRM planes import V4L2 plane 0 (the kernel dedups the prime handle).
   const bool semiplanar = is_semiplanar_yuv(drm_fourcc);
-  const unsigned planar_vsub = planar_yuv_vsub(drm_fourcc);
-  if (num_v4l2 == 1 && (semiplanar || planar_vsub != 0)) {
+  const ChromaSubsampling planar = planar_yuv_subsampling(drm_fourcc);
+  if (num_v4l2 == 1 && (semiplanar || planar.hsub != 0)) {
     const std::uint32_t bpl = plane_bpl(cap_fmt, is_mplane, 0);
     if (bpl == 0 || bpl > k_max_bytes_per_line) {
       return std::make_error_code(std::errc::invalid_argument);
@@ -88,15 +95,15 @@ std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mpla
       return {};
     }
 
-    // Planar YUV: two chroma planes, each stride bpl/2. Chroma height is
-    // ceil(h/vsub) -- half-height for 4:2:0, full-height for 4:2:2. Needs an even
-    // luma stride so it halves cleanly; odd is malformed.
-    if ((bpl & 1U) != 0U) {
+    // Planar YUV: two equal-size chroma planes, each at stride bpl/hsub and
+    // height ceil(h/vsub) -- 4:2:0 {2,2}, 4:2:2 {2,1}, 4:4:4 {1,1}. A halved luma
+    // stride (hsub == 2) needs an even bpl so it divides cleanly; odd is malformed.
+    if (planar.hsub == 2 && (bpl & 1U) != 0U) {
       return std::make_error_code(std::errc::invalid_argument);
     }
-    const std::uint64_t chroma_bpl = bpl / 2;
+    const std::uint64_t chroma_bpl = bpl / planar.hsub;
     const std::uint64_t chroma_h =
-        (planar_vsub == 2) ? (static_cast<std::uint64_t>(h) + 1) / 2 : h;  // DIV_ROUND_UP(h, vsub)
+        (static_cast<std::uint64_t>(h) + planar.vsub - 1) / planar.vsub;  // DIV_ROUND_UP(h, vsub)
     const std::uint64_t chroma_size = chroma_bpl * chroma_h;
     const std::uint64_t v_offset = y_size + chroma_size;
     // Largest offset (plane 2) plus its own extent must stay inside AddFB2's u32.
