@@ -537,6 +537,15 @@ int main(int argc, char* argv[]) {
   // the overlay leases the PlanePresenter writes to.
   std::optional<drm::csd::OverlayReservation> reservation_holder;
 
+  // A blue->teal desktop backdrop for the composite presenter (the
+  // CompositePresenter copies it, so this local can go out of scope after
+  // create()). The plane presenter ignores it — its bg is the LayerScene
+  // gradient below.
+  std::vector<std::uint8_t> composite_bg(static_cast<std::size_t>(fb_w) * fb_h * 4U);
+  paint_bg_gradient(drm::span<std::uint8_t>(composite_bg.data(), composite_bg.size()), fb_w * 4U,
+                    fb_w, fb_h);
+  const drm::span<const std::uint8_t> bg_span(composite_bg.data(), composite_bg.size());
+
   if (args.presenter == PresenterMode::Auto) {
     // Let probe_presenter pick: Plane when it can reserve one overlay per
     // document, else Composite onto the primary. (fb isn't a candidate —
@@ -548,6 +557,7 @@ int main(int argc, char* argv[]) {
     probe_cfg.canvas_width = fb_w;
     probe_cfg.canvas_height = fb_h;
     probe_cfg.plane_base_zpos = primary_zpos_max(registry, *crtc_idx) + 1U;
+    probe_cfg.background_argb = bg_span;  // used only if it picks Composite
     auto probed = drm::csd::probe_presenter(dev, registry, probe_cfg);
     if (!probed) {
       drm::println(stderr,
@@ -569,7 +579,7 @@ int main(int argc, char* argv[]) {
       return EXIT_FAILURE;
     }
     auto presenter_res = drm::csd::CompositePresenter::create(dev, registry, output->crtc_id,
-                                                              primary_id, fb_w, fb_h);
+                                                              primary_id, fb_w, fb_h, bg_span);
     if (!presenter_res) {
       drm::println(stderr, "mdi_demo: CompositePresenter::create: {}",
                    presenter_res.error().message());
