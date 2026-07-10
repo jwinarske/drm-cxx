@@ -2,11 +2,12 @@
 
 A multi-document desktop on top of `drm::csd`. Each "document" is a
 glass-themed decoration painted by `drm::csd::Renderer` into a
-`drm::csd::Surface` and arrived on its own reserved DRM overlay plane
-via `drm::csd::PlanePresenter` (Tier 0).
+`drm::csd::Surface` and presented either on its own reserved DRM overlay
+plane (`drm::csd::PlanePresenter`, the default) or software-composited
+onto the primary plane (`drm::csd::CompositePresenter`).
 
-The example is the headline showcase for the CSD module's Tier 0
-presenter — multiple movable, focusable, glass-styled windows on a
+The example is the headline showcase for the CSD module's presenters —
+multiple movable, focusable, glass-styled windows on a
 single CRTC, all rendered through the production library types you'd
 use to write a real shell.
 
@@ -32,9 +33,9 @@ mdi_demo [--docs N] [--theme {default|lite|minimal|PATH}]
 | Flag | Meaning |
 |---|---|
 | `--docs N` | Initial document count. Default `2`. Capped at the CRTC's available overlay budget — fewer planes mean fewer initial docs, not a hard error. |
-| `--theme NAME` | One of `default` (Tier 0 / desktop), `lite` (Tier 1), `minimal` (Tier 2), or a path to a TOML theme file. Path themes layer onto `glass_default` so missing keys inherit. |
+| `--theme NAME` | One of `default` (desktop), `lite`, `minimal`, or a path to a TOML theme file. Path themes layer onto `glass_default` so missing keys inherit. |
 | `--dump PATH.png` | Output path for `Ctrl+S` snapshots. When omitted, `Ctrl+S` is a no-op. |
-| `--presenter MODE` | Wired for the future Tier 1/2 presenters. v1 only implements `plane`; the other modes log an error and exit. |
+| `--presenter MODE` | `plane` (default) gives each decoration its own overlay; `composite` software-blends every decoration onto the primary plane — the path for plane-starved hardware. `fb` is not implemented and exits. |
 | `/dev/dri/cardN` | DRM device. `select_device` prompts when omitted. |
 
 ## Controls
@@ -58,15 +59,32 @@ Same as every other CSD example:
   session holding DRM master will reject the atomic commit with EACCES.
 - Build with `DRM_CXX_HAS_BLEND2D=1` (the gate that pulls in `drm::csd`).
 
+## Composite mode (`--presenter=composite`)
+
+`CompositePresenter` blends every decoration into one double-buffered
+ARGB8888 canvas (`scene::CompositeCanvas`) and scans that canvas out from
+the CRTC's **primary** plane — no per-decoration overlay. It's the path
+for plane-starved hardware (mid-range ARM: i.MX8 DCSS, RK3399 VOP, Mali
+Komeda) that can't give each window its own plane. The blend is
+damage-tracked: each frame clears only the previous frame's footprint and
+copies only the touched scanline bands to scanout, so an idle desktop
+costs almost nothing. Decoration count is bounded by `--docs`, not by the
+plane budget.
+
+The desktop background is solid black in v1 (a gradient / wallpaper under
+the composited decorations is a follow-up — it needs the canvas to carry
+a persistent background source). Everything else — drag, focus stacking,
+theme swap, snapshot — behaves identically to Plane mode.
+
 ## What's not in v1
 
-- **Tier 1 (`CompositePresenter`) / Tier 2 (`FramebufferPresenter`).**
-  The `--presenter` flag is wired so the override scaffolding is in
-  place, but only `plane` actually runs.
+- **The `/dev/fb0` (`FramebufferPresenter`) mode.** The `fb` mode is
+  wired into the `--presenter` flag but the blit path hasn't landed; it
+  logs an error and exits. `plane` and `composite` both run.
 - **Per-doc content surfaces.** v1 documents are decoration-only — the
-  glass panel + title text is the entire window. The plan calls for a
-  separate content buffer; that's a follow-up once Tier 1's damage
-  tracker lands and tells us what shape content damage should take.
+  glass panel + title text is the entire window. A separate content
+  buffer is a follow-up, once the composite damage tracker tells us what
+  shape content damage should take.
 - **Resize.** The traffic-light Maximize button is painted but inert;
   resize requires reallocating the decoration `Surface`, which lives
   alongside the still-undecided rebind story for csd.
@@ -94,14 +112,18 @@ The example holds two atomic-commit paths:
    wait for the flip, done. The bg's primary-plane state survives
    subsequent overlay-only commits because we never write any of its
    properties — atomic state is per-property, last-write-wins.
-2. **Per-frame overlay commit.** `drm::csd::PlanePresenter::apply`
-   writes the decoration overlays into a fresh `AtomicRequest`, the
-   demo commits with `PAGE_FLIP_EVENT` and waits for the flip.
+2. **Per-frame commit.** `Presenter::apply` writes into a fresh
+   `AtomicRequest`, the demo commits with `PAGE_FLIP_EVENT` and waits for
+   the flip. In Plane mode that's decoration overlays; in Composite mode
+   it's the primary plane's `FB_ID` (the freshly-blended canvas). Either
+   way the bg modeset from step 1 isn't revisited.
 
 The two commits intentionally don't share a request — bg goes through
 LayerScene's allocator (which expects a CRTC mode + connector), while
-the per-frame path is overlay-only and has no need to revisit modeset
-state. The same shape is used by `csd_smoke --presenter=plane`.
+the per-frame path has no need to revisit modeset state. In Composite
+mode the canvas takes over the primary from frame 1, so the startup
+gradient shows for a single frame before the black-desktop canvas
+replaces it. The same shape is used by `csd_smoke --presenter=plane`.
 
 ## Hardware validation status
 
