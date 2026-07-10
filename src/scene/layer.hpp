@@ -56,12 +56,36 @@ class Layer {
   /// zpos). Mutate via the setters below — do not const_cast.
   [[nodiscard]] const DisplayParams& display() const noexcept { return display_; }
 
-  /// Allocator hint passed at `add_layer` time. Read-only post-create.
+  /// Allocator content-type hint. Seeded from `LayerDesc`; mutable via
+  /// `set_content_type`.
   [[nodiscard]] drm::planes::ContentType content_type() const noexcept { return content_type_; }
 
-  /// Producer's expected refresh rate in Hz from `LayerDesc`, 0 if no
-  /// hint was supplied. Read-only post-create.
+  /// Producer's expected refresh rate in Hz, 0 if no hint. Seeded from
+  /// `LayerDesc`; mutable via `set_update_hint`.
   [[nodiscard]] std::uint32_t update_hint_hz() const noexcept { return update_hint_hz_; }
+
+  /// Change the allocator content-type hint (e.g. promote a stream from
+  /// `Generic` to `Video` once its pipeline is confirmed). Unlike the
+  /// display setters this changes plane *scoring*, not just the values
+  /// written to an already-chosen plane, so it also flags the layer for
+  /// re-allocation (`hints_dirty`) — the scene drops the allocator's
+  /// warm-start that frame so the layer can move to a better plane.
+  void set_content_type(drm::planes::ContentType ct) noexcept {
+    content_type_ = ct;
+    dirty_ = true;
+    hints_dirty_ = true;
+  }
+  /// Change the producer refresh-rate hint (Hz; 0 clears it). Feeds the
+  /// allocator's scheduling; flags the layer for re-allocation like
+  /// `set_content_type`.
+  void set_update_hint(std::uint32_t hz) noexcept {
+    update_hint_hz_ = hz;
+    dirty_ = true;
+    hints_dirty_ = true;
+  }
+  /// True when `set_content_type` / `set_update_hint` ran since the last
+  /// `mark_clean` — the scene's signal to force a full re-allocation.
+  [[nodiscard]] bool hints_dirty() const noexcept { return hints_dirty_; }
 
   /// Opaque pointer forwarded verbatim from `LayerDesc::identity_tag`,
   /// nullptr if the caller didn't set one. The scene never
@@ -211,9 +235,12 @@ class Layer {
   /// decide whether the layer's plane state needs re-emission.
   [[nodiscard]] bool is_dirty() const noexcept { return dirty_; }
 
-  /// Reset the dirty flag. Called by `LayerScene` after a commit
+  /// Reset the dirty flags. Called by `LayerScene` after a commit
   /// succeeds; consumers shouldn't normally call it directly.
-  void mark_clean() noexcept { dirty_ = false; }
+  void mark_clean() noexcept {
+    dirty_ = false;
+    hints_dirty_ = false;
+  }
 
   // ── Last-commit placement readout ──────────────────────────────────
   //
@@ -276,6 +303,13 @@ class Layer {
   // freshly-added layer — no stale plane state carries over from
   // whatever used the plane before the scene did.
   bool dirty_{true};
+
+  // Set by set_content_type / set_update_hint. Distinct from `dirty_`:
+  // those hints feed plane *scoring*, so a change must drop the
+  // allocator's warm-start (a full re-search), not just re-emit the
+  // current plane's properties. Cleared by mark_clean() like `dirty_`;
+  // starts false (the cold-start commit full-searches regardless).
+  bool hints_dirty_{false};
 
   // Sticky across the layer's lifetime once `set_alpha` is called.
   // Distinct from `dirty_` (cleared after every commit) because we

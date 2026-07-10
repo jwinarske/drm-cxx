@@ -183,6 +183,14 @@ class Allocator {
   void set_force_full_property_writes(bool force) noexcept { force_full_writes_ = force; }
   [[nodiscard]] bool force_full_property_writes() const noexcept { return force_full_writes_; }
 
+  // Drop the warm-start cache so the next apply() does a full plane
+  // search instead of reusing the previous assignment. The scene calls
+  // this when a layer's content-type / update-hint changed: those affect
+  // plane scoring but not the layer set, so warm-start (keyed on "same
+  // layers, still valid") would otherwise keep the stale assignment and
+  // never move the layer to the plane its new hint prefers.
+  void invalidate_allocation() noexcept { previous_allocation_valid_ = false; }
+
   // Erase any cached state that references `layer`. Must be called
   // before the planes::Layer pointed to by `layer` is destroyed,
   // because the allocator's per-plane snapshot stores a raw pointer
