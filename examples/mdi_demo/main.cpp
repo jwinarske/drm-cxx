@@ -4,8 +4,9 @@
 // mdi_demo — multi-document desktop on top of drm::csd.
 //
 // Each "document" is a glass-themed decoration painted by
-// drm::csd::Renderer into a drm::csd::Surface and arrived on its own
-// reserved DRM overlay plane via drm::csd::PlanePresenter (Tier 0).
+// drm::csd::Renderer into a drm::csd::Surface and presented either on
+// its own reserved DRM overlay plane (drm::csd::PlanePresenter) or
+// software-composited onto the primary (drm::csd::CompositePresenter).
 // The Shell type (shell.hpp) holds the document list, focus stack, and
 // hit testing — main.cpp wires it to libinput, the bg LayerScene, and
 // the per-frame atomic commit.
@@ -34,6 +35,7 @@
 #include "../common/vt_switch.hpp"
 #include "csd/overlay_reservation.hpp"
 #include "csd/presenter.hpp"
+#include "csd/presenter_composite.hpp"
 #include "csd/presenter_plane.hpp"
 #include "csd/theme.hpp"
 #include "cursor/cursor.hpp"
@@ -163,6 +165,19 @@ std::uint64_t primary_zpos_max(const drm::planes::PlaneRegistry& registry,
   return out;
 }
 
+// The KMS object id of the PRIMARY plane bound to this CRTC — the plane
+// the Composite presenter scans its canvas out from. 0 when the CRTC
+// exposes no PRIMARY (shouldn't happen on a modeset-capable card).
+std::uint32_t primary_plane_id_for(const drm::planes::PlaneRegistry& registry,
+                                   std::uint32_t crtc_index) {
+  for (const auto* cap : registry.for_crtc(crtc_index)) {
+    if (cap != nullptr && cap->type == drm::planes::DRMPlaneType::PRIMARY) {
+      return cap->id;
+    }
+  }
+  return 0;
+}
+
 // Try to reserve `desired` overlays for `crtc_index`, falling back to
 // progressively smaller counts when the registry doesn't have enough
 // candidates. Returns the actual count reserved (>= 1) on success;
@@ -261,14 +276,14 @@ Args parse_args(int& argc, char* argv[]) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape)
 int main(int argc, char* argv[]) {
   const Args args = parse_args(argc, argv);
 
-  if (args.presenter != PresenterMode::Plane) {
+  if (args.presenter == PresenterMode::Fb) {
     drm::println(stderr,
-                 "mdi_demo: --presenter={} is not implemented in v1; only the Tier 0 Plane "
-                 "presenter has landed. Re-run with --presenter=plane (or omit the flag).",
-                 args.presenter == PresenterMode::Composite ? "composite" : "fb");
+                 "mdi_demo: --presenter=fb is not implemented; the /dev/fb0 framebuffer "
+                 "presenter has not landed. Use --presenter=plane or --presenter=composite.");
     return EXIT_FAILURE;
   }
 
@@ -316,46 +331,80 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  auto reservation_res = drm::csd::OverlayReservation::create(registry);
-  if (!reservation_res) {
-    drm::println(stderr, "mdi_demo: OverlayReservation::create: {}",
-                 reservation_res.error().message());
-    return EXIT_FAILURE;
-  }
-  auto reservation = std::move(*reservation_res);
+  // ── Presenter (plane-per-decoration or composited canvas) ────────
+  // The presenter is the only piece that differs between the two
+  // modes; the rest of the demo drives it through the abstract
+  // csd::Presenter. `deco_budget` is the max concurrent documents: the
+  // plane presenter reserves one overlay per decoration, so it's the
+  // reserved count; the composite presenter has no per-decoration
+  // plane, so it's the requested `--docs` (all blend onto one canvas).
+  std::unique_ptr<drm::csd::Presenter> presenter;
+  std::size_t deco_budget = 0;
 
-  // Try to reserve `--docs` overlays for decorations; fall back to
-  // smaller counts so the demo runs on plane-budget-limited hardware
-  // without forcing the user to guess the limit. The budget defines
-  // the upper bound on documents — Ctrl+N stops spawning at that
-  // ceiling. A budget of 0 means no compatible overlay exists.
-  const auto reserved = reserve_with_fallback(reservation, *crtc_idx, args.initial_docs);
-  if (reserved.empty()) {
-    drm::println(stderr,
-                 "mdi_demo: no ARGB8888 overlay plane available on CRTC {} — needs at least 1 "
-                 "for the decoration. Try a different card or run on hardware with overlay "
-                 "support.",
-                 output->crtc_id);
-    return EXIT_FAILURE;
-  }
-  if (reserved.size() < args.initial_docs) {
-    drm::println("mdi_demo: --docs={} requested, plane budget {} available; capping",
-                 args.initial_docs, reserved.size());
-  }
-  drm::println("mdi_demo: reserved {} overlay plane{} for decorations", reserved.size(),
-               reserved.size() == 1 ? "" : "s");
+  // Kept alive for the whole run in Plane mode: the reservation owns
+  // the overlay leases the PlanePresenter writes to.
+  std::optional<drm::csd::OverlayReservation> reservation_holder;
 
-  // ── PlanePresenter ───────────────────────────────────────────────
-  const std::uint64_t base_zpos = primary_zpos_max(registry, *crtc_idx) + 1U;
-  auto presenter_res = drm::csd::PlanePresenter::create(
-      dev, registry, output->crtc_id,
-      drm::span<const std::uint32_t>(reserved.data(), reserved.size()), base_zpos);
-  if (!presenter_res) {
-    drm::println(stderr, "mdi_demo: PlanePresenter::create: {}", presenter_res.error().message());
-    return EXIT_FAILURE;
+  if (args.presenter == PresenterMode::Composite) {
+    const std::uint32_t primary_id = primary_plane_id_for(registry, *crtc_idx);
+    if (primary_id == 0U) {
+      drm::println(stderr, "mdi_demo: no PRIMARY plane on CRTC {} for the composite canvas",
+                   output->crtc_id);
+      return EXIT_FAILURE;
+    }
+    auto presenter_res = drm::csd::CompositePresenter::create(dev, registry, output->crtc_id,
+                                                              primary_id, fb_w, fb_h);
+    if (!presenter_res) {
+      drm::println(stderr, "mdi_demo: CompositePresenter::create: {}",
+                   presenter_res.error().message());
+      return EXIT_FAILURE;
+    }
+    presenter = std::move(*presenter_res);
+    deco_budget = args.initial_docs == 0 ? 1U : args.initial_docs;
+    drm::println("mdi_demo: CompositePresenter armed on primary plane {} ({} doc budget)",
+                 primary_id, deco_budget);
+  } else {
+    auto reservation_res = drm::csd::OverlayReservation::create(registry);
+    if (!reservation_res) {
+      drm::println(stderr, "mdi_demo: OverlayReservation::create: {}",
+                   reservation_res.error().message());
+      return EXIT_FAILURE;
+    }
+    reservation_holder.emplace(std::move(*reservation_res));
+
+    // Try to reserve `--docs` overlays for decorations; fall back to
+    // smaller counts so the demo runs on plane-budget-limited hardware
+    // without forcing the user to guess the limit. The budget defines
+    // the upper bound on documents — Ctrl+N stops spawning at that
+    // ceiling. A budget of 0 means no compatible overlay exists.
+    const auto reserved = reserve_with_fallback(*reservation_holder, *crtc_idx, args.initial_docs);
+    if (reserved.empty()) {
+      drm::println(stderr,
+                   "mdi_demo: no ARGB8888 overlay plane available on CRTC {} — needs at least 1 "
+                   "for the decoration. Try a different card, run on hardware with overlay "
+                   "support, or use --presenter=composite.",
+                   output->crtc_id);
+      return EXIT_FAILURE;
+    }
+    if (reserved.size() < args.initial_docs) {
+      drm::println("mdi_demo: --docs={} requested, plane budget {} available; capping",
+                   args.initial_docs, reserved.size());
+    }
+    drm::println("mdi_demo: reserved {} overlay plane{} for decorations", reserved.size(),
+                 reserved.size() == 1 ? "" : "s");
+
+    const std::uint64_t base_zpos = primary_zpos_max(registry, *crtc_idx) + 1U;
+    auto presenter_res = drm::csd::PlanePresenter::create(
+        dev, registry, output->crtc_id,
+        drm::span<const std::uint32_t>(reserved.data(), reserved.size()), base_zpos);
+    if (!presenter_res) {
+      drm::println(stderr, "mdi_demo: PlanePresenter::create: {}", presenter_res.error().message());
+      return EXIT_FAILURE;
+    }
+    presenter = std::move(*presenter_res);
+    deco_budget = reserved.size();
+    drm::println("mdi_demo: PlanePresenter armed (base_zpos={})", base_zpos);
   }
-  const auto presenter = std::move(*presenter_res);
-  drm::println("mdi_demo: PlanePresenter armed (base_zpos={})", base_zpos);
 
   // ── Background LayerScene ────────────────────────────────────────
   // Bg modeset commits once at startup. The primary plane's atomic
@@ -414,8 +463,8 @@ int main(int argc, char* argv[]) {
   }
 
   // ── Shell + initial documents ────────────────────────────────────
-  mdi_demo::Shell shell(dev, gbm ? &*gbm : nullptr, *theme, reserved.size());
-  for (std::size_t i = 0; i < reserved.size(); ++i) {
+  mdi_demo::Shell shell(dev, gbm ? &*gbm : nullptr, *theme, deco_budget);
+  for (std::size_t i = 0; i < deco_budget; ++i) {
     if (!shell.spawn_document(fb_w, fb_h)) {
       break;
     }

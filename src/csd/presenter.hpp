@@ -12,7 +12,8 @@
 //                       `presenter_plane.cpp`.
 //   * Tier::Composite — software compositor onto the primary plane,
 //                       damage-tracked. Mid-range ARM (i.MX8 DCSS,
-//                       RK3399 VOP, Mali Komeda). Lives in a follow-up.
+//                       RK3399 VOP, Mali Komeda). Lives in
+//                       `presenter_composite.cpp`.
 //   * Tier::Fb        — `/dev/fb0` blit. Legacy / no-KMS targets.
 //                       Lives in a later follow-up.
 //
