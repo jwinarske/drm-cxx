@@ -115,6 +115,14 @@ class Surface {
   /// empty().
   [[nodiscard]] SurfaceBacking backing() const noexcept;
 
+  /// Monotonic counter bumped every time the surface is mapped for
+  /// writing (`paint()` with `Write` / `ReadWrite`), i.e. every time a
+  /// renderer could have changed its pixels. A presenter that composites
+  /// the surface tracks the last value it blended to tell "content
+  /// repainted" from "moved / unchanged" without diffing pixels — the
+  /// signal behind the composite presenter's per-decoration damage.
+  [[nodiscard]] std::uint64_t content_generation() const noexcept { return content_gen_; }
+
   /// Acquire a scoped CPU mapping for drawing. Call once per draw
   /// pass; release the returned guard before the surface is scanned
   /// out (Mesa's GBM path does cache-coherence work at unmap, and the
@@ -156,6 +164,8 @@ class Surface {
   // need it (gbm_bo_get_fd carries its own fd internally).
   drm::Device* device_{nullptr};
   std::variant<drm::gbm::Buffer, drm::dumb::Buffer> backing_;
+  // Bumped by paint() on any write-access map; see content_generation().
+  std::uint64_t content_gen_{0};
 };
 
 }  // namespace drm::csd
