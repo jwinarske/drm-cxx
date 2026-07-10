@@ -60,6 +60,35 @@ namespace drm::csd {
                                                                std::uint32_t canvas_w,
                                                                std::uint32_t canvas_h);
 
+/// One decoration slot's snapshot, diffed frame-to-frame to find damage.
+/// `gen` is the surface's `content_generation()` at snapshot time.
+struct CompositeSlotState {
+  bool armed{false};
+  std::int32_t x{0};
+  std::int32_t y{0};
+  std::uint32_t w{0};
+  std::uint32_t h{0};
+  std::uint64_t gen{0};
+};
+
+/// A canvas-space damage rectangle (half-open extents).
+struct DamageRect {
+  std::int32_t x{0};
+  std::int32_t y{0};
+  std::uint32_t w{0};
+  std::uint32_t h{0};
+  [[nodiscard]] bool empty() const noexcept { return w == 0U || h == 0U; }
+};
+
+/// Pure: the bounding damage rectangle for the change from `prev` to `cur`
+/// (index-matched slots), clamped to the canvas. A slot contributes its
+/// old and/or new rect when it opened, closed, moved, resized, or its
+/// content generation changed. A slot-count change (or empty `prev`, i.e.
+/// the first frame) damages the whole canvas. Exposed for unit tests.
+[[nodiscard]] DamageRect compute_composite_damage(drm::span<const CompositeSlotState> prev,
+                                                  drm::span<const CompositeSlotState> cur,
+                                                  std::uint32_t canvas_w, std::uint32_t canvas_h);
+
 class CompositePresenter : public Presenter {
  public:
   /// Build a presenter that composites onto `canvas_plane_id` (typically
@@ -134,6 +163,13 @@ class CompositePresenter : public Presenter {
   // Owned ARGB8888 desktop backdrop (canvas_w_*canvas_h_*4), or empty for
   // a transparent-black desktop. Blended under the decorations each frame.
   std::vector<std::uint8_t> background_;
+
+  // Per-decoration state from the previous apply() (index-matched to the
+  // SurfaceRefs) + the damage it produced. Together they drive incremental
+  // re-compositing: each frame touches only this-frame's damage unioned
+  // with last-frame's, so both of the canvas's double buffers converge.
+  std::vector<CompositeSlotState> prev_slots_;
+  DamageRect prev_damage_;
 };
 
 }  // namespace drm::csd

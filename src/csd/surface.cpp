@@ -180,6 +180,12 @@ drm::expected<drm::BufferMapping, std::error_code> Surface::paint(drm::MapAccess
   if (empty()) {
     return make_error(std::errc::bad_file_descriptor);
   }
+  // A write-capable map means the caller may repaint the surface; bump the
+  // content generation so compositing consumers know to re-blend it. A
+  // read-only map (e.g. a presenter sampling pixels) leaves it untouched.
+  if (access != drm::MapAccess::Read) {
+    ++content_gen_;
+  }
   if (auto* g = std::get_if<drm::gbm::Buffer>(&backing_)) {
     return g->map(access);
   }

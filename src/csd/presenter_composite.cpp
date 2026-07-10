@@ -20,6 +20,7 @@
 #include <drm_fourcc.h>
 #include <drm_mode.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -60,6 +61,62 @@ constexpr std::uint64_t to_16_16(std::uint32_t pixels) noexcept {
   return static_cast<std::uint64_t>(pixels) << 16U;
 }
 
+// Signed bounding box accumulator for damage rects.
+struct Bounds {
+  bool valid{false};
+  std::int32_t x0{0};
+  std::int32_t y0{0};
+  std::int32_t x1{0};
+  std::int32_t y1{0};
+};
+
+void add_rect(Bounds& b, std::int32_t x, std::int32_t y, std::uint32_t w, std::uint32_t h) {
+  if (w == 0U || h == 0U) {
+    return;
+  }
+  const std::int32_t rx1 = x + static_cast<std::int32_t>(w);
+  const std::int32_t ry1 = y + static_cast<std::int32_t>(h);
+  if (!b.valid) {
+    b = {true, x, y, rx1, ry1};
+    return;
+  }
+  b.x0 = std::min(b.x0, x);
+  b.y0 = std::min(b.y0, y);
+  b.x1 = std::max(b.x1, rx1);
+  b.y1 = std::max(b.y1, ry1);
+}
+
+// Intersection of the decoration rect (x,y,w,h) with `r`; empty if disjoint.
+DamageRect intersect(std::int32_t x, std::int32_t y, std::uint32_t w, std::uint32_t h,
+                     const DamageRect& r) {
+  const std::int32_t x0 = std::max(x, r.x);
+  const std::int32_t y0 = std::max(y, r.y);
+  const std::int32_t x1 =
+      std::min(x + static_cast<std::int32_t>(w), r.x + static_cast<std::int32_t>(r.w));
+  const std::int32_t y1 =
+      std::min(y + static_cast<std::int32_t>(h), r.y + static_cast<std::int32_t>(r.h));
+  if (x1 <= x0 || y1 <= y0) {
+    return {};
+  }
+  return {x0, y0, static_cast<std::uint32_t>(x1 - x0), static_cast<std::uint32_t>(y1 - y0)};
+}
+
+DamageRect union_rect(const DamageRect& a, const DamageRect& b) {
+  if (a.empty()) {
+    return b;
+  }
+  if (b.empty()) {
+    return a;
+  }
+  const std::int32_t x0 = std::min(a.x, b.x);
+  const std::int32_t y0 = std::min(a.y, b.y);
+  const std::int32_t x1 =
+      std::max(a.x + static_cast<std::int32_t>(a.w), b.x + static_cast<std::int32_t>(b.w));
+  const std::int32_t y1 =
+      std::max(a.y + static_cast<std::int32_t>(a.h), b.y + static_cast<std::int32_t>(b.h));
+  return {x0, y0, static_cast<std::uint32_t>(x1 - x0), static_cast<std::uint32_t>(y1 - y0)};
+}
+
 }  // namespace
 
 // ── Pure helper ────────────────────────────────────────────────────────
@@ -85,6 +142,48 @@ std::vector<PropertyWrite> compute_canvas_writes(const PlaneSlot& slot, std::uin
   add(slot.src_w_prop, to_16_16(canvas_w));
   add(slot.src_h_prop, to_16_16(canvas_h));
   return out;
+}
+
+DamageRect compute_composite_damage(drm::span<const CompositeSlotState> prev,
+                                    drm::span<const CompositeSlotState> cur, std::uint32_t canvas_w,
+                                    std::uint32_t canvas_h) {
+  const DamageRect whole{0, 0, canvas_w, canvas_h};
+  // First frame (no prior state) or a slot-count change: repaint everything
+  // — the backdrop has to be laid down and the diff below is index-matched.
+  if (prev.size() != cur.size() || prev.empty()) {
+    return whole;
+  }
+
+  Bounds b;
+  for (std::size_t i = 0; i < cur.size(); ++i) {
+    const auto& p = prev[i];
+    const auto& c = cur[i];
+    const bool changed =
+        (p.armed != c.armed) ||
+        (c.armed && (p.x != c.x || p.y != c.y || p.w != c.w || p.h != c.h || p.gen != c.gen));
+    if (!changed) {
+      continue;
+    }
+    if (p.armed) {
+      add_rect(b, p.x, p.y, p.w, p.h);  // vacate the old footprint
+    }
+    if (c.armed) {
+      add_rect(b, c.x, c.y, c.w, c.h);  // paint the new one
+    }
+  }
+  if (!b.valid) {
+    return {};  // nothing changed this frame
+  }
+
+  // Clamp the bounding box to the canvas.
+  const std::int32_t x0 = std::max(0, b.x0);
+  const std::int32_t y0 = std::max(0, b.y0);
+  const std::int32_t x1 = std::min(static_cast<std::int32_t>(canvas_w), b.x1);
+  const std::int32_t y1 = std::min(static_cast<std::int32_t>(canvas_h), b.y1);
+  if (x1 <= x0 || y1 <= y0) {
+    return {};
+  }
+  return {x0, y0, static_cast<std::uint32_t>(x1 - x0), static_cast<std::uint32_t>(y1 - y0)};
 }
 
 // ── CompositePresenter ─────────────────────────────────────────────────
@@ -164,59 +263,87 @@ CompositePresenter::~CompositePresenter() = default;
 
 drm::expected<void, std::error_code> CompositePresenter::apply(drm::span<const SurfaceRef> surfaces,
                                                                drm::AtomicRequest& req) {
-  // Standard composition-target drive: clear last frame's footprint,
-  // blend this frame's decorations bottom-to-top, publish. The canvas's
-  // clear()/flush() pair scissors the shadow->scanout copy to just the
-  // touched bands, so an idle desktop pays only for what moved.
   canvas_->begin_frame();
-  canvas_->clear();
 
-  // Desktop backdrop, if any, as the bottom layer. Full-screen, so the
-  // canvas's damage tracking widens to the whole frame this pass — fine
-  // for the composite tier, whose apply() runs on content change, not
-  // every vblank.
-  if (!background_.empty()) {
-    drm::scene::CompositeSrc bg;
-    bg.pixels = drm::span<const std::uint8_t>(background_.data(), background_.size());
-    bg.src_stride_bytes = canvas_w_ * 4U;
-    bg.src_width = canvas_w_;
-    bg.src_height = canvas_h_;
-    // XRGB (not ARGB): the backdrop is opaque, and tagging it opaque takes
-    // blend_into's straight-copy fast path instead of a per-pixel SRC_OVER.
-    bg.drm_fourcc = DRM_FORMAT_XRGB8888;
-    const drm::scene::CompositeRect full{0, 0, canvas_w_, canvas_h_};
-    canvas_->blend(bg, full, full);
-  }
-
+  // Snapshot this frame's decoration slots and diff against last frame's to
+  // find the damage. Re-composite this-frame's damage unioned with
+  // last-frame's, so a change reaches both of the canvas's double buffers
+  // within their two-frame cycle. Everything outside the region keeps the
+  // persistent shadow's prior content — the incremental win.
+  std::vector<CompositeSlotState> cur;
+  cur.reserve(surfaces.size());
   for (const auto& ref : surfaces) {
-    const auto* surface = ref.surface;
-    if (surface == nullptr || surface->empty()) {
-      continue;  // vacant slot — the closed decoration vacates via clear()
+    CompositeSlotState s;
+    if (ref.surface != nullptr && !ref.surface->empty()) {
+      s.armed = true;
+      s.x = ref.x;
+      s.y = ref.y;
+      s.w = ref.surface->width();
+      s.h = ref.surface->height();
+      s.gen = ref.surface->content_generation();
     }
-    // SurfaceRef holds a const Surface* — the presenter contract is
-    // "read the decoration, don't mutate it". A read-only CPU map honors
-    // that, but Surface::paint() is non-const (the GBM backend stages a
-    // scratch buffer at map time), so a const_cast is the honest bridge;
-    // MapAccess::Read never alters the decoration's pixels.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    auto map = const_cast<Surface*>(surface)->paint(drm::MapAccess::Read);
-    if (!map) {
-      return drm::unexpected<std::error_code>(map.error());
+    cur.push_back(s);
+  }
+  const DamageRect dmg = compute_composite_damage(
+      drm::span<const CompositeSlotState>(prev_slots_.data(), prev_slots_.size()),
+      drm::span<const CompositeSlotState>(cur.data(), cur.size()), canvas_w_, canvas_h_);
+  const DamageRect region = union_rect(dmg, prev_damage_);
+
+  if (!region.empty()) {
+    canvas_->clear_rect(region.x, region.y, static_cast<std::int32_t>(region.w),
+                        static_cast<std::int32_t>(region.h));
+
+    // Desktop backdrop (opaque, straight-copy fast path) as the bottom
+    // layer, clipped to the damage region. It sits at the canvas origin, so
+    // its source rect equals the destination.
+    if (!background_.empty()) {
+      drm::scene::CompositeSrc bg;
+      bg.pixels = drm::span<const std::uint8_t>(background_.data(), background_.size());
+      bg.src_stride_bytes = canvas_w_ * 4U;
+      bg.src_width = canvas_w_;
+      bg.src_height = canvas_h_;
+      bg.drm_fourcc = DRM_FORMAT_XRGB8888;
+      const drm::scene::CompositeRect r{region.x, region.y, region.w, region.h};
+      canvas_->blend(bg, r, r);
     }
-    drm::scene::CompositeSrc src;
-    src.pixels = map->pixels();
-    src.src_stride_bytes = map->stride();
-    src.src_width = surface->width();
-    src.src_height = surface->height();
-    src.drm_fourcc = surface->format();
-    const drm::scene::CompositeRect src_rect{0, 0, surface->width(), surface->height()};
-    const drm::scene::CompositeRect dst_rect{ref.x, ref.y, surface->width(), surface->height()};
-    canvas_->blend(src, src_rect, dst_rect);
+
+    // Decorations overlapping the region, bottom-to-top, each clipped to it.
+    for (const auto& ref : surfaces) {
+      const auto* surface = ref.surface;
+      if (surface == nullptr || surface->empty()) {
+        continue;
+      }
+      const DamageRect d = intersect(ref.x, ref.y, surface->width(), surface->height(), region);
+      if (d.empty()) {
+        continue;  // untouched decoration keeps its persistent shadow pixels
+      }
+      // SurfaceRef holds a const Surface* — the presenter contract is
+      // "read the decoration, don't mutate it". A read-only CPU map honors
+      // that, but Surface::paint() is non-const (the GBM backend stages a
+      // scratch buffer at map time), so a const_cast is the honest bridge;
+      // MapAccess::Read never alters the decoration's pixels.
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
+      auto map = const_cast<Surface*>(surface)->paint(drm::MapAccess::Read);
+      if (!map) {
+        return drm::unexpected<std::error_code>(map.error());
+      }
+      drm::scene::CompositeSrc src;
+      src.pixels = map->pixels();
+      src.src_stride_bytes = map->stride();
+      src.src_width = surface->width();
+      src.src_height = surface->height();
+      src.drm_fourcc = surface->format();
+      const drm::scene::CompositeRect src_rect{d.x - ref.x, d.y - ref.y, d.w, d.h};
+      const drm::scene::CompositeRect dst_rect{d.x, d.y, d.w, d.h};
+      canvas_->blend(src, src_rect, dst_rect);
+    }
   }
 
   if (auto r = canvas_->flush(); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
+  prev_slots_ = std::move(cur);
+  prev_damage_ = dmg;
 
   const auto writes = compute_canvas_writes(slot_, canvas_->fb_id(), canvas_w_, canvas_h_);
   for (const auto& w : writes) {
