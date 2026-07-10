@@ -447,6 +447,14 @@ test('test_layer_scene_minimization_vkms',
   is_parallel : false,
 )
 
+test('test_layer_scene_content_type_vkms',
+  executable('test_layer_scene_content_type_vkms',
+    'integration/test_layer_scene_content_type_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
 # Hardware-gated EGL Streams integration. All TESTs self-skip via
 # GTEST_SKIP when probe_stream_capability returns Unsupported, so
 # CI hosts on Mesa-only stacks see the binary run-and-skip cleanly.

@@ -3192,6 +3192,18 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
                                  ? drm::span<const std::uint32_t>{}
                                  : drm::span<const std::uint32_t>(scratch_reserved_planes_.data(),
                                                                   scratch_reserved_planes_.size());
+  // A content-type / update-hint change alters plane scoring but not the
+  // layer set, so the allocator's warm-start would keep the stale
+  // assignment. Drop it this frame so the layer can move to the plane its
+  // new hint prefers (e.g. Generic -> Video wanting an overlay).
+  for (const auto& slot : slots_) {
+    if (slot.alive && slot.scene_layer != nullptr && slot.scene_layer->hints_dirty()) {
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access) allocator_ is set at create().
+      allocator_->invalidate_allocation();
+      break;
+    }
+  }
+
   auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
       allocator_->apply(output_, req, effective_flags, reserved_span, test_only);
   if (!assigned) {
