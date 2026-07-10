@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 
+#include <drm-cxx/csd/damage.hpp>
 #include <drm-cxx/csd/presenter_fb.hpp>
 #include <drm-cxx/detail/span.hpp>
 
@@ -15,8 +16,14 @@
 namespace {
 
 using drm::csd::compose_into_framebuffer;
+using drm::csd::DamageRect;
 using drm::csd::fb_fourcc_for;
 using drm::csd::FbBlitItem;
+
+// Whole-canvas damage helper for the full-frame compose tests.
+DamageRect whole(std::uint32_t w, std::uint32_t h) {
+  return DamageRect{0, 0, w, h};
+}
 
 // One opaque ARGB8888 pixel, memory order B,G,R,A.
 constexpr std::array<std::uint8_t, 4> px(std::uint8_t b, std::uint8_t g, std::uint8_t r,
@@ -64,9 +71,10 @@ TEST(ComposeIntoFramebuffer, BlitsOneOpaquePixelAtOffset) {
   const FbBlitItem item{
       drm::span<const std::uint8_t>(red.data(), red.size()), 4U, 1U, 1U, 1, 0, DRM_FORMAT_ARGB8888};
 
-  compose_into_framebuffer(
-      drm::span<std::uint8_t>(fb.data(), fb.size()), w * 4U, w, h, DRM_FORMAT_XRGB8888,
-      drm::span<std::uint8_t>(shadow.data(), shadow.size()), drm::span<const FbBlitItem>(&item, 1));
+  compose_into_framebuffer(drm::span<std::uint8_t>(fb.data(), fb.size()), w * 4U, w, h,
+                           DRM_FORMAT_XRGB8888,
+                           drm::span<std::uint8_t>(shadow.data(), shadow.size()),
+                           drm::span<const FbBlitItem>(&item, 1), whole(w, h));
 
   // Pixel (1,0) is red; (0,0) and (2,0) and row 1 are cleared to zero.
   const auto at = [&](std::uint32_t x, std::uint32_t y) {
@@ -89,9 +97,10 @@ TEST(ComposeIntoFramebuffer, ConvertsToXbgrDestination) {
   const auto red = px(0x00, 0x00, 0xFF);  // ARGB source: R=0xFF
   const FbBlitItem item{
       drm::span<const std::uint8_t>(red.data(), red.size()), 4U, 1U, 1U, 0, 0, DRM_FORMAT_ARGB8888};
-  compose_into_framebuffer(
-      drm::span<std::uint8_t>(fb.data(), fb.size()), 4U, w, h, DRM_FORMAT_XBGR8888,
-      drm::span<std::uint8_t>(shadow.data(), shadow.size()), drm::span<const FbBlitItem>(&item, 1));
+  compose_into_framebuffer(drm::span<std::uint8_t>(fb.data(), fb.size()), 4U, w, h,
+                           DRM_FORMAT_XBGR8888,
+                           drm::span<std::uint8_t>(shadow.data(), shadow.size()),
+                           drm::span<const FbBlitItem>(&item, 1), whole(w, h));
   // XBGR8888 memory order R,G,B,X: red ends up in byte 0.
   EXPECT_EQ(fb[0], 0xFF);
   EXPECT_EQ(fb[2], 0x00);
@@ -101,8 +110,40 @@ TEST(ComposeIntoFramebuffer, ConvertsToXbgrDestination) {
 TEST(ComposeIntoFramebuffer, UndersizedShadowIsNoop) {
   std::vector<std::uint8_t> fb(static_cast<std::size_t>(4U) * 4U, 0x11);
   std::vector<std::uint8_t> shadow(4U, 0U);  // too small for a 2x2 fb
-  compose_into_framebuffer(
-      drm::span<std::uint8_t>(fb.data(), fb.size()), 8U, 2U, 2U, DRM_FORMAT_XRGB8888,
-      drm::span<std::uint8_t>(shadow.data(), shadow.size()), drm::span<const FbBlitItem>{});
+  compose_into_framebuffer(drm::span<std::uint8_t>(fb.data(), fb.size()), 8U, 2U, 2U,
+                           DRM_FORMAT_XRGB8888,
+                           drm::span<std::uint8_t>(shadow.data(), shadow.size()),
+                           drm::span<const FbBlitItem>{}, whole(2U, 2U));
   EXPECT_EQ(fb[0], 0x11);  // untouched
+}
+
+// Damage restricted to one row converts only that row; other rows keep
+// their prior fb bytes (the incremental blit).
+TEST(ComposeIntoFramebuffer, ConvertsOnlyDamagedRows) {
+  constexpr std::uint32_t w = 2;
+  constexpr std::uint32_t h = 3;
+  std::vector<std::uint8_t> fb(static_cast<std::size_t>(w) * h * 4U, 0x77);  // prior content
+  std::vector<std::uint8_t> shadow(static_cast<std::size_t>(w) * h * 4U, 0U);
+
+  // Damage row 1 only (a full-width band). No items -> the band clears to 0.
+  const DamageRect band{0, 1, w, 1};
+  compose_into_framebuffer(
+      drm::span<std::uint8_t>(fb.data(), fb.size()), w * 4U, w, h, DRM_FORMAT_XRGB8888,
+      drm::span<std::uint8_t>(shadow.data(), shadow.size()), drm::span<const FbBlitItem>{}, band);
+
+  const auto row = [&](std::uint32_t y) { return &fb[static_cast<std::size_t>(y) * w * 4U]; };
+  EXPECT_EQ(row(0)[0], 0x77);  // untouched
+  EXPECT_EQ(row(1)[0], 0x00);  // damaged -> cleared + converted
+  EXPECT_EQ(row(2)[0], 0x77);  // untouched
+}
+
+// Empty damage is a no-op (nothing changed this frame).
+TEST(ComposeIntoFramebuffer, EmptyDamageIsNoop) {
+  std::vector<std::uint8_t> fb(static_cast<std::size_t>(2U) * 2U * 4U, 0x22);
+  std::vector<std::uint8_t> shadow(static_cast<std::size_t>(2U) * 2U * 4U, 0U);
+  compose_into_framebuffer(drm::span<std::uint8_t>(fb.data(), fb.size()), 8U, 2U, 2U,
+                           DRM_FORMAT_XRGB8888,
+                           drm::span<std::uint8_t>(shadow.data(), shadow.size()),
+                           drm::span<const FbBlitItem>{}, DamageRect{});
+  EXPECT_EQ(fb[0], 0x22);  // untouched
 }

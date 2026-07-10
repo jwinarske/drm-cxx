@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include "damage.hpp"  // DamageSlot, DamageRect
 #include "presenter.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
@@ -71,14 +72,19 @@ struct FbBlitItem {
   std::uint32_t fourcc{0};  // source DRM FourCC (ARGB8888 / XRGB8888)
 };
 
-/// Clear `shadow` (an ARGB8888 scratch buffer sized `fb_w * fb_h * 4`),
-/// SRC_OVER-blend each item into it bottom-to-top, then convert the shadow
-/// row-by-row into `fb` (`fb_stride` bytes/row, `fb_fourcc` layout). Pure:
-/// no fbdev / DRM handles, so unit tests drive it with stack buffers.
+/// Re-composite only `damage` (a canvas-space rect) into the persistent
+/// ARGB8888 `shadow` (sized `fb_w * fb_h * 4`) and convert only that rect's
+/// scanlines into `fb`: clear the damage region, SRC_OVER-blend each item
+/// clipped to it (bottom-to-top), then `convert_row` rows
+/// `[damage.y, damage.y + damage.h)` into the fb's layout. Everything
+/// outside `damage` keeps the shadow's (and fb's) prior pixels — the
+/// single-buffered incremental blit. Pass the whole canvas as `damage` for
+/// a full frame (the first one). Pure: no fbdev / DRM handles, so unit
+/// tests drive it with stack buffers.
 void compose_into_framebuffer(drm::span<std::uint8_t> fb, std::uint32_t fb_stride,
                               std::uint32_t fb_w, std::uint32_t fb_h, std::uint32_t fb_fourcc,
-                              drm::span<std::uint8_t> shadow,
-                              drm::span<const FbBlitItem> items) noexcept;
+                              drm::span<std::uint8_t> shadow, drm::span<const FbBlitItem> items,
+                              const DamageRect& damage) noexcept;
 
 class FramebufferPresenter : public Presenter {
  public:
@@ -125,6 +131,9 @@ class FramebufferPresenter : public Presenter {
   std::uint32_t stride_{0};  // bytes per row (fb_fix_screeninfo::line_length)
   std::uint32_t fourcc_{0};
   std::vector<std::uint8_t> shadow_;  // ARGB8888 scratch, width_*height_*4
+  // Per-decoration state from the previous apply(), diffed to blit only the
+  // changed scanlines to the single-buffered fb.
+  std::vector<DamageSlot> prev_slots_;
 };
 
 }  // namespace drm::csd
