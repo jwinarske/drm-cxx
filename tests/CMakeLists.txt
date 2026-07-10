@@ -82,6 +82,19 @@ foreach(_t ${DRM_CXX_TESTS})
   gtest_discover_tests(${_t})
 endforeach()
 
+# write_jpg round-trip test — links libjpeg directly to decode what the
+# encoder produced, so it's wired explicitly (the foreach targets only link
+# drm-cxx). Gated on both Blend2D (Image) and libjpeg, matching the source.
+if(DRM_CXX_HAS_BLEND2D AND DRM_CXX_HAS_LIBJPEG)
+  add_executable(test_capture_jpg unit/test_capture_jpg.cpp)
+  target_link_libraries(test_capture_jpg PRIVATE
+    drm-cxx::drm-cxx
+    PkgConfig::libjpeg
+    GTest::gtest
+    GTest::gtest_main)
+  gtest_discover_tests(test_capture_jpg)
+endif()
+
 # DumbRingSource integration test — plain CHECK harness (not gtest), lives under
 # integration/, needs a dumb-capable card (skips if none). Wired explicitly.
 add_executable(test_dumb_ring_source integration/test_dumb_ring_source.cpp)

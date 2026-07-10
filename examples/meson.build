@@ -370,6 +370,7 @@ endif
 if has_blend2d
   executable('capture_demo',
     'advanced/capture_demo/main.cpp',
+    cpp_args : has_libjpeg ? ['-DCAPTURE_DEMO_HAS_JPG=1'] : ['-DCAPTURE_DEMO_HAS_JPG=0'],
     dependencies : [drm_cxx_dep],
   )
 

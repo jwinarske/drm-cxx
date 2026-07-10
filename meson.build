@@ -169,6 +169,22 @@ if not has_blend2d and not blend2d_feature.disabled()
   message('drm-cxx: blend2d not found — drm::capture will not be built')
 endif
 
+# libjpeg (libjpeg-turbo) backs drm::capture's JPEG encoder — Blend2D can
+# decode JPEG but not encode it. libjpeg-turbo ships a standard libjpeg.pc, so
+# pkg-config finds it everywhere. Sub-gate of blend2d: the encoder consumes
+# the Blend2D-only capture::Image, so it is only probed when blend2d is on.
+capture_jpg_feature = get_option('capture-jpg')
+has_libjpeg = false
+libjpeg_dep = disabler()
+if has_blend2d and not capture_jpg_feature.disabled()
+  libjpeg_dep = dependency('libjpeg', required : capture_jpg_feature.enabled(),
+                           include_type : 'system')
+  has_libjpeg = libjpeg_dep.found()
+endif
+if not has_libjpeg and has_blend2d and not capture_jpg_feature.disabled()
+  message('drm-cxx: libjpeg not found — drm::capture JPEG encoder will not be built')
+endif
+
 # toml++ backs drm::csd theme loading. Header-only, C++17, and only
 # pulled when the Blend2D gate resolves on. Prefer a system install
 # (Fedora ships tomlplusplus-devel, Arch ships tomlplusplus); fall back

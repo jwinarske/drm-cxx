@@ -44,6 +44,14 @@ set(DRM_CXX_BLEND2D "AUTO" CACHE STRING
     "Build drm::capture (and later drm::csd) on top of Blend2D: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_BLEND2D PROPERTY STRINGS AUTO ON OFF)
 
+# Optional JPEG encoder for drm::capture. Blend2D decodes JPEG but ships no
+# encoder, so the JPEG write path links libjpeg (satisfied by libjpeg-turbo)
+# instead. Only meaningful when Blend2D is on — the capture module and its
+# Image type ride on Blend2D — so this is a sub-gate of DRM_CXX_BLEND2D.
+set(DRM_CXX_CAPTURE_JPG "AUTO" CACHE STRING
+    "Build drm::capture's JPEG encoder on libjpeg (libjpeg-turbo): AUTO, ON, or OFF")
+set_property(CACHE DRM_CXX_CAPTURE_JPG PROPERTY STRINGS AUTO ON OFF)
+
 # Optional drm::scene::GstAppsinkSource. Needs four GStreamer packages:
 # gstreamer-1.0, gstreamer-app-1.0 (appsink pull), gstreamer-allocators-1.0
 # (DMABUF zero-copy path), and gstreamer-video-1.0 (per-plane offsets/strides).
@@ -322,6 +330,25 @@ else()
   set(DRM_CXX_HAS_BLEND2D 0)
   if(NOT DRM_CXX_BLEND2D STREQUAL "OFF")
     message(STATUS "drm-cxx: blend2d not found — drm::capture will not be built")
+  endif()
+endif()
+
+# libjpeg (libjpeg-turbo) backs drm::capture's JPEG encoder. libjpeg-turbo
+# ships a standard `libjpeg.pc`, so pkg-config finds it on every distro. Gated
+# under Blend2D since the encoder consumes the Blend2D-only capture::Image.
+if(DRM_CXX_HAS_BLEND2D AND NOT DRM_CXX_CAPTURE_JPG STREQUAL "OFF")
+  if(DRM_CXX_CAPTURE_JPG STREQUAL "ON")
+    pkg_check_modules(libjpeg REQUIRED IMPORTED_TARGET libjpeg)
+  else()
+    pkg_check_modules(libjpeg IMPORTED_TARGET libjpeg)
+  endif()
+endif()
+if(TARGET PkgConfig::libjpeg)
+  set(DRM_CXX_HAS_LIBJPEG 1)
+else()
+  set(DRM_CXX_HAS_LIBJPEG 0)
+  if(DRM_CXX_HAS_BLEND2D AND NOT DRM_CXX_CAPTURE_JPG STREQUAL "OFF")
+    message(STATUS "drm-cxx: libjpeg not found — drm::capture JPEG encoder will not be built")
   endif()
 endif()
 

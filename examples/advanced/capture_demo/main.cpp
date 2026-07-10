@@ -6,12 +6,15 @@
 // enable atomic, bind libinput for keys, run an event loop, and on
 // a keypress snapshot the current CRTC composition to a PNG.
 //
-// Usage: capture_demo [--out DIR] [--crtc ID] [/dev/dri/cardN]
+// Usage: capture_demo [--out DIR] [--crtc ID] [--jpg] [/dev/dri/cardN]
 //
-//   --out DIR     Directory for captured PNGs (default: current dir).
+//   --out DIR     Directory for captured images (default: current dir).
 //   --crtc ID     Capture a specific CRTC instead of auto-picking the
 //                 first connected one. Useful on multi-head boxes when
 //                 the interesting content isn't on CRTC 0.
+//   --jpg         Encode captures as JPEG instead of PNG (only when the
+//                 library was built with the capture-jpg option / libjpeg;
+//                 otherwise a warning is printed and PNG is used).
 //   /dev/dri/cardN  DRM device; select_device prompts if omitted.
 //
 // Key bindings in the event loop:
@@ -44,6 +47,9 @@
 #include "../../common/select_device.hpp"
 #include "../../common/vt_switch.hpp"
 #include "capture/png.hpp"
+#if CAPTURE_DEMO_HAS_JPG
+#include "capture/jpg.hpp"
+#endif
 #include "capture/snapshot.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -138,16 +144,17 @@ std::uint32_t count_bound_planes(int fd, std::uint32_t crtc_id) {
   return bound;
 }
 
-// "capture_YYYYMMDD_HHMMSS_NNN.png" where NNN is a monotonically
+// "capture_YYYYMMDD_HHMMSS_NNN.<ext>" where NNN is a monotonically
 // incrementing tie-breaker so back-to-back captures don't clobber.
-std::string make_capture_path(const std::filesystem::path& out_dir, std::uint32_t counter) {
+std::string make_capture_path(const std::filesystem::path& out_dir, std::uint32_t counter,
+                              const char* ext) {
   const auto now = std::chrono::system_clock::now();
   const auto t = std::chrono::system_clock::to_time_t(now);
   std::tm tm{};
   localtime_r(&t, &tm);
   std::array<char, 32> stamp{};
   std::strftime(stamp.data(), stamp.size(), "%Y%m%d_%H%M%S", &tm);
-  const auto filename = drm::format("capture_{}_{:03d}.png", stamp.data(), counter);
+  const auto filename = drm::format("capture_{}_{:03d}.{}", stamp.data(), counter, ext);
   return (out_dir / filename).string();
 }
 
@@ -167,12 +174,14 @@ bool parse_uint(const char* s, int max_val, int& out) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape) — a throw here just aborts the demo
 int main(int argc, char* argv[]) {
   // ---------------------------------------------------------------------------
   // CLI parse. --out and --crtc strip from argv before handing to select_device.
   // ---------------------------------------------------------------------------
   const char* cli_out = nullptr;
   int cli_crtc = 0;
+  bool cli_jpg = false;
 
   auto strip = [&](int i, int n) {
     for (int j = i; j + n < argc; ++j) {
@@ -182,6 +191,11 @@ int main(int argc, char* argv[]) {
   };
 
   for (int i = 1; i < argc;) {
+    if (std::strcmp(argv[i], "--jpg") == 0) {
+      cli_jpg = true;
+      strip(i, 1);
+      continue;
+    }
     const bool is_out = std::strcmp(argv[i], "--out") == 0;
     const bool is_crtc = std::strcmp(argv[i], "--crtc") == 0;
     if (is_out || is_crtc) {
@@ -200,6 +214,15 @@ int main(int argc, char* argv[]) {
     }
     ++i;
   }
+
+#if !CAPTURE_DEMO_HAS_JPG
+  // No JPG path in this build: warn once, then fall through to the PNG writer
+  // below (do_capture ignores cli_jpg entirely when built without libjpeg).
+  if (cli_jpg) {
+    drm::println(stderr,
+                 "--jpg: built without libjpeg (capture-jpg option off) — writing PNG instead");
+  }
+#endif
 
   const std::filesystem::path out_dir =
       (cli_out != nullptr) ? std::filesystem::path(cli_out) : std::filesystem::current_path();
@@ -291,7 +314,18 @@ int main(int argc, char* argv[]) {
       drm::println(stderr, "snapshot failed: {}", img.error().message());
       return;
     }
-    const auto out = make_capture_path(out_dir, counter++);
+#if CAPTURE_DEMO_HAS_JPG
+    if (cli_jpg) {
+      const auto out = make_capture_path(out_dir, counter++, "jpg");
+      if (auto w = drm::capture::write_jpg(*img, out); !w) {
+        drm::println(stderr, "write_jpg({}) failed: {}", out, w.error().message());
+        return;
+      }
+      drm::println("wrote {} ({}x{})", out, img->width(), img->height());
+      return;
+    }
+#endif
+    const auto out = make_capture_path(out_dir, counter++, "png");
     if (auto w = drm::capture::write_png(*img, out); !w) {
       drm::println(stderr, "write_png({}) failed: {}", out, w.error().message());
       return;
