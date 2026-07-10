@@ -99,7 +99,7 @@ drm::expected<ProbedPresenter, std::error_code> probe_presenter(
   }
 
   auto p = CompositePresenter::create(dev, registry, cfg.crtc_id, canvas_plane, cfg.canvas_width,
-                                      cfg.canvas_height);
+                                      cfg.canvas_height, cfg.background_argb);
   if (!p) {
     return drm::unexpected<std::error_code>(p.error());
   }

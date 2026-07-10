@@ -32,6 +32,7 @@
 #include "presenter.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -57,6 +58,10 @@ struct ProbeConfig {
   std::uint32_t canvas_width{0};       ///< Composite canvas size (CRTC mode).
   std::uint32_t canvas_height{0};
   std::uint64_t plane_base_zpos{0};  ///< First decoration plane's zpos.
+  /// Optional desktop backdrop for the Composite pick — forwarded to
+  /// `CompositePresenter::create` (ARGB8888, `canvas_width*canvas_height*4`;
+  /// empty leaves it black). Ignored for the Plane pick.
+  drm::span<const std::uint8_t> background_argb;
 };
 
 /// The chosen presenter plus the state the caller must keep alive.

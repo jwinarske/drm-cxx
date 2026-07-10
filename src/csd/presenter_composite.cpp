@@ -17,8 +17,10 @@
 #include <drm-cxx/modeset/atomic.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
 
+#include <drm_fourcc.h>
 #include <drm_mode.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -89,7 +91,8 @@ std::vector<PropertyWrite> compute_canvas_writes(const PlaneSlot& slot, std::uin
 
 drm::expected<std::unique_ptr<CompositePresenter>, std::error_code> CompositePresenter::create(
     drm::Device& dev, const drm::planes::PlaneRegistry& registry, std::uint32_t crtc_id,
-    std::uint32_t canvas_plane_id, std::uint32_t canvas_w, std::uint32_t canvas_h) {
+    std::uint32_t canvas_plane_id, std::uint32_t canvas_w, std::uint32_t canvas_h,
+    drm::span<const std::uint8_t> background_argb) {
   if (crtc_id == 0U || canvas_w == 0U || canvas_h == 0U) {
     return err(std::errc::invalid_argument);
   }
@@ -121,6 +124,13 @@ drm::expected<std::unique_ptr<CompositePresenter>, std::error_code> CompositePre
   self->canvas_w_ = canvas_w;
   self->canvas_h_ = canvas_h;
   self->canvas_ = std::move(*canvas);
+
+  // Copy the desktop backdrop only when it's exactly the canvas size;
+  // a mismatched or empty span leaves the desktop transparent-black.
+  const std::size_t bg_bytes = static_cast<std::size_t>(canvas_w) * canvas_h * 4U;
+  if (background_argb.size() == bg_bytes) {
+    self->background_.assign(background_argb.begin(), background_argb.end());
+  }
 
   drm::PropertyStore props;
   if (auto r = props.cache_properties(dev.fd(), canvas_plane_id, DRM_MODE_OBJECT_PLANE); !r) {
@@ -160,6 +170,23 @@ drm::expected<void, std::error_code> CompositePresenter::apply(drm::span<const S
   // touched bands, so an idle desktop pays only for what moved.
   canvas_->begin_frame();
   canvas_->clear();
+
+  // Desktop backdrop, if any, as the bottom layer. Full-screen, so the
+  // canvas's damage tracking widens to the whole frame this pass — fine
+  // for the composite tier, whose apply() runs on content change, not
+  // every vblank.
+  if (!background_.empty()) {
+    drm::scene::CompositeSrc bg;
+    bg.pixels = drm::span<const std::uint8_t>(background_.data(), background_.size());
+    bg.src_stride_bytes = canvas_w_ * 4U;
+    bg.src_width = canvas_w_;
+    bg.src_height = canvas_h_;
+    // XRGB (not ARGB): the backdrop is opaque, and tagging it opaque takes
+    // blend_into's straight-copy fast path instead of a per-pixel SRC_OVER.
+    bg.drm_fourcc = DRM_FORMAT_XRGB8888;
+    const drm::scene::CompositeRect full{0, 0, canvas_w_, canvas_h_};
+    canvas_->blend(bg, full, full);
+  }
 
   for (const auto& ref : surfaces) {
     const auto* surface = ref.surface;

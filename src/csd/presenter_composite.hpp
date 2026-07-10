@@ -81,9 +81,19 @@ class CompositePresenter : public Presenter {
   ///   * `errc::no_such_device` — property caching failed (stale fd).
   ///   * whatever `CompositeCanvas::create` returns on buffer-allocation
   ///     failure.
+  ///
+  /// `background_argb` is an optional full-screen desktop backdrop drawn
+  /// under the decorations (a gradient, wallpaper, or solid fill the
+  /// caller paints). When its length is exactly `canvas_w * canvas_h * 4`
+  /// the presenter copies + owns it and blends it as the bottom layer each
+  /// frame; any other length (including empty) leaves the desktop black.
+  /// The backdrop is treated as **opaque** (byte layout B,G,R,X — the
+  /// alpha byte is ignored, which also takes the blender's fast copy
+  /// path); the canvas plane is opaque, so that's what a desktop wants.
   [[nodiscard]] static drm::expected<std::unique_ptr<CompositePresenter>, std::error_code> create(
       drm::Device& dev, const drm::planes::PlaneRegistry& registry, std::uint32_t crtc_id,
-      std::uint32_t canvas_plane_id, std::uint32_t canvas_w, std::uint32_t canvas_h);
+      std::uint32_t canvas_plane_id, std::uint32_t canvas_w, std::uint32_t canvas_h,
+      drm::span<const std::uint8_t> background_argb = {});
 
   CompositePresenter(const CompositePresenter&) = delete;
   CompositePresenter& operator=(const CompositePresenter&) = delete;
@@ -121,6 +131,9 @@ class CompositePresenter : public Presenter {
   std::uint32_t canvas_w_{0};
   std::uint32_t canvas_h_{0};
   std::unique_ptr<drm::scene::CompositeCanvas> canvas_;
+  // Owned ARGB8888 desktop backdrop (canvas_w_*canvas_h_*4), or empty for
+  // a transparent-black desktop. Blended under the decorations each frame.
+  std::vector<std::uint8_t> background_;
 };
 
 }  // namespace drm::csd

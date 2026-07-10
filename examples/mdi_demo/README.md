@@ -83,10 +83,12 @@ copies only the touched scanline bands to scanout, so an idle desktop
 costs almost nothing. Decoration count is bounded by `--docs`, not by the
 plane budget.
 
-The desktop background is solid black in v1 (a gradient / wallpaper under
-the composited decorations is a follow-up — it needs the canvas to carry
-a persistent background source). Everything else — drag, focus stacking,
-theme swap, snapshot — behaves identically to Plane mode.
+The desktop background is a blue→teal gradient — `mdi_demo` paints it
+once and hands it to `CompositePresenter::create(..., background_argb)`,
+which copies it and blends it (opaque, straight-copy fast path) under the
+decorations each frame. Pass an empty span for a plain black desktop.
+Everything else — drag, focus stacking, theme swap, snapshot — behaves
+identically to Plane mode.
 
 ## Framebuffer mode (`--presenter=fb`)
 
