@@ -99,7 +99,8 @@ if(DRM_CXX_HAS_BLEND2D)
     csd/animator.cpp
     csd/overlay_reservation.cpp
     csd/presenter_plane.cpp
-    csd/presenter_composite.cpp)
+    csd/presenter_composite.cpp
+    csd/presenter_fb.cpp)
 endif()
 
 include(GNUInstallDirs)
@@ -379,6 +380,7 @@ if(DRM_CXX_HAS_BLEND2D)
       csd/presenter.hpp
       csd/presenter_plane.hpp
       csd/presenter_composite.hpp
+      csd/presenter_fb.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/csd)
 endif()
 

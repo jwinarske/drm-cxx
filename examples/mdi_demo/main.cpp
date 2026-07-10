@@ -33,9 +33,11 @@
 #include "../common/cursor_size.hpp"
 #include "../common/open_output.hpp"
 #include "../common/vt_switch.hpp"
+#include "core/device.hpp"
 #include "csd/overlay_reservation.hpp"
 #include "csd/presenter.hpp"
 #include "csd/presenter_composite.hpp"
+#include "csd/presenter_fb.hpp"
 #include "csd/presenter_plane.hpp"
 #include "csd/theme.hpp"
 #include "cursor/cursor.hpp"
@@ -72,6 +74,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <memory>
 #include <optional>
@@ -79,6 +82,7 @@
 #include <string_view>
 #include <sys/poll.h>
 #include <system_error>
+#include <unistd.h>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -274,6 +278,191 @@ Args parse_args(int& argc, char* argv[]) {
   return a;
 }
 
+// First /dev/dri/* path on the command line, else the default card. The
+// fb path opens this only to allocate decoration surfaces (dumb/GBM); it
+// never modesets, so any card with the DUMB cap works.
+const char* find_card_path(int argc, char* argv[]) {
+  for (int i = 1; i < argc; ++i) {
+    if (std::string_view(argv[i]).rfind("/dev/dri/", 0) == 0) {
+      return argv[i];
+    }
+  }
+  return "/dev/dri/card0";
+}
+
+// --presenter=fb: composite the decorations straight into /dev/fb0. This
+// path deliberately does NOT take DRM master (Device::open grabs it, so we
+// drop it immediately) — a master would suspend the kernel fbcon and the
+// mmap writes would land on an inactive framebuffer. The DRM device is used
+// only to allocate the decoration Surfaces; scanout is the fbdev blit.
+// Kept separate from the KMS main() so the plane/composite paths (which do
+// modeset + atomic commit + a cursor plane) stay untouched.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+int run_fb(const Args& args, int argc, char* argv[]) {
+  auto pres_res = drm::csd::FramebufferPresenter::create("/dev/fb0");
+  if (!pres_res) {
+    drm::println(stderr, "mdi_demo: FramebufferPresenter::create(/dev/fb0): {}",
+                 pres_res.error().message());
+    return EXIT_FAILURE;
+  }
+  const auto presenter = std::move(*pres_res);
+  const std::uint32_t fb_w = presenter->width();
+  const std::uint32_t fb_h = presenter->height();
+  drm::println("mdi_demo: FramebufferPresenter on /dev/fb0 {}x{} (fourcc 0x{:08x})", fb_w, fb_h,
+               presenter->fourcc());
+
+  drm::csd::Theme theme_from_file{};
+  const drm::csd::Theme* theme = resolve_theme(args.theme_name, theme_from_file);
+  if (theme == nullptr) {
+    return EXIT_FAILURE;
+  }
+  drm::println("mdi_demo: theme = {}", theme->name);
+
+  // Open the card WITHOUT becoming DRM master — Device::open() would call
+  // drmSetMaster, which suspends the kernel fbcon and freezes /dev/fb0.
+  // A plain open wrapped by from_fd stays a non-master client; CREATE_DUMB
+  // and AddFB2 (what Surface allocation needs) don't require master, so the
+  // decorations still allocate while fbcon keeps scanning out our blit.
+  const char* card = find_card_path(argc, argv);
+  const int card_fd =
+      ::open(card, O_RDWR | O_CLOEXEC);  // NOLINT(cppcoreguidelines-pro-type-vararg)
+  if (card_fd < 0) {
+    drm::println(stderr, "mdi_demo: open({}): {}", card, std::system_category().message(errno));
+    return EXIT_FAILURE;
+  }
+  auto dev = drm::Device::from_fd(card_fd);  // non-owning; closed below
+  drm::println("mdi_demo: decoration surfaces from {} (non-master)", card);
+
+  std::optional<drm::gbm::GbmDevice> gbm;
+  if (auto g = drm::gbm::GbmDevice::create(dev.fd()); g) {
+    gbm.emplace(std::move(*g));
+  }
+
+  const std::size_t deco_budget = args.initial_docs == 0 ? 1U : args.initial_docs;
+  mdi_demo::Shell shell(dev, gbm ? &*gbm : nullptr, *theme, deco_budget);
+  for (std::size_t i = 0; i < deco_budget; ++i) {
+    if (!shell.spawn_document(fb_w, fb_h)) {
+      break;
+    }
+  }
+  drm::println("mdi_demo: spawned {} document{}", shell.document_count(),
+               shell.document_count() == 1 ? "" : "s");
+
+  auto input_res = drm::input::Seat::open({});
+  if (!input_res) {
+    drm::println(stderr, "mdi_demo: input::Seat::open: {} (need root or input group)",
+                 input_res.error().message());
+    return EXIT_FAILURE;
+  }
+  auto& input_seat = *input_res;
+
+  double pointer_x = static_cast<double>(fb_w) / 2.0;
+  double pointer_y = static_cast<double>(fb_h) / 2.0;
+  bool ctrl_left = false;
+  bool ctrl_right = false;
+  const auto ctrl_held = [&]() { return ctrl_left || ctrl_right; };
+  bool frame_dirty = true;
+
+  input_seat.set_event_handler([&](const drm::input::InputEvent& event) {
+    if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event)) {
+      if (ke->key == KEY_LEFTCTRL) {
+        ctrl_left = ke->pressed;
+      } else if (ke->key == KEY_RIGHTCTRL) {
+        ctrl_right = ke->pressed;
+      }
+      if (!ke->pressed) {
+        return;
+      }
+      if (ke->key == KEY_ESC || ke->key == KEY_Q) {
+        shell.request_quit();
+      } else if (ctrl_held() && ke->key == KEY_TAB) {
+        shell.cycle_focus();
+        frame_dirty = true;
+      } else if (ctrl_held() && ke->key == KEY_N) {
+        if (shell.spawn_document(fb_w, fb_h)) {
+          frame_dirty = true;
+        }
+      } else if (ctrl_held() && ke->key == KEY_W) {
+        shell.close_focused();
+        frame_dirty = true;
+      }
+      return;
+    }
+    if (const auto* pe = std::get_if<drm::input::PointerEvent>(&event)) {
+      if (const auto* m = std::get_if<drm::input::PointerMotionEvent>(pe)) {
+        pointer_x = std::clamp(pointer_x + m->dx, 0.0, static_cast<double>(fb_w - 1U));
+        pointer_y = std::clamp(pointer_y + m->dy, 0.0, static_cast<double>(fb_h - 1U));
+        if (shell.on_pointer_motion(static_cast<std::int32_t>(pointer_x),
+                                    static_cast<std::int32_t>(pointer_y))) {
+          frame_dirty = true;
+        }
+      } else if (const auto* b = std::get_if<drm::input::PointerButtonEvent>(pe)) {
+        if (b->button != BTN_LEFT) {
+          return;
+        }
+        if (b->pressed) {
+          if (shell.on_pointer_press(static_cast<std::int32_t>(pointer_x),
+                                     static_cast<std::int32_t>(pointer_y))) {
+            frame_dirty = true;
+          }
+        } else {
+          shell.on_pointer_release();
+        }
+      }
+    }
+  });
+
+  std::signal(SIGINT, signal_handler);
+  std::signal(SIGTERM, signal_handler);
+  drm::println("mdi_demo: ready (fb). Drag title bars; Ctrl+N new; Ctrl+W close; Esc quits.");
+
+  // The fb presenter ignores the AtomicRequest (fbdev has no atomic commit),
+  // but the Presenter interface takes one; build it once and reuse it.
+  drm::AtomicRequest req(dev);
+  pollfd pfd{};
+  pfd.fd = input_seat.fd();
+  pfd.events = POLLIN;
+  auto last_tick = std::chrono::steady_clock::now();
+  while (g_quit == 0 && !shell.quit_requested()) {
+    if (const int ret = poll(&pfd, 1, 16); ret < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      drm::println(stderr, "mdi_demo: poll: {}", std::system_category().message(errno));
+      break;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick);
+    last_tick = now;
+    if (shell.tick_animations(dt)) {
+      frame_dirty = true;
+    }
+    if ((pfd.revents & POLLIN) != 0) {
+      if (auto r = input_seat.dispatch(); !r) {
+        drm::println(stderr, "mdi_demo: input dispatch: {}", r.error().message());
+        break;
+      }
+    }
+    if (!frame_dirty) {
+      continue;
+    }
+    frame_dirty = false;
+    if (auto r = shell.redraw_dirty(); !r) {
+      drm::println(stderr, "mdi_demo: redraw_dirty: {}", r.error().message());
+      break;
+    }
+    const auto refs = shell.surface_refs();
+    if (auto r =
+            presenter->apply(drm::span<const drm::csd::SurfaceRef>(refs.data(), refs.size()), req);
+        !r) {
+      drm::println(stderr, "mdi_demo: fb apply: {}", r.error().message());
+      break;
+    }
+  }
+  ::close(card_fd);  // Device::from_fd is non-owning
+  return EXIT_SUCCESS;
+}
+
 }  // namespace
 
 // NOLINTNEXTLINE(bugprone-exception-escape)
@@ -281,10 +470,7 @@ int main(int argc, char* argv[]) {
   const Args args = parse_args(argc, argv);
 
   if (args.presenter == PresenterMode::Fb) {
-    drm::println(stderr,
-                 "mdi_demo: --presenter=fb is not implemented; the /dev/fb0 framebuffer "
-                 "presenter has not landed. Use --presenter=plane or --presenter=composite.");
-    return EXIT_FAILURE;
+    return run_fb(args, argc, argv);
   }
 
   // ── Theme resolution ─────────────────────────────────────────────

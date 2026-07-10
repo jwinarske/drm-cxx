@@ -35,7 +35,7 @@ mdi_demo [--docs N] [--theme {default|lite|minimal|PATH}]
 | `--docs N` | Initial document count. Default `2`. Capped at the CRTC's available overlay budget — fewer planes mean fewer initial docs, not a hard error. |
 | `--theme NAME` | One of `default` (desktop), `lite`, `minimal`, or a path to a TOML theme file. Path themes layer onto `glass_default` so missing keys inherit. |
 | `--dump PATH.png` | Output path for `Ctrl+S` snapshots. When omitted, `Ctrl+S` is a no-op. |
-| `--presenter MODE` | `plane` (default) gives each decoration its own overlay; `composite` software-blends every decoration onto the primary plane — the path for plane-starved hardware. `fb` is not implemented and exits. |
+| `--presenter MODE` | `plane` (default) gives each decoration its own overlay; `composite` software-blends every decoration onto the primary plane; `fb` blits into `/dev/fb0` (legacy framebuffer / no-KMS targets — see below). |
 | `/dev/dri/cardN` | DRM device. `select_device` prompts when omitted. |
 
 ## Controls
@@ -76,11 +76,32 @@ the composited decorations is a follow-up — it needs the canvas to carry
 a persistent background source). Everything else — drag, focus stacking,
 theme swap, snapshot — behaves identically to Plane mode.
 
-## What's not in v1
+## Framebuffer mode (`--presenter=fb`)
 
-- **The `/dev/fb0` (`FramebufferPresenter`) mode.** The `fb` mode is
-  wired into the `--presenter` flag but the blit path hasn't landed; it
-  logs an error and exits. `plane` and `composite` both run.
+`FramebufferPresenter` has no KMS at all: it opens `/dev/fb0`, mmaps it,
+and blits the composited decorations straight into that memory (reusing
+`scene::CompositeCanvas`'s blend + row-conversion helpers). It's the
+fallback for legacy framebuffers and no-plane targets — simplefb, a
+bootloader/VESA fb, or the DRM-emulated fbcon when no KMS plane is free.
+
+This mode takes a different bring-up (`run_fb` in `main.cpp`): it opens
+the DRM card with a plain `open()` wrapped by `Device::from_fd` — a
+**non-master** client — purely to allocate the decoration `Surface`s.
+`CREATE_DUMB` and `AddFB2` don't need DRM master, and staying non-master
+is what keeps the kernel fbcon live; `Device::open()` would call
+`drmSetMaster` and suspend fbcon, so the mmap writes would land on an
+inactive framebuffer. No modeset, no cursor plane, no atomic commit — the
+blit into `/dev/fb0` *is* the present. Run it from a console VT with
+nothing else holding DRM master. v1 is a single-buffered full-frame blit;
+`FBIOPAN_DISPLAY` double-buffering and blit-side damage are follow-ups.
+
+Validated on a Raspberry Pi 5: `/dev/fb0` is a 1280×1440 RGB565
+DRM-emulated fbcon; `--presenter=fb` opens it, allocates three glass
+decorations non-master from `card0`, and blits them in — the live
+framebuffer's contents change (fbcon stays active) rather than freezing
+under a DRM master.
+
+## What's not in v1
 - **Per-doc content surfaces.** v1 documents are decoration-only — the
   glass panel + title text is the entire window. A separate content
   buffer is a follow-up, once the composite damage tracker tells us what

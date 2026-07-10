@@ -15,7 +15,7 @@
 //                       RK3399 VOP, Mali Komeda). Lives in
 //                       `presenter_composite.cpp`.
 //   * Tier::Fb        — `/dev/fb0` blit. Legacy / no-KMS targets.
-//                       Lives in a later follow-up.
+//                       Lives in `presenter_fb.cpp`.
 //
 // The decoration renderer and shadow cache are tier-agnostic; only the
 // presenter — the component that takes rendered Surfaces and gets them
