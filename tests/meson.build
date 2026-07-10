@@ -335,6 +335,16 @@ if has_blend2d
     ),
   )
 
+  # write_jpg round-trip — links libjpeg directly to decode the output.
+  if has_libjpeg
+    test('test_capture_jpg',
+      executable('test_capture_jpg',
+        'unit/test_capture_jpg.cpp',
+        dependencies : test_deps + [libjpeg_dep],
+      ),
+    )
+  endif
+
   test('test_csd_theme',
     executable('test_csd_theme',
       'unit/test_csd_theme.cpp',

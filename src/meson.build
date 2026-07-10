@@ -199,9 +199,8 @@ endif
 # drm::capture — Blend2D-backed plane composition snapshot + PNG encode.
 # Build-gated on blend2d availability; public headers only install when
 # the gate is on (matches drm::cursor).
-capture_cpp_args = has_blend2d \
-  ? ['-DDRM_CXX_HAS_BLEND2D=1'] \
-  : ['-DDRM_CXX_HAS_BLEND2D=0']
+capture_cpp_args = (has_blend2d ? ['-DDRM_CXX_HAS_BLEND2D=1'] : ['-DDRM_CXX_HAS_BLEND2D=0']) \
+  + (has_libjpeg ? ['-DDRM_CXX_HAS_LIBJPEG=1'] : ['-DDRM_CXX_HAS_LIBJPEG=0'])
 if has_blend2d
   drm_cxx_sources += files(
     'capture/snapshot.cpp',
@@ -220,6 +219,10 @@ if has_blend2d
   )
   drm_cxx_deps += blend2d_dep
   drm_cxx_deps += tomlplusplus_dep
+  if has_libjpeg
+    drm_cxx_sources += files('capture/jpg.cpp')
+    drm_cxx_deps += libjpeg_dep
+  endif
 endif
 
 gbm_cpp_args = has_gbm_bo_create_with_modifiers2 \
@@ -344,6 +347,9 @@ if has_blend2d
     'capture/png.hpp',
     subdir : 'drm-cxx/capture',
   )
+  if has_libjpeg
+    install_headers('capture/jpg.hpp', subdir : 'drm-cxx/capture')
+  endif
   install_headers(
     'csd/theme.hpp',
     'csd/surface.hpp',

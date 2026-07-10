@@ -6,6 +6,7 @@ option('thorvg_janitor', type : 'feature', value : 'auto', description : 'Build 
 option('session', type : 'feature', value : 'auto', description : 'Build drm::session::Seat on top of libseat (auto-mux of logind/seatd/builtin)')
 option('cursor',  type : 'feature', value : 'auto', description : 'Build drm::cursor (XCursor theme resolver + KMS cursor renderer, needs libxcursor)')
 option('blend2d', type : 'feature', value : 'auto', description : 'Build drm::capture and drm::csd on top of Blend2D (CMake-config dep, no pkg-config upstream)')
+option('capture-jpg', type : 'feature', value : 'auto', description : 'Build the drm::capture JPEG encoder on libjpeg (libjpeg-turbo). Sub-gate of blend2d; Blend2D decodes JPEG but cannot encode it')
 option('camera',  type : 'feature', value : 'auto', description : 'Build the camera example (needs libcamera>=0.3.0 and libyuv)')
 option('keyboard', type : 'feature', value : 'disabled', description : 'Build the keyboard demo (downloads Noto Sans at configure time; disable for sandboxed/offline builds)')
 option('gstreamer', type : 'feature', value : 'auto', description : 'Build drm::scene::GstAppsinkSource on top of GStreamer (needs gstreamer-1.0, gstreamer-app-1.0, gstreamer-allocators-1.0, gstreamer-video-1.0)')

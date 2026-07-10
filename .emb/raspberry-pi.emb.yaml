@@ -35,15 +35,26 @@ cross:
   targets:
     rpi4-trixie:
       extends: rpi4-trixie
+      # Feature toggles that gate the augments below. Opt-out: each is ON by
+      # default (a plain build augments everything, as before), so a lean build
+      # drops a heavy source dep with e.g. --define DRM_CXX_BUILD_CAMERA=OFF.
+      # They map to real drm-cxx CMake options, so the same value also
+      # configures the embedder build (no unused-variable warnings).
+      defines: &feature_defines
+        DRM_CXX_BLEND2D: 'ON'       # blend2d augment -> drm::capture / drm::csd
+        DRM_CXX_BUILD_CAMERA: 'ON'  # libcamera augment -> camera example
+        DRM_CXX_EGL: 'ON'           # shadertoy-cxx augment -> shadertoy_egl
       sysroot:
         dev_packages:
           - libdisplay-info-dev   # trixie ships >= 0.2.0
           - libgtest-dev          # GoogleTest for the on-target gtest binaries
+          - libjpeg62-turbo-dev   # drm::capture JPEG encoder (libjpeg-turbo)
       augment: &augment_libs
         # blend2d (Zlib license) backs drm::capture's PNG screenshots. Build it
         # static + no-JIT (skips the asmjit dependency) and PIC so it links into
         # the shared libdrm-cxx -- no extra shared object to deploy.
         - pkg: blend2d
+          requires_define: DRM_CXX_BLEND2D   # gate: drm::capture / drm::csd
           min: "0"
           url: https://github.com/blend2d/blend2d/archive/refs/heads/master.tar.gz
           build: cmake
@@ -56,6 +67,7 @@ cross:
         # find_package; cross-build + install it into the sysroot here so a plain
         # `emb cross --build` picks up shadertoy_egl instead of skipping it.
         - pkg: shadertoy-cxx
+          requires_define: DRM_CXX_EGL       # gate: shadertoy_egl (needs EGL)
           min: "0.3.0"
           url: https://github.com/jwinarske/shadertoy-cxx/archive/refs/heads/main.tar.gz
           build: cmake
@@ -67,6 +79,7 @@ cross:
         # needed to link against -- the pipeline handlers + IPAs come from the
         # Pi's own libcamera install at run time -- so everything optional is off.
         - pkg: libcamera
+          requires_define: DRM_CXX_BUILD_CAMERA  # gate: camera example
           # >= 0.7 so a base image that ships Debian's generic libcamera 0.4
           # doesn't satisfy the check -- we need the rpt 0.7 built below.
           min: "0.7"
@@ -101,11 +114,13 @@ cross:
 
     rpi5-trixie:
       extends: rpi5-trixie
+      defines: *feature_defines
       sysroot:
         dev_packages:
           - libdisplay-info-dev
           - libgtest-dev          # GoogleTest for the on-target gtest binaries
           - libyuv-dev            # camera example: YUY2/MJPEG->NV12 libyuv fallback
+          - libjpeg62-turbo-dev   # drm::capture JPEG encoder (libjpeg-turbo)
       # libcamera (0.7, matching the Pi 5's runtime) is built from source in the
       # shared augment above, not taken from Debian apt (which only has 0.4).
       augment: *augment_libs

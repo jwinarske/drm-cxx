@@ -103,6 +103,9 @@ if(DRM_CXX_HAS_BLEND2D)
     csd/presenter_composite.cpp
     csd/presenter_fb.cpp
     csd/probe_presenter.cpp)
+  if(DRM_CXX_HAS_LIBJPEG)
+    list(APPEND DRM_CXX_SOURCES capture/jpg.cpp)
+  endif()
 endif()
 
 include(GNUInstallDirs)
@@ -255,6 +258,15 @@ else()
   target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_BLEND2D=0)
 endif()
 
+# libjpeg (libjpeg-turbo) — PRIVATE link for the capture JPEG encoder. Its
+# headers live in a system include dir, so no -isystem promotion is needed.
+if(DRM_CXX_HAS_LIBJPEG)
+  target_link_libraries(drm-cxx PRIVATE PkgConfig::libjpeg)
+  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_LIBJPEG=1)
+else()
+  target_compile_definitions(drm-cxx PRIVATE DRM_CXX_HAS_LIBJPEG=0)
+endif()
+
 if(DRM_CXX_VULKAN)
   target_link_libraries(drm-cxx PUBLIC PkgConfig::vulkan)
 endif()
@@ -371,6 +383,11 @@ if(DRM_CXX_HAS_BLEND2D)
       capture/snapshot.hpp
       capture/png.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/capture)
+  if(DRM_CXX_HAS_LIBJPEG)
+    install(FILES
+        capture/jpg.hpp
+      DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/capture)
+  endif()
   install(FILES
       csd/theme.hpp
       csd/surface.hpp
