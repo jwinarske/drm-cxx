@@ -98,6 +98,7 @@ if(DRM_CXX_HAS_BLEND2D)
     csd/renderer.cpp
     csd/animator.cpp
     csd/overlay_reservation.cpp
+    csd/damage.cpp
     csd/presenter_plane.cpp
     csd/presenter_composite.cpp
     csd/presenter_fb.cpp
@@ -378,6 +379,7 @@ if(DRM_CXX_HAS_BLEND2D)
       csd/renderer.hpp
       csd/animator.hpp
       csd/overlay_reservation.hpp
+      csd/damage.hpp
       csd/presenter.hpp
       csd/presenter_plane.hpp
       csd/presenter_composite.hpp
