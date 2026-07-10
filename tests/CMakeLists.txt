@@ -69,7 +69,8 @@ if(DRM_CXX_HAS_BLEND2D)
     test_csd_overlay_reservation
     test_csd_presenter_plane
     test_csd_presenter_composite
-    test_csd_presenter_fb)
+    test_csd_presenter_fb
+    test_csd_probe_presenter)
 endif()
 
 foreach(_t ${DRM_CXX_TESTS})

@@ -26,7 +26,7 @@ use to write a real shell.
 
 ```
 mdi_demo [--docs N] [--theme {default|lite|minimal|PATH}]
-         [--dump PATH.png] [--presenter {plane|composite|fb}]
+         [--dump PATH.png] [--presenter {auto|plane|composite|fb}]
          [/dev/dri/cardN]
 ```
 
@@ -35,7 +35,7 @@ mdi_demo [--docs N] [--theme {default|lite|minimal|PATH}]
 | `--docs N` | Initial document count. Default `2`. Capped at the CRTC's available overlay budget — fewer planes mean fewer initial docs, not a hard error. |
 | `--theme NAME` | One of `default` (desktop), `lite`, `minimal`, or a path to a TOML theme file. Path themes layer onto `glass_default` so missing keys inherit. |
 | `--dump PATH.png` | Output path for `Ctrl+S` snapshots. When omitted, `Ctrl+S` is a no-op. |
-| `--presenter MODE` | `plane` (default) gives each decoration its own overlay; `composite` software-blends every decoration onto the primary plane; `fb` blits into `/dev/fb0` (legacy framebuffer / no-KMS targets — see below). |
+| `--presenter MODE` | `auto` (default) lets `csd::probe_presenter` pick `plane` or `composite` from the plane budget (see below); `plane` gives each decoration its own overlay; `composite` software-blends every decoration onto the primary plane; `fb` blits into `/dev/fb0` (legacy framebuffer / no-KMS targets). |
 | `/dev/dri/cardN` | DRM device. `select_device` prompts when omitted. |
 
 ## Controls
@@ -58,6 +58,18 @@ Same as every other CSD example:
 - Run from a TTY (Ctrl+Alt+F3) or a libseat session — a Wayland / X
   session holding DRM master will reject the atomic commit with EACCES.
 - Build with `DRM_CXX_HAS_BLEND2D=1` (the gate that pulls in `drm::csd`).
+
+## Presenter selection (`--presenter=auto`, the default)
+
+`csd::probe_presenter` picks between the two KMS presenters from what the
+CRTC can give it: it tries to reserve one overlay per document, and if it
+gets **all** of them the plane presenter wins (every window on its own
+plane); otherwise it falls back to the composite presenter on the primary
+(every window still shows, software-blended — no per-window plane limit).
+The `fb` presenter is not a candidate here (it needs a non-master device);
+select it explicitly with `--presenter=fb`. The probe borrows the overlay
+`OverlayReservation` back to the caller to hold for the plane pick, since
+the `PlanePresenter` writes to those leases for its whole lifetime.
 
 ## Composite mode (`--presenter=composite`)
 

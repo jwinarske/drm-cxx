@@ -19,8 +19,9 @@
 //
 // The decoration renderer and shadow cache are tier-agnostic; only the
 // presenter — the component that takes rendered Surfaces and gets them
-// onto the output — differs. `csd::probe_presenter` (when all tiers
-// have landed) selects one at startup based on plane budget.
+// onto the output — differs. `csd::probe_presenter` (probe_presenter.hpp)
+// selects between the KMS presenters (Plane / Composite) at startup from
+// the plane budget; the fbdev presenter is a separate no-KMS fallback.
 //
 // A presenter is constructed once per CRTC and owns no per-frame state
 // beyond whatever's needed to track plane disarm. The shell calls

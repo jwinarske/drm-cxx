@@ -215,6 +215,7 @@ if has_blend2d
     'csd/presenter_plane.cpp',
     'csd/presenter_composite.cpp',
     'csd/presenter_fb.cpp',
+    'csd/probe_presenter.cpp',
   )
   drm_cxx_deps += blend2d_dep
   drm_cxx_deps += tomlplusplus_dep
@@ -354,6 +355,7 @@ if has_blend2d
     'csd/presenter_plane.hpp',
     'csd/presenter_composite.hpp',
     'csd/presenter_fb.hpp',
+    'csd/probe_presenter.hpp',
     subdir : 'drm-cxx/csd',
   )
 endif

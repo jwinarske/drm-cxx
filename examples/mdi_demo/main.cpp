@@ -24,8 +24,11 @@
 //
 // Usage:
 //   mdi_demo [--docs N] [--theme {default|lite|minimal|PATH}]
-//            [--dump PATH.png] [--presenter {plane|composite|fb}]
+//            [--dump PATH.png] [--presenter {auto|plane|composite|fb}]
 //            [/dev/dri/cardN]
+//
+// --presenter defaults to `auto`: probe_presenter picks plane (one overlay
+// per document) or composite (onto the primary) from the plane budget.
 //
 // Preconditions match every other csd example: run from a TTY (Ctrl-
 // Alt-F3) or a libseat session. Build needs DRM_CXX_HAS_BLEND2D=1.
@@ -39,6 +42,7 @@
 #include "csd/presenter_composite.hpp"
 #include "csd/presenter_fb.hpp"
 #include "csd/presenter_plane.hpp"
+#include "csd/probe_presenter.hpp"
 #include "csd/theme.hpp"
 #include "cursor/cursor.hpp"
 #include "cursor/renderer.hpp"
@@ -96,13 +100,13 @@ void signal_handler(int /*sig*/) {
   g_quit = 1;
 }
 
-enum class PresenterMode : std::uint8_t { Plane, Composite, Fb };
+enum class PresenterMode : std::uint8_t { Auto, Plane, Composite, Fb };
 
 struct Args {
   std::uint32_t initial_docs{2};
   std::string theme_name{"default"};
   std::string dump_path;
-  PresenterMode presenter{PresenterMode::Plane};
+  PresenterMode presenter{PresenterMode::Auto};
 };
 
 // Resolve a --theme value to a const Theme*. Built-in names map to the
@@ -261,14 +265,16 @@ Args parse_args(int& argc, char* argv[]) {
       a.dump_path = std::string(*v3);
       strip(i, n3);
     } else if (auto [v4, n4] = match(arg, "--presenter", i); v4) {
-      if (*v4 == "plane") {
+      if (*v4 == "auto") {
+        a.presenter = PresenterMode::Auto;
+      } else if (*v4 == "plane") {
         a.presenter = PresenterMode::Plane;
       } else if (*v4 == "composite") {
         a.presenter = PresenterMode::Composite;
       } else if (*v4 == "fb") {
         a.presenter = PresenterMode::Fb;
       } else {
-        drm::println(stderr, "mdi_demo: --presenter: unknown value '{}', defaulting to plane", *v4);
+        drm::println(stderr, "mdi_demo: --presenter: unknown value '{}', defaulting to auto", *v4);
       }
       strip(i, n4);
     } else {
@@ -531,7 +537,31 @@ int main(int argc, char* argv[]) {
   // the overlay leases the PlanePresenter writes to.
   std::optional<drm::csd::OverlayReservation> reservation_holder;
 
-  if (args.presenter == PresenterMode::Composite) {
+  if (args.presenter == PresenterMode::Auto) {
+    // Let probe_presenter pick: Plane when it can reserve one overlay per
+    // document, else Composite onto the primary. (fb isn't a candidate —
+    // it needs a non-master device; use --presenter=fb explicitly.)
+    drm::csd::ProbeConfig probe_cfg;
+    probe_cfg.crtc_id = output->crtc_id;
+    probe_cfg.crtc_index = *crtc_idx;
+    probe_cfg.desired_decorations = args.initial_docs == 0 ? 1U : args.initial_docs;
+    probe_cfg.canvas_width = fb_w;
+    probe_cfg.canvas_height = fb_h;
+    probe_cfg.plane_base_zpos = primary_zpos_max(registry, *crtc_idx) + 1U;
+    auto probed = drm::csd::probe_presenter(dev, registry, probe_cfg);
+    if (!probed) {
+      drm::println(stderr,
+                   "mdi_demo: probe_presenter: {} (no usable KMS plane on CRTC {}; try "
+                   "--presenter=fb)",
+                   probed.error().message(), output->crtc_id);
+      return EXIT_FAILURE;
+    }
+    presenter = std::move(probed->presenter);
+    reservation_holder = std::move(probed->reservation);
+    deco_budget = probe_cfg.desired_decorations;
+    drm::println("mdi_demo: probe picked {} presenter ({} doc budget)",
+                 presenter->tier() == drm::csd::Tier::Plane ? "plane" : "composite", deco_budget);
+  } else if (args.presenter == PresenterMode::Composite) {
     const std::uint32_t primary_id = primary_plane_id_for(registry, *crtc_idx);
     if (primary_id == 0U) {
       drm::println(stderr, "mdi_demo: no PRIMARY plane on CRTC {} for the composite canvas",
