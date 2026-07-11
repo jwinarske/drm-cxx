@@ -85,6 +85,7 @@ std::unique_ptr<V4l2H264Encoder> V4l2H264Encoder::create(const Config& cfg, std:
     enc->destroy_state();
     return nullptr;
   }
+  enc->out_sizeimage_ = ofmt.fmt.pix_mp.plane_fmt[0].sizeimage;
 
   // CAPTURE (coded H.264) format.
   v4l2_format cfmt{};
@@ -117,40 +118,58 @@ std::unique_ptr<V4l2H264Encoder> V4l2H264Encoder::create(const Config& cfg, std:
   set_ctrl(fd, V4L2_CID_MPEG_VIDEO_H264_I_PERIOD, static_cast<std::int32_t>(gop));
   set_ctrl(fd, V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER, 1);
 
-  // OUTPUT buffers (MMAP) — filled by encode(), never displayed.
+  // OUTPUT buffers — raw frames fed by encode()/encode_dmabuf(), never displayed.
+  // A dma-buf-import queue owns no memory (the caller's fd backs each QBUF), so
+  // it skips QUERYBUF/mmap; if the driver rejects the DMABUF request outright,
+  // fall back to MMAP so the copy path still works.
+  const bool want_dmabuf = cfg.dmabuf_output;
   v4l2_requestbuffers oreq{};
   oreq.count = k_buffer_count;
   oreq.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-  oreq.memory = V4L2_MEMORY_MMAP;
-  if (xioctl(fd, VIDIOC_REQBUFS, &oreq) < 0 || oreq.count == 0) {
+  oreq.memory = want_dmabuf ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
+  bool req_ok = xioctl(fd, VIDIOC_REQBUFS, &oreq) >= 0 && oreq.count != 0;
+  if (!req_ok && want_dmabuf) {
+    drm::println(stderr, "[v4l2_h264_encoder] REQBUFS(OUTPUT,DMABUF): {} — using MMAP",
+                 std::strerror(errno));
+    oreq = {};
+    oreq.count = k_buffer_count;
+    oreq.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    oreq.memory = V4L2_MEMORY_MMAP;
+    req_ok = xioctl(fd, VIDIOC_REQBUFS, &oreq) >= 0 && oreq.count != 0;
+  }
+  if (!req_ok) {
     drm::println(stderr, "[v4l2_h264_encoder] REQBUFS(OUTPUT): {}", std::strerror(errno));
     set_ec(std::errc::not_supported);
     enc->destroy_state();
     return nullptr;
   }
-  enc->out_bufs_.resize(oreq.count);
-  for (unsigned int i = 0; i < oreq.count; ++i) {
-    v4l2_plane plane{};
-    v4l2_buffer buf{};
-    buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-    buf.memory = V4L2_MEMORY_MMAP;
-    buf.index = i;
-    buf.length = 1;
-    buf.m.planes = &plane;
-    if (xioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
-      set_ec(std::errc::not_supported);
-      enc->destroy_state();
-      return nullptr;
+  enc->output_dmabuf_ = oreq.memory == V4L2_MEMORY_DMABUF;
+  enc->out_count_ = oreq.count;
+  if (!enc->output_dmabuf_) {
+    enc->out_bufs_.resize(oreq.count);
+    for (unsigned int i = 0; i < oreq.count; ++i) {
+      v4l2_plane plane{};
+      v4l2_buffer buf{};
+      buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+      buf.memory = V4L2_MEMORY_MMAP;
+      buf.index = i;
+      buf.length = 1;
+      buf.m.planes = &plane;
+      if (xioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+        set_ec(std::errc::not_supported);
+        enc->destroy_state();
+        return nullptr;
+      }
+      enc->out_bufs_[i].length = plane.length;
+      void* p =
+          ::mmap(nullptr, plane.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, plane.m.mem_offset);
+      if (p == MAP_FAILED) {
+        set_ec(std::errc::not_supported);
+        enc->destroy_state();
+        return nullptr;
+      }
+      enc->out_bufs_[i].start = static_cast<std::uint8_t*>(p);
     }
-    enc->out_bufs_[i].length = plane.length;
-    void* p =
-        ::mmap(nullptr, plane.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, plane.m.mem_offset);
-    if (p == MAP_FAILED) {
-      set_ec(std::errc::not_supported);
-      enc->destroy_state();
-      return nullptr;
-    }
-    enc->out_bufs_[i].start = static_cast<std::uint8_t*>(p);
   }
 
   // CAPTURE buffers (MMAP) — receive coded chunks; queued up front.
@@ -209,7 +228,7 @@ std::unique_ptr<V4l2H264Encoder> V4l2H264Encoder::create(const Config& cfg, std:
 // NOLINTNEXTLINE(bugprone-exception-escape) — only std::vector growth can throw (OOM = abort)
 bool V4l2H264Encoder::encode(const std::uint8_t* frame, std::size_t size,
                              std::vector<std::uint8_t>& out) noexcept {
-  if (frame == nullptr) {
+  if (frame == nullptr || output_dmabuf_) {
     return false;
   }
 
@@ -222,7 +241,7 @@ bool V4l2H264Encoder::encode(const std::uint8_t* frame, std::size_t size,
   obuf.memory = V4L2_MEMORY_MMAP;
   obuf.length = 1;
   obuf.m.planes = &oplane;
-  if (out_queued_ < out_bufs_.size()) {
+  if (out_queued_ < out_count_) {
     idx = out_queued_++;
   } else {
     if (xioctl(fd_, VIDIOC_DQBUF, &obuf) < 0) {
@@ -248,7 +267,58 @@ bool V4l2H264Encoder::encode(const std::uint8_t* frame, std::size_t size,
     drm::println(stderr, "[v4l2_h264_encoder] QBUF(OUTPUT): {}", std::strerror(errno));
     return false;
   }
+  return drain_capture(out);
+}
 
+// NOLINTNEXTLINE(bugprone-exception-escape) — only std::vector growth can throw (OOM = abort)
+bool V4l2H264Encoder::encode_dmabuf(int dmabuf_fd, std::size_t data_offset,
+                                    std::vector<std::uint8_t>& out) noexcept {
+  if (dmabuf_fd < 0 || !output_dmabuf_) {
+    return false;
+  }
+
+  // Acquire a free OUTPUT slot: use each once up front, then recycle the
+  // kernel's completed ones. The slot carries no memory — the caller's fd does.
+  unsigned int idx = 0;
+  v4l2_plane oplane{};
+  v4l2_buffer obuf{};
+  obuf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+  obuf.memory = V4L2_MEMORY_DMABUF;
+  obuf.length = 1;
+  obuf.m.planes = &oplane;
+  if (out_queued_ < out_count_) {
+    idx = out_queued_++;
+  } else {
+    if (xioctl(fd_, VIDIOC_DQBUF, &obuf) < 0) {
+      drm::println(stderr, "[v4l2_h264_encoder] DQBUF(OUTPUT,DMABUF): {}", std::strerror(errno));
+      return false;
+    }
+    idx = obuf.index;
+  }
+
+  // Import the caller's frame by fd — no copy. `data_offset` locates the first
+  // (Y) plane; a single-fd NV12 buffer's UV follows contiguously, matching the
+  // single-plane OUTPUT format the encoder negotiated.
+  v4l2_plane qplane{};
+  qplane.bytesused = out_sizeimage_;
+  qplane.length = out_sizeimage_;
+  qplane.data_offset = static_cast<std::uint32_t>(data_offset);
+  qplane.m.fd = dmabuf_fd;
+  v4l2_buffer qbuf{};
+  qbuf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+  qbuf.memory = V4L2_MEMORY_DMABUF;
+  qbuf.index = idx;
+  qbuf.length = 1;
+  qbuf.m.planes = &qplane;
+  if (xioctl(fd_, VIDIOC_QBUF, &qbuf) < 0) {
+    drm::println(stderr, "[v4l2_h264_encoder] QBUF(OUTPUT,DMABUF): {}", std::strerror(errno));
+    return false;
+  }
+  return drain_capture(out);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape) — only std::vector growth can throw (OOM = abort)
+bool V4l2H264Encoder::drain_capture(std::vector<std::uint8_t>& out) noexcept {
   // Dequeue the coded frame (baseline is 1-in-1-out) and requeue the buffer.
   v4l2_plane cplane{};
   v4l2_buffer cbuf{};

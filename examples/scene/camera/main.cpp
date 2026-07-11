@@ -947,6 +947,10 @@ std::FILE* g_record_file = nullptr;
 int g_record_slot = -1;  // camera_index bound to the recording, -1 until bound
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::size_t g_record_bytes = 0;
+// Prefer zero-copy dma-buf import into the encoder's OUTPUT queue; cleared (and
+// the encoder rebuilt in copy mode) if the codec can't map the capture buffer.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+bool g_record_try_dmabuf = true;
 
 std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::LayerScene& scene,
                                            const std::shared_ptr<libcamera::Camera>& camera,
@@ -1607,20 +1611,39 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
               cfg.in_fourcc = slot.target.camera_fourcc;
               cfg.width = slot.target.size.width;
               cfg.height = slot.target.size.height;
+              cfg.dmabuf_output = g_record_try_dmabuf;  // zero-copy import if the codec maps it
               std::error_code rec_ec;
               g_recorder = drm::examples::camera::V4l2H264Encoder::create(cfg, &rec_ec);
-              g_record_file = g_recorder ? std::fopen(g_record_path, "wb") : nullptr;
+              if (g_recorder && g_record_file == nullptr) {
+                g_record_file = std::fopen(g_record_path, "wb");
+              }
               if (!g_recorder || g_record_file == nullptr) {
                 drm::println(stderr, "record: setup failed; recording disabled");
                 g_record_path = nullptr;  // stop retrying
               } else {
-                drm::println("record: {}x{} -> {} (V4L2 {})", cfg.width, cfg.height, g_record_path,
-                             g_record_encoder);
+                drm::println("record: {}x{} -> {} (V4L2 {}, {})", cfg.width, cfg.height,
+                             g_record_path, g_record_encoder,
+                             g_recorder->imports_dmabuf() ? "zero-copy dma-buf" : "copy");
               }
             }
             if (g_recorder && g_record_file != nullptr) {
               std::vector<std::uint8_t> rec_bits;
-              if (g_recorder->encode(src, length, rec_bits) && !rec_bits.empty()) {
+              bool encoded = false;
+              if (g_recorder->imports_dmabuf()) {
+                encoded = g_recorder->encode_dmabuf(fd, offset, rec_bits);
+                if (!encoded && g_record_bytes == 0) {
+                  // The codec can't map this source's dma-buf (e.g. a UVC
+                  // camera's vmalloc buffer) — drop to the copy path and rebuild
+                  // the encoder on the next frame. Nothing recorded yet, so the
+                  // truncating reopen is a no-op.
+                  drm::println(stderr, "record: dma-buf import rejected; falling back to copy");
+                  g_record_try_dmabuf = false;
+                  g_recorder.reset();
+                }
+              } else {
+                encoded = g_recorder->encode(src, length, rec_bits);
+              }
+              if (encoded && !rec_bits.empty()) {
                 std::fwrite(rec_bits.data(), 1, rec_bits.size(), g_record_file);
                 g_record_bytes += rec_bits.size();
               }
