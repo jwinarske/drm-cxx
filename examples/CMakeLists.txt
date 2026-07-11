@@ -79,7 +79,8 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
       scene/camera/double_dumb_source.cpp
       scene/camera/imported_buffers.cpp
       scene/camera/libcamera_nv12_source.cpp
-      scene/camera/status_overlay_renderer.cpp)
+      scene/camera/status_overlay_renderer.cpp
+      scene/camera/v4l2_h264_encoder.cpp)
     # VAAPI MJPEG decode (auto-feature). libva + libva-drm together
     # unlock zero-copy JPEG -> NV12 -> scanout on AMD/Intel; missing
     # either falls the example back to the CPU libyuv path.

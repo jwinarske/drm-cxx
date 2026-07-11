@@ -126,6 +126,7 @@ if not camera_feature.disabled()
       'scene/camera/imported_buffers.cpp',
       'scene/camera/libcamera_nv12_source.cpp',
       'scene/camera/status_overlay_renderer.cpp',
+      'scene/camera/v4l2_h264_encoder.cpp',
     ]
     if has_blend2d
       camera_deps += blend2d_dep
