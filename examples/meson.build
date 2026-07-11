@@ -158,22 +158,24 @@ if not camera_feature.disabled()
     message('camera: libcamera>=0.3.0 or libyuv not found, skipping (pass -Dcamera=enabled to hard-fail)')
   endif
 
-  # camera_record — headless V4L2 MJPEG -> VA-API H.264 recorder. Captures via
-  # V4L2 directly (no libcamera), so it only needs libva/libva-drm and is gated
-  # independently of the camera viewfinder above.
+  # camera_record — headless H.264 recorder. Captures via V4L2 directly (no
+  # libcamera). Two backends: a V4L2 M2M encoder (--v4l2-encoder, e.g. the Pi's
+  # bcm2835-codec; always available) and VA-API (added when libva is present).
+  camrec_sources = ['scene/camera_record/main.cpp', 'scene/camera/v4l2_h264_encoder.cpp']
+  camrec_deps = [drm_cxx_dep]
+  camrec_args = []
   camrec_va = dependency('libva', include_type : 'system', required : false)
   camrec_va_drm = dependency('libva-drm', include_type : 'system', required : false)
   if camrec_va.found() and camrec_va_drm.found()
-    executable('camera_record',
-      'scene/camera_record/main.cpp',
-      'scene/camera/vaapi_jpeg_decoder.cpp',
-      'scene/camera/vaapi_h264_encoder.cpp',
-      dependencies : [drm_cxx_dep, camrec_va, camrec_va_drm],
-      cpp_args : ['-DCAMERA_HAS_VAAPI=1'],
-    )
-  else
-    message('camera_record: libva / libva-drm not found, skipping headless H.264 recorder')
+    camrec_sources += ['scene/camera/vaapi_jpeg_decoder.cpp', 'scene/camera/vaapi_h264_encoder.cpp']
+    camrec_deps += [camrec_va, camrec_va_drm]
+    camrec_args += '-DCAMERA_HAS_VAAPI=1'
   endif
+  executable('camera_record',
+    camrec_sources,
+    dependencies : camrec_deps,
+    cpp_args : camrec_args,
+  )
 endif
 
 subdir('scene/signage_player')

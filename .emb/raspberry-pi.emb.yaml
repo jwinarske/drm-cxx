@@ -49,6 +49,7 @@ cross:
           - libdisplay-info-dev   # trixie ships >= 0.2.0
           - libgtest-dev          # GoogleTest for the on-target gtest binaries
           - libjpeg62-turbo-dev   # drm::capture JPEG encoder (libjpeg-turbo)
+          - libyuv-dev            # camera example: YUY2/MJPEG->NV12 libyuv fallback
       augment: &augment_libs
         # blend2d (Zlib license) backs drm::capture's PNG screenshots. Build it
         # static + no-JIT (skips the asmjit dependency) and PIC so it links into
