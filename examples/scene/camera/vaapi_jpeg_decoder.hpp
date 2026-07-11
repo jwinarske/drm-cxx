@@ -134,6 +134,12 @@ class VaapiJpegDecoder {
   [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
   [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
 
+  /// The NV12 output VASurfaceID (as an opaque unsigned int), valid after a
+  /// successful decode_into_surface(). Lets an in-process VA-API consumer on
+  /// the same VADisplay — e.g. VaapiH264Encoder — read the decoded frame with
+  /// no export/import. `VA_INVALID_ID` (0xffffffff) before the first decode.
+  [[nodiscard]] unsigned int output_surface() const noexcept { return va_output_surface_; }
+
  private:
   VaapiJpegDecoder() = default;
 

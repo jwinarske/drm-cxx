@@ -88,7 +88,9 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
     if(TARGET PkgConfig::libva AND TARGET PkgConfig::libva_drm)
       _drm_cxx_promote_system_includes(PkgConfig::libva)
       _drm_cxx_promote_system_includes(PkgConfig::libva_drm)
-      list(APPEND camera_sources scene/camera/vaapi_jpeg_decoder.cpp)
+      list(APPEND camera_sources
+        scene/camera/vaapi_jpeg_decoder.cpp
+        scene/camera/vaapi_h264_encoder.cpp)
     else()
       message(STATUS
         "camera: libva / libva-drm not found, MJPEG falls back to CPU libyuv decode")
@@ -116,6 +118,26 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
     message(STATUS
       "camera: libcamera>=0.3.0 or libyuv not found, skipping "
       "(set DRM_CXX_BUILD_CAMERA=ON to hard-fail)")
+  endif()
+
+  # camera_record — headless V4L2 MJPEG -> VA-API H.264 recorder. Captures via
+  # V4L2 directly (no libcamera), so it only needs libva/libva-drm and builds
+  # independently of the camera viewfinder above.
+  if(NOT TARGET PkgConfig::libva)
+    pkg_check_modules(libva IMPORTED_TARGET libva)
+    pkg_check_modules(libva_drm IMPORTED_TARGET libva-drm)
+  endif()
+  if(TARGET PkgConfig::libva AND TARGET PkgConfig::libva_drm)
+    add_executable(camera_record
+      scene/camera_record/main.cpp
+      scene/camera/vaapi_jpeg_decoder.cpp
+      scene/camera/vaapi_h264_encoder.cpp)
+    target_link_libraries(camera_record PRIVATE
+      drm-cxx::drm-cxx PkgConfig::libva PkgConfig::libva_drm)
+    target_include_directories(camera_record PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(camera_record PRIVATE CAMERA_HAS_VAAPI=1)
+  else()
+    message(STATUS "camera_record: libva / libva-drm not found, skipping headless H.264 recorder")
   endif()
 endif()
 
