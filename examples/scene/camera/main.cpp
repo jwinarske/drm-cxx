@@ -37,6 +37,7 @@
 #include "imported_buffers.hpp"
 #include "libcamera_nv12_source.hpp"
 #include "status_overlay_renderer.hpp"
+#include "v4l2_h264_encoder.hpp"  // --record: raw frame -> V4L2 M2M H.264 alongside display
 #if CAMERA_HAS_VAAPI
 #include "vaapi_jpeg_decoder.hpp"
 #endif
@@ -77,6 +78,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <libcamera/base/span.h>
@@ -928,6 +930,24 @@ std::atomic<int> g_snapshot_remaining{0};
 constexpr auto k_snapshot_warmup = std::chrono::seconds(2);
 #endif
 
+// --record FILE + --v4l2-encoder DEV: encode each captured frame to H.264 with a
+// V4L2 M2M encoder (e.g. the Pi's bcm2835-codec) while the same frame also
+// displays — the recording "third consumer". Consumed by drain_slot on the main
+// loop thread only (plain globals). The encoder + file are created lazily on the
+// first raw (YUYV/NV12) frame of the first recorded slot.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+const char* g_record_path = nullptr;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+const char* g_record_encoder = nullptr;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::unique_ptr<drm::examples::camera::V4l2H264Encoder> g_recorder;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::FILE* g_record_file = nullptr;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+int g_record_slot = -1;  // camera_index bound to the recording, -1 until bound
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::size_t g_record_bytes = 0;
+
 std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::LayerScene& scene,
                                            const std::shared_ptr<libcamera::Camera>& camera,
                                            const std::vector<DisplayFmt>& display_formats,
@@ -1571,6 +1591,42 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
       if (cached.base != nullptr) {
         const auto* base = static_cast<const std::uint8_t*>(cached.base);
         const auto* src = base + offset;
+        // --record: encode this raw frame to H.264 with a V4L2 M2M encoder while
+        // the same buffer also feeds the display convert — no extra copy of the
+        // capture. bcm2835-codec / rkvenc take YUYV and NV12 directly.
+        if (g_record_path != nullptr && g_record_encoder != nullptr) {
+          if (g_record_slot < 0) {
+            g_record_slot = static_cast<int>(slot.target.camera_index);
+          }
+          if (static_cast<int>(slot.target.camera_index) == g_record_slot) {
+            const bool raw = slot.target.camera_fourcc == DRM_FORMAT_YUYV ||
+                             slot.target.camera_fourcc == DRM_FORMAT_NV12;
+            if (!g_recorder && raw) {
+              drm::examples::camera::V4l2H264Encoder::Config cfg{};
+              cfg.device = g_record_encoder;
+              cfg.in_fourcc = slot.target.camera_fourcc;
+              cfg.width = slot.target.size.width;
+              cfg.height = slot.target.size.height;
+              std::error_code rec_ec;
+              g_recorder = drm::examples::camera::V4l2H264Encoder::create(cfg, &rec_ec);
+              g_record_file = g_recorder ? std::fopen(g_record_path, "wb") : nullptr;
+              if (!g_recorder || g_record_file == nullptr) {
+                drm::println(stderr, "record: setup failed; recording disabled");
+                g_record_path = nullptr;  // stop retrying
+              } else {
+                drm::println("record: {}x{} -> {} (V4L2 {})", cfg.width, cfg.height, g_record_path,
+                             g_record_encoder);
+              }
+            }
+            if (g_recorder && g_record_file != nullptr) {
+              std::vector<std::uint8_t> rec_bits;
+              if (g_recorder->encode(src, length, rec_bits) && !rec_bits.empty()) {
+                std::fwrite(rec_bits.data(), 1, rec_bits.size(), g_record_file);
+                g_record_bytes += rec_bits.size();
+              }
+            }
+          }
+        }
         bool frame_landed = false;
         if (slot.target.mode == ConversionMode::ZeroCopy && slot.libcamera_nv12_source != nullptr) {
           // No CPU touch — the LibcameraNv12Source already minted an
@@ -2484,6 +2540,15 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
   }
   drm::println("\nshutting down");
 
+  // Finalize the recording (if any): flush + close the file and drop the
+  // encoder so its V4L2 device is released.
+  if (g_record_file != nullptr) {
+    (void)std::fclose(g_record_file);
+    g_record_file = nullptr;
+    drm::println("record: wrote {} ({} bytes)", g_record_path, g_record_bytes);
+  }
+  g_recorder.reset();
+
   // Disconnect CameraManager hotplug signals before pending_hotplug
   // goes out of scope, so libcamera doesn't keep a stale receiver
   // pointer and a worker-thread emission racing teardown can't even
@@ -2521,6 +2586,15 @@ void print_usage() {
                "isn't scanout-capable");
   drm::println(stderr,
                "  --gbm-import           allocate them via GBM (SCANOUT|LINEAR) instead (Mode C)");
+  drm::println(stderr,
+               "  --record FILE          also encode each captured frame to H.264 (Annex-B) while "
+               "it displays;");
+  drm::println(stderr,
+               "  --v4l2-encoder DEV     use the V4L2 M2M encoder DEV (e.g. /dev/video11, the Pi's "
+               "bcm2835-codec).");
+  drm::println(stderr,
+               "                         Records the first camera's raw YUYV/NV12 tier; give both "
+               "flags together");
 #if CAMERA_HAS_JPG
   drm::println(stderr,
                "  --snapshot N           after a ~2s AEC/AWB warm-up, write N NV12 frames to "
@@ -2736,6 +2810,20 @@ int main(int argc, char* argv[]) {
       }
       g_snapshot_remaining.store(n, std::memory_order_relaxed);
 #endif
+    } else if (arg == "--record") {
+      if (i + 1 >= argc) {
+        drm::println(stderr, "--record: missing output FILE");
+        print_usage();
+        return EXIT_FAILURE;
+      }
+      g_record_path = argv[++i];
+    } else if (arg == "--v4l2-encoder") {
+      if (i + 1 >= argc) {
+        drm::println(stderr, "--v4l2-encoder: missing device");
+        print_usage();
+        return EXIT_FAILURE;
+      }
+      g_record_encoder = argv[++i];
     } else if (arg == "--help" || arg == "-h") {
       print_usage();
       return EXIT_SUCCESS;
@@ -2754,6 +2842,11 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
   if (!want_probe && !want_show) {
+    print_usage();
+    return EXIT_FAILURE;
+  }
+  if ((g_record_path != nullptr) != (g_record_encoder != nullptr)) {
+    drm::println(stderr, "camera: --record and --v4l2-encoder must be given together");
     print_usage();
     return EXIT_FAILURE;
   }
