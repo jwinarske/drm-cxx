@@ -42,6 +42,12 @@
 #endif
 
 #include <drm-cxx/buffer_mapping.hpp>
+#if CAMERA_HAS_JPG
+#include <drm-cxx/capture/jpg.hpp>  // NV12 -> JPEG snapshot ('R' key / --snapshot)
+
+#include <charconv>                   // std::from_chars for --snapshot N
+#include <linux/input-event-codes.h>  // KEY_R
+#endif
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
@@ -838,6 +844,10 @@ struct CameraSlot {
   // Sticky once we hit at least one successful conversion+commit, so
   // hotplug churn doesn't keep "first frame" diagnostics bouncing.
   bool first_frame_seen{false};
+  // Wall-time the first frame landed on this slot — the reference for the
+  // --snapshot warm-up, so an auto-snapshot waits for the sensor's AEC/AWB to
+  // converge instead of capturing the dark, unconverged opening frames.
+  std::chrono::steady_clock::time_point first_frame_at;
   // Wall-time of the last successful frame conversion (or of slot
   // `configure` when no frame has arrived yet). The main loop tears down
   // any slot whose timestamp goes stale, so an OVERLAY plane
@@ -897,6 +907,26 @@ void release_va_display() {
 // allocator).
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::optional<drm::examples::camera::ImportMode> g_import_mode;
+
+// Set by the 'R' key (keyboard handler), consumed by drain_slot: write the next
+// landed NV12 frame to a JPEG. One-shot — cleared after a snapshot is taken.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<bool> g_snapshot_requested{false};
+
+// Countdown of frames to auto-snapshot, set by --snapshot N. drain_slot writes
+// one JPEG per landed NV12 frame and decrements. Complements the 'R' key for
+// headless use, where libinput can't see a keyboard (e.g. over SSH) — a key
+// press never reaches the example, but --snapshot needs no input at all.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<int> g_snapshot_remaining{0};
+
+#if CAMERA_HAS_JPG
+// How long an auto-snapshot (--snapshot) waits after a slot's first frame
+// before capturing, so the sensor's AEC/AWB has converged and the JPEG matches
+// the stabilized on-screen preview rather than the dark opening frames. The 'R'
+// key is unaffected — the user presses it once the preview already looks right.
+constexpr auto k_snapshot_warmup = std::chrono::seconds(2);
+#endif
 
 std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::LayerScene& scene,
                                            const std::shared_ptr<libcamera::Camera>& camera,
@@ -1547,6 +1577,36 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
           // FB for this fd at configure time; switching it makes the
           // scene's next commit pick up the new fb_id.
           frame_landed = slot.libcamera_nv12_source->set_current_fd(fd);
+#if CAMERA_HAS_JPG
+          bool want_snapshot = frame_landed && g_snapshot_requested.exchange(false);
+          if (frame_landed && !want_snapshot &&
+              g_snapshot_remaining.load(std::memory_order_relaxed) > 0 && slot.first_frame_seen &&
+              (std::chrono::steady_clock::now() - slot.first_frame_at) >= k_snapshot_warmup) {
+            g_snapshot_remaining.fetch_sub(1, std::memory_order_relaxed);
+            want_snapshot = true;
+          }
+          if (want_snapshot) {
+            // NV12 is JPEG's native color space, so encode the mapped planes
+            // straight through (snapshot() can't read back a YUV scanout plane).
+            // Y at `src`; UV at plane[1]'s offset (or contiguous after Y).
+            const std::uint8_t* uv =
+                (lc_planes.size() >= 2)
+                    ? base + lc_planes[1].offset
+                    : src + (static_cast<std::size_t>(slot.src_stride) * slot.target.size.height);
+            static std::uint32_t snap_counter = 0;
+            const auto path = drm::format("camera_snapshot_{:04d}.jpg", snap_counter++);
+            if (auto w = drm::capture::write_jpg_nv12(src, uv, slot.src_stride, slot.src_stride,
+                                                      slot.target.size.width,
+                                                      slot.target.size.height, path);
+                w) {
+              drm::println("snapshot: wrote {} ({}x{})", path, slot.target.size.width,
+                           slot.target.size.height);
+            } else {
+              drm::println(stderr, "snapshot: write_jpg_nv12({}) failed: {}", path,
+                           w.error().message());
+            }
+          }
+#endif
         } else
 #if CAMERA_HAS_VAAPI
             if (slot.target.mode == ConversionMode::MjpegVaapiNv12 && slot.vaapi_decoder) {
@@ -1635,6 +1695,7 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
         if (frame_landed) {
           if (!slot.first_frame_seen) {
             slot.first_frame_seen = true;
+            slot.first_frame_at = std::chrono::steady_clock::now();
             drm::println(stderr, "slot[{}]: first frame landed ({})", slot.target.camera_index,
                          mode_label(slot.target.mode));
             // configure_slot / rebuild_vaapi_slot / both downgrade
@@ -2190,6 +2251,12 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
       if (vt_chord.is_quit_key(*ke)) {
         g_running.store(false, std::memory_order_relaxed);
       }
+#if CAMERA_HAS_JPG
+      // 'R' snapshots the next NV12 frame to camera_snapshot_NNNN.jpg.
+      if (ke->pressed && ke->key == KEY_R) {
+        g_snapshot_requested.store(true, std::memory_order_relaxed);
+      }
+#endif
     });
   } else {
     drm::println(
@@ -2454,6 +2521,14 @@ void print_usage() {
                "isn't scanout-capable");
   drm::println(stderr,
                "  --gbm-import           allocate them via GBM (SCANOUT|LINEAR) instead (Mode C)");
+#if CAMERA_HAS_JPG
+  drm::println(stderr,
+               "  --snapshot N           after a ~2s AEC/AWB warm-up, write N NV12 frames to "
+               "camera_snapshot_NNNN.jpg,");
+  drm::println(stderr,
+               "                         then keep streaming (headless-friendly; the 'R' key does "
+               "the same on demand)");
+#endif
 }
 
 int run_probe(int argc, char* argv[]) {
@@ -2644,6 +2719,23 @@ int main(int argc, char* argv[]) {
       g_import_mode = drm::examples::camera::ImportMode::DmaHeapSystem;
     } else if (arg == "--dma-heap=cma") {
       g_import_mode = drm::examples::camera::ImportMode::DmaHeapCma;
+#if CAMERA_HAS_JPG
+    } else if (arg == "--snapshot") {
+      if (i + 1 >= argc) {
+        drm::println(stderr, "--snapshot: missing frame count N");
+        print_usage();
+        return EXIT_FAILURE;
+      }
+      const char* nstr = argv[++i];  // argv entries are null-terminated
+      const char* nend = nstr + std::strlen(nstr);
+      int n = 0;
+      const auto res = std::from_chars(nstr, nend, n);
+      if (res.ec != std::errc{} || res.ptr != nend || n <= 0) {
+        drm::println(stderr, "--snapshot: invalid count '{}' (expected a positive integer)", nstr);
+        return EXIT_FAILURE;
+      }
+      g_snapshot_remaining.store(n, std::memory_order_relaxed);
+#endif
     } else if (arg == "--help" || arg == "-h") {
       print_usage();
       return EXIT_SUCCESS;

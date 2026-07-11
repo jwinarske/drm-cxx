@@ -107,6 +107,11 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
       target_link_libraries(camera PRIVATE blend2d::blend2d)
       target_compile_definitions(camera PRIVATE CAMERA_STATUS_HAS_BLEND2D=1)
     endif()
+    # NV12 -> JPEG snapshot ('R' key). write_jpg_nv12 is in the library only
+    # when both Blend2D and libjpeg are on, so gate the wiring on both.
+    if(DRM_CXX_HAS_BLEND2D AND DRM_CXX_HAS_LIBJPEG)
+      target_compile_definitions(camera PRIVATE CAMERA_HAS_JPG=1)
+    endif()
   else()
     message(STATUS
       "camera: libcamera>=0.3.0 or libyuv not found, skipping "
