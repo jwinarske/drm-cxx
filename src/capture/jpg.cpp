@@ -23,6 +23,8 @@
 #include "detail/span.hpp"
 #include "snapshot.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <csetjmp>
 #include <cstddef>
@@ -123,6 +125,102 @@ drm::expected<void, std::error_code> write_jpg(const Image& image, std::string_v
     }
     JSAMPROW rp = row.data();
     (void)jpeg_write_scanlines(&cinfo, &rp, 1);
+  }
+
+  jpeg_finish_compress(&cinfo);
+  jpeg_destroy_compress(&cinfo);
+  (void)std::fclose(fp);
+  return {};
+}
+
+drm::expected<void, std::error_code> write_jpg_nv12(const std::uint8_t* y, const std::uint8_t* uv,
+                                                    std::uint32_t y_stride, std::uint32_t uv_stride,
+                                                    std::uint32_t width, std::uint32_t height,
+                                                    std::string_view path, int quality) {
+  if (y == nullptr || uv == nullptr || width == 0U || height == 0U) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+  }
+
+  const int q = quality < 1 ? 1 : quality;
+  const int quality_clamped = q > 100 ? 100 : q;
+
+  // 4:2:0 chroma grid: one Cb/Cr sample per 2x2 luma block (round up so an odd
+  // edge column/row still gets a sample). libjpeg's raw path wants the two
+  // chroma channels as separate planes, so de-interleave NV12's Cb,Cr once.
+  const std::uint32_t cw = (width + 1U) / 2U;
+  const std::uint32_t ch = (height + 1U) / 2U;
+  std::vector<std::uint8_t> cb(static_cast<std::size_t>(cw) * ch);
+  std::vector<std::uint8_t> cr(static_cast<std::size_t>(cw) * ch);
+  for (std::uint32_t r = 0; r < ch; ++r) {
+    const std::uint8_t* row = uv + (static_cast<std::size_t>(r) * uv_stride);
+    for (std::uint32_t c = 0; c < cw; ++c) {
+      const std::size_t src = static_cast<std::size_t>(c) * 2U;
+      const std::size_t dst = (static_cast<std::size_t>(r) * cw) + c;
+      cb[dst] = row[src];
+      cr[dst] = row[src + 1U];
+    }
+  }
+
+  const std::string path_z(path);
+  std::FILE* fp = std::fopen(path_z.c_str(), "wb");
+  if (fp == nullptr) {
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::generic_category()));
+  }
+
+  jpeg_compress_struct cinfo{};
+  JpgErrorMgr jerr{};
+  cinfo.err = jpeg_std_error(&jerr.pub);
+  jerr.pub.error_exit = jpg_error_exit;
+  if (setjmp(jerr.jb) != 0) {
+    jpeg_destroy_compress(&cinfo);
+    (void)std::fclose(fp);
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::io_error));
+  }
+
+  jpeg_create_compress(&cinfo);
+  jpeg_stdio_dest(&cinfo, fp);
+  cinfo.image_width = width;
+  cinfo.image_height = height;
+  cinfo.input_components = 3;
+  cinfo.in_color_space = JCS_YCbCr;
+  jpeg_set_defaults(&cinfo);
+  jpeg_set_quality(&cinfo, quality_clamped, TRUE);
+  // Y at full resolution (2x2), Cb/Cr subsampled (1x1) — i.e. 4:2:0.
+  cinfo.comp_info[0].h_samp_factor = 2;
+  cinfo.comp_info[0].v_samp_factor = 2;
+  cinfo.comp_info[1].h_samp_factor = 1;
+  cinfo.comp_info[1].v_samp_factor = 1;
+  cinfo.comp_info[2].h_samp_factor = 1;
+  cinfo.comp_info[2].v_samp_factor = 1;
+  cinfo.raw_data_in = TRUE;
+  jpeg_start_compress(&cinfo, TRUE);
+
+  // Feed one iMCU row per call: 16 luma lines + 8 chroma lines. The last row
+  // is edge-padded (extra pointers alias the final valid line); libjpeg crops
+  // the output back to image_height.
+  const int y_lines = DCTSIZE * cinfo.comp_info[0].v_samp_factor;  // 16
+  const int c_lines = DCTSIZE * cinfo.comp_info[1].v_samp_factor;  // 8
+  std::vector<JSAMPROW> y_rows(static_cast<std::size_t>(y_lines));
+  std::vector<JSAMPROW> cb_rows(static_cast<std::size_t>(c_lines));
+  std::vector<JSAMPROW> cr_rows(static_cast<std::size_t>(c_lines));
+  std::array<JSAMPARRAY, 3> planes{y_rows.data(), cb_rows.data(), cr_rows.data()};
+
+  while (cinfo.next_scanline < cinfo.image_height) {
+    const std::uint32_t base = cinfo.next_scanline;
+    for (int i = 0; i < y_lines; ++i) {
+      const std::uint32_t line = std::min(base + static_cast<std::uint32_t>(i), height - 1U);
+      const std::uint8_t* row = y + (static_cast<std::size_t>(line) * y_stride);
+      // libjpeg reads (never writes) the input during compress; shed const.
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
+      y_rows[static_cast<std::size_t>(i)] = const_cast<JSAMPROW>(row);
+    }
+    const std::uint32_t cbase = base / 2U;
+    for (int i = 0; i < c_lines; ++i) {
+      const std::uint32_t line = std::min(cbase + static_cast<std::uint32_t>(i), ch - 1U);
+      cb_rows[static_cast<std::size_t>(i)] = cb.data() + (static_cast<std::size_t>(line) * cw);
+      cr_rows[static_cast<std::size_t>(i)] = cr.data() + (static_cast<std::size_t>(line) * cw);
+    }
+    (void)jpeg_write_raw_data(&cinfo, planes.data(), static_cast<JDIMENSION>(y_lines));
   }
 
   jpeg_finish_compress(&cinfo);

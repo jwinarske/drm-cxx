@@ -130,6 +130,11 @@ if not camera_feature.disabled()
     if has_blend2d
       camera_deps += blend2d_dep
       camera_args += '-DCAMERA_STATUS_HAS_BLEND2D=1'
+      # NV12 -> JPEG snapshot ('R' key). The write_jpg_nv12 symbol lives in the
+      # library only when both Blend2D and libjpeg are on, so gate on both.
+      if has_libjpeg
+        camera_args += '-DCAMERA_HAS_JPG=1'
+      endif
     endif
     # VAAPI MJPEG decode (auto-feature). libva + libva-drm together
     # unlock zero-copy JPEG -> NV12 -> scanout on AMD/Intel; missing
