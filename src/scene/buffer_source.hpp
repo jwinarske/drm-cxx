@@ -36,6 +36,7 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <system_error>
@@ -125,6 +126,31 @@ struct AcquiredBuffer {
   void* opaque{nullptr};
   std::optional<drm::sync::SyncFence> acquire_fence;
   std::vector<DamageRect> damage;
+};
+
+/// A borrowed view of a source buffer's DMA-BUF planes, for a consumer
+/// that imports the buffer directly (e.g. `GlCompositor` via
+/// `EGL_EXT_image_dma_buf_import`) instead of reading CPU pixels through
+/// `map()`. Returned by `export_dma_buf()` for the currently-acquired
+/// buffer.
+///
+/// The `fds` are **borrowed**: they stay owned by the source and are
+/// valid only until the matching `release()` of the current buffer. The
+/// consumer must NOT close them — an EGLImage import references the fds
+/// internally, so no dup is needed. `n_planes` DRM planes are described;
+/// plane `p` imports from `fds[p]` at `offsets[p]` / `pitches[p]`.
+/// Single-fd multi-plane formats (NV12) repeat the same fd across planes
+/// with distinct offsets. `drm_fourcc` / `modifier` / `width` / `height`
+/// match `format()`.
+struct DmaBufDesc {
+  std::array<int, 4> fds{{-1, -1, -1, -1}};
+  std::array<std::uint32_t, 4> offsets{};
+  std::array<std::uint32_t, 4> pitches{};
+  std::uint32_t n_planes{0};
+  std::uint32_t drm_fourcc{0};
+  std::uint64_t modifier{0};
+  std::uint32_t width{0};
+  std::uint32_t height{0};
 };
 
 /// Polymorphic interface for "where does this layer's content come
@@ -233,6 +259,25 @@ class LayerBufferSource {
   /// composition and they stay dropped for the frame.
   [[nodiscard]] virtual drm::expected<drm::BufferMapping, std::error_code> map(
       drm::MapAccess /*access*/) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
+  }
+
+  /// Export the currently-acquired buffer's DMA-BUF planes so a consumer
+  /// can import the buffer directly — the GPU compositor's EGLImage path —
+  /// instead of reading CPU pixels through `map()`. Mirrors `map()`'s
+  /// contract: the default returns `errc::function_not_supported`, so a
+  /// source that can't (or needn't) export is simply never import-
+  /// composited. DMA-BUF-backed sources (`ExternalDmaBufSource` /
+  /// `ExternalDmaBufRing`, `V4l2DecoderSource`) override it. The returned
+  /// `DmaBufDesc::fds` are borrowed and valid only between `acquire()` and
+  /// the matching `release()` — see `DmaBufDesc`.
+  ///
+  /// This is the escape from the `map()`-uncompositable trap: a source
+  /// whose pixels never reach CPU memory (a V4L2 camera capture buffer)
+  /// can still be composited by importing its DMA-BUF, so the layer no
+  /// longer blanks when the allocator can't place it on a plane.
+  [[nodiscard]] virtual drm::expected<DmaBufDesc, std::error_code> export_dma_buf() {
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::function_not_supported));
   }

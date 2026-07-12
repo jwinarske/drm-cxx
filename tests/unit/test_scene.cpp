@@ -23,6 +23,7 @@
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/composite_canvas.hpp>
+#include <drm-cxx/scene/composition_target.hpp>
 #include <drm-cxx/scene/display_params.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/gbm_buffer_source.hpp>
@@ -507,4 +508,45 @@ TEST(SceneLayerDescPin, DefaultsToNoPin) {
 TEST(SceneCommitReportPin, PinsFailedDefaultsToZero) {
   const drm::scene::CommitReport r;
   EXPECT_EQ(r.pins_failed, 0U);
+}
+
+namespace {
+// Minimal LayerBufferSource implementing only the pure virtuals, to
+// exercise the base-class export_dma_buf() default (non-exporting sources
+// stay uncompositable via the DMA-BUF import path).
+class StubSource : public drm::scene::LayerBufferSource {
+ public:
+  drm::expected<drm::scene::AcquiredBuffer, std::error_code> acquire() override {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+  void release(drm::scene::AcquiredBuffer /*acquired*/) noexcept override {}
+  [[nodiscard]] drm::scene::BindingModel binding_model() const noexcept override {
+    return drm::scene::BindingModel::SceneSubmitsFbId;
+  }
+  [[nodiscard]] drm::scene::SourceFormat format() const noexcept override { return {}; }
+};
+}  // namespace
+
+TEST(SceneDmaBufExport, BaseDefaultIsUnsupported) {
+  StubSource s;
+  auto r = s.export_dma_buf();
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::function_not_supported));
+}
+
+TEST(SceneDmaBufDesc, ZeroInitDefaults) {
+  const drm::scene::DmaBufDesc d;
+  EXPECT_EQ(d.n_planes, 0U);
+  EXPECT_EQ(d.drm_fourcc, 0U);
+  EXPECT_EQ(d.modifier, 0U);
+  EXPECT_EQ(d.fds.at(0), -1);
+  EXPECT_EQ(d.offsets.at(0), 0U);
+}
+
+TEST(SceneCompositeSrcDmaBuf, DefaultsToNoDmaBuf) {
+  const drm::scene::CompositeSrc s;
+  EXPECT_EQ(s.dma_n_planes, 0U);
+  EXPECT_EQ(s.dma_fds.at(0), -1);
+  EXPECT_EQ(s.dma_modifier, 0U);
 }
