@@ -7,7 +7,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 
-#include <drm/drm_mode.h>
+#include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <cerrno>
