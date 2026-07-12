@@ -26,6 +26,7 @@
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 
+#include <array>
 #include <cstdint>
 #include <system_error>
 
@@ -62,6 +63,19 @@ struct CompositeSrc {
   /// (CPU path only; the GPU path ignores it for now). nullptr leaves the
   /// source pixels untouched.
   const drm::display::ToneMapper* tone_mapper{nullptr};
+
+  /// Optional direct DMA-BUF import path. When `dma_n_planes > 0`, the GPU
+  /// compositor imports these planes as an EGLImage and samples them
+  /// directly, ignoring `pixels` (which may be empty for a source with no
+  /// CPU mapping — a camera / V4L2 layer that would otherwise blank). The
+  /// CPU `CompositeCanvas` cannot import DMA-BUFs and skips such a source.
+  /// The fds are borrowed (owned by the layer's source; not closed here);
+  /// see `DmaBufDesc` in buffer_source.hpp. `dma_fourcc` is `drm_fourcc`.
+  std::array<int, 4> dma_fds{{-1, -1, -1, -1}};
+  std::array<std::uint32_t, 4> dma_offsets{};
+  std::array<std::uint32_t, 4> dma_pitches{};
+  std::uint32_t dma_n_planes{0};
+  std::uint64_t dma_modifier{0};
 };
 
 /// Rectangles passed to blend(). Both are signed because dst_rect can

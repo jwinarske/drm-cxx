@@ -111,10 +111,28 @@ class ExternalDmaBufSource : public LayerBufferSource {
     return BindingModel::SceneSubmitsFbId;
   }
   [[nodiscard]] SourceFormat format() const noexcept override { return format_; }
-  // map() inherits the base default — foreign sources do not expose
-  // a CPU mapping. Layers backed by an ExternalDmaBufSource that the
-  // allocator can't place on a hardware plane will be dropped this
-  // frame; the composition fallback cannot rescue them.
+  // map() inherits the base default — foreign sources expose no CPU
+  // mapping. Such a layer is compositable only via export_dma_buf()
+  // below (the GPU EGLImage import path); on GPU-less builds it is
+  // dropped when the allocator finds no plane for it.
+  [[nodiscard]] drm::expected<DmaBufDesc, std::error_code> export_dma_buf() override {
+    if (plane_count_ == 0) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+    DmaBufDesc d;
+    d.n_planes = static_cast<std::uint32_t>(plane_count_);
+    d.drm_fourcc = format_.drm_fourcc;
+    d.modifier = format_.modifier;
+    d.width = format_.width;
+    d.height = format_.height;
+    for (std::size_t i = 0; i < plane_count_; ++i) {
+      d.fds.at(i) = planes_.at(i).duped_fd;
+      d.offsets.at(i) = planes_.at(i).offset;
+      d.pitches.at(i) = planes_.at(i).pitch;
+    }
+    return d;
+  }
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;

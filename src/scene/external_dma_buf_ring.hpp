@@ -176,6 +176,33 @@ class ExternalDmaBufRing : public LayerBufferSource {
     return BindingModel::SceneSubmitsFbId;
   }
   [[nodiscard]] SourceFormat format() const noexcept override { return format_; }
+  // Export the currently-scanning slot's DMA-BUF planes for the GPU
+  // compositor's EGLImage import path (borrowed fds — see DmaBufDesc).
+  // Commit-thread only, like scanning_slot_; nullopt before the first
+  // acquire() returns function_not_supported.
+  [[nodiscard]] drm::expected<DmaBufDesc, std::error_code> export_dma_buf() override {
+    if (!scanning_slot_.has_value() || *scanning_slot_ >= slots_.size()) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+    const SlotRecord& s = slots_.at(*scanning_slot_);
+    if (s.plane_count == 0) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+    DmaBufDesc d;
+    d.n_planes = static_cast<std::uint32_t>(s.plane_count);
+    d.drm_fourcc = format_.drm_fourcc;
+    d.modifier = s.modifier;
+    d.width = format_.width;
+    d.height = format_.height;
+    for (std::size_t i = 0; i < s.plane_count; ++i) {
+      d.fds.at(i) = s.planes.at(i).duped_fd;
+      d.offsets.at(i) = s.planes.at(i).offset;
+      d.pitches.at(i) = s.planes.at(i).pitch;
+    }
+    return d;
+  }
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
