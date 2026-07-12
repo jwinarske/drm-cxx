@@ -28,6 +28,7 @@
 #include <drm-cxx/detail/span.hpp>
 
 #include <drm_fourcc.h>
+#include <gbm.h>
 #include <xf86drmMode.h>
 
 #include <cstddef>
@@ -35,6 +36,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -122,6 +124,84 @@ TEST(GlCompositorReadback, RedSquareLandsTopLeftInRedChannel) {
   EXPECT_EQ(out[0], 0x00U);
   EXPECT_EQ(out[1], 0x00U);
   EXPECT_EQ(out[2], 0x00U);
+}
+
+// Import a dma-buf directly and verify the imported texture samples in the
+// correct channel order (no CPU pixels, so only the EGLImage path can produce
+// output). This is the escape from the map()-uncompositable trap for camera
+// layers. Skips when the stack can't import dma-bufs.
+TEST(GlCompositorReadback, DmaBufImportSamplesCorrectChannels) {
+  auto dev = open_gl_kms_device();
+  if (!dev) {
+    GTEST_SKIP() << "no GL-capable KMS card — GPU path not exercisable";
+  }
+  constexpr std::uint32_t k_canvas = 256;
+  constexpr std::uint32_t k_sq = 64;
+  drm::scene::CompositeCanvasConfig cfg;
+  cfg.canvas_width = k_canvas;
+  cfg.canvas_height = k_canvas;
+  cfg.output_fourcc = DRM_FORMAT_ARGB8888;
+  cfg.allow_software_renderer = true;
+  auto comp = drm::scene::GlCompositor::create(*dev, cfg);
+  ASSERT_TRUE(comp.has_value()) << comp.error().message();
+  if (!(*comp)->dmabuf_import_supported()) {
+    GTEST_SKIP() << "EGL_EXT_image_dma_buf_import not available on this stack";
+  }
+
+  // Allocate a linear ARGB gbm bo and fill it opaque red (memory B,G,R,A).
+  gbm_device* gbm = gbm_create_device(dev->fd());
+  ASSERT_NE(gbm, nullptr);
+  gbm_bo* bo =
+      gbm_bo_create(gbm, k_sq, k_sq, GBM_FORMAT_ARGB8888, GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
+  if (bo == nullptr) {
+    gbm_device_destroy(gbm);
+    GTEST_SKIP() << "gbm_bo_create(ARGB, LINEAR) unsupported on this stack";
+  }
+  void* map_data = nullptr;
+  std::uint32_t map_stride = 0;
+  void* ptr = gbm_bo_map(bo, 0, 0, k_sq, k_sq, GBM_BO_TRANSFER_WRITE, &map_stride, &map_data);
+  ASSERT_NE(ptr, nullptr);
+  auto* pix = static_cast<std::uint8_t*>(ptr);
+  for (std::uint32_t y = 0; y < k_sq; ++y) {
+    for (std::uint32_t x = 0; x < k_sq; ++x) {
+      std::uint8_t* p = pix + (static_cast<std::size_t>(y) * map_stride) + (x * 4U);
+      p[0] = 0x00U;  // B
+      p[1] = 0x00U;  // G
+      p[2] = 0xFFU;  // R
+      p[3] = 0xFFU;  // A
+    }
+  }
+  gbm_bo_unmap(bo, map_data);
+
+  const int fd = gbm_bo_get_fd(bo);
+  ASSERT_GE(fd, 0);
+  drm::scene::CompositeSrc src;
+  src.src_width = k_sq;
+  src.src_height = k_sq;
+  src.drm_fourcc = DRM_FORMAT_ARGB8888;
+  src.dma_n_planes = 1;
+  src.dma_fds[0] = fd;
+  src.dma_offsets[0] = static_cast<std::uint32_t>(gbm_bo_get_offset(bo, 0));
+  src.dma_pitches[0] = gbm_bo_get_stride(bo);
+  src.dma_modifier = gbm_bo_get_modifier(bo);
+  // pixels intentionally left empty: only the dma-buf import path can draw here.
+
+  (*comp)->begin_frame();
+  (*comp)->clear();
+  (*comp)->blend(src, drm::scene::CompositeRect{0, 0, k_sq, k_sq},
+                 drm::scene::CompositeRect{0, 0, k_sq, k_sq});
+  ASSERT_TRUE((*comp)->flush().has_value());
+
+  std::vector<std::uint8_t> readpx;
+  ASSERT_TRUE((*comp)->read_back(readpx).has_value());
+  ASSERT_EQ(readpx.size(), static_cast<std::size_t>(k_canvas) * k_canvas * 4U);
+  const std::uint8_t* in = readpx.data() + ((static_cast<std::size_t>(10) * k_canvas + 10) * 4U);
+  EXPECT_EQ(in[2], 0xFFU) << "imported dma-buf: red channel not sampled";
+  EXPECT_EQ(in[0], 0x00U) << "imported dma-buf: blue set — wrong channel order (swizzle applied?)";
+
+  ::close(fd);
+  gbm_bo_destroy(bo);
+  gbm_device_destroy(gbm);
 }
 
 // Guard invariant: with the default config (allow_software_renderer == false),
