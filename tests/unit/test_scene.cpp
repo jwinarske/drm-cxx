@@ -440,7 +440,38 @@ TEST(SceneLayerIdentityTag, LayerCtorStoresAndReturnsValue) {
   int sentinel = 0;
   // The scene never dereferences the tag — any non-null pointer the
   // caller hands over must round-trip verbatim.
-  const drm::scene::Layer layer{h,   /*source=*/nullptr, dp, drm::planes::ContentType::UI,
-                                60U, &sentinel};
+  const drm::scene::Layer layer{h,   /*source=*/nullptr, dp,       drm::planes::ContentType::UI,
+                                60U, /*app_priority=*/0, &sentinel};
   EXPECT_EQ(layer.identity_tag(), &sentinel);
+}
+
+TEST(SceneLayerAppPriority, CtorDefaultsToZero) {
+  const drm::scene::LayerHandle h{1, 0};
+  const drm::scene::DisplayParams dp;
+  // 5-arg legacy form leaves app_priority at its default.
+  const drm::scene::Layer layer{h, /*source=*/nullptr, dp, drm::planes::ContentType::Generic, 0U};
+  EXPECT_EQ(layer.app_priority(), 0U);
+}
+
+TEST(SceneLayerAppPriority, CtorStoresAndReturnsValue) {
+  const drm::scene::LayerHandle h{2, 0};
+  const drm::scene::DisplayParams dp;
+  const drm::scene::Layer layer{h,
+                                /*source=*/nullptr,
+                                dp,
+                                drm::planes::ContentType::Video,
+                                /*update_hint_hz=*/60U,
+                                /*app_priority=*/200};
+  EXPECT_EQ(layer.app_priority(), 200U);
+}
+
+TEST(SceneLayerAppPriority, SetAppPriorityFlagsHintsDirty) {
+  auto layer = make_clean_layer();
+  EXPECT_FALSE(layer.hints_dirty());
+  layer.set_app_priority(5);
+  EXPECT_EQ(layer.app_priority(), 5U);
+  // Priority feeds plane scoring, so a change must drop the allocator
+  // warm-start — same contract as set_content_type / set_update_hint.
+  EXPECT_TRUE(layer.hints_dirty());
+  EXPECT_TRUE(layer.is_dirty());
 }
