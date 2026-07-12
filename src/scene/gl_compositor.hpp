@@ -95,11 +95,17 @@ class GlCompositor : public CompositionTarget {
   // Tear EGL down (surface/context/display) — must run before source_ dies.
   void teardown_egl() noexcept;
 
-  // Import a single-plane RGB CompositeSrc's dma-buf as an EGLImage
+  // Import a CompositeSrc's dma-buf (1..3 planes) as an EGLImage
   // (EGL_LINUX_DMA_BUF_EXT) for direct sampling. Returns EGL_NO_IMAGE_KHR when
   // the import can't be done; the caller then falls back to the CPU path. The
   // descriptor's fds are borrowed — not closed here.
   [[nodiscard]] void* import_dma_buf_image(const CompositeSrc& src) noexcept;
+
+  // Upload the shared quad geometry for `dst_rect`<-`src_rect` and issue the
+  // draw through the given program's a_pos/a_uv attribute locations. Shared by
+  // the sampler2D (RGB) and samplerExternalOES (NV12) blend paths.
+  void draw_source_quad(std::int32_t attr_pos, std::int32_t attr_uv, const CompositeRect& src_rect,
+                        const CompositeRect& dst_rect, const CompositeSrc& src) const noexcept;
 
   const drm::Device* dev_{nullptr};
   std::unique_ptr<GbmSurfaceSource> source_;
@@ -118,6 +124,16 @@ class GlCompositor : public CompositionTarget {
   std::int32_t loc_bgra_{-1};
   std::int32_t attr_pos_{-1};
   std::int32_t attr_uv_{-1};
+
+  // Second program for planar-YUV (NV12) sources: a samplerExternalOES that the
+  // driver YUV->RGB-converts. Built only when GL_OES_EGL_image_external is
+  // advertised; RGB import works without it.
+  std::uint32_t program_ext_{0};
+  std::uint32_t texture_ext_{0};  // GL_TEXTURE_EXTERNAL_OES
+  std::int32_t loc_alpha_ext_{-1};
+  std::int32_t loc_tex_ext_{-1};
+  std::int32_t attr_pos_ext_{-1};
+  std::int32_t attr_uv_ext_{-1};
 
   std::uint32_t width_{0};
   std::uint32_t height_{0};

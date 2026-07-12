@@ -48,6 +48,10 @@ inline constexpr GLenum k_static_draw = 0x88E4;
 inline constexpr GLenum k_float = 0x1406;
 inline constexpr GLenum k_unsigned_byte = 0x1401;
 inline constexpr GLenum k_texture_2d = 0x0DE1;
+// GL_TEXTURE_EXTERNAL_OES — the sampler target an EGLImage from a planar-YUV
+// dma-buf binds to (GL_OES_EGL_image_external); the driver samples it as RGB.
+inline constexpr GLenum k_texture_external_oes = 0x8D65;
+inline constexpr GLenum k_extensions = 0x1F03;  // GL_EXTENSIONS
 inline constexpr GLenum k_texture0 = 0x84C0;
 inline constexpr GLenum k_rgba = 0x1908;
 inline constexpr GLenum k_tex_min_filter = 0x2801;
