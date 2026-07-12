@@ -190,10 +190,10 @@ class V4l2DecoderSource : public LayerBufferSource {
 
   // map() inherits the base default — decoder CAPTURE buffers are not
   // generally CPU-mappable in a useful way (NV12 with vendor strides,
-  // potentially in carveout memory). Layers backed by a
-  // V4l2DecoderSource that the allocator can't place on a hardware
-  // plane will be dropped this frame; the composition fallback cannot
-  // rescue them.
+  // potentially in carveout memory). Such a layer is compositable only
+  // via export_dma_buf() below (the GPU EGLImage import path); on
+  // GPU-less builds it is dropped when the allocator finds no plane.
+  [[nodiscard]] drm::expected<DmaBufDesc, std::error_code> export_dma_buf() override;
 
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(

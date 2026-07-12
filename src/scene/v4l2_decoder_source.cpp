@@ -474,6 +474,11 @@ struct V4l2DecoderSource::Impl {
   // derive_drm_plane_layout against the new drm_fd without another
   // S_FMT round-trip.
   v4l2_format capture_format_echo{};
+  // DRM plane layout (per-DRM-plane V4L2-fd index / offset / pitch) derived
+  // from capture_format_echo; kept so export_dma_buf() can describe the
+  // current CAPTURE buffer's planes without re-deriving. Refreshed on
+  // reconfigure.
+  DrmPlaneLayout capture_layout{};
   std::vector<V4l2CaptureBuffer> capture_buffers;
 
   // OUTPUT side. submit_bitstream pulls a slot index off output_free,
@@ -493,6 +498,10 @@ struct V4l2DecoderSource::Impl {
   // (V4l2CaptureBuffer::acquired) so several can be outstanding at once -- a KMS
   // present loop keeps the displayed frame acquired while acquiring the next.
   int capture_ready_idx{-1};
+  // Slot index the most recent acquire() handed out (-1 == none). Lets
+  // export_dma_buf() describe the buffer the scene is currently
+  // compositing (acquire() -> export_dma_buf() -> release() in one frame).
+  int last_acquired_idx{-1};
 
   // Sticky decoder-state flags surfaced by drive() and queried by
   // acquire(). source_change_seen disables the source permanently
@@ -761,6 +770,7 @@ drm::expected<std::unique_ptr<V4l2DecoderSource>, std::error_code> V4l2DecoderSo
   // V4L2 surfaces in v1 are LINEAR (DRM_FORMAT_MOD_LINEAR == 0).
   src->impl_->capture_format = SourceFormat{cfg.capture_fourcc, 0, cap_w, cap_h};
   src->impl_->capture_format_echo = cap_fmt;
+  src->impl_->capture_layout = layout;
   src->impl_->capture_buffers = std::move(capture_buffers);
   src->impl_->output_buffers = std::move(output_buffers);
   src->impl_->output_free = std::move(output_free);
@@ -865,6 +875,8 @@ std::error_code V4l2DecoderSource::reconfigure_capture_for_source_change() noexc
   impl_->capture_num_planes = cap_num_planes;
   impl_->capture_format_echo = cap_fmt;
   impl_->capture_format = SourceFormat{impl_->cfg.capture_fourcc, 0, cap_w, cap_h};
+  impl_->capture_layout = layout;
+  impl_->last_acquired_idx = -1;  // the old buffer ring is gone
   impl_->capture_streaming = true;
   return {};
 }
@@ -1077,11 +1089,49 @@ drm::expected<AcquiredBuffer, std::error_code> V4l2DecoderSource::acquire() {
   // capture_ready_idx clears -- the next decoded frame refills it.
   impl_->capture_buffers.at(idx).acquired = true;
   impl_->capture_ready_idx = -1;
+  impl_->last_acquired_idx = static_cast<int>(idx);
   AcquiredBuffer acq;
   acq.fb_id = fb_id;
   // NOLINTNEXTLINE(performance-no-int-to-ptr) -- opaque cookie, not a real address.
   acq.opaque = reinterpret_cast<void*>(static_cast<std::uintptr_t>(idx) + 1U);
   return acq;
+}
+
+drm::expected<DmaBufDesc, std::error_code> V4l2DecoderSource::export_dma_buf() {
+  if (!impl_ || impl_->last_acquired_idx < 0) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
+  }
+  auto const idx = static_cast<std::uint32_t>(impl_->last_acquired_idx);
+  if (idx >= impl_->capture_buffers.size()) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
+  }
+  const V4l2CaptureBuffer& buf = impl_->capture_buffers.at(idx);
+  const DrmPlaneLayout& layout = impl_->capture_layout;
+  // fb_id == 0 means the ring was dropped by on_session_paused (no
+  // presentable frame right now); an empty layout means it was never derived.
+  if (buf.fb_id == 0 || layout.num_drm_planes == 0) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
+  }
+  DmaBufDesc d;
+  d.n_planes = layout.num_drm_planes;
+  d.drm_fourcc = impl_->capture_format.drm_fourcc;
+  d.modifier = impl_->capture_format.modifier;  // 0 == DRM_FORMAT_MOD_LINEAR
+  d.width = impl_->capture_format.width;
+  d.height = impl_->capture_format.height;
+  for (std::uint32_t p = 0; p < layout.num_drm_planes && p < d.fds.size(); ++p) {
+    const std::uint8_t v4l2_idx = layout.v4l2_plane_idx.at(p);
+    if (v4l2_idx >= buf.num_planes || buf.dmabuf_fd.at(v4l2_idx) < 0) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::function_not_supported));
+    }
+    d.fds.at(p) = buf.dmabuf_fd.at(v4l2_idx);
+    d.offsets.at(p) = layout.offset.at(p);
+    d.pitches.at(p) = layout.pitch.at(p);
+  }
+  return d;
 }
 
 bool V4l2DecoderSource::has_fresh_content() const noexcept {
