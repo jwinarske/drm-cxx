@@ -448,6 +448,13 @@ void* GlCompositor::import_dma_buf_image(const CompositeSrc& src) noexcept {
                           static_cast<EGLClientBuffer>(nullptr), attribs.data());
 }
 
+bool GlCompositor::supports_dma_buf_import(std::uint32_t drm_fourcc) const noexcept {
+  // blend() imports single-plane RGB (ARGB8888 / XRGB8888) today; NV12 and
+  // other planar YUV need the external-sampler variant and are not yet handled.
+  return dmabuf_import_supported_ &&
+         ((drm_fourcc == DRM_FORMAT_ARGB8888) || (drm_fourcc == DRM_FORMAT_XRGB8888));
+}
+
 void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
                          const CompositeRect& dst_rect) noexcept {
   if (!frame_open_) {

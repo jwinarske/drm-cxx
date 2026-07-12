@@ -66,6 +66,7 @@ class GlCompositor : public CompositionTarget {
   [[nodiscard]] std::uint32_t height() const noexcept override { return height_; }
   [[nodiscard]] std::uint32_t drm_fourcc() const noexcept override { return fourcc_; }
   [[nodiscard]] bool armable() const noexcept override { return armable_; }
+  [[nodiscard]] bool supports_dma_buf_import(std::uint32_t drm_fourcc) const noexcept override;
 
   /// True when this compositor can import a layer's dma-buf as an EGLImage and
   /// sample it directly (EGL_EXT_image_dma_buf_import plus eglCreateImageKHR /

@@ -127,6 +127,17 @@ class CompositionTarget {
   /// True when the target can be armed (allocated, not session-paused).
   [[nodiscard]] virtual bool armable() const noexcept = 0;
 
+  /// True when this target can composite a source directly from its
+  /// DMA-BUF of `drm_fourcc` (the GPU EGLImage path) instead of reading
+  /// CPU pixels — which lets the scene rescue a `map()`-less source (a
+  /// camera / V4L2 layer) rather than dropping it. The CPU
+  /// `CompositeCanvas` can't import DMA-BUFs, so it uses the default
+  /// `false`. A `GlCompositor` returns true only for the formats its
+  /// blend path handles.
+  [[nodiscard]] virtual bool supports_dma_buf_import(std::uint32_t /*drm_fourcc*/) const noexcept {
+    return false;
+  }
+
   /// Drop GEM/FB state without ioctls — the revoked fd can't service them.
   virtual void on_session_paused() noexcept = 0;
   /// Re-allocate against `new_dev` after a session resume.
