@@ -93,8 +93,27 @@ void main() {
 }
 )";
 
-// Compile + link the quad program. Returns 0 on failure.
-[[nodiscard]] std::uint32_t build_program(const drm::detail::GlesLoader& gl) noexcept {
+// Planar-YUV (NV12) variant: samples a GL_TEXTURE_EXTERNAL_OES bound to the
+// EGLImage of a YUV dma-buf. The driver does the YUV->RGB conversion inside the
+// sampler, so this shader gets RGB straight (no .bgra swizzle) and treats the
+// source as opaque (NV12 has no alpha). Per-layer alpha still scales all four
+// channels for premultiplied SRC_OVER, matching the RGB path.
+constexpr const char* k_fragment_ext_src = R"(
+#extension GL_OES_EGL_image_external : require
+precision highp float;
+varying vec2 v_uv;
+uniform samplerExternalOES u_tex;
+uniform float u_alpha;
+void main() {
+  vec3 rgb = texture2D(u_tex, v_uv).rgb;
+  gl_FragColor = vec4(rgb, 1.0) * u_alpha;
+}
+)";
+
+// Compile + link a quad program with the given fragment source. Returns 0 on
+// failure.
+[[nodiscard]] std::uint32_t build_program(const drm::detail::GlesLoader& gl,
+                                          const char* fragment_src) noexcept {
   auto compile = [&](drm::detail::GLenum type, const char* src) -> std::uint32_t {
     const std::uint32_t sh = gl.create_shader(type);
     if (sh == 0) {
@@ -117,7 +136,7 @@ void main() {
   };
 
   const std::uint32_t vs = compile(drm::detail::gl::k_vertex_shader, k_vertex_src);
-  const std::uint32_t fs = compile(drm::detail::gl::k_fragment_shader, k_fragment_src);
+  const std::uint32_t fs = compile(drm::detail::gl::k_fragment_shader, fragment_src);
   if (vs == 0 || fs == 0) {
     if (vs != 0) {
       gl.delete_shader(vs);
@@ -323,7 +342,7 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
     }
   }
 
-  program_ = build_program(gl);
+  program_ = build_program(gl, k_fragment_src);
   if (program_ == 0) {
     teardown_egl();
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
@@ -348,6 +367,29 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
       (gl.egl_image_target_texture_2d != nullptr);
   if (dmabuf_import_supported_) {
     drm::log_info("gl_compositor: EGL dma-buf import available (EGLImage composition path)");
+  }
+
+  // Planar-YUV (NV12) import needs the GLES GL_OES_EGL_image_external extension
+  // (samplerExternalOES) on top of the dma-buf import capability. Optional: when
+  // it (or its program) is unavailable, RGB import still works and NV12 sources
+  // stay on the drop/CPU path. Probing GL_EXTENSIONS first avoids a spurious
+  // shader-compile warning on stacks without the extension.
+  if (dmabuf_import_supported_ && (gl.get_string != nullptr)) {
+    // glGetString returns unsigned char*; the extension string is plain ASCII.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    const auto* gl_exts =
+        reinterpret_cast<const char*>(gl.get_string(drm::detail::gl::k_extensions));
+    if (drm::detail::extension_present(gl_exts, "GL_OES_EGL_image_external")) {
+      program_ext_ = build_program(gl, k_fragment_ext_src);
+      if (program_ext_ != 0) {
+        loc_tex_ext_ = gl.get_uniform_location(program_ext_, "u_tex");
+        loc_alpha_ext_ = gl.get_uniform_location(program_ext_, "u_alpha");
+        attr_pos_ext_ = gl.get_attrib_location(program_ext_, "a_pos");
+        attr_uv_ext_ = gl.get_attrib_location(program_ext_, "a_uv");
+        gl.gen_textures(1, &texture_ext_);
+        drm::log_info("gl_compositor: external-sampler NV12 dma-buf import available");
+      }
+    }
   }
 
   armable_ = true;
@@ -377,8 +419,10 @@ void GlCompositor::teardown_egl() noexcept {
   surface_ = nullptr;
   // GL objects belonged to the destroyed context.
   program_ = 0;
+  program_ext_ = 0;
   vbo_ = 0;
   texture_ = 0;
+  texture_ext_ = 0;
   frame_open_ = false;
 }
 
@@ -423,7 +467,22 @@ void* GlCompositor::import_dma_buf_image(const CompositeSrc& src) noexcept {
   const bool has_modifier = (src.dma_modifier != 0U) &&
                             (src.dma_modifier != DRM_FORMAT_MOD_INVALID) &&
                             (egl.query_dma_buf_modifiers != nullptr);
-  std::array<EGLint, 20> attribs{};
+  // Per-plane attribute enums (PLANE0..2 — the base dma_buf_import extension;
+  // enough for NV12 (2 planes) and YUV420 (3)). The modifier LO/HI enums come
+  // with import_modifiers, already gated by `has_modifier`.
+  constexpr std::array<EGLint, 3> fd_attr{EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT,
+                                          EGL_DMA_BUF_PLANE2_FD_EXT};
+  constexpr std::array<EGLint, 3> off_attr{
+      EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT, EGL_DMA_BUF_PLANE2_OFFSET_EXT};
+  constexpr std::array<EGLint, 3> pitch_attr{
+      EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT, EGL_DMA_BUF_PLANE2_PITCH_EXT};
+  constexpr std::array<EGLint, 3> modlo_attr{EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
+                                             EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT,
+                                             EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT};
+  constexpr std::array<EGLint, 3> modhi_attr{EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,
+                                             EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT,
+                                             EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT};
+  std::array<EGLint, 40> attribs{};
   std::size_t i = 0;
   attribs.at(i++) = EGL_WIDTH;
   attribs.at(i++) = static_cast<EGLint>(src.src_width);
@@ -431,17 +490,20 @@ void* GlCompositor::import_dma_buf_image(const CompositeSrc& src) noexcept {
   attribs.at(i++) = static_cast<EGLint>(src.src_height);
   attribs.at(i++) = EGL_LINUX_DRM_FOURCC_EXT;
   attribs.at(i++) = static_cast<EGLint>(src.drm_fourcc);
-  attribs.at(i++) = EGL_DMA_BUF_PLANE0_FD_EXT;
-  attribs.at(i++) = src.dma_fds.at(0);
-  attribs.at(i++) = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-  attribs.at(i++) = static_cast<EGLint>(src.dma_offsets.at(0));
-  attribs.at(i++) = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-  attribs.at(i++) = static_cast<EGLint>(src.dma_pitches.at(0));
-  if (has_modifier) {
-    attribs.at(i++) = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-    attribs.at(i++) = static_cast<EGLint>(src.dma_modifier & 0xFFFFFFFFU);
-    attribs.at(i++) = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-    attribs.at(i++) = static_cast<EGLint>(src.dma_modifier >> 32U);
+  const std::size_t n_planes = std::min<std::size_t>(src.dma_n_planes, fd_attr.size());
+  for (std::size_t p = 0; p < n_planes; ++p) {
+    attribs.at(i++) = fd_attr.at(p);
+    attribs.at(i++) = src.dma_fds.at(p);
+    attribs.at(i++) = off_attr.at(p);
+    attribs.at(i++) = static_cast<EGLint>(src.dma_offsets.at(p));
+    attribs.at(i++) = pitch_attr.at(p);
+    attribs.at(i++) = static_cast<EGLint>(src.dma_pitches.at(p));
+    if (has_modifier) {
+      attribs.at(i++) = modlo_attr.at(p);
+      attribs.at(i++) = static_cast<EGLint>(src.dma_modifier & 0xFFFFFFFFU);
+      attribs.at(i++) = modhi_attr.at(p);
+      attribs.at(i++) = static_cast<EGLint>(src.dma_modifier >> 32U);
+    }
   }
   attribs.at(i++) = EGL_NONE;
   return egl.create_image(static_cast<EGLDisplay>(display_), EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
@@ -449,10 +511,12 @@ void* GlCompositor::import_dma_buf_image(const CompositeSrc& src) noexcept {
 }
 
 bool GlCompositor::supports_dma_buf_import(std::uint32_t drm_fourcc) const noexcept {
-  // blend() imports single-plane RGB (ARGB8888 / XRGB8888) today; NV12 and
-  // other planar YUV need the external-sampler variant and are not yet handled.
+  // blend() imports single-plane RGB (ARGB8888 / XRGB8888) via a sampler2D and,
+  // when the external-sampler program built (GL_OES_EGL_image_external), NV12
+  // via a GL_TEXTURE_EXTERNAL_OES sampler that the driver YUV->RGB-converts.
   return dmabuf_import_supported_ &&
-         ((drm_fourcc == DRM_FORMAT_ARGB8888) || (drm_fourcc == DRM_FORMAT_XRGB8888));
+         ((drm_fourcc == DRM_FORMAT_ARGB8888) || (drm_fourcc == DRM_FORMAT_XRGB8888) ||
+          ((program_ext_ != 0) && (drm_fourcc == DRM_FORMAT_NV12)));
 }
 
 void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
@@ -460,13 +524,52 @@ void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
   if (!frame_open_) {
     return;
   }
-  if ((src.drm_fourcc != DRM_FORMAT_ARGB8888) && (src.drm_fourcc != DRM_FORMAT_XRGB8888)) {
-    return;  // same supported-format set as the CPU path
+  const bool is_rgb =
+      (src.drm_fourcc == DRM_FORMAT_ARGB8888) || (src.drm_fourcc == DRM_FORMAT_XRGB8888);
+  const bool is_nv12 = (src.drm_fourcc == DRM_FORMAT_NV12);
+  if (!is_rgb && !is_nv12) {
+    return;  // RGB (CPU path's set) plus NV12 via the external sampler
   }
   if ((src.src_width == 0U) || (src.src_height == 0U) || (dst_rect.w == 0U) || (dst_rect.h == 0U)) {
     return;
   }
   const auto& gl = drm::detail::gles_loader();
+
+  // Planar-YUV path: import the multi-plane dma-buf into a
+  // GL_TEXTURE_EXTERNAL_OES sampler that the driver YUV->RGB-converts. NV12 has
+  // no CPU-upload fallback here (a camera/decoder layer with no map()), so a
+  // failed import just drops the source this frame.
+  if (is_nv12) {
+    if ((program_ext_ == 0) || (src.dma_n_planes < 2U) || (src.dma_fds.at(0) < 0)) {
+      return;
+    }
+    void* const nv12_image = import_dma_buf_image(src);
+    if (nv12_image == EGL_NO_IMAGE_KHR) {
+      return;
+    }
+    gl.active_texture(drm::detail::gl::k_texture0);
+    gl.bind_texture(drm::detail::gl::k_texture_external_oes, texture_ext_);
+    gl.egl_image_target_texture_2d(drm::detail::gl::k_texture_external_oes, nv12_image);
+    gl.tex_parameteri(drm::detail::gl::k_texture_external_oes, drm::detail::gl::k_tex_min_filter,
+                      static_cast<drm::detail::GLint>(drm::detail::gl::k_nearest));
+    gl.tex_parameteri(drm::detail::gl::k_texture_external_oes, drm::detail::gl::k_tex_mag_filter,
+                      static_cast<drm::detail::GLint>(drm::detail::gl::k_nearest));
+    gl.tex_parameteri(drm::detail::gl::k_texture_external_oes, drm::detail::gl::k_tex_wrap_s,
+                      static_cast<drm::detail::GLint>(drm::detail::gl::k_clamp_to_edge));
+    gl.tex_parameteri(drm::detail::gl::k_texture_external_oes, drm::detail::gl::k_tex_wrap_t,
+                      static_cast<drm::detail::GLint>(drm::detail::gl::k_clamp_to_edge));
+    gl.use_program(program_ext_);
+    gl.uniform1i(loc_tex_ext_, 0);
+    gl.uniform1f(loc_alpha_ext_, static_cast<float>(src.plane_alpha) / 65535.0F);
+    draw_source_quad(attr_pos_ext_, attr_uv_ext_, src_rect, dst_rect, src);
+    const auto& egl = drm::detail::egl_loader();
+    if (egl.destroy_image != nullptr) {
+      egl.destroy_image(static_cast<EGLDisplay>(display_), nv12_image);
+    }
+    // Restore the default RGB program for any later blends this frame.
+    gl.use_program(program_);
+    return;
+  }
 
   gl.active_texture(drm::detail::gl::k_texture0);
   gl.bind_texture(drm::detail::gl::k_texture_2d, texture_);
@@ -530,24 +633,7 @@ void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
   // the .bgra swizzle (ARGB8888 bytes uploaded as RGBA).
   gl.uniform1f(loc_bgra_, (egl_image != EGL_NO_IMAGE_KHR) ? 0.0F : 1.0F);
 
-  const auto verts =
-      gl_geom::quad(dst_rect.x, dst_rect.y, dst_rect.w, dst_rect.h, width_, height_, src_rect.x,
-                    src_rect.y, src_rect.w, src_rect.h, src.src_width, src.src_height);
-  gl.buffer_data(drm::detail::gl::k_array_buffer,
-                 static_cast<drm::detail::GLsizeiptr>(sizeof(verts)), verts.data(),
-                 drm::detail::gl::k_static_draw);
-  const auto stride = static_cast<drm::detail::GLsizei>(sizeof(gl_geom::QuadVertex));
-  gl.enable_vertex_attrib_array(static_cast<drm::detail::GLuint>(attr_pos_));
-  gl.vertex_attrib_pointer(static_cast<drm::detail::GLuint>(attr_pos_), 2, drm::detail::gl::k_float,
-                           drm::detail::gl::k_false, stride, nullptr);
-  gl.enable_vertex_attrib_array(static_cast<drm::detail::GLuint>(attr_uv_));
-  // u,v live at byte offset 2*sizeof(float) within each vertex. The
-  // attrib-offset-as-pointer is the canonical GLES2 idiom.
-  // NOLINTNEXTLINE(performance-no-int-to-ptr,cppcoreguidelines-pro-type-reinterpret-cast)
-  const void* uv_offset = reinterpret_cast<const void*>(2 * sizeof(float));
-  gl.vertex_attrib_pointer(static_cast<drm::detail::GLuint>(attr_uv_), 2, drm::detail::gl::k_float,
-                           drm::detail::gl::k_false, stride, uv_offset);
-  gl.draw_arrays(drm::detail::gl::k_triangle_strip, 0, 4);
+  draw_source_quad(attr_pos_, attr_uv_, src_rect, dst_rect, src);
 
   // The texture keeps its EGLImage sibling storage after the target bind, so the
   // image can be destroyed once the draw referencing it is issued. The fds in
@@ -558,6 +644,30 @@ void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
       egl.destroy_image(static_cast<EGLDisplay>(display_), egl_image);
     }
   }
+}
+
+void GlCompositor::draw_source_quad(std::int32_t attr_pos, std::int32_t attr_uv,
+                                    const CompositeRect& src_rect, const CompositeRect& dst_rect,
+                                    const CompositeSrc& src) const noexcept {
+  const auto& gl = drm::detail::gles_loader();
+  const auto verts =
+      gl_geom::quad(dst_rect.x, dst_rect.y, dst_rect.w, dst_rect.h, width_, height_, src_rect.x,
+                    src_rect.y, src_rect.w, src_rect.h, src.src_width, src.src_height);
+  gl.buffer_data(drm::detail::gl::k_array_buffer,
+                 static_cast<drm::detail::GLsizeiptr>(sizeof(verts)), verts.data(),
+                 drm::detail::gl::k_static_draw);
+  const auto stride = static_cast<drm::detail::GLsizei>(sizeof(gl_geom::QuadVertex));
+  gl.enable_vertex_attrib_array(static_cast<drm::detail::GLuint>(attr_pos));
+  gl.vertex_attrib_pointer(static_cast<drm::detail::GLuint>(attr_pos), 2, drm::detail::gl::k_float,
+                           drm::detail::gl::k_false, stride, nullptr);
+  gl.enable_vertex_attrib_array(static_cast<drm::detail::GLuint>(attr_uv));
+  // u,v live at byte offset 2*sizeof(float) within each vertex. The
+  // attrib-offset-as-pointer is the canonical GLES2 idiom.
+  // NOLINTNEXTLINE(performance-no-int-to-ptr,cppcoreguidelines-pro-type-reinterpret-cast)
+  const void* uv_offset = reinterpret_cast<const void*>(2 * sizeof(float));
+  gl.vertex_attrib_pointer(static_cast<drm::detail::GLuint>(attr_uv), 2, drm::detail::gl::k_float,
+                           drm::detail::gl::k_false, stride, uv_offset);
+  gl.draw_arrays(drm::detail::gl::k_triangle_strip, 0, 4);
 }
 
 drm::expected<void, std::error_code> GlCompositor::flush() noexcept {
