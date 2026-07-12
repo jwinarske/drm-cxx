@@ -11,7 +11,9 @@
 // drm::Device, drmModeAddFB2WithModifiers to a stable per-buffer fb_id.
 // `acquire()` returns the most-recently-completed CAPTURE buffer and
 // drops anything older that was sitting in the queue (latest-frame-wins
-// semantics — see roadmap §225). `release()` re-queues the buffer.
+// semantics: a scanout source must never display a stale decoded frame when a
+// newer one has completed, so acquire() drains the CAPTURE queue to the newest
+// ready buffer). `release()` re-queues the buffer.
 //
 // The OUTPUT side (the bitstream that gets *into* the decoder) is the
 // caller's responsibility. The caller pumps coded frames in via
@@ -19,8 +21,8 @@
 // MMAPs OUTPUT buffers internally and copies the bitstream in. Coupling
 // to a demuxer (FFmpeg, GStreamer, a Matroska reader, raw Annex-B
 // streaming) is left to the caller — the source is the V4L2 boundary,
-// not a media pipeline. See roadmap §231 for the integration-pattern
-// rationale.
+// not a media pipeline. Keeping the demuxer out of the source is what lets one
+// decoder front a file, an RTSP stream, or a live camera unchanged.
 //
 // Format scope:
 //   * Codec input: any V4L2 OUTPUT pixel format the decoder advertises

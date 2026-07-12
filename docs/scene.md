@@ -326,7 +326,5 @@ the answer is "this is what the scene is for."
 
 - [`src/scene/README.md`](../src/scene/README.md) — module reference
   (types, headers, lifecycle contract, examples, stability).
-- [`docs/implementation_plan.md`](implementation_plan.md) — the
-  milestone-level roadmap the v1 design choices were drawn from.
 - `examples/allocator/overlay_planes/README.md` — the raw-allocator
   reference example.
