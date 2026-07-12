@@ -71,18 +71,23 @@ void main() {
 }
 )";
 
-// BGRA-in-memory (ARGB8888/XRGB8888) is uploaded as GL_RGBA, so swizzle .bgra
-// back to RGBA. u_opaque forces alpha=1 for XRGB. Output is premultiplied and
-// per-layer alpha scales all four channels, matching CompositeCanvas's
-// premultiplied SRC_OVER under glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
+// The CPU-upload path uploads BGRA-in-memory (ARGB8888/XRGB8888) as GL_RGBA and
+// needs a .bgra swizzle to correct the channel order (u_bgra = 1). A dma-buf
+// imported as an EGLImage is sampled in the correct channel order by the driver,
+// so it must NOT swizzle (u_bgra = 0). u_opaque forces alpha=1 for XRGB. Output
+// is premultiplied and per-layer alpha scales all four channels, matching
+// CompositeCanvas's premultiplied SRC_OVER under
+// glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
 constexpr const char* k_fragment_src = R"(
 precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_tex;
 uniform float u_alpha;
 uniform float u_opaque;
+uniform float u_bgra;
 void main() {
-  vec4 t = texture2D(u_tex, v_uv).bgra;
+  vec4 s = texture2D(u_tex, v_uv);
+  vec4 t = mix(s, s.bgra, u_bgra);
   float a = mix(t.a, 1.0, u_opaque);
   gl_FragColor = vec4(t.rgb, a) * u_alpha;
 }
@@ -326,6 +331,7 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
   loc_tex_ = gl.get_uniform_location(program_, "u_tex");
   loc_alpha_ = gl.get_uniform_location(program_, "u_alpha");
   loc_opaque_ = gl.get_uniform_location(program_, "u_opaque");
+  loc_bgra_ = gl.get_uniform_location(program_, "u_bgra");
   attr_pos_ = gl.get_attrib_location(program_, "a_pos");
   attr_uv_ = gl.get_attrib_location(program_, "a_uv");
   gl.gen_buffers(1, &vbo_);
@@ -406,6 +412,42 @@ void GlCompositor::clear() noexcept {
   gl.clear(drm::detail::gl::k_color_buffer_bit);
 }
 
+void* GlCompositor::import_dma_buf_image(const CompositeSrc& src) noexcept {
+  const auto& egl = drm::detail::egl_loader();
+  if (egl.create_image == nullptr) {
+    return EGL_NO_IMAGE_KHR;
+  }
+  // Only pass an explicit modifier (and the LO/HI attribute pair) for a real
+  // tiling modifier when the stack advertises the modifiers query; LINEAR /
+  // INVALID import without it (the driver assumes linear).
+  const bool has_modifier = (src.dma_modifier != 0U) &&
+                            (src.dma_modifier != DRM_FORMAT_MOD_INVALID) &&
+                            (egl.query_dma_buf_modifiers != nullptr);
+  std::array<EGLint, 20> attribs{};
+  std::size_t i = 0;
+  attribs.at(i++) = EGL_WIDTH;
+  attribs.at(i++) = static_cast<EGLint>(src.src_width);
+  attribs.at(i++) = EGL_HEIGHT;
+  attribs.at(i++) = static_cast<EGLint>(src.src_height);
+  attribs.at(i++) = EGL_LINUX_DRM_FOURCC_EXT;
+  attribs.at(i++) = static_cast<EGLint>(src.drm_fourcc);
+  attribs.at(i++) = EGL_DMA_BUF_PLANE0_FD_EXT;
+  attribs.at(i++) = src.dma_fds.at(0);
+  attribs.at(i++) = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+  attribs.at(i++) = static_cast<EGLint>(src.dma_offsets.at(0));
+  attribs.at(i++) = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+  attribs.at(i++) = static_cast<EGLint>(src.dma_pitches.at(0));
+  if (has_modifier) {
+    attribs.at(i++) = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+    attribs.at(i++) = static_cast<EGLint>(src.dma_modifier & 0xFFFFFFFFU);
+    attribs.at(i++) = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+    attribs.at(i++) = static_cast<EGLint>(src.dma_modifier >> 32U);
+  }
+  attribs.at(i++) = EGL_NONE;
+  return egl.create_image(static_cast<EGLDisplay>(display_), EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
+                          static_cast<EGLClientBuffer>(nullptr), attribs.data());
+}
+
 void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
                          const CompositeRect& dst_rect) noexcept {
   if (!frame_open_) {
@@ -419,34 +461,52 @@ void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
   }
   const auto& gl = drm::detail::gles_loader();
 
-  // GLES2 has no GL_UNPACK_ROW_LENGTH; compact to a tightly-packed staging
-  // buffer when the source stride is padded.
-  const std::size_t tight = static_cast<std::size_t>(src.src_width) * 4U;
-  const std::uint8_t* upload = src.pixels.data();
-  std::vector<std::uint8_t> packed;
-  if (src.src_stride_bytes != tight) {
-    packed.resize(tight * src.src_height);
-    for (std::uint32_t row = 0; row < src.src_height; ++row) {
-      const std::size_t so = static_cast<std::size_t>(row) * src.src_stride_bytes;
-      if (so + tight > src.pixels.size()) {
-        return;
-      }
-      std::copy_n(src.pixels.data() + so, tight,
-                  packed.data() + (static_cast<std::size_t>(row) * tight));
-    }
-    upload = packed.data();
-  } else if (src.pixels.size() < tight * src.src_height) {
-    return;
-  }
-
   gl.active_texture(drm::detail::gl::k_texture0);
   gl.bind_texture(drm::detail::gl::k_texture_2d, texture_);
-  gl.pixel_storei(drm::detail::gl::k_unpack_alignment, 4);
-  gl.tex_image_2d(drm::detail::gl::k_texture_2d, 0,
-                  static_cast<drm::detail::GLint>(drm::detail::gl::k_rgba),
-                  static_cast<drm::detail::GLsizei>(src.src_width),
-                  static_cast<drm::detail::GLsizei>(src.src_height), 0, drm::detail::gl::k_rgba,
-                  drm::detail::gl::k_unsigned_byte, upload);
+
+  // Direct DMA-BUF import: a single-plane RGB source carrying dma-buf fds is
+  // imported as an EGLImage and sampled straight, skipping the CPU-pixel upload
+  // (the escape from the map()-uncompositable trap for camera layers). Falls
+  // back to the CPU path when the import fails or the stack can't do it.
+  void* egl_image = EGL_NO_IMAGE_KHR;
+  if ((src.dma_n_planes == 1) && dmabuf_import_supported_ && (src.dma_fds.at(0) >= 0)) {
+    egl_image = import_dma_buf_image(src);
+  }
+  if (egl_image != EGL_NO_IMAGE_KHR) {
+    gl.egl_image_target_texture_2d(drm::detail::gl::k_texture_2d, egl_image);
+  } else {
+    // CPU-pixel upload path. A dma-buf-only source with no CPU pixels (import
+    // unavailable or failed) can't be sampled here — skip it.
+    if (src.pixels.empty()) {
+      return;
+    }
+    // GLES2 has no GL_UNPACK_ROW_LENGTH; compact to a tightly-packed staging
+    // buffer when the source stride is padded.
+    const std::size_t tight = static_cast<std::size_t>(src.src_width) * 4U;
+    const std::uint8_t* upload = src.pixels.data();
+    std::vector<std::uint8_t> packed;
+    if (src.src_stride_bytes != tight) {
+      packed.resize(tight * src.src_height);
+      for (std::uint32_t row = 0; row < src.src_height; ++row) {
+        const std::size_t so = static_cast<std::size_t>(row) * src.src_stride_bytes;
+        if (so + tight > src.pixels.size()) {
+          return;
+        }
+        std::copy_n(src.pixels.data() + so, tight,
+                    packed.data() + (static_cast<std::size_t>(row) * tight));
+      }
+      upload = packed.data();
+    } else if (src.pixels.size() < tight * src.src_height) {
+      return;
+    }
+    gl.pixel_storei(drm::detail::gl::k_unpack_alignment, 4);
+    gl.tex_image_2d(drm::detail::gl::k_texture_2d, 0,
+                    static_cast<drm::detail::GLint>(drm::detail::gl::k_rgba),
+                    static_cast<drm::detail::GLsizei>(src.src_width),
+                    static_cast<drm::detail::GLsizei>(src.src_height), 0, drm::detail::gl::k_rgba,
+                    drm::detail::gl::k_unsigned_byte, upload);
+  }
+
   gl.tex_parameteri(drm::detail::gl::k_texture_2d, drm::detail::gl::k_tex_min_filter,
                     static_cast<drm::detail::GLint>(drm::detail::gl::k_nearest));
   gl.tex_parameteri(drm::detail::gl::k_texture_2d, drm::detail::gl::k_tex_mag_filter,
@@ -459,6 +519,9 @@ void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
   gl.uniform1i(loc_tex_, 0);
   gl.uniform1f(loc_alpha_, static_cast<float>(src.plane_alpha) / 65535.0F);
   gl.uniform1f(loc_opaque_, (src.drm_fourcc == DRM_FORMAT_XRGB8888) ? 1.0F : 0.0F);
+  // Imported dma-buf is sampled in-order by the driver; the CPU upload needs
+  // the .bgra swizzle (ARGB8888 bytes uploaded as RGBA).
+  gl.uniform1f(loc_bgra_, (egl_image != EGL_NO_IMAGE_KHR) ? 0.0F : 1.0F);
 
   const auto verts =
       gl_geom::quad(dst_rect.x, dst_rect.y, dst_rect.w, dst_rect.h, width_, height_, src_rect.x,
@@ -478,6 +541,16 @@ void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
   gl.vertex_attrib_pointer(static_cast<drm::detail::GLuint>(attr_uv_), 2, drm::detail::gl::k_float,
                            drm::detail::gl::k_false, stride, uv_offset);
   gl.draw_arrays(drm::detail::gl::k_triangle_strip, 0, 4);
+
+  // The texture keeps its EGLImage sibling storage after the target bind, so the
+  // image can be destroyed once the draw referencing it is issued. The fds in
+  // the descriptor are borrowed (owned by the layer's source) and left untouched.
+  if (egl_image != EGL_NO_IMAGE_KHR) {
+    const auto& egl = drm::detail::egl_loader();
+    if (egl.destroy_image != nullptr) {
+      egl.destroy_image(static_cast<EGLDisplay>(display_), egl_image);
+    }
+  }
 }
 
 drm::expected<void, std::error_code> GlCompositor::flush() noexcept {

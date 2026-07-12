@@ -94,6 +94,12 @@ class GlCompositor : public CompositionTarget {
   // Tear EGL down (surface/context/display) — must run before source_ dies.
   void teardown_egl() noexcept;
 
+  // Import a single-plane RGB CompositeSrc's dma-buf as an EGLImage
+  // (EGL_LINUX_DMA_BUF_EXT) for direct sampling. Returns EGL_NO_IMAGE_KHR when
+  // the import can't be done; the caller then falls back to the CPU path. The
+  // descriptor's fds are borrowed — not closed here.
+  [[nodiscard]] void* import_dma_buf_image(const CompositeSrc& src) noexcept;
+
   const drm::Device* dev_{nullptr};
   std::unique_ptr<GbmSurfaceSource> source_;
   std::unique_ptr<AcquiredBuffer> held_;  // currently locked front buffer
@@ -108,6 +114,7 @@ class GlCompositor : public CompositionTarget {
   std::int32_t loc_alpha_{-1};
   std::int32_t loc_opaque_{-1};
   std::int32_t loc_tex_{-1};
+  std::int32_t loc_bgra_{-1};
   std::int32_t attr_pos_{-1};
   std::int32_t attr_uv_{-1};
 
