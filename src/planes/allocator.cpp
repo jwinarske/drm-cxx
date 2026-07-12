@@ -233,7 +233,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
       prev_set.insert(prev_layer);
     }
     for (const auto* layer : output.layers()) {
-      if (layer->is_composition_layer() || layer->is_externally_bound()) {
+      if (layer->is_composition_layer() || layer->is_externally_bound() || layer->is_pinned()) {
         continue;
       }
       if (prev_set.count(layer) == 0) {
@@ -345,7 +345,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   // Mark unassigned layers as needing composition
   for (auto* layer : output.layers()) {
     if (!layer->assigned_plane_.has_value() && !layer->is_composition_layer() &&
-        !layer->is_externally_bound()) {
+        !layer->is_externally_bound() && !layer->is_pinned()) {
       layer->needs_composition_ = true;
     }
   }
@@ -373,7 +373,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   scratch_placeable_.clear();
   scratch_placeable_.reserve(output.layers().size());
   for (auto* l : output.layers()) {
-    if (l->is_externally_bound() || l->is_transient_composited()) {
+    if (l->is_externally_bound() || l->is_transient_composited() || l->is_pinned()) {
       continue;
     }
     scratch_placeable_.push_back(l);
@@ -440,7 +440,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     placeable.reserve(output.layers().size());
     for (auto* l : output.layers()) {
       if (l->force_composited_ || l->is_transient_composited() || l->is_composition_layer() ||
-          l->is_externally_bound()) {
+          l->is_externally_bound() || l->is_pinned()) {
         continue;
       }
       placeable.push_back(l);
@@ -484,7 +484,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // Mark unassigned layers
   for (auto* layer : output.layers()) {
     if (!layer->assigned_plane_.has_value() && !layer->is_composition_layer() &&
-        !layer->is_externally_bound()) {
+        !layer->is_externally_bound() && !layer->is_pinned()) {
       layer->needs_composition_ = true;
     }
   }

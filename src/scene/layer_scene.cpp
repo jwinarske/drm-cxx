@@ -378,9 +378,9 @@ class LayerScene::Impl {
       planes_layer.set_composited();
     }
 
-    slot.scene_layer =
-        std::make_unique<Layer>(handle, std::move(desc.source), desc.display, desc.content_type,
-                                desc.update_hint_hz, desc.app_priority, desc.identity_tag);
+    slot.scene_layer = std::make_unique<Layer>(
+        handle, std::move(desc.source), desc.display, desc.content_type, desc.update_hint_hz,
+        desc.app_priority, desc.identity_tag, desc.pinned_plane_id);
     structure_dirty_ = true;  // a new layer must be committed (content_changed)
     return handle;
   }
@@ -2462,6 +2462,81 @@ class LayerScene::Impl {
     }
   }
 
+  // Capabilities of a plane by id on `crtc_index`, or nullptr when the
+  // id names no plane on that CRTC.
+  const drm::planes::PlaneCapabilities* plane_caps_for(std::uint32_t crtc_index,
+                                                       std::uint32_t plane_id) const {
+    for (const auto* p : registry_.for_crtc(crtc_index)) {
+      if (p != nullptr && p->id == plane_id) {
+        return p;
+      }
+    }
+    return nullptr;
+  }
+
+  // True when `plane_id` can honor a hard pin of `layer` this commit: a
+  // non-cursor plane on this CRTC that can scan out the layer's format
+  // and isn't already reserved (the composition canvas, a stream, an
+  // external owner, or another pin accumulated so far in `reserved`).
+  bool pin_is_honorable(std::uint32_t crtc_index, std::uint32_t plane_id, const Layer& layer,
+                        const std::vector<std::uint32_t>& reserved) const {
+    if (std::any_of(reserved.begin(), reserved.end(),
+                    [plane_id](std::uint32_t p) { return p == plane_id; })) {
+      return false;
+    }
+    const auto* caps = plane_caps_for(crtc_index, plane_id);
+    if (caps == nullptr || caps->type == drm::planes::DRMPlaneType::CURSOR) {
+      return false;
+    }
+    return caps->supports_format(layer.source().format().drm_fourcc);
+  }
+
+  // Write each pinned layer's plane state directly to its caller-chosen
+  // plane. The allocator skipped these layers (is_pinned) and the scene
+  // reserved their planes out of the allocator, so this is where the FB
+  // actually lands. Mirrors Allocator::apply_layer_to_plane: the property
+  // bag was filled by lower_layer; skip properties the plane doesn't
+  // advertise, immutable ones, and a fixed-slot zpos. Sets assigned_plane_
+  // so the report shows the layer AssignedToPlane and compose_unassigned's
+  // canvas search treats the plane as in-use — must run before it.
+  drm::expected<void, std::error_code> arm_pinned_layers(std::vector<AcquisitionSlot>& acquisitions,
+                                                         std::uint32_t crtc_index,
+                                                         drm::AtomicRequest& req,
+                                                         CommitReport& report) {
+    for (auto& acq : acquisitions) {
+      if (acq.planes_layer == nullptr || acq.scene_layer == nullptr ||
+          !acq.planes_layer->is_pinned()) {
+        continue;
+      }
+      const auto pin = acq.scene_layer->pinned_plane_id();
+      if (!pin.has_value()) {
+        continue;
+      }
+      const std::uint32_t plane_id = *pin;
+      const auto* caps = plane_caps_for(crtc_index, plane_id);
+      const bool zpos_fixed = caps != nullptr && caps->zpos_min.has_value() &&
+                              caps->zpos_max.has_value() && *caps->zpos_min == *caps->zpos_max;
+      for (auto [name, value] : acq.planes_layer->properties()) {
+        auto id = props_.property_id(plane_id, name);
+        if (!id.has_value() || props_.is_immutable(plane_id, name).value_or(false)) {
+          continue;
+        }
+        if (name == "zpos" && zpos_fixed) {
+          continue;
+        }
+        if (auto r = req.add_property(plane_id, *id, value); !r) {
+          return r;
+        }
+        ++report.properties_written;
+        if (name == "FB_ID") {
+          ++report.fbs_attached;
+        }
+      }
+      acq.planes_layer->set_assigned_plane(plane_id);
+    }
+    return {};
+  }
+
   // Write the canvas's plane properties directly to `req`. Mirrors
   // Allocator::apply_layer_to_plane minus the immutable-property guard
   // (the canvas only sets writable properties). Bumps the report's
@@ -3189,6 +3264,34 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   for (const auto id : external_reserved_planes_) {
     scratch_reserved_planes_.push_back(id);
   }
+  // Hard pins: reserve each honorable pinned plane out of the allocator
+  // and mark the layer so the allocator skips it (the scene writes its
+  // plane state in arm_pinned_layers below). set_pinned is reset for
+  // every acquired layer first so a pin removed since last frame clears.
+  // An un-honorable pin does not drop the layer — it falls back to
+  // normal allocation and bumps report.pins_failed.
+  const auto pin_crtc_index = resolve_crtc_index();
+  for (auto& acq : acquisitions) {
+    if (acq.planes_layer == nullptr || acq.scene_layer == nullptr) {
+      continue;
+    }
+    acq.planes_layer->set_pinned(false);
+    const auto pin = acq.scene_layer->pinned_plane_id();
+    if (!pin.has_value()) {
+      continue;
+    }
+    if (!pin_crtc_index.has_value() ||
+        !pin_is_honorable(*pin_crtc_index, *pin, *acq.scene_layer, scratch_reserved_planes_)) {
+      ++report.pins_failed;
+      drm::log_warn(
+          "scene::LayerScene: cannot honor pin of layer {} to plane {}; falling back to "
+          "normal allocation",
+          acq.scene_layer->handle().id, *pin);
+      continue;
+    }
+    acq.planes_layer->set_pinned(true);
+    scratch_reserved_planes_.push_back(*pin);
+  }
   const auto reserved_span = scratch_reserved_planes_.empty()
                                  ? drm::span<const std::uint32_t>{}
                                  : drm::span<const std::uint32_t>(scratch_reserved_planes_.data(),
@@ -3253,6 +3356,15 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
 
   if (auto r = arm_layer_amd_plane_color(acquisitions, req, report); !r) {
     return drm::unexpected<std::error_code>(r.error());
+  }
+
+  // Write pinned layers' plane state to their reserved planes. Must run
+  // before compose_unassigned: it sets assigned_plane_ so the canvas
+  // search sees those planes as in-use and never lands the canvas on one.
+  if (pin_crtc_index.has_value()) {
+    if (auto r = arm_pinned_layers(acquisitions, *pin_crtc_index, req, report); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
   }
 
   // rescue unassigned layers via CPU composition before

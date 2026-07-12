@@ -68,6 +68,14 @@ class Layer {
   /// default. Seeded from `LayerDesc`; mutable via `set_app_priority`.
   [[nodiscard]] std::uint8_t app_priority() const noexcept { return app_priority_; }
 
+  /// The plane id this layer is hard-pinned to, or `std::nullopt` for
+  /// normal allocation. Seeded from `LayerDesc::pinned_plane_id` and
+  /// read-only afterward; the scene reserves this plane and writes the
+  /// layer's plane state to it directly each commit.
+  [[nodiscard]] std::optional<std::uint32_t> pinned_plane_id() const noexcept {
+    return pinned_plane_id_;
+  }
+
   /// Change the allocator content-type hint (e.g. promote a stream from
   /// `Generic` to `Video` once its pipeline is confirmed). Unlike the
   /// display setters this changes plane *scoring*, not just the values
@@ -292,14 +300,16 @@ class Layer {
   /// API to avoid friending a pimpl'd nested class.
   Layer(LayerHandle handle, std::unique_ptr<LayerBufferSource> source, DisplayParams display,
         drm::planes::ContentType content_type, std::uint32_t update_hint_hz,
-        std::uint8_t app_priority = 0, void* identity_tag = nullptr) noexcept
+        std::uint8_t app_priority = 0, void* identity_tag = nullptr,
+        std::optional<std::uint32_t> pinned_plane_id = std::nullopt) noexcept
       : handle_(handle),
         source_(std::move(source)),
         display_(std::move(display)),
         content_type_(content_type),
         update_hint_hz_(update_hint_hz),
         app_priority_(app_priority),
-        identity_tag_(identity_tag) {}
+        identity_tag_(identity_tag),
+        pinned_plane_id_(pinned_plane_id) {}
 
  private:
   LayerHandle handle_;
@@ -308,6 +318,7 @@ class Layer {
   drm::planes::ContentType content_type_;
   std::uint32_t update_hint_hz_;
   std::uint8_t app_priority_;
+  std::optional<std::uint32_t> pinned_plane_id_;
   // Opaque caller-side identity. Stored verbatim, never dereferenced or
   // freed by the scene. Recovered by
   // `LayerScene::find_by_identity_tag`. `nullptr` is the unset sentinel.

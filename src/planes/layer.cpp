@@ -248,6 +248,20 @@ Layer& Layer::set_externally_bound(bool externally_bound) noexcept {
   return *this;
 }
 
+bool Layer::is_pinned() const noexcept {
+  return pinned_;
+}
+
+Layer& Layer::set_pinned(bool pinned) noexcept {
+  pinned_ = pinned;
+  return *this;
+}
+
+Layer& Layer::set_assigned_plane(std::optional<uint32_t> plane_id) noexcept {
+  assigned_plane_ = plane_id;
+  return *this;
+}
+
 bool Layer::is_dirty() const noexcept {
   return dirty_;
 }

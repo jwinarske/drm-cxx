@@ -92,6 +92,16 @@ struct CommitReport {
   /// can raise this.
   std::size_t composition_buckets{0};
 
+  /// Layers that requested `LayerDesc::pin_to_plane` but whose pin could
+  /// not be honored this commit — the target plane isn't on this CRTC,
+  /// doesn't support the layer's format, or was already claimed. The
+  /// layer is NOT dropped: it falls back to normal allocation and is
+  /// still counted in one of the placement tallies above. Nonzero is a
+  /// loud signal that a caller's deterministic-plane assumption was
+  /// violated (as opposed to a silent drop). Does not affect the
+  /// `layers_total` invariant — it is orthogonal to placement outcome.
+  std::size_t pins_failed{0};
+
   /// Total properties enqueued on the AtomicRequest this commit —
   /// includes plane state, CRTC state, and connector state. Useful as
   /// a regression signal for property-minimization work:
