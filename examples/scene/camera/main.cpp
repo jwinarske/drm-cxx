@@ -39,6 +39,7 @@
 #include "status_overlay_renderer.hpp"
 #include "v4l2_h264_encoder.hpp"  // --record: raw frame -> V4L2 M2M H.264 alongside display
 #if CAMERA_HAS_VAAPI
+#include "vaapi_h264_encoder.hpp"  // --record (no --v4l2-encoder): NV12 surface -> VA-API H.264
 #include "vaapi_jpeg_decoder.hpp"
 #endif
 
@@ -930,11 +931,13 @@ std::atomic<int> g_snapshot_remaining{0};
 constexpr auto k_snapshot_warmup = std::chrono::seconds(2);
 #endif
 
-// --record FILE + --v4l2-encoder DEV: encode each captured frame to H.264 with a
-// V4L2 M2M encoder (e.g. the Pi's bcm2835-codec) while the same frame also
-// displays — the recording "third consumer". Consumed by drain_slot on the main
-// loop thread only (plain globals). The encoder + file are created lazily on the
-// first raw (YUYV/NV12) frame of the first recorded slot.
+// --record FILE: encode each captured frame to H.264 while it also displays —
+// the recording "third consumer". With --v4l2-encoder DEV, a V4L2 M2M encoder
+// (e.g. the Pi's bcm2835-codec) takes the raw YUYV/NV12 tier; alone, VA-API
+// encodes the MJPEG/VAAPI tier's decoded NV12 surface (g_vaapi_recorder).
+// Consumed by drain_slot on the main loop thread only (plain globals). The
+// encoder + file are created lazily on the first frame of the first recorded
+// slot.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 const char* g_record_path = nullptr;
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
@@ -951,6 +954,13 @@ std::size_t g_record_bytes = 0;
 // the encoder rebuilt in copy mode) if the codec can't map the capture buffer.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 bool g_record_try_dmabuf = true;
+#if CAMERA_HAS_VAAPI
+// --record without --v4l2-encoder: encode the MJPEG/VAAPI tier's decoded NV12
+// surface to H.264 with VA-API on the same VADisplay (no export/import). Lazily
+// created on the first decoded frame of the recorded slot.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::unique_ptr<drm::examples::camera::VaapiH264Encoder> g_vaapi_recorder;
+#endif
 
 std::unique_ptr<CameraSlot> configure_slot(drm::Device const& dev, drm::scene::LayerScene& scene,
                                            const std::shared_ptr<libcamera::Camera>& camera,
@@ -1712,6 +1722,43 @@ void drain_slot(CameraSlot& slot, drm::scene::LayerScene& scene) {
               req->reuse(libcamera::Request::ReuseBuffers);
               slot.camera->queueRequest(req);
               return;
+            }
+          }
+          // --record without --v4l2-encoder: encode the just-decoded NV12
+          // surface to H.264 with VA-API on the same VADisplay — no export or
+          // import, the surface never leaves the GPU — while it also displays.
+          if (frame_landed && g_record_path != nullptr && g_record_encoder == nullptr) {
+            if (g_record_slot < 0) {
+              g_record_slot = static_cast<int>(slot.target.camera_index);
+            }
+            if (static_cast<int>(slot.target.camera_index) == g_record_slot) {
+              if (!g_vaapi_recorder && slot.va_display != nullptr) {
+                drm::examples::camera::VaapiH264Encoder::Config vcfg{};
+                vcfg.width = slot.target.size.width;
+                vcfg.height = slot.target.size.height;
+                std::error_code vrec_ec;
+                g_vaapi_recorder = drm::examples::camera::VaapiH264Encoder::create(slot.va_display,
+                                                                                   vcfg, &vrec_ec);
+                if (g_vaapi_recorder && g_record_file == nullptr) {
+                  g_record_file = std::fopen(g_record_path, "wb");
+                }
+                if (!g_vaapi_recorder || g_record_file == nullptr) {
+                  drm::println(stderr, "record: VA-API encoder setup failed; recording disabled");
+                  g_record_path = nullptr;  // stop retrying
+                } else {
+                  drm::println("record: {}x{} -> {} (VA-API H.264)", vcfg.width, vcfg.height,
+                               g_record_path);
+                }
+              }
+              if (g_vaapi_recorder && g_record_file != nullptr) {
+                std::vector<std::uint8_t> rec_bits;
+                if (g_vaapi_recorder->encode_surface(slot.vaapi_decoder->output_surface(),
+                                                     rec_bits) &&
+                    !rec_bits.empty()) {
+                  std::fwrite(rec_bits.data(), 1, rec_bits.size(), g_record_file);
+                  g_record_bytes += rec_bits.size();
+                }
+              }
             }
           }
         } else
@@ -2564,13 +2611,16 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
   drm::println("\nshutting down");
 
   // Finalize the recording (if any): flush + close the file and drop the
-  // encoder so its V4L2 device is released.
+  // encoder so its V4L2 device / VA-API context is released.
   if (g_record_file != nullptr) {
     (void)std::fclose(g_record_file);
     g_record_file = nullptr;
     drm::println("record: wrote {} ({} bytes)", g_record_path, g_record_bytes);
   }
   g_recorder.reset();
+#if CAMERA_HAS_VAAPI
+  g_vaapi_recorder.reset();
+#endif
 
   // Disconnect CameraManager hotplug signals before pending_hotplug
   // goes out of scope, so libcamera doesn't keep a stale receiver
@@ -2611,13 +2661,16 @@ void print_usage() {
                "  --gbm-import           allocate them via GBM (SCANOUT|LINEAR) instead (Mode C)");
   drm::println(stderr,
                "  --record FILE          also encode each captured frame to H.264 (Annex-B) while "
-               "it displays;");
+               "it displays.");
+  drm::println(stderr,
+               "                         Alone, records the first camera via VA-API (the "
+               "MJPEG/VAAPI tier);");
+  drm::println(stderr,
+               "                         with --v4l2-encoder, records its raw YUYV/NV12 tier "
+               "instead.");
   drm::println(stderr,
                "  --v4l2-encoder DEV     use the V4L2 M2M encoder DEV (e.g. /dev/video11, the Pi's "
-               "bcm2835-codec).");
-  drm::println(stderr,
-               "                         Records the first camera's raw YUYV/NV12 tier; give both "
-               "flags together");
+               "bcm2835-codec)");
 #if CAMERA_HAS_JPG
   drm::println(stderr,
                "  --snapshot N           after a ~2s AEC/AWB warm-up, write N NV12 frames to "
@@ -2868,11 +2921,20 @@ int main(int argc, char* argv[]) {
     print_usage();
     return EXIT_FAILURE;
   }
-  if ((g_record_path != nullptr) != (g_record_encoder != nullptr)) {
-    drm::println(stderr, "camera: --record and --v4l2-encoder must be given together");
+  if (g_record_encoder != nullptr && g_record_path == nullptr) {
+    drm::println(stderr, "camera: --v4l2-encoder requires --record");
     print_usage();
     return EXIT_FAILURE;
   }
+#if !CAMERA_HAS_VAAPI
+  if (g_record_path != nullptr && g_record_encoder == nullptr) {
+    drm::println(stderr,
+                 "camera: --record without --v4l2-encoder needs the VA-API encoder, "
+                 "which was not built; pass --v4l2-encoder DEV");
+    print_usage();
+    return EXIT_FAILURE;
+  }
+#endif
 
   if (want_show) {
     return run_show(static_cast<int>(rest.size()), rest.data());
