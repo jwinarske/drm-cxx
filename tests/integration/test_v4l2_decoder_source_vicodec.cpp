@@ -273,6 +273,21 @@ TEST_F(VicodecFixture, SubmitAndDriveDoesNotError) {
     auto acq_r = src->acquire();
     if (acq_r.has_value()) {
       EXPECT_NE(acq_r->fb_id, 0U);
+      // The CAPTURE buffer is not CPU-mappable, but it must be exportable
+      // as a DMA-BUF for the GPU compositor's EGLImage path. vicodec NV12
+      // -> 2 DRM planes sharing one fd (Y at offset 0, interleaved chroma
+      // after it).
+      auto dmabuf = src->export_dma_buf();
+      ASSERT_TRUE(dmabuf.has_value()) << "export_dma_buf: " << dmabuf.error().message();
+      EXPECT_EQ(dmabuf->n_planes, 2U);
+      EXPECT_EQ(dmabuf->drm_fourcc, k_nv12_fourcc);
+      EXPECT_GT(dmabuf->width, 0U);
+      EXPECT_GT(dmabuf->height, 0U);
+      EXPECT_GE(dmabuf->fds.at(0), 0);
+      EXPECT_GE(dmabuf->fds.at(1), 0);
+      EXPECT_EQ(dmabuf->fds.at(0), dmabuf->fds.at(1));  // single-fd NV12
+      EXPECT_GT(dmabuf->pitches.at(0), 0U);
+      EXPECT_GT(dmabuf->offsets.at(1), dmabuf->offsets.at(0));  // chroma after luma
       src->release(std::move(*acq_r));
       acquired = true;
       break;
