@@ -995,6 +995,12 @@ class LayerScene::Impl {
     // been armed and before atomic commit) — `BufferMapping`'s dtor
     // pairs with `gbm_bo_unmap` for GBM-backed sources.
     std::optional<drm::BufferMapping> cached_mapping;
+    // Populated by compose_unassigned for a map()-less source that can export
+    // its DMA-BUF: the GPU compositor imports it as an EGLImage instead of
+    // reading CPU pixels, so a camera / V4L2 layer composites instead of
+    // blanking. The fds are borrowed (owned by the source), valid until the
+    // slot's release() — see DmaBufDesc.
+    std::optional<DmaBufDesc> cached_dma_buf;
     // Copied from Slot::stream_pinned_plane_id at acquire_all time.
     // Drives the post-apply property writes in arm_stream_layer_planes
     // and the blend / color arm passes' fallback when the allocator
@@ -1049,7 +1055,8 @@ class LayerScene::Impl {
         return drm::unexpected<std::error_code>(acq.error());
       }
       out.push_back(AcquisitionSlot{slot.scene_layer.get(), slot.planes_layer, std::move(*acq),
-                                    std::nullopt, slot.stream_pinned_plane_id});
+                                    /*cached_mapping=*/std::nullopt,
+                                    /*cached_dma_buf=*/std::nullopt, slot.stream_pinned_plane_id});
     }
     return {};
   }
@@ -1773,9 +1780,22 @@ class LayerScene::Impl {
         // SceneSubmitsFbId source on a driver that routes it to composition).
         // Genuine map failures (EIO, ENOMEM, …) still warn.
         if (mapping.error() == std::errc::function_not_supported) {
+          // No CPU mapping — but if the source can export its DMA-BUF and GPU
+          // composition is in play, the GPU compositor imports it as an EGLImage
+          // and the layer composites instead of blanking. Gated on
+          // composition_mode_ so a CPU-only path still drops it (as before)
+          // rather than arming a canvas that can't sample it; the target's
+          // per-format capability is confirmed in the blend pass below.
+          if (composition_mode_ != LayerScene::Composition::ForceCpu) {
+            if (auto desc = acq.scene_layer->source().export_dma_buf(); desc.has_value()) {
+              acq.cached_dma_buf.emplace(*desc);
+              scratch_composited_.push_back(&acq);
+              continue;
+            }
+          }
           drm::log_debug(
               "scene::LayerScene: layer {} dropped — source is uncompositable "
-              "(no CPU mapping) and the allocator found no plane for it",
+              "(no CPU mapping, no DMA-BUF export) and the allocator found no plane for it",
               acq.scene_layer->handle().id);
         } else {
           drm::log_warn(
@@ -1862,24 +1882,48 @@ class LayerScene::Impl {
     // memory-bandwidth budget of any consumer-class CPU.
     composition_canvas_->clear();
 
-    for (const auto* acq : scratch_composited_) {
+    std::size_t composited = 0;
+    for (auto* acq : scratch_composited_) {
       const auto& d = acq->scene_layer->display();
       const auto fmt = acq->scene_layer->source().format();
-      // Mapping was stashed during the collection pass above — no
-      // second virtual call.
-      if (!acq->cached_mapping.has_value()) {
-        continue;
-      }
       CompositeSrc src;
-      src.pixels = acq->cached_mapping->pixels();
-      src.src_stride_bytes = acq->cached_mapping->stride();
       src.src_width = fmt.width;
       src.src_height = fmt.height;
       src.drm_fourcc = fmt.drm_fourcc;
       src.plane_alpha = d.alpha;
+      if (acq->cached_mapping.has_value()) {
+        // CPU pixels stashed during collection — no second virtual map() call.
+        src.pixels = acq->cached_mapping->pixels();
+        src.src_stride_bytes = acq->cached_mapping->stride();
+      } else if (acq->cached_dma_buf.has_value() &&
+                 composition_canvas_->supports_dma_buf_import(fmt.drm_fourcc)) {
+        // GPU import path: the source's DMA-BUF is sampled directly, so a
+        // map()-less camera layer composites instead of blanking.
+        const DmaBufDesc& dmabuf = *acq->cached_dma_buf;
+        src.dma_n_planes = dmabuf.n_planes;
+        src.dma_fds = dmabuf.fds;
+        src.dma_offsets = dmabuf.offsets;
+        src.dma_pitches = dmabuf.pitches;
+        src.dma_modifier = dmabuf.modifier;
+      } else {
+        // DMA-BUF-only source this target can't import yet (e.g. NV12 before the
+        // external-sampler path, or a CPU-only canvas): clear the descriptor so
+        // the report doesn't count it composited, and let it fall to the
+        // dropped tally.
+        acq->cached_dma_buf.reset();
+        continue;
+      }
       const CompositeRect src_rect{d.src_rect.x, d.src_rect.y, d.src_rect.w, d.src_rect.h};
       const CompositeRect dst_rect{d.dst_rect.x, d.dst_rect.y, d.dst_rect.w, d.dst_rect.h};
       composition_canvas_->blend(src, src_rect, dst_rect);
+      ++composited;
+    }
+    // Nothing actually landed on the canvas (every entry was a DMA-BUF-only
+    // source this target can't import): don't arm a blank canvas plane — let
+    // the layers fall into the dropped tally and reclaim the plane next frame.
+    if (composited == 0) {
+      last_canvas_plane_id_.reset();
+      return;
     }
     // One bulk memcpy from the cached userspace shadow into the WC
     // dumb buffer. The shadow tracks a per-frame dirty rect (union of
@@ -1897,7 +1941,7 @@ class LayerScene::Impl {
       drm::log_warn("scene::LayerScene: arm composition canvas failed: {}", r.error().message());
       return;
     }
-    report.layers_composited += scratch_composited_.size();
+    report.layers_composited += composited;
     report.composition_buckets += 1U;
     last_canvas_plane_id_ = target_plane->id;
   }
@@ -1935,7 +1979,8 @@ class LayerScene::Impl {
         entry.placement = LayerPlacement::AssignedToPlane;
         entry.plane_id = *pid;
         entry.plane_rotation_bits = plane_rotation_bits_for(*pid);
-      } else if (acq.cached_mapping.has_value() && last_canvas_plane_id_.has_value()) {
+      } else if ((acq.cached_mapping.has_value() || acq.cached_dma_buf.has_value()) &&
+                 last_canvas_plane_id_.has_value()) {
         entry.placement = LayerPlacement::Composited;
         entry.plane_id = *last_canvas_plane_id_;
       } else {
@@ -1959,7 +2004,8 @@ class LayerScene::Impl {
       const auto pid = acq.planes_layer->assigned_plane_id();
       if (pid.has_value()) {
         acq.scene_layer->record_placement(LayerPlacement::AssignedToPlane, pid);
-      } else if (acq.cached_mapping.has_value() && last_canvas_plane_id_.has_value()) {
+      } else if ((acq.cached_mapping.has_value() || acq.cached_dma_buf.has_value()) &&
+                 last_canvas_plane_id_.has_value()) {
         acq.scene_layer->record_placement(LayerPlacement::Composited, last_canvas_plane_id_);
       } else {
         acq.scene_layer->record_placement(LayerPlacement::Unassigned, std::nullopt);

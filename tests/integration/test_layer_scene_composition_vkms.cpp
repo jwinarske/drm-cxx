@@ -30,8 +30,10 @@
 #include <drm-cxx/capture/snapshot.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
+#include <drm-cxx/scene/external_dma_buf_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -39,11 +41,14 @@
 #include <drm.h>
 #include <drm_fourcc.h>
 #include <drm_mode.h>
+#include <gbm.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <array>
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -92,6 +97,16 @@ std::optional<std::string> find_vkms_node() {
     }
   }
   return std::nullopt;
+}
+
+// The DMA-BUF-import rescue test needs a GL-capable card. Honor an explicit
+// DRM_CXX_TEST_CARD override (a real GPU card, e.g. vc4 on a Pi) so the GPU
+// import path can be exercised on hardware; else fall back to vkms.
+std::optional<std::string> find_dmabuf_import_card() {
+  if (const char* node = std::getenv("DRM_CXX_TEST_CARD"); node != nullptr && *node != '\0') {
+    return std::string(node);
+  }
+  return find_vkms_node();
 }
 
 struct ActiveCrtc {
@@ -263,6 +278,123 @@ TEST(LayerSceneCompositionVkms, ForceCompositedLayerLandsOnCanvas) {
   EXPECT_EQ(at(fb_w - 1U, 0), 0xFFFF0000U) << "top-right should be background red";
   EXPECT_EQ(at(0, fb_h - 1U), 0xFFFF0000U) << "bottom-left should be background red";
   EXPECT_EQ(at(fb_w - 1U, fb_h - 1U), 0xFFFF0000U) << "bottom-right should be background red";
+}
+
+// A map()-less source (no CPU pixels) that can export its dma-buf must be
+// rescued by GPU composition — imported as an EGLImage — rather than dropped,
+// when the composition target is a GlCompositor. Self-skips when the scene
+// falls back to the CPU CompositeCanvas (no GL on this card), which cannot
+// import a dma-buf and correctly drops the layer.
+TEST(LayerSceneCompositionVkms, DmaBufSourceRescuedByGpuImport) {
+  const auto node = find_dmabuf_import_card();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a GL-capable card)";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+  const std::uint32_t fb_w = active.mode.hdisplay;
+  const std::uint32_t fb_h = active.mode.vdisplay;
+  ASSERT_GE(fb_w, 64U);
+  ASSERT_GE(fb_h, 64U);
+
+  // CPU background that lands on a plane.
+  auto bg = DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(bg.has_value()) << bg.error().message();
+  fill_uniform_argb(**bg, fb_w, fb_h, 0xFFFF0000U);
+
+  // A map()-less overlay backed by a dma-buf (gbm bo), force_composited: the
+  // only way it can reach the canvas is the GPU EGLImage import path.
+  const std::uint32_t ow = fb_w / 4U;
+  const std::uint32_t oh = fb_h / 4U;
+  gbm_device* gbm = gbm_create_device(dev.fd());
+  ASSERT_NE(gbm, nullptr);
+  // LINEAR (not RENDERING) so the modifier is DRM_FORMAT_MOD_LINEAR, which
+  // ExternalDmaBufSource requires; a RENDERING bo on some drivers (vc4) is
+  // tiled and would be rejected. EGL imports the linear dma-buf regardless.
+  gbm_bo* bo =
+      gbm_bo_create(gbm, ow, oh, GBM_FORMAT_ARGB8888, GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT);
+  if (bo == nullptr) {
+    gbm_device_destroy(gbm);
+    GTEST_SKIP() << "gbm_bo_create(ARGB, LINEAR) unsupported on this stack";
+  }
+  void* md = nullptr;
+  std::uint32_t bo_stride = 0;
+  void* p = gbm_bo_map(bo, 0, 0, ow, oh, GBM_BO_TRANSFER_WRITE, &bo_stride, &md);
+  ASSERT_NE(p, nullptr);
+  auto* px = static_cast<std::uint8_t*>(p);
+  for (std::uint32_t y = 0; y < oh; ++y) {
+    for (std::uint32_t x = 0; x < ow; ++x) {
+      std::uint8_t* q = px + (static_cast<std::size_t>(y) * bo_stride) + (x * 4U);
+      q[0] = 0x00U;
+      q[1] = 0xFFU;
+      q[2] = 0x00U;
+      q[3] = 0xFFU;  // opaque green (B,G,R,A)
+    }
+  }
+  gbm_bo_unmap(bo, md);
+
+  const int fd = gbm_bo_get_fd(bo);
+  ASSERT_GE(fd, 0);
+  const std::array<drm::scene::ExternalPlaneInfo, 1> planes{
+      {drm::scene::ExternalPlaneInfo{fd, 0, gbm_bo_get_stride(bo)}}};
+  auto src = drm::scene::ExternalDmaBufSource::create(
+      dev, ow, oh, DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR,
+      drm::span<const drm::scene::ExternalPlaneInfo>(planes.data(), planes.size()));
+  ::close(fd);  // the source dup'd it
+  ASSERT_TRUE(src.has_value()) << src.error().message();
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = active.crtc_id;
+  cfg.connector_id = active.connector_id;
+  cfg.mode = active.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  LayerDesc bg_desc;
+  bg_desc.source = std::move(*bg);
+  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.zpos = 1;
+  ASSERT_TRUE(scene.add_layer(std::move(bg_desc)).has_value());
+
+  LayerDesc od;
+  od.source = std::move(*src);
+  od.display.src_rect = drm::scene::Rect{0, 0, ow, oh};
+  od.display.dst_rect =
+      drm::scene::Rect{static_cast<std::int32_t>(ow), static_cast<std::int32_t>(oh), ow, oh};
+  od.display.zpos = 4;
+  od.force_composited = true;
+  auto handle_r = scene.add_layer(std::move(od));
+  ASSERT_TRUE(handle_r.has_value()) << handle_r.error().message();
+  const auto handle = *handle_r;
+
+  auto report_r = scene.commit();
+  ASSERT_TRUE(report_r.has_value()) << report_r.error().message();
+  auto* layer = scene.get_layer(handle);
+  ASSERT_NE(layer, nullptr);
+
+  const bool composited = layer->last_placement() == drm::scene::LayerPlacement::Composited;
+  if (composited) {
+    EXPECT_GE(report_r->layers_composited, 1U)
+        << "the map()-less dma-buf source was imported and composited";
+  } else {
+    // CPU composition target (no GL) can't import — the layer is correctly
+    // dropped and the import path isn't exercised here.
+    EXPECT_EQ(layer->last_placement(), drm::scene::LayerPlacement::Unassigned);
+  }
+
+  gbm_bo_destroy(bo);
+  gbm_device_destroy(gbm);
+  if (!composited) {
+    GTEST_SKIP() << "composition target is CPU-only (no GL) — dma-buf import path not exercised";
+  }
 }
 
 // Regression: when full_search exhausts its TEST budget without finding
