@@ -193,6 +193,26 @@ class Layer {
   /// is `DriverOwnsBinding`.
   Layer& set_externally_bound(bool externally_bound) noexcept;
 
+  /// True iff the scene has pinned this layer to a caller-chosen plane.
+  /// Like `is_externally_bound()`, the allocator must skip it during
+  /// placement, scoring, and the test-commit pipeline — the scene
+  /// reserves the pinned plane and writes the layer's FB_ID/CRTC/SRC
+  /// properties to it directly. Unlike `is_externally_bound()`, the
+  /// layer keeps its FB_ID in the property bag (it is a normal, not a
+  /// driver-owned, source), so this flag must NOT gate the FB_ID write.
+  [[nodiscard]] bool is_pinned() const noexcept;
+
+  /// Mark this layer as pinned to a specific plane. Default false. Set
+  /// and cleared by the scene each commit from `LayerDesc::pin_to_plane`
+  /// once the pin has been validated against the target plane.
+  Layer& set_pinned(bool pinned) noexcept;
+
+  /// Record the plane this layer was placed on. The allocator sets this
+  /// for layers it places; the scene sets it for pinned layers, which
+  /// the allocator skips, so the commit report still shows them as
+  /// `AssignedToPlane`.
+  Layer& set_assigned_plane(std::optional<uint32_t> plane_id) noexcept;
+
   [[nodiscard]] bool is_dirty() const noexcept;
   [[nodiscard]] ContentType content_type() const noexcept;
   [[nodiscard]] uint32_t update_hz() const noexcept;
@@ -223,6 +243,7 @@ class Layer {
   bool dirty_{true};
   bool is_composition_layer_{false};
   bool externally_bound_{false};
+  bool pinned_{false};
   std::optional<uint32_t> assigned_plane_;
   ContentType content_type_{ContentType::Generic};
   uint32_t update_hz_{0};

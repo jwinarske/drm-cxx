@@ -475,3 +475,36 @@ TEST(SceneLayerAppPriority, SetAppPriorityFlagsHintsDirty) {
   EXPECT_TRUE(layer.hints_dirty());
   EXPECT_TRUE(layer.is_dirty());
 }
+
+TEST(SceneLayerPin, CtorDefaultsToNoPin) {
+  const drm::scene::LayerHandle h{1, 0};
+  const drm::scene::DisplayParams dp;
+  // 5-arg legacy form leaves the layer unpinned.
+  const drm::scene::Layer layer{h, /*source=*/nullptr, dp, drm::planes::ContentType::Video, 0U};
+  EXPECT_FALSE(layer.pinned_plane_id().has_value());
+}
+
+TEST(SceneLayerPin, CtorStoresPinnedPlaneId) {
+  const drm::scene::LayerHandle h{2, 0};
+  const drm::scene::DisplayParams dp;
+  const drm::scene::Layer layer{h,
+                                /*source=*/nullptr,
+                                dp,
+                                drm::planes::ContentType::Video,
+                                /*update_hint_hz=*/60U,
+                                /*app_priority=*/0,
+                                /*identity_tag=*/nullptr,
+                                /*pinned_plane_id=*/std::uint32_t{42}};
+  ASSERT_TRUE(layer.pinned_plane_id().has_value());
+  EXPECT_EQ(*layer.pinned_plane_id(), 42U);
+}
+
+TEST(SceneLayerDescPin, DefaultsToNoPin) {
+  const drm::scene::LayerDesc d;
+  EXPECT_FALSE(d.pinned_plane_id.has_value());
+}
+
+TEST(SceneCommitReportPin, PinsFailedDefaultsToZero) {
+  const drm::scene::CommitReport r;
+  EXPECT_EQ(r.pins_failed, 0U);
+}

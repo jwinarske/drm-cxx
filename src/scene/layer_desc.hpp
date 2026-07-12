@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace drm::scene {
 
@@ -63,6 +64,18 @@ struct LayerDesc {
   /// don't reach CPU memory (future EGL Stream consumers, tiled GBM
   /// BOs) cannot be composited and will be dropped this frame.
   bool force_composited{false};
+
+  /// Hard-pin this layer to a specific DRM plane id. When set, the scene
+  /// reserves that plane out of the allocator and writes this layer's
+  /// FB_ID/CRTC/SRC properties to it directly, so the layer always scans
+  /// out on exactly that plane and nothing else can take it. Use for a
+  /// layer whose plane placement must be deterministic (e.g. a reverse
+  /// camera that must never be displaced). If the pin cannot be honored
+  /// (the plane isn't on this CRTC, doesn't support the layer's format,
+  /// or is already taken), the commit does not silently drop the layer:
+  /// it is left to normal allocation and `CommitReport::pins_failed` is
+  /// incremented. `std::nullopt` (default) means no pin.
+  std::optional<std::uint32_t> pinned_plane_id{std::nullopt};
 
   /// Opaque pointer the scene stores verbatim on the created `Layer`
   /// and returns from `LayerScene::find_by_identity_tag`. Not
