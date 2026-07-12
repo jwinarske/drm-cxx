@@ -179,6 +179,14 @@ target_link_libraries(test_layer_scene_content_type_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_content_type_vkms)
 
+add_executable(test_layer_scene_app_priority_vkms
+  integration/test_layer_scene_app_priority_vkms.cpp)
+target_link_libraries(test_layer_scene_app_priority_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_layer_scene_app_priority_vkms)
+
 # Hardware-gated EGL Streams integration. All TESTs self-skip via
 # GTEST_SKIP when probe_stream_capability returns Unsupported, so
 # CI hosts on Mesa-only stacks see the binary run-and-skip cleanly.

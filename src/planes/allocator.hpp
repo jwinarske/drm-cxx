@@ -265,6 +265,13 @@ class Allocator {
   // §13.6 Content-type layer priority
   static int layer_priority(const Layer& layer);
 
+  // Composite keep/drop ordering: content-class priority dominates,
+  // application priority breaks ties within a class. layer_priority()
+  // (<= 100) is scaled above the uint8_t app_priority range so a higher
+  // content class always outranks any app_priority. Used to order layers
+  // for placement and to choose which layer to drop under plane pressure.
+  static int keep_priority(const Layer& layer);
+
   // §13.1 Static compatibility check (necessary conditions only)
   static bool plane_statically_compatible(const PlaneCapabilities& plane, const Layer& layer,
                                           uint32_t crtc_index);
@@ -290,7 +297,7 @@ class Allocator {
                  AtomicRequest& req, uint32_t flags, uint32_t crtc_index);
 
   // Place a single layer set on a single plane set. Runs preseed →
-  // greedy → backtrack-drop-one (lowest priority first) and returns
+  // greedy → backtrack-drop-one (lowest keep-priority first) and returns
   // the largest subset that passes a TEST commit; empty when no
   // non-empty subset survives or the per-frame TEST budget is hit.
   // Used both by the per-group pass and by the scene-wide partial
@@ -300,7 +307,7 @@ class Allocator {
                               uint32_t crtc_index);
 
   // Pick the layer with the fewest statically compatible planes among
-  // `planes` (lowest layer_priority breaks ties). Returns the
+  // `planes` (lowest keep_priority breaks ties). Returns the
   // bottleneck layer the scene-wide fallback should drop next, or
   // nullptr when `layers` is empty.
   static const Layer* pick_most_constrained(const std::vector<Layer*>& layers,
