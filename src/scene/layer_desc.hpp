@@ -45,6 +45,15 @@ struct LayerDesc {
   /// a 60 Hz display can sit on a plane that doesn't tear-mitigate).
   std::uint32_t update_hint_hz{0};
 
+  /// Application-level placement priority within a content class, 0 =
+  /// default (lowest). When plane pressure forces a layer to drop, the
+  /// allocator prefers to keep higher-priority layers — a reverse camera
+  /// set above the side cameras will not lose its plane to them. Scoped
+  /// *within* a content class: it breaks ties among like layers (all
+  /// `Video`, say) without letting a high-priority `Generic` layer
+  /// outrank `Video`.
+  std::uint8_t app_priority{0};
+
   /// When true, the allocator will skip plane assignment for this layer
   /// and route it through the composition fallback unconditionally.
   /// Useful for diagnostic overlays, integration tests of the compositor

@@ -32,10 +32,12 @@
 // FD stability: each slot's plane fds are dup'd at create() and
 // closed only at destroy; the recycled fds are stable across frames.
 //
-// The OUT_FENCE-carrying release form requires the scene to hand
-// back the replacing commit's OUT_FENCE; until that scene plumbing lands,
-// release() fires the callback/event-edge form on_release(slot, nullopt), which
-// is exactly the CEF path and the OUT_FENCE-less (vkms / VOP2) fallback path.
+// Two release-delivery forms, both live. When the replacing commit carries an
+// OUT_FENCE, the scene hands it back through release_with_fence() and the ring
+// forwards it as on_release(slot, fence) so a GPU producer can re-render slot K
+// with no CPU wait (the water path). When there is no OUT_FENCE (vkms / VOP2)
+// or the producer is CPU-side (CEF), release() delivers the callback/event-edge
+// form on_release(slot, nullopt) instead.
 
 #pragma once
 

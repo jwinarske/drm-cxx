@@ -147,6 +147,11 @@ Layer& Layer::set_update_hint(uint32_t hz) noexcept {
   return *this;
 }
 
+Layer& Layer::set_app_priority(uint8_t priority) noexcept {
+  app_priority_ = priority;
+  return *this;
+}
+
 bool Layer::needs_composition() const noexcept {
   return needs_composition_;
 }
@@ -253,6 +258,10 @@ ContentType Layer::content_type() const noexcept {
 
 uint32_t Layer::update_hz() const noexcept {
   return update_hz_;
+}
+
+uint8_t Layer::app_priority() const noexcept {
+  return app_priority_;
 }
 
 std::size_t Layer::property_hash() const {

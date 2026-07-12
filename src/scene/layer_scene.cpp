@@ -380,7 +380,7 @@ class LayerScene::Impl {
 
     slot.scene_layer =
         std::make_unique<Layer>(handle, std::move(desc.source), desc.display, desc.content_type,
-                                desc.update_hint_hz, desc.identity_tag);
+                                desc.update_hint_hz, desc.app_priority, desc.identity_tag);
     structure_dirty_ = true;  // a new layer must be committed (content_changed)
     return handle;
   }
@@ -1165,6 +1165,7 @@ class LayerScene::Impl {
     if (src.update_hint_hz() != 0) {
       dst.set_update_hint(src.update_hint_hz());
     }
+    dst.set_app_priority(src.app_priority());
   }
 
   // ── Composition fallback ───────────────────────────────

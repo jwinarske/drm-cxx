@@ -152,6 +152,7 @@ class Layer {
 
   Layer& set_content_type(ContentType type) noexcept;
   Layer& set_update_hint(uint32_t hz) noexcept;
+  Layer& set_app_priority(uint8_t priority) noexcept;
 
   [[nodiscard]] bool needs_composition() const noexcept;
   [[nodiscard]] std::optional<uint32_t> assigned_plane_id() const noexcept;
@@ -195,6 +196,10 @@ class Layer {
   [[nodiscard]] bool is_dirty() const noexcept;
   [[nodiscard]] ContentType content_type() const noexcept;
   [[nodiscard]] uint32_t update_hz() const noexcept;
+  /// Application-level within-content-class placement priority (0 =
+  /// default). Lowered from `LayerDesc::app_priority`; a hint for breaking
+  /// ties among like-content layers when plane pressure forces a drop.
+  [[nodiscard]] uint8_t app_priority() const noexcept;
 
   /// Order-independent hash of the layer's properties, skipping
   /// `FB_ID` (which changes every frame and would dirty the failure
@@ -221,6 +226,7 @@ class Layer {
   std::optional<uint32_t> assigned_plane_;
   ContentType content_type_{ContentType::Generic};
   uint32_t update_hz_{0};
+  uint8_t app_priority_{0};
 };
 
 }  // namespace drm::planes
