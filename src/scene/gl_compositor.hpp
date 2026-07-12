@@ -66,6 +66,13 @@ class GlCompositor : public CompositionTarget {
   [[nodiscard]] std::uint32_t height() const noexcept override { return height_; }
   [[nodiscard]] std::uint32_t drm_fourcc() const noexcept override { return fourcc_; }
   [[nodiscard]] bool armable() const noexcept override { return armable_; }
+
+  /// True when this compositor can import a layer's dma-buf as an EGLImage and
+  /// sample it directly (EGL_EXT_image_dma_buf_import plus eglCreateImageKHR /
+  /// glEGLImageTargetTexture2DOES were present at create()). When false, only
+  /// the CPU-pixel upload path is available. Probed once in init_egl().
+  [[nodiscard]] bool dmabuf_import_supported() const noexcept { return dmabuf_import_supported_; }
+
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
@@ -109,6 +116,7 @@ class GlCompositor : public CompositionTarget {
   std::uint32_t fourcc_{0};
   std::uint32_t fb_id_{0};
   bool armable_{false};
+  bool dmabuf_import_supported_{false};
   bool frame_open_{false};
   bool allow_software_{false};  // test seam: accept llvmpipe/softpipe/swrast
 };

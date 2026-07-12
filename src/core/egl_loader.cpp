@@ -121,6 +121,19 @@ void initialize_runtime(EglLoader& rt) noexcept {
   rt.dup_native_fence_fd = resolve_proc<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>(
       rt.get_proc_address, "eglDupNativeFenceFDANDROID");
 
+  // EGL image + dma-buf import entry points for the GL compositor's EGLImage
+  // path. create_image/destroy_image are EGL_KHR_image_base; the query_dma_buf_*
+  // pair is the optional EGL_EXT_image_dma_buf_import_modifiers query. Null when
+  // unadvertised — the compositor's capability probe gates on them.
+  rt.create_image =
+      resolve_proc<PFNEGLCREATEIMAGEKHRPROC>(rt.get_proc_address, "eglCreateImageKHR");
+  rt.destroy_image =
+      resolve_proc<PFNEGLDESTROYIMAGEKHRPROC>(rt.get_proc_address, "eglDestroyImageKHR");
+  rt.query_dma_buf_formats = resolve_proc<PFNEGLQUERYDMABUFFORMATSEXTPROC>(
+      rt.get_proc_address, "eglQueryDmaBufFormatsEXT");
+  rt.query_dma_buf_modifiers = resolve_proc<PFNEGLQUERYDMABUFMODIFIERSEXTPROC>(
+      rt.get_proc_address, "eglQueryDmaBufModifiersEXT");
+
   rt.loaded = true;
 }
 

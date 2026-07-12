@@ -330,6 +330,20 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
   attr_uv_ = gl.get_attrib_location(program_, "a_uv");
   gl.gen_buffers(1, &vbo_);
   gl.gen_textures(1, &texture_);
+
+  // One-time DMA-BUF import capability probe. The EGLImage composition path
+  // needs EGL_EXT_image_dma_buf_import advertised on this display plus the two
+  // entry points it drives (eglCreateImageKHR + glEGLImageTargetTexture2DOES).
+  // When any is missing the compositor keeps the CPU-upload path.
+  const char* egl_exts = egl.query_string(display, EGL_EXTENSIONS);
+  dmabuf_import_supported_ =
+      drm::detail::extension_present(egl_exts, "EGL_EXT_image_dma_buf_import") &&
+      (egl.create_image != nullptr) && (egl.destroy_image != nullptr) &&
+      (gl.egl_image_target_texture_2d != nullptr);
+  if (dmabuf_import_supported_) {
+    drm::log_info("gl_compositor: EGL dma-buf import available (EGLImage composition path)");
+  }
+
   armable_ = true;
   return {};
 }

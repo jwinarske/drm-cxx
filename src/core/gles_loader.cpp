@@ -86,6 +86,11 @@ void initialize_runtime(GlesLoader& rt) noexcept {
   rt.finish = resolve_gl<decltype(rt.finish)>(rt.handle, "glFinish");
   rt.get_error = resolve_gl<decltype(rt.get_error)>(rt.handle, "glGetError");
   rt.get_string = resolve_gl<decltype(rt.get_string)>(rt.handle, "glGetString");
+  // Optional OES extension for the EGLImage-dmabuf composition path.
+  // Deliberately NOT part of all_present below — a stack without
+  // GL_OES_EGL_image still runs the CPU-upload compositor.
+  rt.egl_image_target_texture_2d = resolve_gl<decltype(rt.egl_image_target_texture_2d)>(
+      rt.handle, "glEGLImageTargetTexture2DOES");
 
   // All entry points are mandatory for the compositor; if any is missing treat
   // the whole stack as unusable so the caller falls back to the CPU path.

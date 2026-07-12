@@ -115,6 +115,18 @@ struct EglLoader {
   PFNEGLCREATESYNCKHRPROC create_sync{nullptr};
   PFNEGLDESTROYSYNCKHRPROC destroy_sync{nullptr};
   PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_native_fence_fd{nullptr};
+
+  // EGL_KHR_image_base + EGL_EXT_image_dma_buf_import entry points — the GL
+  // compositor imports a layer's dma-buf as an EGLImage and samples it directly
+  // (glEGLImageTargetTexture2DOES in the GLES loader) instead of uploading CPU
+  // pixels. create_image/destroy_image come from EGL_KHR_image_base; the
+  // query_dma_buf_* pair from EGL_EXT_image_dma_buf_import_modifiers (optional,
+  // used only to enumerate importable formats/modifiers). Null when the stack
+  // doesn't advertise them; the compositor then keeps the CPU-upload path.
+  PFNEGLCREATEIMAGEKHRPROC create_image{nullptr};
+  PFNEGLDESTROYIMAGEKHRPROC destroy_image{nullptr};
+  PFNEGLQUERYDMABUFFORMATSEXTPROC query_dma_buf_formats{nullptr};
+  PFNEGLQUERYDMABUFMODIFIERSEXTPROC query_dma_buf_modifiers{nullptr};
 };
 
 /// Process-singleton EGL runtime accessor. First call performs the
