@@ -637,8 +637,20 @@ std::vector<CandidatePair> Allocator::rank_candidates_group(
 PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
                                        const std::vector<const PlaneCapabilities*>& planes,
                                        const uint32_t flags, const uint32_t crtc_index) {
+  // Process layers highest keep-priority first so that, when planes are
+  // scarce, the preseed's max-cardinality matching and the greedy pass
+  // keep the higher-priority layers and drop the lower-priority ones
+  // (the matching itself is weight-agnostic in its drop choice, so the
+  // input order is what decides who survives). Stable, so same-priority
+  // layers preserve caller order. keep_priority is content-class
+  // dominant, with app_priority breaking within-class ties.
+  std::vector<Layer*> ordered(layers.begin(), layers.end());
+  std::stable_sort(ordered.begin(), ordered.end(), [](const Layer* a, const Layer* b) {
+    return keep_priority(*a) > keep_priority(*b);
+  });
+
   // §13.5 Bipartite pre-solve
-  auto preseed = bipartite_preseed_group(layers, planes, crtc_index);
+  auto preseed = bipartite_preseed_group(ordered, planes, crtc_index);
 
   PlaneAssignment assignment;
   for (auto& [layer, plane] : preseed) {
@@ -665,7 +677,7 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
 
   // §13.2 + §13.1 Greedy from ranked candidates
   assignment.clear();
-  auto candidates = rank_candidates_group(layers, planes, crtc_index);
+  auto candidates = rank_candidates_group(ordered, planes, crtc_index);
 
   std::unordered_map<uint32_t, bool> used_planes;
   std::unordered_map<Layer*, bool> assigned_layers;
@@ -703,11 +715,12 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
     return assignment;
   }
 
-  // Backtrack: remove assignments one by one (lowest priority first)
+  // Backtrack: remove assignments one by one (lowest keep-priority
+  // first — content class dominates, app_priority breaks within-class ties)
   auto assigned_vec =
       std::vector<std::pair<uint32_t, Layer*>>(assignment.begin(), assignment.end());
   std::sort(assigned_vec.begin(), assigned_vec.end(), [](const auto& a, const auto& b) {
-    return layer_priority(*a.second) < layer_priority(*b.second);
+    return keep_priority(*a.second) < keep_priority(*b.second);
   });
 
   for (auto& [fst, snd] : assigned_vec) {
@@ -728,7 +741,7 @@ const Layer* Allocator::pick_most_constrained(const std::vector<Layer*>& layers,
                                               const uint32_t crtc_index) {
   const Layer* worst = nullptr;
   std::size_t worst_count = std::numeric_limits<std::size_t>::max();
-  int worst_priority = std::numeric_limits<int>::max();
+  int worst_keep = std::numeric_limits<int>::max();
 
   for (const auto* layer : layers) {
     std::size_t count = 0;
@@ -737,13 +750,14 @@ const Layer* Allocator::pick_most_constrained(const std::vector<Layer*>& layers,
         ++count;
       }
     }
-    const int prio = layer_priority(*layer);
-    // Most-constrained first; lowest-priority breaks ties (least
-    // valuable to keep when constraint counts agree).
-    if (count < worst_count || (count == worst_count && prio < worst_priority)) {
+    const int keep = keep_priority(*layer);
+    // Most-constrained first; lowest keep-priority breaks ties (least
+    // valuable to keep when constraint counts agree — content class
+    // dominates, app_priority breaks within-class ties).
+    if (count < worst_count || (count == worst_count && keep < worst_keep)) {
       worst = layer;
       worst_count = count;
-      worst_priority = prio;
+      worst_keep = keep;
     }
   }
   return worst;
@@ -870,6 +884,13 @@ int Allocator::layer_priority(const Layer& layer) {
     return 50;
   }
   return 10;
+}
+
+int Allocator::keep_priority(const Layer& layer) {
+  // app_priority (0..255) occupies the low byte; the content-class
+  // priority is shifted above it so it always dominates — app_priority
+  // only breaks ties among layers of the same content class.
+  return (layer_priority(layer) * 256) + static_cast<int>(layer.app_priority());
 }
 
 // ── §13.1 Static compatibility ────────────────────────────────
