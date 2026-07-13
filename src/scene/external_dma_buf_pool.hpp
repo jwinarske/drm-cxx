@@ -42,6 +42,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -68,6 +69,12 @@ class ExternalDmaBufPool : public LayerBufferSource {
     /// Fault isolation: same CPU fence pre-wait / hold-last-frame contract as
     /// ExternalDmaBufRing::Options::fence_deadline. See RingPresenter.
     std::optional<std::chrono::nanoseconds> fence_deadline;
+    /// Bound on the number of imported buffers kept cached. Once exceeded, the
+    /// least-recently-submitted *idle* entries are evicted on acquire() —
+    /// eviction of a buffer still referenced by an in-flight commit is deferred
+    /// until it retires. Covers producers with unstable buffer identities so the
+    /// import map can't grow without bound. Must be >= 1.
+    std::size_t max_pool{32};
   };
 
   /// Create an empty pool for `dev` at the generation geometry
@@ -76,7 +83,13 @@ class ExternalDmaBufPool : public LayerBufferSource {
   /// or errc::bad_file_descriptor on a dead device.
   [[nodiscard]] static drm::expected<std::unique_ptr<ExternalDmaBufPool>, std::error_code> create(
       const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_fourcc,
-      std::uint64_t modifier, Options options = {});
+      std::uint64_t modifier, Options options);
+
+  /// Overload with default Options (no callback, no deadline, max_pool 32). Split
+  /// out because a DMI-bearing aggregate can't form an in-class default argument.
+  [[nodiscard]] static drm::expected<std::unique_ptr<ExternalDmaBufPool>, std::error_code> create(
+      const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_fourcc,
+      std::uint64_t modifier);
 
   ExternalDmaBufPool(const ExternalDmaBufPool&) = delete;
   ExternalDmaBufPool& operator=(const ExternalDmaBufPool&) = delete;
@@ -119,21 +132,35 @@ class ExternalDmaBufPool : public LayerBufferSource {
       const drm::Device& new_dev) override;
 
  private:
-  explicit ExternalDmaBufPool(std::optional<std::chrono::nanoseconds> fence_deadline)
-      : presenter_(fence_deadline) {}
+  explicit ExternalDmaBufPool(std::optional<std::chrono::nanoseconds> fence_deadline,
+                              std::size_t max_pool)
+      : max_pool_(max_pool < 1 ? 1 : max_pool), presenter_(fence_deadline) {}
 
   void fire_release(std::uintptr_t buffer_key,
                     std::optional<drm::sync::SyncFence> release_fence) noexcept;
 
+  // Move `buffer_key` to most-recently-used. Caller holds slots_mu_.
+  void touch_lru(std::uintptr_t buffer_key);
+  // Tear down + forget the buffer under `buffer_key`. Caller holds slots_mu_.
+  void evict_locked(std::uintptr_t buffer_key) noexcept;
+  // Evict least-recently-used idle buffers until at most max_pool_ remain,
+  // skipping any the presenter still references. Caller holds slots_mu_ and runs
+  // on the commit thread (so the presenter's liveness view is stable).
+  void prune_locked() noexcept;
+
   int fd_{-1};
   SourceFormat format_{};
+  std::size_t max_pool_{32};
   OnBufferRelease on_release_;
 
   // buffer_key -> imported buffer (dma_buf planes + cached fb_id). Guarded by
   // slots_mu_ because submit() imports on the producer thread while acquire() /
-  // export_dma_buf() read on the commit thread.
+  // export_dma_buf() read on the commit thread. `lru_` orders keys
+  // least-recently-submitted (front) to most (back); `lru_pos_` is its index.
   mutable std::mutex slots_mu_;
   std::unordered_map<std::uintptr_t, detail::DmaBufSlot> slots_;
+  std::list<std::uintptr_t> lru_;
+  std::unordered_map<std::uintptr_t, std::list<std::uintptr_t>::iterator> lru_pos_;
 
   // Presentation state machine, keyed by buffer_key. See external_ring_core.hpp.
   detail::RingPresenter presenter_;
