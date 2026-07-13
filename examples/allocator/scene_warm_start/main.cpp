@@ -2,54 +2,51 @@
 // SPDX-License-Identifier: MIT
 //
 // scene_warm_start — pedagogical demonstrator for the allocator's
-// warm-start optimization.
+// warm-start optimization and its FB-only fast path.
 //
 // What you should see when this runs:
 //
-//   frame  1 test_commits= 1 assigned=3 ... props= 32 fbs=3   ← cold
-//   frame  2 test_commits= 1 assigned=3 ... props=  3 fbs=3   ← warm
-//   frame  3 test_commits= 1 assigned=3 ... props=  3 fbs=3   ← steady
+//   frame  1 test_commits= 1 assigned=3 ... props= 44 fbs=3   ← cold
+//   frame  2 test_commits= 0 assigned=3 ... props=  3 fbs=3   ← fast path
+//   frame  3 test_commits= 0 assigned=3 ... props=  3 fbs=3   ← steady
 //   ...
 //   frame 30 test_commits= 1 assigned=3 ... props=  4 fbs=3
-//   ↑ HUD translated 16px — dirty layer, warm TEST still validates
-//   frame 31 test_commits= 1 assigned=3 ... props=  3 fbs=3   ← steady
+//   ↑ HUD translated 16px — placement changed, one warm TEST re-validates
+//   frame 31 test_commits= 0 assigned=3 ... props=  3 fbs=3   ← steady
 //   ...
 //
-// The visible cold-vs-warm signal here is `props`, not `test_commits`:
+// `test_commits` is the cold-vs-warm signal:
 //
-//   - Frame 1 writes the full plane state for every assigned plane —
-//     CRTC_ID, FB_ID, src/dst rects, zpos, alpha, plus the mode blob —
-//     so `props` is large (32 for this 3-layer scene on amdgpu).
-//   - Frame 2+ only writes the FB_ID delta for double-buffering, so
-//     `props` collapses to 3 (one FB_ID per layer).
-//   - Move frames (30, 50) write one extra dst_rect prop on the dirtied
-//     HUD layer, so `props` ticks up to 4.
+//   - Frame 1 (cold) writes the full plane state for every assigned plane
+//     — CRTC_ID, FB_ID, src/dst rects, zpos, alpha, plus the mode blob —
+//     so `props` is large (44 for this 3-layer scene on vc4), and the
+//     allocator issues one DRM_MODE_ATOMIC_TEST_ONLY to validate the
+//     first assignment.
+//   - Frame 2+ change only FB_ID (double-buffering), so `props` collapses
+//     to 3 (one FB_ID per layer) AND `test_commits` drops to 0: the
+//     allocator sees that every layer's property hash — geometry, format,
+//     modifier, everything but FB_ID / fence — is byte-identical to the
+//     assignment the kernel already accepted, so it reuses the cached
+//     allocation and skips the redundant TEST entirely. The real commit's
+//     atomic_check remains the sole arbiter.
+//   - Move frames (30, 50) translate the HUD 16px. That changes CRTC_X, so
+//     the property hash moves, the fast path is defeated, and the warm
+//     path re-validates the (unchanged) plane→layer mapping with exactly
+//     one TEST. `props` ticks up to 4 (the extra dst_rect). The very next
+//     frame is back on the fast path at 0.
 //
-// `test_commits` stays at 1 throughout — including frame 1 — because
-// the allocator's bipartite preseed solves this 3-layer scene on the
-// first probe and the full_search ladder never has to fall back to
-// greedy or backtracking. A more adversarial scene (tight format /
-// scaling / zpos constraints) would defeat the preseed and you'd see
-// `test_commits` spike on frame 1 as the ladder steps through each
-// rung, each rung issuing one DRM_MODE_ATOMIC_TEST_ONLY probe.
-//
-// Steady-state `test_commits=1` is the warm-start invariant: the
-// allocator caches the previous frame's plane→layer assignment and
-// re-validates it with a single TEST per commit. When a layer is
-// dirtied, the warm path still runs — for changes the kernel accepts
-// on the same plane→layer mapping (pure translation, alpha tweaks)
-// the TEST passes and we never re-enter full_search. A change the
-// cached assignment can't satisfy — formats, sizes that exceed the
-// plane's scaling, zpos values outside the plane's range — fails
-// the warm TEST and kicks full_search back in, briefly spiking
-// `test_commits`.
+// So over these 60 frames the driver's atomic_check runs only 3 times
+// (frame 1 + the two moves) instead of 60. A change the cached assignment
+// can't satisfy — formats, sizes that exceed the plane's scaling, zpos
+// outside the plane's range — fails the warm TEST and kicks full_search
+// back in, spiking `test_commits` further.
 //
 // The example ships exactly three layers (bg + indicator + HUD) and
 // two 16-pixel HUD translations (frames 30, 50) to exercise the
-// dirty-but-still-warm path. Buffer contents are static solid fills
-// — repainting a buffer would also be a dirty event but would muddle
-// the warm-start signal we're trying to expose. Printing is to
-// stderr via drm::println.
+// fast-path-defeat-and-recover path. Buffer contents are static solid
+// fills — repainting a buffer would also be a content event but would
+// muddle the signal we're trying to expose. Printing is to stderr via
+// drm::println.
 //
 // Usage: scene_warm_start [/dev/dri/cardN]
 
@@ -252,7 +249,7 @@ int main(int argc, char* argv[]) try {
         frame, report->test_commits_issued, report->layers_assigned, report->layers_composited,
         report->layers_unassigned, report->properties_written, report->fbs_attached);
     if (moved) {
-      drm::println("  ↑ HUD translated 16px — dirty layer, warm TEST still validates");
+      drm::println("  ↑ HUD translated 16px — placement changed, one warm TEST re-validates");
     }
   }
 
