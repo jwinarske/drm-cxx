@@ -632,6 +632,11 @@ class LayerScene::Impl {
   // commit failure: stick suspended_ on EACCES, propagate the error.
   // Always release the held acquisitions before returning.
   //
+  // The "a failed commit releases its acquisitions before returning"
+  // guarantee is an external contract: self-healing producer rings reuse
+  // their buffers immediately after a rejected commit and depend on it. Do
+  // not weaken it — the CommitFailureReleasesAcquisitions test pins it.
+  //
   // Test-only builds skip the post-commit state updates and just
   // release acquisitions — the commit_report from build_frame_into is
   // already complete.

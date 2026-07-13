@@ -33,6 +33,7 @@
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/modeset/atomic.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
@@ -285,6 +286,13 @@ std::size_t count_acquires(const std::vector<TrackingSource::Event>& transcript)
     }
   }
   return n;
+}
+
+// Outstanding leases = buffers acquired from the source but not yet released
+// back to it. The deferred-release contract keeps this at 1-2 across steady
+// commits; a commit *failure* must drive it straight back to 0.
+std::size_t outstanding_leases(const std::vector<TrackingSource::Event>& transcript) {
+  return count_acquires(transcript) - released_ids(transcript).size();
 }
 
 }  // namespace
@@ -586,5 +594,92 @@ TEST(LayerSceneReleaseVkms, ReplaceSourceRejectsBadArgs) {
   EXPECT_EQ(rep.error(), std::make_error_code(std::errc::invalid_argument));
 
   fx.scene.reset();  // drain teardown releases while the transcript is alive
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+// A failed real commit must release exactly the frame's own acquisitions
+// immediately — no flip is in flight to gate their release on — while leaving
+// the buffers legitimately in flight from earlier successful commits untouched,
+// and a non-EACCES failure must leave the scene paintable. Consumer self-healing
+// designs (a source ring reusing buffers after a rejected commit) now depend on
+// this, so pin it against silent regression: after steady-state presentation,
+// N consecutive injected commit failures each return the source's outstanding-
+// lease count to the pre-failure baseline, and commit N+1 still presents.
+//
+// The failure is injected without a fault-injecting driver via the two-phase
+// commit API: build_frame_into() acquires from the source and appends the
+// property writes, then finalize_frame() is handed a simulated kernel error
+// in place of a real req.commit().
+TEST(LayerSceneReleaseVkms, CommitFailureReleasesAcquisitions) {
+  const char* env = std::getenv("DRM_CXX_TEST_CARD");
+  const std::optional<std::string> node =
+      (env != nullptr && *env != '\0') ? std::optional<std::string>(env) : find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+
+  std::vector<TrackingSource::Event> transcript;
+  auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner.has_value()) << inner.error().message();
+
+  LayerDesc layer;
+  layer.source = std::make_unique<TrackingSource>(std::move(*inner), transcript);
+  layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.zpos = 1;
+  ASSERT_TRUE(fx.scene->add_layer(std::move(layer)).has_value());
+
+  // Establish steady state: two real commits so the mode is set and the
+  // deferred-release ring holds two in-flight buffers. This mirrors a
+  // producer ring that has been presenting frames before a commit is
+  // rejected — the case the self-healing contract exists for.
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  const std::size_t baseline = outstanding_leases(transcript);
+  ASSERT_EQ(baseline, 2U) << "two commits should leave two buffers deferred in flight";
+
+  // Inject N consecutive commit failures. Each build acquires one buffer;
+  // the failed finalize must release exactly that buffer (no flip is in
+  // flight to gate it on) and leave the two legitimately in-flight buffers
+  // untouched — so outstanding leases return to the pre-failure baseline.
+  constexpr int k_failures = 3;
+  for (int i = 0; i < k_failures; ++i) {
+    const std::size_t acquires_before = count_acquires(transcript);
+
+    drm::AtomicRequest req(*fx.dev);
+    ASSERT_TRUE(req.valid());
+    auto build = fx.scene->build_frame_into(req, 0, /*test_only=*/false);
+    ASSERT_TRUE(build.has_value()) << build.error().message();
+    ASSERT_TRUE(*build) << "scene unexpectedly suspended before failure " << i;
+    ASSERT_EQ(count_acquires(transcript), acquires_before + 1)
+        << "build_frame_into should acquire exactly one buffer on failure " << i;
+
+    // EINVAL, not EACCES: a transient rejection that must NOT suspend the scene.
+    auto fin = fx.scene->finalize_frame(
+        std::move(*build),
+        drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument)));
+    EXPECT_FALSE(fin.has_value()) << "commit failure " << i << " should propagate";
+    EXPECT_EQ(fin.error(), std::make_error_code(std::errc::invalid_argument));
+
+    EXPECT_EQ(outstanding_leases(transcript), baseline)
+        << "commit failure " << i
+        << " must release its own acquisition immediately and touch nothing else";
+  }
+
+  // Frame N+1: the ring is still paintable — a real commit succeeds.
+  auto ok = fx.scene->commit();
+  ASSERT_TRUE(ok.has_value()) << "ring must be paintable after " << k_failures
+                              << " commit failures: " << ok.error().message();
+
+  fx.scene.reset();  // drain the in-flight ring while the transcript is alive
+  EXPECT_EQ(outstanding_leases(transcript), 0U)
+      << "scene destruction must release every still-held in-flight acquisition";
+
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }
