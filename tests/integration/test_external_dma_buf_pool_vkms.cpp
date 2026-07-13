@@ -284,3 +284,39 @@ TEST(ExternalDmaBufPoolVkms, EvictionDeferredWhileInFlight) {
   ASSERT_TRUE(held.has_value());
   EXPECT_EQ((*pool)->cached_count(), 1U);
 }
+
+// A generation change updates the geometry and retires the old buffers; each is
+// torn down once its in-flight acquisition retires (deferred), while a fresh-key
+// buffer of the new generation imports under the new dimensions.
+TEST(ExternalDmaBufPoolVkms, ResetGenerationRetiresOldBuffers) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR);
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds[0], probe->stride));
+  auto a = (*pool)->acquire();  // A scanning, token outstanding
+  ASSERT_TRUE(a.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 1U);
+
+  (*pool)->reset_generation(k_w / 2, k_h / 2, DRM_FORMAT_XRGB8888);
+  EXPECT_EQ((*pool)->format().width, k_w / 2);
+  EXPECT_EQ((*pool)->format().height, k_h / 2);
+  // A is retired but still on screen + in flight — not yet torn down.
+  EXPECT_EQ((*pool)->cached_count(), 1U);
+
+  // A fresh-key buffer of the new generation imports under the new geometry.
+  (*pool)->submit(0xB, one(p, probe->dmabuf_fds[1], probe->stride));
+  auto b = (*pool)->acquire();  // B scanning; A superseded but its token is unretired
+  ASSERT_TRUE(b.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 2U);  // A's teardown deferred past its token
+
+  (*pool)->release_with_fence(std::move(*a), std::nullopt);  // A token retires
+  auto held = (*pool)->acquire();                            // sweep tears down the retired A
+  ASSERT_TRUE(held.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 1U);  // only the new-generation B remains
+}

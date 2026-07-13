@@ -22,6 +22,7 @@
 #include <optional>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -119,8 +120,10 @@ void ExternalDmaBufPool::submit(std::uintptr_t buffer_key,
       slots_.emplace(buffer_key, slot);
     }
     // Mark most-recently-used (whether freshly imported or a cache hit) so LRU
-    // eviction keeps the active working set.
+    // eviction keeps the active working set. A re-submitted key is active again,
+    // so clear any generation-retirement mark to keep it from being swept.
     touch_lru(buffer_key);
+    retiring_.erase(buffer_key);
   }
   presenter_.submit(static_cast<detail::SlotKey>(buffer_key), std::move(acquire), damage);
 }
@@ -128,6 +131,21 @@ void ExternalDmaBufPool::submit(std::uintptr_t buffer_key,
 std::size_t ExternalDmaBufPool::cached_count() const noexcept {
   const std::scoped_lock lock(slots_mu_);
   return slots_.size();
+}
+
+void ExternalDmaBufPool::reset_generation(std::uint32_t width, std::uint32_t height,
+                                          std::uint32_t drm_fourcc) noexcept {
+  const std::scoped_lock lock(slots_mu_);
+  format_.width = width;
+  format_.height = height;
+  format_.drm_fourcc = drm_fourcc;
+  // Mark every current buffer for retirement. The actual RmFB/GEM_CLOSE is
+  // deferred to a later acquire() (commit thread), once no in-flight commit
+  // still references the buffer — the same deferral LRU eviction uses. Fresh-key
+  // submits of the new generation import under the updated geometry.
+  for (const auto& [key, slot] : slots_) {
+    retiring_.insert(key);
+  }
 }
 
 drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufPool::acquire() {
@@ -142,9 +160,11 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufPool::acquire() {
         fb_id = it->second.fb_id;
       }
     }
-    // Commit thread: the presenter's in-flight view is stable here, so bound the
-    // import map by evicting idle least-recently-used buffers. The just-acquired
-    // key is the scanning key and so is never evicted.
+    // Commit thread: the presenter's in-flight view is stable here. Tear down
+    // any superseded-generation buffers that have retired, then bound the import
+    // map by evicting idle least-recently-used buffers. The just-acquired key is
+    // the scanning key and so is never evicted.
+    sweep_retiring_locked();
     prune_locked();
   }
   if (d.kind == detail::RingPresenter::Present::Fresh) {
@@ -202,6 +222,18 @@ void ExternalDmaBufPool::evict_locked(std::uintptr_t buffer_key) noexcept {
   if (auto it = lru_pos_.find(buffer_key); it != lru_pos_.end()) {
     lru_.erase(it->second);
     lru_pos_.erase(it);
+  }
+}
+
+void ExternalDmaBufPool::sweep_retiring_locked() noexcept {
+  for (auto it = retiring_.begin(); it != retiring_.end();) {
+    const std::uintptr_t key = *it;
+    if (presenter_.is_referenced(static_cast<detail::SlotKey>(key))) {
+      ++it;
+      continue;
+    }
+    it = retiring_.erase(it);
+    evict_locked(key);  // tears down slots_ + lru
   }
 }
 
@@ -277,6 +309,7 @@ drm::expected<void, std::error_code> ExternalDmaBufPool::on_session_resumed(
   }
   for (const std::uintptr_t key : dropped) {
     slots_.erase(key);
+    retiring_.erase(key);
     if (auto it = lru_pos_.find(key); it != lru_pos_.end()) {
       lru_.erase(it->second);
       lru_pos_.erase(it);
