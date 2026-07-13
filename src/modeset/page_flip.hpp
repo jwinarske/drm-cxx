@@ -81,6 +81,13 @@ class PageFlip {
   // page-flip handler or the foreign source's callback respectively.
   // Returns `timed_out` if `timeout_ms` elapses with no events.
   //
+  // EINTR is retried internally, so dispatch() NEVER returns
+  // `errc::interrupted` — a signal landing mid-wait (SIGCHLD, interval timers,
+  // profilers) does not abandon a flip still in flight. For `timeout_ms > 0` the
+  // remaining budget is recomputed from a steady clock across retries, so a
+  // signal storm cannot extend the wait past `timeout_ms`. (A foreign source's
+  // own callback may still observe EINTR on its own fd reads — that is theirs.)
+  //
   // Single-threaded contract: do not call dispatch / add_source /
   // remove_source concurrently against the same instance.
   [[nodiscard]] drm::expected<void, std::error_code> dispatch(int timeout_ms = -1);

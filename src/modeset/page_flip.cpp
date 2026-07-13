@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <sys/epoll.h>
@@ -169,7 +170,34 @@ drm::expected<void, std::error_code> PageFlip::dispatch(const int timeout_ms) {
   }
 
   std::array<epoll_event, k_max_dispatch_events> events{};
-  const int nfds = ::epoll_wait(epfd_, events.data(), static_cast<int>(events.size()), timeout_ms);
+  const int event_cap = static_cast<int>(events.size());
+  int nfds = 0;
+  // Retry EINTR internally so a signal landing mid-wait never abandons a flip
+  // still in flight. For an infinite (-1) or non-blocking (0) wait the timeout
+  // is retried verbatim; for a bounded wait the remaining budget is recomputed
+  // from a steady clock so a signal storm cannot stretch the wait past
+  // timeout_ms.
+  if (timeout_ms <= 0) {
+    // -1 (block forever) / 0 (poll): the timeout is retried verbatim.
+    for (;;) {
+      nfds = ::epoll_wait(epfd_, events.data(), event_cap, timeout_ms);
+      if (nfds >= 0 || errno != EINTR) {
+        break;
+      }
+    }
+  } else {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 deadline - std::chrono::steady_clock::now())
+                                 .count();
+      nfds = ::epoll_wait(epfd_, events.data(), event_cap,
+                          remaining < 0 ? 0 : static_cast<int>(remaining));
+      if (nfds >= 0 || errno != EINTR) {
+        break;
+      }
+    }
+  }
   if (nfds < 0) {
     return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
   }

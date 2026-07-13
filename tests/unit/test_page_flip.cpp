@@ -16,9 +16,13 @@
 #include "core/device.hpp"
 #include "modeset/page_flip.hpp"
 
+#include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <signal.h>  // NOLINT(modernize-deprecated-headers): POSIX sigaction/setitimer live here, not <csignal>
 #include <sys/eventfd.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <system_error>
 #include <unistd.h>
@@ -34,6 +38,63 @@ namespace {
 drm::Device make_device_with_fd(int fd) {
   return drm::Device::from_fd(fd);
 }
+
+// Count of SIGALRM deliveries, so a test can assert the storm actually
+// fired (otherwise a "passing" EINTR test may not have exercised EINTR).
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+volatile std::sig_atomic_t g_alrm_count = 0;
+
+// A fd the handler makes readable after k_ready_after_ticks interruptions,
+// or -1 to keep the storm purely interrupting (no readiness). write() is
+// async-signal-safe, so ending the storm from the handler itself lets one
+// thread both generate the EINTR storm and terminate it — no second thread
+// or signal masking to steer delivery.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+int g_ready_fd = -1;
+
+constexpr int k_ready_after_ticks = 20;
+
+void on_sigalrm(int /*signo*/) {
+  const int ticks = ++g_alrm_count;
+  if (ticks == k_ready_after_ticks && g_ready_fd >= 0) {
+    const std::uint64_t bump = 1;
+    const ssize_t written = ::write(g_ready_fd, &bump, sizeof(bump));
+    (void)written;
+  }
+}
+
+// RAII: install a deliberately non-restarting SIGALRM handler and arm a
+// 1 ms interval timer, so any epoll_wait running while this is alive is
+// interrupted (EINTR) roughly every millisecond. Restores the previous
+// handler and disarms the timer on scope exit.
+class SigalrmStorm {
+ public:
+  SigalrmStorm() {
+    g_alrm_count = 0;
+    struct sigaction sa{};
+    sa.sa_handler = on_sigalrm;
+    ::sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  // no SA_RESTART: interrupted syscalls return EINTR.
+    ::sigaction(SIGALRM, &sa, &old_sa_);
+    struct itimerval it{};
+    it.it_interval.tv_usec = 1000;  // 1 ms cadence
+    it.it_value.tv_usec = 1000;
+    ::setitimer(ITIMER_REAL, &it, &old_it_);
+  }
+  ~SigalrmStorm() {
+    const struct itimerval off{};
+    ::setitimer(ITIMER_REAL, &off, nullptr);
+    ::sigaction(SIGALRM, &old_sa_, nullptr);
+  }
+  SigalrmStorm(const SigalrmStorm&) = delete;
+  SigalrmStorm& operator=(const SigalrmStorm&) = delete;
+  SigalrmStorm(SigalrmStorm&&) = delete;
+  SigalrmStorm& operator=(SigalrmStorm&&) = delete;
+
+ private:
+  struct sigaction old_sa_{};
+  struct itimerval old_it_{};
+};
 
 }  // namespace
 
@@ -212,4 +273,73 @@ TEST(PageFlipRebind, SwapsDrmFdRegistration) {
 
   ::close(first);
   ::close(second);
+}
+
+// dispatch(-1) under a 1 ms SIGALRM storm must swallow every EINTR and
+// return only once a source is actually readable — never
+// errc::interrupted. Without the internal retry, the first interrupting
+// signal (~1 ms in) would abandon the wait and surface interrupted,
+// dropping a flip still in flight.
+TEST(PageFlipEintr, DispatchInfiniteRetriesUntilReady) {
+  const int efd = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  if (efd < 0) {
+    GTEST_SKIP() << "eventfd unavailable";
+  }
+  auto dev = make_device_with_fd(-1);
+  drm::PageFlip pf(dev);
+  int calls = 0;
+  ASSERT_TRUE(pf.add_source(efd, [&] {
+                  std::uint64_t val = 0;
+                  ::read(efd, &val, sizeof(val));
+                  ++calls;
+                }).has_value());
+
+  // The handler makes efd readable only after k_ready_after_ticks
+  // interruptions, so dispatch(-1) blocks, is interrupted many times, and
+  // must swallow every EINTR — returning success once efd is readable,
+  // never errc::interrupted.
+  g_ready_fd = efd;
+  {
+    const SigalrmStorm storm;
+    auto r = pf.dispatch(-1);
+    EXPECT_TRUE(r.has_value()) << r.error().message();
+  }
+  g_ready_fd = -1;
+
+  EXPECT_EQ(calls, 1);
+  EXPECT_GE(g_alrm_count, k_ready_after_ticks) << "storm never fired — EINTR path untested";
+
+  pf.remove_source(efd);
+  ::close(efd);
+}
+
+// dispatch(timeout_ms > 0) under the same storm must still complete at
+// ~timeout_ms, not restart the full budget per signal. A naive retry that
+// re-passed timeout_ms to epoll_wait each time would never terminate under
+// a 1 ms storm; recomputing the remaining budget from a steady deadline
+// bounds the total wait.
+TEST(PageFlipEintr, DispatchBoundedTimeoutHonorsBudgetUnderStorm) {
+  const int efd = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  if (efd < 0) {
+    GTEST_SKIP() << "eventfd unavailable";
+  }
+  auto dev = make_device_with_fd(-1);
+  drm::PageFlip pf(dev);
+  ASSERT_TRUE(pf.add_source(efd, [] {}).has_value());  // never made readable
+
+  const SigalrmStorm storm;
+  const auto start = std::chrono::steady_clock::now();
+  auto r = pf.dispatch(50);
+  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count();
+
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error(), std::make_error_code(std::errc::timed_out));
+  EXPECT_GE(elapsed_ms, 45) << "returned before the budget elapsed";
+  EXPECT_LT(elapsed_ms, 500) << "budget not recomputed across EINTR retries";
+  EXPECT_GT(g_alrm_count, 0) << "storm never fired — EINTR path untested";
+
+  pf.remove_source(efd);
+  ::close(efd);
 }
