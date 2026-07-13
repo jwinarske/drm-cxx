@@ -34,12 +34,14 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
+#include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
 
 #include <drm_fourcc.h>
+#include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -681,5 +683,64 @@ TEST(LayerSceneReleaseVkms, CommitFailureReleasesAcquisitions) {
   EXPECT_EQ(outstanding_leases(transcript), 0U)
       << "scene destruction must release every still-held in-flight acquisition";
 
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+// drain() must land the page-flip event armed by the last real commit so the
+// scene can be torn down without leaving an event queued against a buffer it
+// is about to release (the classic RmFB-on-in-flight-FB hazard). After drain()
+// returns, the flip has been dispatched and the kernel's event queue is empty.
+TEST(LayerSceneReleaseVkms, DrainLandsPendingFlipBeforeTeardown) {
+  const char* env = std::getenv("DRM_CXX_TEST_CARD");
+  const std::optional<std::string> node =
+      (env != nullptr && *env != '\0') ? std::optional<std::string>(env) : find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+
+  std::vector<TrackingSource::Event> transcript;
+  auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner.has_value()) << inner.error().message();
+
+  LayerDesc layer;
+  layer.source = std::make_unique<TrackingSource>(std::move(*inner), transcript);
+  layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.zpos = 1;
+  ASSERT_TRUE(fx.scene->add_layer(std::move(layer)).has_value());
+
+  drm::PageFlip pf(*fx.dev);
+  int flips_seen = 0;
+  pf.set_handler(
+      [&](std::uint32_t /*crtc*/, std::uint64_t /*seq*/, std::uint64_t /*ts*/) { ++flips_seen; });
+
+  // Establish the mode with a plain commit, then a flip commit that arms the
+  // page-flip event (user_data routes the completion back through pf).
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  auto flip = fx.scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &pf);
+  ASSERT_TRUE(flip.has_value()) << flip.error().message();
+
+  // drain() lands exactly that event.
+  auto d = fx.scene->drain(pf, 1000);
+  ASSERT_TRUE(d.has_value()) << d.error().message();
+  EXPECT_EQ(flips_seen, 1) << "drain should have dispatched the pending flip event";
+
+  // No event left in the queue: a non-blocking dispatch now times out.
+  auto extra = pf.dispatch(0);
+  EXPECT_FALSE(extra.has_value());
+  EXPECT_EQ(extra.error(), std::make_error_code(std::errc::timed_out));
+
+  // With nothing armed, drain() is an immediate no-op that never touches pf.
+  auto again = fx.scene->drain(pf, 0);
+  EXPECT_TRUE(again.has_value()) << again.error().message();
+  EXPECT_EQ(flips_seen, 1);
+
+  fx.scene.reset();  // safe: the in-flight flip already landed
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }

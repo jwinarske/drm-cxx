@@ -32,6 +32,7 @@
 #include <drm-cxx/fmt/format_mod.hpp>
 #include <drm-cxx/log.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
+#include <drm-cxx/modeset/page_flip.hpp>
 #include <drm-cxx/planes/allocator.hpp>
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/planes/output.hpp>
@@ -611,7 +612,28 @@ class LayerScene::Impl {
         release_src = nullptr;                    // moved out — nothing to stamp from
       }
     }
+    // Track whether an undispatched page-flip event is now queued, so drain()
+    // can land it before teardown. Only a successful real commit that carried
+    // the flag queues an event; a failed or test commit queues nothing.
+    if (!test_only) {
+      last_real_commit_wanted_event_ =
+          kr.has_value() && (kernel_flags & DRM_MODE_PAGE_FLIP_EVENT) != 0;
+    }
     return finalize_frame(std::move(state), kr, release_src);
+  }
+
+  drm::expected<void, std::error_code> drain(PageFlip& pf, int timeout_ms) {
+    if (!last_real_commit_wanted_event_) {
+      return {};  // nothing armed — no event queued to land
+    }
+    // The last real commit queued exactly one flip event; dispatch until it is
+    // delivered. Single-scene teardown assumption: this scene owns its CRTC's
+    // flip stream, so the next event pf surfaces is ours.
+    if (auto r = pf.dispatch(timeout_ms); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+    last_real_commit_wanted_event_ = false;
+    return {};
   }
 
   // Build the frame's property writes onto the caller-supplied
@@ -2991,6 +3013,11 @@ class LayerScene::Impl {
   std::vector<std::uint32_t> ephemeral_blobs_;
   bool first_commit_{true};
   bool suspended_{false};
+  // True when the most recent successful real commit carried
+  // DRM_MODE_PAGE_FLIP_EVENT, i.e. the kernel has an undispatched flip event
+  // queued for it. drain() consumes that event before teardown; cleared once
+  // drain() dispatches it. See LayerScene::drain.
+  bool last_real_commit_wanted_event_{false};
   // Set when the layer set changes (add/remove); cleared on a successful real
   // commit. Forces content_changed() true so an all-idle Skip can't drop a
   // structural change (e.g. a removed layer's plane left armed).
@@ -3813,6 +3840,10 @@ drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t fl
                                                                 void* user_data,
                                                                 drm::sync::SyncFence* out_fence) {
   return impl_->do_commit(flags, /*test_only=*/false, user_data, out_fence);
+}
+
+drm::expected<void, std::error_code> LayerScene::drain(PageFlip& pf, int timeout_ms) {
+  return impl_->drain(pf, timeout_ms);
 }
 
 drm::expected<FrameBuildPtr, std::error_code> LayerScene::build_frame_into(
