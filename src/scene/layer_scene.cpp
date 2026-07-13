@@ -459,31 +459,17 @@ class LayerScene::Impl {
       output_.remove_layer(*slot->planes_layer);
       slot->planes_layer = nullptr;
     }
-    // Scrub the deferred-release ring of any acquisition that still
-    // references this layer. The ring holds raw scene_layer pointers
-    // (AcquisitionSlot::scene_layer = slot.scene_layer.get()); resetting
-    // the owning unique_ptr below would leave them dangling, and the
-    // next finalize_frame's release_all() would dereference freed memory
-    // (source().release()) → crash. The buffer may still be mid-scanout,
-    // but the layer is leaving the scene, so releasing now — while the
-    // source is still alive — is the correct trade (mirrors
-    // release_pending_acquisitions()'s synchronous drain). Null the slot
-    // so release_all() skips it; entries stay in place to preserve ring
-    // ordering.
+    // The deferred-release ring holds raw scene_layer pointers
+    // (AcquisitionSlot::scene_layer = slot.scene_layer.get()) and the buffer may
+    // still be mid-scanout. Rather than release it early (tearing) or free the
+    // Layer out from under those pointers (use-after-free), move the Layer into
+    // the source-retire ring: it stays alive so the next commits' release_all()
+    // return its buffers to the source with their release fences, and it is
+    // destroyed only after they have all drained (see finalize_frame). A moved-
+    // from unique_ptr is null, so the slot's Layer is gone either way.
     if (slot->scene_layer) {
-      const Layer* dying = slot->scene_layer.get();
-      const auto scrub = [&](std::vector<AcquisitionSlot>& ring) {
-        for (auto& a : ring) {
-          if (a.scene_layer == dying) {
-            a.scene_layer->source().release(std::move(a.buffer));
-            a.scene_layer = nullptr;
-          }
-        }
-      };
-      scrub(prev_acquisitions_);
-      scrub(prev_prev_acquisitions_);
+      retire_pending_.push_back(std::move(slot->scene_layer));
     }
-    slot->scene_layer.reset();
     slot->alive = false;
     // Slot index is slot_idx in the vector; store slot_idx (= handle.id-1)
     // in the freelist.
@@ -1079,6 +1065,11 @@ class LayerScene::Impl {
   void release_pending_acquisitions() noexcept {
     release_all(prev_prev_acquisitions_);
     release_all(prev_acquisitions_);
+    // The buffers held by retired sources have now been returned; destroy those
+    // sources (no flip is in flight on these paths, so nothing still scans them).
+    retire_prev_prev_.clear();
+    retire_prev_.clear();
+    retire_pending_.clear();
   }
 
   // Copy scene::Layer state into the planes::Layer property bag. The
@@ -3050,6 +3041,19 @@ class LayerScene::Impl {
   std::vector<AcquisitionSlot> prev_acquisitions_;
   std::vector<AcquisitionSlot> prev_prev_acquisitions_;
 
+  // Source-lifetime retire ring. A removed (or, in a follow-up, replaced) Layer
+  // is moved here instead of being destroyed synchronously: the deferred-release
+  // ring above still holds raw Layer* into it (release_all dereferences
+  // scene_layer->source()), and its buffer may still be mid-scanout. The Layer
+  // is destroyed only after its last buffer has drained out of
+  // prev_prev_acquisitions_ — one rotation deeper than the buffer ring, so every
+  // release_all that could touch it has already run. Rotated in finalize_frame's
+  // success branch right after the buffer release_all; drained synchronously on
+  // the same teardown/pause/rebind paths as the buffer ring.
+  std::vector<std::unique_ptr<Layer>> retire_pending_;
+  std::vector<std::unique_ptr<Layer>> retire_prev_;
+  std::vector<std::unique_ptr<Layer>> retire_prev_prev_;
+
   // Per-plane "what we last actually committed" snapshot for the
   // properties that arm_layer_plane_blend_defaults /
   // arm_layer_plane_color_props re-emit defensively each frame
@@ -3618,6 +3622,13 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
       }
     }
     release_all(prev_prev_acquisitions_);
+    // Destroy sources retired two rotations ago: their last buffers were just
+    // returned above (they had drained into prev_prev_acquisitions_), so no ring
+    // entry references them any more. Advance the retire ring in lockstep with
+    // the buffer ring below.
+    retire_prev_prev_.clear();
+    std::swap(retire_prev_prev_, retire_prev_);
+    std::swap(retire_prev_, retire_pending_);
     std::swap(prev_prev_acquisitions_, prev_acquisitions_);
     std::swap(prev_acquisitions_, state->acquisitions);
     scratch_acquisitions_ = std::move(state->acquisitions);
