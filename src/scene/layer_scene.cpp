@@ -385,6 +385,45 @@ class LayerScene::Impl {
     return handle;
   }
 
+  drm::expected<void, std::error_code> replace_source(
+      LayerHandle handle, std::unique_ptr<LayerBufferSource> new_source) {
+    if (!new_source) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    // Same DriverOwnsBinding gate as add_layer: the scene can't drive a source
+    // whose FB_ID it may not write.
+    if (new_source->binding_model() == BindingModel::DriverOwnsBinding &&
+        !stream_capability_.usable()) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+    }
+    auto* slot = slot_for(handle);  // rejects a stale handle (generation mismatch)
+    if (slot == nullptr || !slot->scene_layer) {
+      return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
+    }
+    Layer* const layer = slot->scene_layer.get();
+    // Swap in the new source. The layer — its handle, geometry and plane
+    // assignment — is untouched; the next commit acquires from new_source.
+    auto old_source = layer->exchange_source(std::move(new_source));
+    LayerBufferSource* const old_raw = old_source.get();
+    // Retarget this layer's still-in-flight acquisitions at the retiring source
+    // so they release to the producer that made them, not the replacement. An
+    // entry already retired (by a prior rapid replace) keeps its earlier target.
+    const auto retarget = [&](std::vector<AcquisitionSlot>& ring) {
+      for (auto& a : ring) {
+        if (a.scene_layer == layer && a.retired_source == nullptr) {
+          a.retired_source = old_raw;
+        }
+      }
+    };
+    retarget(prev_acquisitions_);
+    retarget(prev_prev_acquisitions_);
+    // Hold the old source alive until those releases fire; destroyed a rotation
+    // past its last buffer (see finalize_frame).
+    retire_src_pending_.push_back(std::move(old_source));
+    structure_dirty_ = true;  // the new source's first frame must be committed
+    return {};
+  }
+
   // True if this frame would change scanout: the layer set changed since the
   // last commit, any live layer's params are dirty, or any live source has a
   // fresh frame to present. False only when every layer is clean AND every
@@ -998,6 +1037,11 @@ class LayerScene::Impl {
     // the source via release_with_fence so a GPU producer can wait on it instead
     // of CPU-blocking. nullopt unless the source opted in (wants_release_fence).
     std::optional<drm::sync::SyncFence> release_fence;
+    // Normally null: release targets scene_layer->source(). Set by
+    // replace_source to the OLD source when this layer's source was swapped while
+    // this buffer was still in flight, so it releases to the producer that made
+    // it (held alive in the source-retire ring) instead of the replacement.
+    LayerBufferSource* retired_source{nullptr};
   };
 
   // Slot-table helpers — return nullptr on any handle that doesn't
@@ -1049,10 +1093,15 @@ class LayerScene::Impl {
 
   static void release_all(std::vector<AcquisitionSlot>& acquisitions) noexcept {
     for (auto& a : acquisitions) {
-      if (a.scene_layer != nullptr) {
-        // release_with_fence carries the release fence when one was
-        // stamped (else nullopt); the base default forwards to release().
-        a.scene_layer->source().release_with_fence(std::move(a.buffer), std::move(a.release_fence));
+      // A buffer whose source was swapped by replace_source releases to the
+      // retiring producer (retired_source); otherwise to the layer's current
+      // source. release_with_fence carries the stamped fence (else nullopt).
+      LayerBufferSource* src = a.retired_source;
+      if (src == nullptr && a.scene_layer != nullptr) {
+        src = &a.scene_layer->source();
+      }
+      if (src != nullptr) {
+        src->release_with_fence(std::move(a.buffer), std::move(a.release_fence));
       }
     }
     acquisitions.clear();
@@ -1070,6 +1119,9 @@ class LayerScene::Impl {
     retire_prev_prev_.clear();
     retire_prev_.clear();
     retire_pending_.clear();
+    retire_src_prev_prev_.clear();
+    retire_src_prev_.clear();
+    retire_src_pending_.clear();
   }
 
   // Copy scene::Layer state into the planes::Layer property bag. The
@@ -3054,6 +3106,15 @@ class LayerScene::Impl {
   std::vector<std::unique_ptr<Layer>> retire_prev_;
   std::vector<std::unique_ptr<Layer>> retire_prev_prev_;
 
+  // Source-retire ring. replace_source keeps the Layer (its handle, geometry and
+  // plane assignment stay) but swaps its source; the displaced source is held
+  // here so its still-in-flight buffers (AcquisitionSlot::retired_source) release
+  // to it, and it is destroyed only after they drain — rotated and drained in
+  // lockstep with the buffer + layer-retire rings.
+  std::vector<std::unique_ptr<LayerBufferSource>> retire_src_pending_;
+  std::vector<std::unique_ptr<LayerBufferSource>> retire_src_prev_;
+  std::vector<std::unique_ptr<LayerBufferSource>> retire_src_prev_prev_;
+
   // Per-plane "what we last actually committed" snapshot for the
   // properties that arm_layer_plane_blend_defaults /
   // arm_layer_plane_color_props re-emit defensively each frame
@@ -3629,6 +3690,9 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
     retire_prev_prev_.clear();
     std::swap(retire_prev_prev_, retire_prev_);
     std::swap(retire_prev_, retire_pending_);
+    retire_src_prev_prev_.clear();
+    std::swap(retire_src_prev_prev_, retire_src_prev_);
+    std::swap(retire_src_prev_, retire_src_pending_);
     std::swap(prev_prev_acquisitions_, prev_acquisitions_);
     std::swap(prev_acquisitions_, state->acquisitions);
     scratch_acquisitions_ = std::move(state->acquisitions);
@@ -3685,6 +3749,11 @@ drm::expected<LayerHandle, std::error_code> LayerScene::add_layer(LayerDesc desc
 
 void LayerScene::remove_layer(LayerHandle handle) {
   impl_->remove_layer(handle);
+}
+
+drm::expected<void, std::error_code> LayerScene::replace_source(
+    LayerHandle handle, std::unique_ptr<LayerBufferSource> new_source) {
+  return impl_->replace_source(handle, std::move(new_source));
 }
 
 Layer* LayerScene::get_layer(LayerHandle handle) noexcept {

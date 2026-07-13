@@ -124,6 +124,18 @@ class LayerScene {
   /// layer, slot recycled to a different layer) are a no-op.
   void remove_layer(LayerHandle handle);
 
+  /// Swap `handle`'s buffer source for `new_source`, keeping the layer's handle,
+  /// geometry, and plane assignment. The next commit acquires from `new_source`;
+  /// the displaced source is retired — its still-in-flight buffers release to it
+  /// (with their release fences) over the following commits and it is destroyed
+  /// only afterward, so nothing is freed while the kernel may still scan it.
+  /// For decoder restart after RTSP reconnect, format renegotiation, or handing
+  /// a layer to a dynamic pool. Returns invalid_argument for a null source or a
+  /// stale handle, not_supported for a DriverOwnsBinding source without a usable
+  /// stream capability.
+  [[nodiscard]] drm::expected<void, std::error_code> replace_source(
+      LayerHandle handle, std::unique_ptr<LayerBufferSource> new_source);
+
   /// Look up a layer by handle. Returns nullptr if the handle doesn't
   /// name a currently-live layer (never allocated, already removed, or
   /// generation-mismatched).
