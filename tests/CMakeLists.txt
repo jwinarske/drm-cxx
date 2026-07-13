@@ -113,6 +113,11 @@ target_link_libraries(test_external_dma_buf_ring_vkms PRIVATE
   drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
 gtest_discover_tests(test_external_dma_buf_ring_vkms)
 
+add_executable(test_external_dma_buf_pool_vkms integration/test_external_dma_buf_pool_vkms.cpp)
+target_link_libraries(test_external_dma_buf_pool_vkms PRIVATE
+  drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
+gtest_discover_tests(test_external_dma_buf_pool_vkms)
+
 add_executable(test_external_dma_buf_ring_scene_vkms integration/test_external_dma_buf_ring_scene_vkms.cpp)
 target_link_libraries(test_external_dma_buf_ring_scene_vkms PRIVATE
   drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
@@ -346,6 +351,13 @@ target_link_libraries(test_external_dma_buf_source PRIVATE
   GTest::gtest
   GTest::gtest_main)
 gtest_discover_tests(test_external_dma_buf_source)
+
+add_executable(test_external_dma_buf_pool unit/test_external_dma_buf_pool.cpp)
+target_link_libraries(test_external_dma_buf_pool PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_external_dma_buf_pool)
 
 add_executable(test_external_dma_buf_ring unit/test_external_dma_buf_ring.cpp)
 target_link_libraries(test_external_dma_buf_ring PRIVATE
