@@ -9,7 +9,8 @@ The headline feature is **`drm::scene::LayerScene`** — a handle-based
 layer model that owns plane assignment, dirty tracking, CPU
 composition fallback, and session pause/resume on top of the native
 `drm::planes::Allocator`. See [`docs/scene.md`](docs/scene.md) for the
-design rationale.
+design rationale, and [`INVARIANTS.md`](INVARIANTS.md) for the behavioral
+contracts external consumers depend on (each with the test that pins it).
 
 ## Hello world
 
