@@ -4,7 +4,7 @@
 #include "external_dma_buf_ring.hpp"
 
 #include "buffer_source.hpp"
-#include "external_dma_buf_source.hpp"
+#include "detail/dmabuf_slot.hpp"
 
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -12,40 +12,24 @@
 #include <drm-cxx/fmt/format_mod.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
-#include <drm.h>
-#include <drm_mode.h>
-#include <xf86drm.h>
-#include <xf86drmMode.h>
-
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <sys/ioctl.h>
 #include <system_error>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
 namespace drm::scene {
 
 namespace {
-
-constexpr std::uint64_t k_mod_invalid = (1ULL << 56U) - 1U;  // DRM_FORMAT_MOD_INVALID
-
-[[nodiscard]] std::error_code last_errno_or(std::errc fallback) noexcept {
-  const int e = errno;
-  return {e != 0 ? e : static_cast<int>(fallback), std::system_category()};
-}
 
 [[nodiscard]] std::error_code err(std::errc code) noexcept {
   return std::make_error_code(code);
@@ -97,7 +81,7 @@ drm::expected<std::unique_ptr<ExternalDmaBufRing>, std::error_code> ExternalDmaB
   // Structural + modifier validation first (no device needed) so callers get a
   // clean rejection before any fd is touched — mirrors ExternalDmaBufSource.
   for (const ExternalSlotDesc& desc : slots) {
-    if (desc.planes.empty() || desc.planes.size() > k_max_planes) {
+    if (desc.planes.empty() || desc.planes.size() > detail::k_max_planes) {
       debug_step("validate slot plane count");
       return drm::unexpected<std::error_code>(err(std::errc::invalid_argument));
     }
@@ -138,19 +122,10 @@ drm::expected<std::unique_ptr<ExternalDmaBufRing>, std::error_code> ExternalDmaB
     // destructor (teardown_kernel_state + close_duped_fds over slots_).
     SlotRecord& rec = ring->slots_.emplace_back();
     rec.modifier = desc.modifier;
-    for (std::size_t i = 0; i < desc.planes.size(); ++i) {
-      const int duped = ::fcntl(desc.planes[i].fd, F_DUPFD_CLOEXEC, 0);
-      if (duped < 0) {
-        const auto ec = last_errno_or(std::errc::bad_file_descriptor);
-        debug_step("fcntl F_DUPFD_CLOEXEC", ec.value());
-        return drm::unexpected<std::error_code>(ec);
-      }
-      rec.planes.at(i).duped_fd = duped;
-      rec.planes.at(i).offset = desc.planes[i].offset;
-      rec.planes.at(i).pitch = desc.planes[i].pitch;
-      rec.plane_count = i + 1;
+    if (auto r = detail::dup_planes(rec, desc.planes); !r) {
+      return drm::unexpected<std::error_code>(r.error());
     }
-    if (auto r = ring->import_slot(fd, rec); !r) {
+    if (auto r = detail::import_slot(fd, rec, ring->format_); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
   }
@@ -162,46 +137,6 @@ drm::expected<std::unique_ptr<ExternalDmaBufRing>, std::error_code> ExternalDmaB
     const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_format,
     drm::span<const ExternalSlotDesc> slots) {
   return create(dev, width, height, drm_format, slots, Options{});
-}
-
-drm::expected<void, std::error_code> ExternalDmaBufRing::import_slot(int fd,
-                                                                     SlotRecord& slot) const {
-  // PRIME-import each plane's duped fd into a GEM handle. The kernel dedups
-  // identical fds into the same handle, so re-importing a shared fd is correct.
-  for (std::size_t i = 0; i < slot.plane_count; ++i) {
-    std::uint32_t handle = 0;
-    const int rc = drmPrimeFDToHandle(fd, slot.planes.at(i).duped_fd, &handle);
-    if (rc != 0 || handle == 0) {
-      const auto ec = last_errno_or(std::errc::io_error);
-      debug_step("drmPrimeFDToHandle", ec.value());
-      return drm::unexpected<std::error_code>(ec);
-    }
-    slot.planes.at(i).gem_handle = handle;
-  }
-
-  std::array<std::uint32_t, k_max_planes> handles{};
-  std::array<std::uint32_t, k_max_planes> pitches{};
-  std::array<std::uint32_t, k_max_planes> offsets{};
-  std::array<std::uint64_t, k_max_planes> modifiers{};
-  for (std::size_t i = 0; i < slot.plane_count; ++i) {
-    const auto& rec = slot.planes.at(i);
-    handles.at(i) = rec.gem_handle;
-    pitches.at(i) = rec.pitch;
-    offsets.at(i) = rec.offset;
-    modifiers.at(i) = slot.modifier;
-  }
-
-  const bool use_modifiers = slot.modifier != k_mod_invalid;
-  const int rc = drmModeAddFB2WithModifiers(fd, format_.width, format_.height, format_.drm_fourcc,
-                                            handles.data(), pitches.data(), offsets.data(),
-                                            use_modifiers ? modifiers.data() : nullptr, &slot.fb_id,
-                                            use_modifiers ? DRM_MODE_FB_MODIFIERS : 0U);
-  if (rc != 0 || slot.fb_id == 0) {
-    const auto ec = last_errno_or(std::errc::io_error);
-    debug_step("drmModeAddFB2WithModifiers", ec.value());
-    return drm::unexpected<std::error_code>(ec);
-  }
-  return {};
 }
 
 ExternalDmaBufRing::~ExternalDmaBufRing() {
@@ -439,7 +374,7 @@ drm::expected<void, std::error_code> ExternalDmaBufRing::on_session_resumed(
     }
   }
   for (SlotRecord& slot : slots_) {
-    if (auto r = import_slot(new_fd, slot); !r) {
+    if (auto r = detail::import_slot(new_fd, slot, format_); !r) {
       teardown_kernel_state();
       return drm::unexpected<std::error_code>(r.error());
     }
@@ -448,36 +383,14 @@ drm::expected<void, std::error_code> ExternalDmaBufRing::on_session_resumed(
 }
 
 void ExternalDmaBufRing::teardown_kernel_state() noexcept {
-  if (fd_ < 0) {
-    return;
-  }
   for (SlotRecord& slot : slots_) {
-    if (slot.fb_id != 0) {
-      drmModeRmFB(fd_, slot.fb_id);
-      slot.fb_id = 0;
-    }
-    for (std::size_t i = 0; i < slot.plane_count; ++i) {
-      auto& rec = slot.planes.at(i);
-      if (rec.gem_handle != 0) {
-        drm_gem_close gc{};
-        gc.handle = rec.gem_handle;
-        ::ioctl(fd_, DRM_IOCTL_GEM_CLOSE, &gc);
-        rec.gem_handle = 0;
-      }
-    }
+    detail::teardown_slot(fd_, slot);
   }
 }
 
 void ExternalDmaBufRing::close_duped_fds() noexcept {
   for (SlotRecord& slot : slots_) {
-    for (std::size_t i = 0; i < slot.plane_count; ++i) {
-      auto& rec = slot.planes.at(i);
-      if (rec.duped_fd >= 0) {
-        ::close(rec.duped_fd);
-        rec.duped_fd = -1;
-      }
-    }
-    slot.plane_count = 0;
+    detail::close_slot_fds(slot);
   }
 }
 

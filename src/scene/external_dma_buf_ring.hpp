@@ -41,8 +41,8 @@
 
 #pragma once
 
-#include "buffer_source.hpp"
-#include "external_dma_buf_source.hpp"  // ExternalPlaneInfo
+#include "buffer_source.hpp"  // ExternalPlaneInfo
+#include "detail/dmabuf_slot.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
@@ -210,31 +210,15 @@ class ExternalDmaBufRing : public LayerBufferSource {
  private:
   ExternalDmaBufRing() = default;
 
-  static constexpr std::size_t k_max_planes = 4;
-
   // Fixed damage store so submit() stays alloc-free / noexcept; the vector copy
   // into AcquiredBuffer::damage happens in acquire() (already non-noexcept).
   // Above this count, submit() degrades to whole-frame (empty) rather than
   // truncating — under-reporting the dirty area would corrupt the scanout.
   static constexpr std::size_t k_max_damage = 16;
 
-  struct PlaneRecord {
-    int duped_fd{-1};
-    std::uint32_t gem_handle{0};
-    std::uint32_t offset{0};
-    std::uint32_t pitch{0};
-  };
+  // One ring slot's imported kernel state — see detail/dmabuf_slot.hpp.
+  using SlotRecord = detail::DmaBufSlot;
 
-  struct SlotRecord {
-    std::array<PlaneRecord, k_max_planes> planes{};
-    std::size_t plane_count{0};
-    std::uint32_t fb_id{0};
-    std::uint64_t modifier{0};
-  };
-
-  /// Build one slot's GEM handles + FB on `fd`. Used by create() and resume.
-  /// const: mutates only the passed-in `slot`, never *this.
-  [[nodiscard]] drm::expected<void, std::error_code> import_slot(int fd, SlotRecord& slot) const;
   /// Drop FB + GEM handles for every slot (keeps duped fds). Idempotent.
   void teardown_kernel_state() noexcept;
   void close_duped_fds() noexcept;

@@ -153,6 +153,17 @@ struct DmaBufDesc {
   std::uint32_t height{0};
 };
 
+/// Per-plane shape of an externally-allocated DMA-BUF handed to an
+/// `ExternalDmaBuf*` source. `fd` is the dma-buf descriptor (caller-owned;
+/// the source dups it). `offset` and `pitch` are the plane's offset into
+/// that fd and its row stride in bytes — V4L2 / libcamera report these
+/// directly.
+struct ExternalPlaneInfo {
+  int fd{-1};
+  std::uint32_t offset{0};
+  std::uint32_t pitch{0};
+};
+
 /// Polymorphic interface for "where does this layer's content come
 /// from?". Concrete v1 implementations: `DumbBufferSource` (single
 /// dumb buffer, CPU-writable) and `GbmBufferSource` (rotating ring of
