@@ -3018,6 +3018,9 @@ class LayerScene::Impl {
   // queued for it. drain() consumes that event before teardown; cleared once
   // drain() dispatches it. See LayerScene::drain.
   bool last_real_commit_wanted_event_{false};
+  // One-shot latch so an FB-only fast-path commit rejected by the kernel warns
+  // only once, not every frame while the condition persists.
+  bool warned_fb_fast_path_reject_{false};
   // Set when the layer set changes (add/remove); cleared on a successful real
   // commit. Forces content_changed() true so an all-idle Skip can't drop a
   // structural change (e.g. a removed layer's plane left armed).
@@ -3467,6 +3470,7 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   report.properties_written = alloc_diag.properties_written;
   report.fbs_attached = alloc_diag.fbs_attached;
   report.test_commits_issued = alloc_diag.test_commits_issued;
+  report.fb_delta_fast_path = alloc_diag.fb_delta_fast_path;
 
   // Reset stale `pixel blend mode` on layer planes the allocator
   // just claimed. layer.properties() carries no entry for it (the
@@ -3651,6 +3655,19 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
   if (!kernel_result) {
     if (kernel_result.error() == std::errc::permission_denied) {
       suspended_ = true;
+    } else if (report.fb_delta_fast_path && allocator_.has_value()) {
+      // The kernel rejected a frame whose TEST_ONLY we skipped (FB-only fast
+      // path). The cached allocation is no longer trustworthy: drop it so the
+      // next frame re-validates via a full search. This frame is dropped but
+      // heals (its acquisitions are released just below). Warn once — a
+      // recurring reject means a property was misclassified as content.
+      allocator_->invalidate_allocation();
+      if (!warned_fb_fast_path_reject_) {
+        warned_fb_fast_path_reject_ = true;
+        drm::log_warn(
+            "scene::LayerScene: FB-only fast-path commit rejected by kernel; invalidating "
+            "cached allocation and re-testing next frame");
+      }
     }
     release_all(state->acquisitions);
     // Return the cleared-but-capacity-retaining vector to the
