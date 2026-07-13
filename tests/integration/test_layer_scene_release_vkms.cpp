@@ -161,17 +161,24 @@ inline std::uint64_t decode_id(void* opaque) noexcept {
 class TrackingSource : public LayerBufferSource {
  public:
   struct Event {
-    enum class Kind : std::uint8_t { Acquire, Release, Destroy };
+    enum class Kind : std::uint8_t { Acquire, Release };
     Kind kind;
-    std::uint64_t id;  // unique per acquire; release matches by id (0 for Destroy)
+    std::uint64_t id;  // unique per acquire; release matches by id
   };
 
-  TrackingSource(std::unique_ptr<DumbBufferSource> inner, std::vector<Event>& transcript)
-      : inner_(std::move(inner)), transcript_(transcript) {}
+  // `destroyed`, when set, is flipped true in the destructor so tests can assert
+  // *when* the scene tears the source down. It is a shared_ptr, not a transcript
+  // write, because the scene may destroy the source (retire-ring drain, teardown)
+  // after the test's transcript vector has gone out of scope.
+  TrackingSource(std::unique_ptr<DumbBufferSource> inner, std::vector<Event>& transcript,
+                 std::shared_ptr<bool> destroyed = nullptr)
+      : inner_(std::move(inner)), transcript_(transcript), destroyed_(std::move(destroyed)) {}
 
-  // Records its own destruction so tests can assert *when* the scene tears the
-  // source down (the source-retire deferral orders this after its releases).
-  ~TrackingSource() override { transcript_.push_back({Event::Kind::Destroy, 0}); }
+  ~TrackingSource() override {
+    if (destroyed_ != nullptr) {
+      *destroyed_ = true;
+    }
+  }
 
   drm::expected<AcquiredBuffer, std::error_code> acquire() override {
     auto r = inner_->acquire();
@@ -216,6 +223,7 @@ class TrackingSource : public LayerBufferSource {
  private:
   std::unique_ptr<DumbBufferSource> inner_;
   std::vector<Event>& transcript_;
+  std::shared_ptr<bool> destroyed_;
   std::uint64_t next_id_{0};
 };
 
@@ -429,19 +437,12 @@ TEST(LayerSceneReleaseVkms, RemoveLayerDefersSourceRetirement) {
   const auto fb_h = fx.active.mode.vdisplay;
 
   std::vector<TrackingSource::Event> transcript;
-  const auto has_destroy = [&transcript]() {
-    for (const auto& e : transcript) {
-      if (e.kind == TrackingSource::Event::Kind::Destroy) {
-        return true;
-      }
-    }
-    return false;
-  };
+  auto destroyed = std::make_shared<bool>(false);
 
   auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
   ASSERT_TRUE(inner.has_value()) << inner.error().message();
   LayerDesc layer;
-  layer.source = std::make_unique<TrackingSource>(std::move(*inner), transcript);
+  layer.source = std::make_unique<TrackingSource>(std::move(*inner), transcript, destroyed);
   layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   layer.display.zpos = 1;
@@ -459,23 +460,131 @@ TEST(LayerSceneReleaseVkms, RemoveLayerDefersSourceRetirement) {
   // buffers, nor destroy the source.
   EXPECT_TRUE(released_ids(transcript).empty())
       << "remove_layer must defer, not synchronously release, in-flight buffers";
-  EXPECT_FALSE(has_destroy()) << "the source must outlive its in-flight buffers";
+  EXPECT_FALSE(*destroyed) << "the source must outlive its in-flight buffers";
 
   // The retired source's buffers drain through the ring on the next commits.
   ASSERT_TRUE(fx.scene->commit().has_value());  // releases id 0
   EXPECT_EQ(released_ids(transcript).size(), 1U);
-  EXPECT_FALSE(has_destroy());
+  EXPECT_FALSE(*destroyed);
   ASSERT_TRUE(fx.scene->commit().has_value());  // releases id 1
   EXPECT_EQ(released_ids(transcript).size(), 2U);
+  EXPECT_FALSE(*destroyed) << "destroyed only after every buffer has drained, not before";
 
-  // One more commit rotates the retire ring far enough to destroy the source —
+  // A further commit rotates the retire ring far enough to destroy the source —
   // strictly after both releases.
   ASSERT_TRUE(fx.scene->commit().has_value());
-  ASSERT_TRUE(has_destroy()) << "the retired source must eventually be destroyed";
-  ASSERT_FALSE(transcript.empty());
-  EXPECT_EQ(transcript.back().kind, TrackingSource::Event::Kind::Destroy)
-      << "destruction must be ordered after every buffer release";
+  EXPECT_TRUE(*destroyed) << "the retired source must eventually be destroyed";
   EXPECT_EQ(released_ids(transcript).size(), 2U);
 
+  fx.scene.reset();  // drain teardown releases while the transcript is alive
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+// replace_source keeps the layer (handle, geometry, plane) and swaps only the
+// source. The displaced source's still-in-flight buffers must release to IT (not
+// the replacement), deferred, and it must be destroyed only afterward.
+TEST(LayerSceneReleaseVkms, ReplaceSourceRetiresOldToProducer) {
+  const char* env = std::getenv("DRM_CXX_TEST_CARD");
+  const std::optional<std::string> node =
+      (env != nullptr && *env != '\0') ? std::optional<std::string>(env) : find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+
+  std::vector<TrackingSource::Event> t_old;  // the source we replace
+  std::vector<TrackingSource::Event> t_new;  // the replacement
+  auto old_destroyed = std::make_shared<bool>(false);
+
+  auto inner_old = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner_old.has_value()) << inner_old.error().message();
+  LayerDesc layer;
+  layer.source = std::make_unique<TrackingSource>(std::move(*inner_old), t_old, old_destroyed);
+  layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.zpos = 1;
+  auto handle_r = fx.scene->add_layer(std::move(layer));
+  ASSERT_TRUE(handle_r.has_value()) << handle_r.error().message();
+
+  // Two commits: the old source has acquisitions 0 and 1 in flight.
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  ASSERT_TRUE(released_ids(t_old).empty());
+
+  // Swap the source. The old source's in-flight buffers are still on the ring.
+  auto inner_new = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner_new.has_value()) << inner_new.error().message();
+  auto rep = fx.scene->replace_source(
+      *handle_r, std::make_unique<TrackingSource>(std::move(*inner_new), t_new));
+  ASSERT_TRUE(rep.has_value()) << rep.error().message();
+  // No synchronous release or destroy of the displaced source.
+  EXPECT_TRUE(released_ids(t_old).empty())
+      << "replace_source must defer, not synchronously release, in-flight buffers";
+  EXPECT_FALSE(*old_destroyed);
+
+  // Next commits acquire from the NEW source; the OLD source's buffers drain to
+  // IT (not the replacement).
+  ASSERT_TRUE(fx.scene->commit().has_value());  // acquires new #0, releases old #0
+  EXPECT_EQ(count_acquires(t_new), 1U) << "the new source must be acquired going forward";
+  EXPECT_EQ(released_ids(t_old).size(), 1U);
+  EXPECT_TRUE(released_ids(t_new).empty()) << "the old buffers must not release to the new source";
+
+  ASSERT_TRUE(fx.scene->commit().has_value());  // releases old #1
+  EXPECT_EQ(released_ids(t_old).size(), 2U);
+  EXPECT_TRUE(released_ids(t_new).empty());
+  EXPECT_FALSE(*old_destroyed) << "destroyed only after both its buffers have drained";
+
+  // A further commit rotates the source-retire ring enough to destroy the old
+  // source — strictly after its releases.
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  EXPECT_TRUE(*old_destroyed) << "the retired source must eventually be destroyed";
+
+  // Destroy the scene while the transcripts are still alive: teardown drains the
+  // new source's in-flight buffers back to it, which records into t_new.
+  fx.scene.reset();
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+TEST(LayerSceneReleaseVkms, ReplaceSourceRejectsBadArgs) {
+  const char* env = std::getenv("DRM_CXX_TEST_CARD");
+  const std::optional<std::string> node =
+      (env != nullptr && *env != '\0') ? std::optional<std::string>(env) : find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+
+  std::vector<TrackingSource::Event> transcript;
+  auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner.has_value());
+  LayerDesc layer;
+  layer.source = std::make_unique<TrackingSource>(std::move(*inner), transcript);
+  layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.zpos = 1;
+  auto handle_r = fx.scene->add_layer(std::move(layer));
+  ASSERT_TRUE(handle_r.has_value());
+
+  // Null source is rejected.
+  EXPECT_FALSE(fx.scene->replace_source(*handle_r, nullptr).has_value());
+
+  // A stale handle (its layer was removed) is rejected, not a crash.
+  auto inner2 = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner2.has_value());
+  fx.scene->remove_layer(*handle_r);
+  auto rep = fx.scene->replace_source(
+      *handle_r, std::make_unique<TrackingSource>(std::move(*inner2), transcript));
+  EXPECT_FALSE(rep.has_value());
+  EXPECT_EQ(rep.error(), std::make_error_code(std::errc::invalid_argument));
+
+  fx.scene.reset();  // drain teardown releases while the transcript is alive
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }

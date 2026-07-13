@@ -52,6 +52,16 @@ class Layer {
   [[nodiscard]] LayerBufferSource& source() noexcept { return *source_; }
   [[nodiscard]] const LayerBufferSource& source() const noexcept { return *source_; }
 
+  /// Swap in a new source, returning the old one. Used only by
+  /// `LayerScene::replace_source`, which retires the returned old source so its
+  /// still-in-flight buffers release to it rather than to the replacement. The
+  /// layer's handle, geometry, and plane assignment are unchanged.
+  [[nodiscard]] std::unique_ptr<LayerBufferSource> exchange_source(
+      std::unique_ptr<LayerBufferSource> next) noexcept {
+    std::swap(source_, next);
+    return next;
+  }
+
   /// Current display configuration (src/dst rect, rotation, alpha,
   /// zpos). Mutate via the setters below — do not const_cast.
   [[nodiscard]] const DisplayParams& display() const noexcept { return display_; }
