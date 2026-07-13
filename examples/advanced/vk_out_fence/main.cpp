@@ -28,7 +28,7 @@
 #include <cstdlib>
 #include <string>
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   const std::string dev_path = (argc > 1) ? argv[1] : "/dev/dri/card0";
   const int frames = (argc > 2) ? std::atoi(argv[2]) : 60;
 
@@ -87,4 +87,6 @@ int main(int argc, char** argv) {
   drm::println("vk_out_fence: presented {} frames; OUT_FENCE produced on {}, signaled on {}",
                frames, produced, signaled);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

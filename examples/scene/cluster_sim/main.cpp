@@ -1304,7 +1304,7 @@ void drive_rearview(RearViewState& rv) noexcept {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   // Graceful exit on SIGINT/SIGTERM so the main loop can drain its
   // last commit + run the jitter-summary block at the bottom. Without
   // this, `timeout`'s SIGTERM kills the process between repaint and
@@ -2121,4 +2121,6 @@ int main(int argc, char** argv) {
                  100.0 * static_cast<double>(jitter.missed) / static_cast<double>(sample_n));
   }
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

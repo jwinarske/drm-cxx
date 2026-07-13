@@ -35,7 +35,7 @@ const char* psr_str(drm::display::PanelSelfRefresh p) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   const std::string path = (argc > 1) ? argv[1] : "/dev/dri/card0";
   auto dev = drm::Device::open(path);
   if (!dev) {
@@ -115,4 +115,6 @@ int main(int argc, char** argv) {
     drm::println(stderr, "  connectors: {}", conns.error().message());
   }
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

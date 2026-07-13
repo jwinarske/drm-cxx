@@ -24,7 +24,7 @@
 #include <string>
 #include <string_view>
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   const char* name = argc > 1 ? argv[1] : "default";
   const char* theme_hint = argc > 2 ? argv[2] : "Adwaita";
   const int size = argc > 3 ? std::atoi(argv[3]) : 64;
@@ -98,4 +98,6 @@ int main(int argc, char** argv) {
     drm::println("t={:<8} -> frame {:3} (delay {})", t.count(), idx, at.delay.count());
   }
   return 0;
+} catch (...) {
+  return 1;
 }

@@ -98,7 +98,7 @@ bool parse_uint(const char* s, const int max, int& out) {
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   // ---------------------------------------------------------------------------
   // CLI parse. Pre-strip our flags so select_device only sees the
   // optional device path.
@@ -446,4 +446,6 @@ int main(int argc, char* argv[]) {
   // Renderer destructor detaches the cursor from its plane and frees
   // the dumb buffer; no manual teardown needed.
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

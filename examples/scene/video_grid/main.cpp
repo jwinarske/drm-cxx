@@ -162,7 +162,7 @@ void paint_all(std::vector<Cell>& cells, std::uint32_t phase) noexcept {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   auto output = drm::examples::open_and_pick_output(argc, argv);
   if (!output) {
     return EXIT_FAILURE;
@@ -356,4 +356,6 @@ int main(int argc, char** argv) {
   }
 
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

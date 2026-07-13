@@ -491,7 +491,7 @@ void paint(BLImage& target, const DemoState& s, const BLFontFace& face) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   // Parse our own flags before handing argv to open_and_pick_output —
   // strip them in place so the device/connector picker sees an argv
   // it understands. std::stoul throws on garbage; wrap with try.
@@ -871,6 +871,8 @@ int main(int argc, char** argv) {
   }
 
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }
 
 // NOLINTEND(misc-include-cleaner)

@@ -123,7 +123,7 @@ const char* arg_value(int argc, char** argv, const char* flag) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   // The DRM device is argv[1] (the drm-cxx example convention that
   // open_and_pick_output / select_device follow); the clip and everything else
   // are named flags so they never collide with that positional.
@@ -340,4 +340,6 @@ int main(int argc, char** argv) {
   pump.join();
   std::fprintf(stderr, "stopping\n");
   return 0;
+} catch (...) {
+  return 1;
 }

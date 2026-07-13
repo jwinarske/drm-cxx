@@ -39,7 +39,6 @@
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/scene/stream_capability.hpp>
 
-#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -83,7 +82,7 @@ void dump(const drm::scene::StreamCapability& cap) {
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   const auto path = drm::examples::select_device(argc, argv);
   if (!path.has_value()) {
     return EXIT_FAILURE;
@@ -113,4 +112,6 @@ int main(int argc, char* argv[]) {
         "Mesa-driven systems (amdgpu / i915 / lima / etc.).");
   }
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

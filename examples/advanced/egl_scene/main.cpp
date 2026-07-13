@@ -171,7 +171,7 @@ struct Args {
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   const auto args = parse_args(argc, argv);
 
   auto out = drm::examples::open_and_pick_output(argc, argv);
@@ -443,4 +443,6 @@ int main(int argc, char* argv[]) {
   scene.reset();
   eglTerminate(display);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

@@ -158,7 +158,7 @@ bool apply_mode(int fd, std::uint32_t connector_id, std::string_view spec, drmMo
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   bool want_vrr = false;
   bool want_rt = false;
   bool want_async = false;
@@ -310,4 +310,6 @@ int main(int argc, char** argv) {
 
   drm::println("vrr_sweep: done");
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

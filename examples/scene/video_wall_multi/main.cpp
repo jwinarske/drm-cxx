@@ -352,7 +352,7 @@ void clear_cells(drm::scene::SceneSet& scene_set, std::vector<Cell>& cells) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   auto ctx = drm::examples::open_device(argc, argv);
   if (!ctx) {
     return EXIT_FAILURE;
@@ -633,4 +633,6 @@ int main(int argc, char** argv) {
 
   clear_cells(scene_set, cells);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

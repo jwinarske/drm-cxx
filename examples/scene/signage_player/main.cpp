@@ -342,7 +342,7 @@ std::string format_now(const std::string& fmt) noexcept {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   const char* toml_path = nullptr;
   bool hotplug_follow = false;
   char* device_path = nullptr;
@@ -748,4 +748,6 @@ int main(int argc, char** argv) {
   }
 
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

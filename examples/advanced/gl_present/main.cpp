@@ -32,7 +32,7 @@
 #include <cstdlib>
 #include <string>
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   const std::string dev_path = (argc > 1) ? argv[1] : "/dev/dri/card0";
   const int frames = (argc > 2) ? std::atoi(argv[2]) : 120;
 
@@ -85,4 +85,6 @@ int main(int argc, char** argv) {
 
   drm::println("gl_present: presented {} frames", frames);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

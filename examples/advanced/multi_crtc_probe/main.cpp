@@ -254,7 +254,7 @@ void run_scene_test(drm::Device& dev,
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   const auto args = parse_args(argc, argv);
 
   auto dev_r = drm::Device::open(args.device_path);
@@ -336,4 +336,6 @@ int main(int argc, char* argv[]) {
   }
 
   return 0;
+} catch (...) {
+  return 1;
 }

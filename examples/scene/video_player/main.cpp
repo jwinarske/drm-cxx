@@ -141,7 +141,7 @@ std::string build_pipeline_string(const Args& args, std::uint32_t width, std::ui
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   const Args args = parse_args(argc, argv);
   if (args.show_help) {
     print_help();
@@ -457,4 +457,6 @@ int main(int argc, char* argv[]) {
   // of the source's dtor.
   scene.reset();
   return error_exit ? EXIT_FAILURE : EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }
