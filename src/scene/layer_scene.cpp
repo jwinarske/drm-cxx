@@ -2250,6 +2250,7 @@ class LayerScene::Impl {
         return r;
       }
       ++report.properties_written;
+      ++report.damage_clips_armed;
     }
     return {};
   }

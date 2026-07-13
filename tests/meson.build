@@ -465,6 +465,14 @@ test('test_layer_scene_minimization_vkms',
   is_parallel : false,
 )
 
+test('test_layer_scene_census_vkms',
+  executable('test_layer_scene_census_vkms',
+    'integration/test_layer_scene_census_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
 test('test_layer_scene_content_type_vkms',
   executable('test_layer_scene_content_type_vkms',
     'integration/test_layer_scene_content_type_vkms.cpp',
