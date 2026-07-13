@@ -91,6 +91,12 @@ class RingPresenter {
   // The key currently on screen, if any (for export_dma_buf()).
   [[nodiscard]] std::optional<SlotKey> scanning_key() const noexcept { return scanning_key_; }
 
+  // True while `key` is still in flight — the scanning buffer or referenced by an
+  // outstanding (unretired) acquisition token. A dynamic pool consults this so
+  // eviction of a cached buffer is deferred until no commit still holds it.
+  // Commit-thread only, like acquire()/release().
+  [[nodiscard]] bool is_referenced(SlotKey key) const noexcept;
+
   // Drop all pending/in-flight/scanning state (a session resume re-imports and
   // restarts presentation from scratch).
   void reset() noexcept;

@@ -222,3 +222,65 @@ TEST(ExternalDmaBufPoolVkms, ReleaseFiresForDisplacedKey) {
   (*pool)->release_with_fence(std::move(*a2), std::nullopt);
   EXPECT_EQ(released.size(), 1U);
 }
+
+// buffer_key is a buffer *identity*, independent of the fd, so distinct keys can
+// reuse the two dumb fds. LRU eviction bounds the import map to max_pool once
+// entries go idle (acquired-then-released).
+TEST(ExternalDmaBufPoolVkms, EvictsIdleLruBeyondCap) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  drm::scene::ExternalDmaBufPool::Options opts;
+  opts.max_pool = 2;
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR, std::move(opts));
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  // A becomes idle: acquired, then displaced by B and released.
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds[0], probe->stride));
+  auto a = (*pool)->acquire();
+  ASSERT_TRUE(a.has_value());
+  (*pool)->submit(0xB, one(p, probe->dmabuf_fds[1], probe->stride));
+  auto b = (*pool)->acquire();
+  ASSERT_TRUE(b.has_value());
+  (*pool)->release_with_fence(std::move(*a), std::nullopt);  // A now idle + unreferenced
+  EXPECT_EQ((*pool)->cached_count(), 2U);
+
+  // C imports (count would be 3); acquire()'s prune evicts LRU-idle A back to 2.
+  (*pool)->submit(0xC, one(p, probe->dmabuf_fds[0], probe->stride));
+  auto c = (*pool)->acquire();
+  ASSERT_TRUE(c.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 2U);
+}
+
+// Eviction of an over-budget buffer is deferred while it is still referenced by
+// an unretired acquisition, then happens once it retires.
+TEST(ExternalDmaBufPoolVkms, EvictionDeferredWhileInFlight) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  drm::scene::ExternalDmaBufPool::Options opts;
+  opts.max_pool = 1;
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR, std::move(opts));
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds[0], probe->stride));
+  auto a = (*pool)->acquire();  // A scanning, token still outstanding
+  ASSERT_TRUE(a.has_value());
+  (*pool)->submit(0xB, one(p, probe->dmabuf_fds[1], probe->stride));
+  auto b = (*pool)->acquire();  // B scanning; A superseded but its token is unretired
+  ASSERT_TRUE(b.has_value());
+  // Over budget (2 > 1), but A is still in flight — eviction is deferred.
+  EXPECT_EQ((*pool)->cached_count(), 2U);
+
+  // Retire A; the next acquire()'s prune may now evict it.
+  (*pool)->release_with_fence(std::move(*a), std::nullopt);
+  auto held = (*pool)->acquire();  // idle-hold B; prune runs
+  ASSERT_TRUE(held.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 1U);
+}

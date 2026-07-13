@@ -160,6 +160,14 @@ std::optional<SlotKey> RingPresenter::release(std::uintptr_t token) noexcept {
   return std::nullopt;
 }
 
+bool RingPresenter::is_referenced(SlotKey key) const noexcept {
+  if (scanning_key_.has_value() && *scanning_key_ == key) {
+    return true;
+  }
+  return std::any_of(outstanding_.begin(), outstanding_.end(),
+                     [key](const Outstanding& o) { return o.key == key; });
+}
+
 void RingPresenter::reset() noexcept {
   const std::scoped_lock lock(mu_);
   pending_key_.reset();

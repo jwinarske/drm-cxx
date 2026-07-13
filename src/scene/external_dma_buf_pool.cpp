@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -57,7 +58,8 @@ drm::expected<std::unique_ptr<ExternalDmaBufPool>, std::error_code> ExternalDmaB
     debug_step("create: bad device fd");
     return drm::unexpected<std::error_code>(err(std::errc::bad_file_descriptor));
   }
-  auto pool = std::unique_ptr<ExternalDmaBufPool>(new ExternalDmaBufPool(options.fence_deadline));
+  auto pool = std::unique_ptr<ExternalDmaBufPool>(
+      new ExternalDmaBufPool(options.fence_deadline, options.max_pool));
   pool->fd_ = fd;
   pool->format_.drm_fourcc = drm_fourcc;
   pool->format_.modifier = modifier;
@@ -65,6 +67,12 @@ drm::expected<std::unique_ptr<ExternalDmaBufPool>, std::error_code> ExternalDmaB
   pool->format_.height = height;
   pool->on_release_ = std::move(options.on_release);
   return pool;
+}
+
+drm::expected<std::unique_ptr<ExternalDmaBufPool>, std::error_code> ExternalDmaBufPool::create(
+    const drm::Device& dev, std::uint32_t width, std::uint32_t height, std::uint32_t drm_fourcc,
+    std::uint64_t modifier) {
+  return create(dev, width, height, drm_fourcc, modifier, Options{});
 }
 
 ExternalDmaBufPool::~ExternalDmaBufPool() {
@@ -110,6 +118,9 @@ void ExternalDmaBufPool::submit(std::uintptr_t buffer_key,
       }
       slots_.emplace(buffer_key, slot);
     }
+    // Mark most-recently-used (whether freshly imported or a cache hit) so LRU
+    // eviction keeps the active working set.
+    touch_lru(buffer_key);
   }
   presenter_.submit(static_cast<detail::SlotKey>(buffer_key), std::move(acquire), damage);
 }
@@ -124,11 +135,17 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufPool::acquire() {
   // the chosen key to its cached fb_id under the import-map lock.
   detail::RingPresenter::Acquired d = presenter_.acquire();
   std::uint32_t fb_id = 0;
-  if (d.kind != detail::RingPresenter::Present::None) {
+  {
     const std::scoped_lock lock(slots_mu_);
-    if (auto it = slots_.find(static_cast<std::uintptr_t>(d.key)); it != slots_.end()) {
-      fb_id = it->second.fb_id;
+    if (d.kind != detail::RingPresenter::Present::None) {
+      if (auto it = slots_.find(static_cast<std::uintptr_t>(d.key)); it != slots_.end()) {
+        fb_id = it->second.fb_id;
+      }
     }
+    // Commit thread: the presenter's in-flight view is stable here, so bound the
+    // import map by evicting idle least-recently-used buffers. The just-acquired
+    // key is the scanning key and so is never evicted.
+    prune_locked();
   }
   if (d.kind == detail::RingPresenter::Present::Fresh) {
     AcquiredBuffer acq;
@@ -164,6 +181,44 @@ void ExternalDmaBufPool::fire_release(std::uintptr_t buffer_key,
                                       std::optional<drm::sync::SyncFence> release_fence) noexcept {
   if (on_release_) {
     on_release_(buffer_key, std::move(release_fence));
+  }
+}
+
+void ExternalDmaBufPool::touch_lru(std::uintptr_t buffer_key) {
+  if (auto it = lru_pos_.find(buffer_key); it != lru_pos_.end()) {
+    lru_.splice(lru_.end(), lru_, it->second);  // move to most-recently-used
+  } else {
+    lru_.push_back(buffer_key);
+    lru_pos_.emplace(buffer_key, std::prev(lru_.end()));
+  }
+}
+
+void ExternalDmaBufPool::evict_locked(std::uintptr_t buffer_key) noexcept {
+  if (auto it = slots_.find(buffer_key); it != slots_.end()) {
+    detail::teardown_slot(fd_, it->second);
+    detail::close_slot_fds(it->second);
+    slots_.erase(it);
+  }
+  if (auto it = lru_pos_.find(buffer_key); it != lru_pos_.end()) {
+    lru_.erase(it->second);
+    lru_pos_.erase(it);
+  }
+}
+
+void ExternalDmaBufPool::prune_locked() noexcept {
+  while (slots_.size() > max_pool_) {
+    // Evict the least-recently-used buffer that no in-flight commit still holds.
+    bool evicted = false;
+    for (const std::uintptr_t key : lru_) {
+      if (!presenter_.is_referenced(static_cast<detail::SlotKey>(key))) {
+        evict_locked(key);  // mutates lru_ — restart the scan
+        evicted = true;
+        break;
+      }
+    }
+    if (!evicted) {
+      break;  // everything over budget is still referenced; defer until it retires
+    }
   }
 }
 
@@ -222,6 +277,10 @@ drm::expected<void, std::error_code> ExternalDmaBufPool::on_session_resumed(
   }
   for (const std::uintptr_t key : dropped) {
     slots_.erase(key);
+    if (auto it = lru_pos_.find(key); it != lru_pos_.end()) {
+      lru_.erase(it->second);
+      lru_pos_.erase(it);
+    }
   }
   return {};
 }
