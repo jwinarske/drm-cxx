@@ -46,6 +46,7 @@ drm_cxx_sources = files(
   'scene/egl_stream_builder.cpp',
   'scene/egl_stream_source.cpp',
   'scene/detail/dmabuf_slot.cpp',
+  'scene/detail/external_ring_core.cpp',
   'scene/external_dma_buf_source.cpp',
   'scene/external_dma_buf_ring.cpp',
   'scene/dma_buf_source_cache.cpp',

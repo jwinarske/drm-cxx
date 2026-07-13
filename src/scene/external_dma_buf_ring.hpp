@@ -43,19 +43,17 @@
 
 #include "buffer_source.hpp"  // ExternalPlaneInfo
 #include "detail/dmabuf_slot.hpp"
+#include "detail/external_ring_core.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
-#include <array>
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <system_error>
 #include <vector>
@@ -148,7 +146,7 @@ class ExternalDmaBufRing : public LayerBufferSource {
 
   /// Fault isolation: the per-layer fence deadline the scene must enforce, if any.
   [[nodiscard]] std::optional<std::chrono::nanoseconds> fence_deadline() const noexcept {
-    return fence_deadline_;
+    return presenter_.fence_deadline();
   }
 
   /// Number of registered slots.
@@ -168,10 +166,7 @@ class ExternalDmaBufRing : public LayerBufferSource {
   /// the next commit will scan out (vs an idle hold-last-frame). Drives the
   /// scene's all-idle Skip. Thread-safe vs submit()/acquire().
   [[nodiscard]] bool has_fresh_content() const noexcept override { return has_fresh_frame(); }
-  [[nodiscard]] bool has_fresh_frame() const noexcept {
-    const std::scoped_lock lock(mu_);
-    return pending_slot_.has_value();
-  }
+  [[nodiscard]] bool has_fresh_frame() const noexcept { return presenter_.has_fresh_frame(); }
   [[nodiscard]] BindingModel binding_model() const noexcept override {
     return BindingModel::SceneSubmitsFbId;
   }
@@ -181,11 +176,12 @@ class ExternalDmaBufRing : public LayerBufferSource {
   // Commit-thread only, like scanning_slot_; nullopt before the first
   // acquire() returns function_not_supported.
   [[nodiscard]] drm::expected<DmaBufDesc, std::error_code> export_dma_buf() override {
-    if (!scanning_slot_.has_value() || *scanning_slot_ >= slots_.size()) {
+    const auto scanning = presenter_.scanning_key();
+    if (!scanning.has_value() || *scanning >= slots_.size()) {
       return drm::unexpected<std::error_code>(
           std::make_error_code(std::errc::function_not_supported));
     }
-    const SlotRecord& s = slots_.at(*scanning_slot_);
+    const SlotRecord& s = slots_.at(*scanning);
     if (s.plane_count == 0) {
       return drm::unexpected<std::error_code>(
           std::make_error_code(std::errc::function_not_supported));
@@ -208,13 +204,8 @@ class ExternalDmaBufRing : public LayerBufferSource {
       const drm::Device& new_dev) override;
 
  private:
-  ExternalDmaBufRing() = default;
-
-  // Fixed damage store so submit() stays alloc-free / noexcept; the vector copy
-  // into AcquiredBuffer::damage happens in acquire() (already non-noexcept).
-  // Above this count, submit() degrades to whole-frame (empty) rather than
-  // truncating — under-reporting the dirty area would corrupt the scanout.
-  static constexpr std::size_t k_max_damage = 16;
+  explicit ExternalDmaBufRing(std::optional<std::chrono::nanoseconds> fence_deadline)
+      : presenter_(fence_deadline) {}
 
   // One ring slot's imported kernel state — see detail/dmabuf_slot.hpp.
   using SlotRecord = detail::DmaBufSlot;
@@ -224,62 +215,14 @@ class ExternalDmaBufRing : public LayerBufferSource {
   void close_duped_fds() noexcept;
   void fire_release(std::size_t slot, std::optional<drm::sync::SyncFence> release_fence) noexcept;
 
-  /// Accumulate the damage of a frame this ring just dropped on a fence-deadline
-  /// miss into carried_damage_, so the next presented frame repaints those never-
-  /// presented regions. `count == 0` (the dropped frame was whole-frame) collapses
-  /// the carry to whole-frame; so does an accumulation past k_max_damage.
-  /// Commit-thread only; no lock.
-  void accumulate_carried_damage(const std::array<DamageRect, k_max_damage>& buf,
-                                 std::size_t count) noexcept;
-  /// Fill `out` for a fresh frame: the union of carried_damage_ (dropped frames)
-  /// and this frame's own damage (`buf`/`count`). Empty `out` == whole-frame.
-  /// Clears the carry. Commit-thread only.
-  void take_damage_with_carry(std::vector<DamageRect>& out,
-                              const std::array<DamageRect, k_max_damage>& buf, std::size_t count);
-
   int fd_{-1};
   SourceFormat format_{};
-  std::vector<SlotRecord> slots_;
+  std::vector<SlotRecord> slots_;  // fixed at create(); slot index is the presenter key
   OnSlotRelease on_release_;
-  std::optional<std::chrono::nanoseconds> fence_deadline_;
 
-  // Producer→commit-thread handoff, guarded by mu_. Mutable so the const
-  // has_fresh_frame() query can lock it.
-  mutable std::mutex mu_;
-  std::optional<std::size_t> pending_slot_;
-  std::optional<drm::sync::SyncFence> pending_fence_;
-  // Per-frame damage for the pending slot, replaced on each submit(). count == 0
-  // means whole-frame — either the caller passed no rects, or an over-cap submit
-  // degraded to whole-frame. Drained atomically with pending_slot_ in acquire().
-  std::array<DamageRect, k_max_damage> pending_damage_{};
-  std::size_t pending_damage_count_{0};
-
-  // Commit-thread only. Each fresh advance gets a new monotonic token (pointer-
-  // width so it round-trips through AcquiredBuffer::opaque without truncation on
-  // ILP32); idle re-holds reuse the live token. `outstanding_` maps each live
-  // token to its slot; release fires once per token by erasing its entry, keyed
-  // by token not slot index so the scene's triple-deferred release of an aliased
-  // slot (slot 0 retiring while slot 0 is live again two frames later) resolves
-  // correctly. Bounded by the in-flight depth, so a linear scan is cheap.
-  struct Outstanding {
-    std::uintptr_t token{0};
-    std::size_t slot{0};
-  };
-  std::optional<std::size_t> scanning_slot_;
-  std::uintptr_t next_token_{0};
-  std::uintptr_t scanning_token_{0};
-  std::vector<Outstanding> outstanding_;
-
-  // Damage carried across this ring's own fence-deadline drops (commit-thread
-  // only, like scanning_slot_). A dropped frame's dirty regions were never
-  // presented, so they must be unioned into the next presented frame or it
-  // under-reports relative to the dropped one. `carried_damage_whole_` collapses
-  // the list to whole-frame when a dropped frame was itself whole-frame or the
-  // accumulation overflows k_max_damage. Empty/false unless fence_deadline_ is
-  // set and a drop occurred, so the no-deadline (CEF) path never touches it.
-  std::array<DamageRect, k_max_damage> carried_damage_{};
-  std::size_t carried_damage_count_{0};
-  bool carried_damage_whole_{false};
+  // The presentation state machine (token map, idle-hold, damage carry, fence
+  // deadline) — keyed by slot index. See detail/external_ring_core.hpp.
+  detail::RingPresenter presenter_;
 };
 
 }  // namespace drm::scene
