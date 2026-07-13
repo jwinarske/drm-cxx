@@ -12,7 +12,7 @@
 
 #include <cstdlib>
 
-int main() {
+int main() try {
   // See atomic_modeset for why we claim a seat session.
   auto seat = drm::session::Seat::open();
 
@@ -40,4 +40,6 @@ int main() {
   }
 
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

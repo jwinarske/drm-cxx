@@ -112,7 +112,7 @@ void render_test_pattern(std::byte* frame, std::uint32_t w, std::uint32_t h, boo
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   bool vsync = false;
   bool force_rgb565 = false;
   bool use_damage = true;
@@ -282,4 +282,6 @@ int main(int argc, char** argv) {
 
   drm::println("software_present: presented {} frames", frames);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

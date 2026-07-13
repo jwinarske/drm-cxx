@@ -39,7 +39,7 @@
 #include <utility>
 #include <vector>
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   auto output = drm::examples::open_and_pick_output(argc, argv);
   if (!output) {
     drm::println(stderr, "ring_present: no usable output");
@@ -140,4 +140,6 @@ int main(int argc, char** argv) {
 
   drm::println("ring_present: presented {} frames", frames);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

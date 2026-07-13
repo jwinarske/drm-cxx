@@ -20,7 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   auto ctx = drm::examples::open_device(argc, argv);
   if (!ctx) {
     return EXIT_FAILURE;
@@ -110,4 +110,6 @@ int main(int argc, char* argv[]) {
   }
 
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

@@ -660,7 +660,7 @@ struct TexArrayPushConstants {
 }  // namespace
 
 // NOLINTNEXTLINE(readability-function-size) — demo main, kept inline for readability.
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   std::signal(SIGINT, on_sigint);
   std::signal(SIGTERM, on_sigint);
 
@@ -2425,4 +2425,6 @@ int main(int argc, char* argv[]) {
   VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyDevice(vk_device, nullptr);
   VULKAN_HPP_DEFAULT_DISPATCHER.vkDestroyInstance(instance, nullptr);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

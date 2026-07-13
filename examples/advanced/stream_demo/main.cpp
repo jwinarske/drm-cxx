@@ -159,17 +159,19 @@ struct PickedOutput {
 
 #if !DRM_CXX_HAS_EGL_STREAMS
 
-int main(int /*argc*/, char* /*argv*/[]) {
+int main(int /*argc*/, char* /*argv*/[]) try {
   drm::println(stderr,
                "stream_demo: drm-cxx was built without EGL Streams "
                "(-DDRM_CXX_STREAMS=OFF or EGL headers absent). Rebuild "
                "with streams enabled to use this demo.");
   return EXIT_FAILURE;
+} catch (...) {
+  return EXIT_FAILURE;
 }
 
 #else  // DRM_CXX_HAS_EGL_STREAMS
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   const auto args = parse_args(argc, argv);
 
   auto ctx = drm::examples::open_device(argc, argv);
@@ -420,6 +422,8 @@ int main(int argc, char* argv[]) {
   scene.reset();
   eglTerminate(egl_display);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }
 
 #endif  // DRM_CXX_HAS_EGL_STREAMS

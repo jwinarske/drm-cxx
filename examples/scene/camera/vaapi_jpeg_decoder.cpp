@@ -225,9 +225,12 @@ struct ParsedJpeg {
 
 // ── VA-API helpers ───────────────────────────────────────────────────
 
-void log_va(const char* step, VAStatus status) noexcept {
+void log_va(const char* step, VAStatus status) noexcept try {
   drm::println(stderr, "[vaapi_jpeg_decoder] {}: {} (0x{:x})", step, vaErrorStr(status),
                static_cast<unsigned>(status));
+} catch (...) {
+  // Best-effort diagnostic; swallow any formatting failure in this noexcept helper.
+  return;
 }
 
 // RAII for a VABufferID. vaCreateBuffer + vaDestroyBuffer pairs.
@@ -533,8 +536,8 @@ void VaapiJpegDecoder::destroy_state() noexcept {
   }
 }
 
-bool VaapiJpegDecoder::decode_into_surface(const std::uint8_t* jpeg,
-                                           std::size_t jpeg_size) noexcept {
+bool VaapiJpegDecoder::decode_into_surface(const std::uint8_t* jpeg, std::size_t jpeg_size) noexcept
+    try {
   if (va_display_ == nullptr || va_jpeg_context_ == VA_INVALID_ID) {
     return false;
   }
@@ -756,6 +759,8 @@ bool VaapiJpegDecoder::decode_into_surface(const std::uint8_t* jpeg,
     return false;
   }
   return true;
+} catch (...) {
+  return false;
 }
 
 drm::expected<std::unique_ptr<drm::scene::ExternalDmaBufSource>, std::error_code>

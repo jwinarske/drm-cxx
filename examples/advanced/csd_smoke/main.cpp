@@ -287,7 +287,7 @@ Args parse_args(int& argc, char* argv[]) {
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   const Args args = parse_args(argc, argv);  // strips its own flags
 
   auto output = drm::examples::open_and_pick_output(argc, argv);
@@ -534,4 +534,6 @@ int main(int argc, char* argv[]) {
   drm::println("csd_smoke: holding for {}s", args.seconds);
   std::this_thread::sleep_for(std::chrono::seconds(args.seconds));
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

@@ -213,7 +213,7 @@ std::vector<drm::scene::ColorLutEntry> bake_tonemap_cube(const drm::display::Ton
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   auto args = parse_args(argc, argv);
 
   auto out = drm::examples::open_and_pick_output(argc, argv);
@@ -501,4 +501,6 @@ int main(int argc, char** argv) {
   std::this_thread::sleep_for(std::chrono::seconds(args.hold_seconds));
   drm::println(stderr, "hdr_demo: tearing down");
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

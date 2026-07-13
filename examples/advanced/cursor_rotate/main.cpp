@@ -160,7 +160,7 @@ bool parse_uint(const char* s, int max_val, int& out) {
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   // ---------------------------------------------------------------------------
   // CLI parse. Strip our own flags before handing argv to select_device.
   // ---------------------------------------------------------------------------
@@ -472,4 +472,6 @@ int main(int argc, char* argv[]) {
 
   drm::println("cursor_rotate: exiting");
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

@@ -244,7 +244,7 @@ struct MouseState {
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
   const auto args = parse_args(argc, argv);
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -696,4 +696,6 @@ int main(int argc, char* argv[]) {
   scene.reset();
   eglTerminate(display);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

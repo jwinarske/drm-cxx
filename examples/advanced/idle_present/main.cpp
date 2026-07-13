@@ -38,7 +38,7 @@
 #include <unistd.h>
 #include <utility>
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   // Consume --vrr before open_and_pick_output walks the positional device path.
   bool want_vrr = false;
   {
@@ -149,4 +149,6 @@ int main(int argc, char** argv) {
                econ.committed(), econ.skipped(),
                frames > 0 ? (econ.skipped() * 100 / static_cast<std::uint64_t>(frames)) : 0);
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

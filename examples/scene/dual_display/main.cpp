@@ -189,7 +189,7 @@ drm::expected<std::unique_ptr<drm::scene::LayerScene>, std::error_code> build_sc
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   auto ctx = drm::examples::open_device(argc, argv);
   if (!ctx) {
     return EXIT_FAILURE;
@@ -448,4 +448,6 @@ int main(int argc, char** argv) {
   }
 
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }

@@ -57,7 +57,7 @@ std::vector<std::uint32_t> make_arrow() {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   auto output = drm::examples::open_and_pick_output(argc, argv);
   if (!output) {
     drm::println(stderr, "cursor_scene: no usable output");
@@ -160,4 +160,6 @@ int main(int argc, char** argv) {
 
   drm::println("cursor_scene: done");
   return EXIT_SUCCESS;
+} catch (...) {
+  return EXIT_FAILURE;
 }
