@@ -41,6 +41,7 @@
 namespace drm {
 class AtomicRequest;
 class Device;
+class PageFlip;
 }  // namespace drm
 
 namespace drm::sync {
@@ -107,6 +108,13 @@ class LayerScene {
   [[nodiscard]] static drm::expected<std::unique_ptr<LayerScene>, std::error_code> create(
       drm::Device& dev, const Config& cfg);
 
+  /// Destroying the scene releases every buffer still held by the
+  /// deferred-release ring back to its source and destroys the scene's
+  /// framebuffers. It does NOT wait on the kernel: if the last real commit
+  /// armed DRM_MODE_PAGE_FLIP_EVENT and that event has not been dispatched,
+  /// the flip is still referencing a buffer this destructor tears down. Land
+  /// it first — call `drain()` (or dispatch the event yourself) before the
+  /// scene goes out of scope.
   ~LayerScene();
 
   LayerScene(const LayerScene&) = delete;
@@ -285,6 +293,24 @@ class LayerScene {
   [[nodiscard]] drm::expected<CommitReport, std::error_code> commit(
       std::uint32_t flags = 0, void* user_data = nullptr,
       drm::sync::SyncFence* out_fence = nullptr);
+
+  /// Land the page-flip event armed by the most recent real commit, so the
+  /// scene can be destroyed without leaving an event queued against a buffer
+  /// it is about to release. Call this at teardown, once, in place of
+  /// dispatching that final commit's event yourself.
+  ///
+  /// If the last real `commit()` did not carry DRM_MODE_PAGE_FLIP_EVENT there
+  /// is nothing outstanding and this returns success immediately without
+  /// touching `pf`. Otherwise it dispatches `pf` (honoring `timeout_ms` — -1
+  /// blocks, 0 polls, >0 bounds the wait) until an event is delivered, then
+  /// clears the pending flag. A dispatch error (including `timed_out`) is
+  /// propagated.
+  ///
+  /// Convenience for the common single-scene teardown: the scene assumes it
+  /// owns its CRTC's flip stream while draining. If foreign event sources are
+  /// registered on the same `PageFlip`, or several event-carrying commits are
+  /// outstanding, dispatch `pf` yourself instead.
+  [[nodiscard]] drm::expected<void, std::error_code> drain(PageFlip& pf, int timeout_ms = -1);
 
   // ── SceneSet integration (advanced) ─────────────────────────────────
   //
