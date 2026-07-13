@@ -19,9 +19,11 @@
 #include <drm-cxx/scene/stream_capability.hpp>
 
 #include <drm_fourcc.h>
+#include <xf86drmMode.h>
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -30,15 +32,40 @@ namespace drm::present {
 
 ScanoutBackend::ScanoutBackend(display::ScanoutTarget target, display::DriverProfile profile,
                                std::vector<fmt::Modifier> modifiers,
-                               std::unique_ptr<scene::LayerScene> scene,
-                               scene::LayerHandle layer) noexcept
+                               std::unique_ptr<scene::LayerScene> scene, scene::LayerHandle layer,
+                               int fd, RestorePolicy restore,
+                               std::optional<SavedCrtc> saved) noexcept
     : target_(std::move(target)),
       profile_(std::move(profile)),
       modifiers_(std::move(modifiers)),
       scene_(std::move(scene)),
-      layer_(layer) {}
+      layer_(layer),
+      fd_(fd),
+      restore_(restore),
+      saved_crtc_(saved) {}
 
-ScanoutBackend::~ScanoutBackend() = default;
+ScanoutBackend::~ScanoutBackend() {
+  // Release the scene first: it drains the deferred-release ring back to the
+  // producer and destroys the scene's framebuffers, so the CRTC restore below
+  // reprograms a pipeline that no longer references our buffers. (Callers must
+  // have already landed any in-flight page-flip event — see LayerScene::drain.)
+  scene_.reset();
+
+  if (restore_ != RestorePolicy::SavedCrtc || !saved_crtc_.has_value() || fd_ < 0) {
+    return;
+  }
+  // Re-apply the CRTC state captured at create(). A saved buffer_id of 0 means
+  // the CRTC was inactive before we took it over, so disable it (no connectors,
+  // no mode) rather than re-lighting a framebuffer that never existed. Legacy
+  // drmModeSetCrtc, as the reference DRM drivers use for restore. Best-effort:
+  // the fd may already be gone at teardown, and a failed restore must not throw.
+  const SavedCrtc& s = *saved_crtc_;
+  const bool had_fb = s.buffer_id != 0;
+  drmModeModeInfo mode = s.mode;
+  std::uint32_t connector = target_.connector_id;
+  (void)drmModeSetCrtc(fd_, target_.crtc_id, s.buffer_id, s.x, s.y, had_fb ? &connector : nullptr,
+                       had_fb ? 1 : 0, (had_fb && s.mode_valid) ? &mode : nullptr);
+}
 
 drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::create(
     drm::Device& dev, ScanoutProducer& producer, const Config& cfg) {
@@ -55,6 +82,18 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
   auto profile = display::DriverProfile::probe(dev);
   if (!profile) {
     return drm::unexpected<std::error_code>(profile.error());
+  }
+
+  // Snapshot the CRTC now — before the scene ever commits — so
+  // RestorePolicy::SavedCrtc can put it back at teardown. Captured whether or
+  // not it is active; a disabled CRTC yields buffer_id 0, which the destructor
+  // restores as "leave off". Failure to read it just skips restore.
+  std::optional<SavedCrtc> saved;
+  if (cfg.restore == RestorePolicy::SavedCrtc) {
+    if (drmModeCrtcPtr c = drmModeGetCrtc(dev.fd(), target->crtc_id); c != nullptr) {
+      saved = SavedCrtc{c->buffer_id, c->x, c->y, c->mode, c->mode_valid != 0};
+      drmModeFreeCrtc(c);
+    }
   }
 
   // Build the scene first so we can negotiate the producer's modifiers against
@@ -120,8 +159,9 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
     (*scene)->set_vrr_enabled(true);
   }
 
-  return std::unique_ptr<ScanoutBackend>(new ScanoutBackend(
-      std::move(*target), std::move(*profile), std::move(negotiated), std::move(*scene), *layer));
+  return std::unique_ptr<ScanoutBackend>(
+      new ScanoutBackend(std::move(*target), std::move(*profile), std::move(negotiated),
+                         std::move(*scene), *layer, dev.fd(), cfg.restore, saved));
 }
 
 drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::create(

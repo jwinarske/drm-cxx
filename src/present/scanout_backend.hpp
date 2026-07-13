@@ -20,9 +20,11 @@
 #include <drm-cxx/scene/layer_handle.hpp>
 
 #include <drm_fourcc.h>
+#include <xf86drmMode.h>
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <vector>
 
@@ -52,10 +54,23 @@ class ScanoutBackend {
     On,    // request VRR_ENABLED (a no-op on CRTCs that don't expose it)
   };
 
+  // Teardown restore policy for the discovered CRTC. By default the backend
+  // leaves the display showing whatever its last commit produced; on developer
+  // boards and fallback paths that reads as a hang, because fbcon / the previous
+  // framebuffer never comes back. SavedCrtc snapshots the CRTC at create() and
+  // re-applies it via legacy drmModeSetCrtc at destruction, after the scene is
+  // released. Off by default: compositors and production embedders replace the
+  // scanout themselves and must not pay a spurious modeset on exit.
+  enum class RestorePolicy : std::uint8_t {
+    None,       // leave the last committed state on screen (default)
+    SavedCrtc,  // restore the CRTC captured at create() on destruction
+  };
+
   struct Config {
     std::uint32_t fourcc{DRM_FORMAT_XRGB8888};
     fmt::Rotation rotation{fmt::Rotation::Rotate0};
     VrrPolicy vrr{VrrPolicy::Off};
+    RestorePolicy restore{RestorePolicy::None};
   };
 
   // Discover an output on `dev`, set up a full-screen layer fed by `producer`,
@@ -121,9 +136,20 @@ class ScanoutBackend {
   ~ScanoutBackend();
 
  private:
+  // Snapshot of the CRTC state at create(), captured only under
+  // RestorePolicy::SavedCrtc and re-applied in the destructor.
+  struct SavedCrtc {
+    std::uint32_t buffer_id{0};
+    std::uint32_t x{0};
+    std::uint32_t y{0};
+    drmModeModeInfo mode{};
+    bool mode_valid{false};
+  };
+
   ScanoutBackend(display::ScanoutTarget target, display::DriverProfile profile,
                  std::vector<fmt::Modifier> modifiers, std::unique_ptr<scene::LayerScene> scene,
-                 scene::LayerHandle layer) noexcept;
+                 scene::LayerHandle layer, int fd, RestorePolicy restore,
+                 std::optional<SavedCrtc> saved) noexcept;
 
   display::ScanoutTarget target_;
   display::DriverProfile profile_;
@@ -131,6 +157,12 @@ class ScanoutBackend {
   std::unique_ptr<scene::LayerScene> scene_;
   scene::LayerHandle layer_;
   FrameEconomy economy_;
+  // Borrowed DRM fd (owned by the Device passed to create(); the Device must
+  // outlive the backend, same as LayerScene's own fd assumption). Used only to
+  // re-apply saved_crtc_ at teardown under RestorePolicy::SavedCrtc.
+  int fd_{-1};
+  RestorePolicy restore_{RestorePolicy::None};
+  std::optional<SavedCrtc> saved_crtc_;
 };
 
 }  // namespace drm::present
