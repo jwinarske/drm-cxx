@@ -6,6 +6,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
 
 #include <drm_fourcc.h>
