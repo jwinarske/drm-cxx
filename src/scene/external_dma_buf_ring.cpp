@@ -12,16 +12,13 @@
 #include <drm-cxx/fmt/format_mod.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
-#include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <system_error>
 #include <utility>
@@ -33,22 +30,6 @@ namespace {
 
 [[nodiscard]] std::error_code err(std::errc code) noexcept {
   return std::make_error_code(code);
-}
-
-// AcquiredBuffer::opaque carries a monotonic acquisition token (full pointer
-// width, so no truncation on ILP32) that identifies each acquisition. release
-// fires per-acquisition keyed by token, not per-slot index, so the scene's
-// triple-deferred release of an aliased slot (slot 0 retiring while slot 0 is
-// live again two frames later) resolves correctly. The token→slot mapping for
-// outstanding acquisitions lives in the ring (outstanding_), not packed into the
-// pointer, so slot width never constrains the token.
-[[nodiscard]] void* token_to_opaque(std::uintptr_t token) noexcept {
-  // NOLINTNEXTLINE(performance-no-int-to-ptr,cppcoreguidelines-pro-type-reinterpret-cast)
-  return reinterpret_cast<void*>(token);
-}
-[[nodiscard]] std::uintptr_t opaque_to_token(void* opaque) noexcept {
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  return reinterpret_cast<std::uintptr_t>(opaque);
 }
 
 bool ring_debug() {
@@ -107,14 +88,13 @@ drm::expected<std::unique_ptr<ExternalDmaBufRing>, std::error_code> ExternalDmaB
     return drm::unexpected<std::error_code>(err(std::errc::bad_file_descriptor));
   }
 
-  auto ring = std::unique_ptr<ExternalDmaBufRing>(new ExternalDmaBufRing());
+  auto ring = std::unique_ptr<ExternalDmaBufRing>(new ExternalDmaBufRing(options.fence_deadline));
   ring->fd_ = fd;
   ring->format_.drm_fourcc = drm_format;
   ring->format_.modifier = slots[0].modifier;  // slots are kept plane-compatible
   ring->format_.width = width;
   ring->format_.height = height;
   ring->on_release_ = std::move(options.on_release);
-  ring->fence_deadline_ = options.fence_deadline;
   ring->slots_.reserve(slots.size());
 
   for (const ExternalSlotDesc& desc : slots) {
@@ -152,144 +132,33 @@ void ExternalDmaBufRing::submit(std::size_t slot, std::optional<drm::sync::SyncF
     debug_step("submit() slot out of range — ignored");
     return;
   }
-  const std::scoped_lock lock(mu_);
-  pending_slot_ = slot;
-  pending_fence_ = std::move(acquire);
-  // Replace, not union (see submit() contract). Over-cap degrades to whole-frame
-  // (count 0) rather than truncating — a short list under-reports the dirty area.
-  if (damage.size() > k_max_damage) {
-    debug_step("submit() damage over cap — degrading to whole-frame");
-    pending_damage_count_ = 0;
-  } else {
-    pending_damage_count_ = damage.size();
-    std::copy_n(damage.begin(), damage.size(), pending_damage_.begin());
-  }
+  presenter_.submit(slot, std::move(acquire), damage);
 }
 
 drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufRing::acquire() {
-  std::optional<std::size_t> slot;
-  std::optional<drm::sync::SyncFence> fence;
-  // Drain the damage store into a stack buffer under the lock (a cheap POD copy,
-  // no allocation) so the producer-contended critical section stays alloc-free,
-  // matching submit()'s noexcept fixed-store design. The vector that backs
-  // AcquiredBuffer::damage is built below, after the lock is released.
-  std::array<DamageRect, k_max_damage> damage_buf{};
-  std::size_t damage_count = 0;
-  {
-    const std::scoped_lock lock(mu_);
-    if (pending_slot_.has_value()) {
-      slot = std::exchange(pending_slot_, std::nullopt);
-      fence = std::exchange(pending_fence_, std::nullopt);
-      // Drain atomically with the slot. count 0 (whole-frame) leaves it empty.
-      damage_count = std::exchange(pending_damage_count_, 0);
-      std::copy_n(pending_damage_.begin(), damage_count, damage_buf.begin());
-    }
-  }
-
-  // Fault isolation. When a deadline is configured, the producer's
-  // fence is CPU-pre-waited here up to the deadline and NEVER handed to the
-  // kernel via IN_FENCE_FD — a never-signaling in-fence the kernel already holds
-  // would wedge the whole-CRTC pipeline (the blast radius this guards). On a
-  // miss we drop this not-ready frame and fall through to hold the last good
-  // slot (frozen-but-alive, not blank); the producer keeps submitting and
-  // whichever frame next signals in time advances (auto-recovery). With no
-  // deadline the fence passes through unchanged for the scene to wire/CPU-wait.
-  if (slot.has_value() && fence_deadline_.has_value() && fence.has_value()) {
-    // Round a sub-millisecond deadline up to 1 ms: SyncFence::wait() polls in ms,
-    // so truncating e.g. 500 us to 0 would never actually wait. A 0 ns deadline
-    // (explicit "don't wait") stays 0.
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(*fence_deadline_);
-    if (ms.count() == 0 && fence_deadline_->count() > 0) {
-      ms = std::chrono::milliseconds(1);
-    }
-    const bool signaled = fence->wait(ms).has_value();
-    fence.reset();  // either way, do not also wire IN_FENCE_FD (mutual exclusion)
-    if (!signaled) {
-      // Deadline missed: drop this not-ready frame and hold the last good slot
-      // below. Its dirty regions were never presented, so carry them into the
-      // next presented frame — here the *ring* is the dropper, so accumulation
-      // is the ring's job (unlike the producer-side replace in submit()).
-      accumulate_carried_damage(damage_buf, damage_count);
-      slot.reset();
-    }
-  }
-
-  if (slot.has_value()) {
-    // Fresh frame: this slot becomes live under a new token; the previously-
-    // scanning buffer is retired by the scene's later release() (off-screen once
-    // the flip carrying this one lands).
-    scanning_slot_ = slot;
-    ++next_token_;
-    if (next_token_ == 0) {
-      ++next_token_;  // skip the reserved "no acquisition" sentinel on wrap
-    }
-    scanning_token_ = next_token_;
-    Outstanding entry;
-    entry.token = scanning_token_;
-    entry.slot = *slot;
-    outstanding_.push_back(entry);
+  // The presenter runs the state machine (fence deadline, token advance, idle
+  // hold, damage carry) over slot-index keys; the ring resolves the chosen key
+  // to its cached fb_id.
+  detail::RingPresenter::Acquired d = presenter_.acquire();
+  if (d.kind == detail::RingPresenter::Present::Fresh) {
     AcquiredBuffer acq;
-    acq.fb_id = slots_.at(*slot).fb_id;
-    acq.opaque = token_to_opaque(scanning_token_);
-    acq.acquire_fence = std::move(fence);
-    // Build the damage vector outside the lock, folding in any damage carried
-    // from frames this ring dropped on a deadline miss (empty -> whole-frame).
-    take_damage_with_carry(acq.damage, damage_buf, damage_count);
+    acq.fb_id = slots_.at(d.key).fb_id;
+    acq.opaque = detail::RingPresenter::token_to_opaque(d.token);
+    acq.acquire_fence = std::move(d.fence);
+    acq.damage = std::move(d.damage);
+    return acq;
+  }
+  // Idle hold: re-present the scanning slot under its live token, provided it
+  // still resolves to a live FB (a paused-then-torn-down slot has fb_id == 0).
+  if (d.kind == detail::RingPresenter::Present::Hold && slots_.at(d.key).fb_id != 0) {
+    AcquiredBuffer acq;
+    acq.fb_id = slots_.at(d.key).fb_id;
+    acq.opaque = detail::RingPresenter::token_to_opaque(d.token);
     return acq;
   }
 
-  // Idle hold (and a fence-deadline miss): nothing fresh and ready — hold the
-  // last good frame rather than drop the layer (which would blank the plane).
-  // Re-hand the scanning slot under the SAME token (so the held buffer isn't
-  // mistaken for a superseded one and released out from under the display) and
-  // with no acquire fence (its pixels are valid and on screen). No new
-  // outstanding entry — the live token's entry already exists.
-  if (scanning_slot_.has_value() && slots_.at(*scanning_slot_).fb_id != 0) {
-    AcquiredBuffer acq;
-    acq.fb_id = slots_.at(*scanning_slot_).fb_id;
-    acq.opaque = token_to_opaque(scanning_token_);
-    return acq;
-  }
-
-  // First frame, nothing ever submitted: no buffer to contribute this vblank.
+  // Nothing to contribute this vblank (first frame, or a held slot with no FB).
   return drm::unexpected<std::error_code>(err(std::errc::resource_unavailable_try_again));
-}
-
-void ExternalDmaBufRing::accumulate_carried_damage(const std::array<DamageRect, k_max_damage>& buf,
-                                                   std::size_t count) noexcept {
-  if (carried_damage_whole_) {
-    return;  // already whole-frame; nothing finer to track
-  }
-  // A whole-frame drop (count 0) forces the carry to whole-frame: we can't know
-  // which regions changed, so the next presented frame must repaint everything.
-  // An accumulation past the cap collapses the same way (never truncate).
-  if (count == 0 || carried_damage_count_ + count > k_max_damage) {
-    carried_damage_whole_ = true;
-    carried_damage_count_ = 0;
-    return;
-  }
-  std::copy_n(buf.begin(), count,
-              carried_damage_.begin() + static_cast<std::ptrdiff_t>(carried_damage_count_));
-  carried_damage_count_ += count;
-}
-
-void ExternalDmaBufRing::take_damage_with_carry(std::vector<DamageRect>& out,
-                                                const std::array<DamageRect, k_max_damage>& buf,
-                                                std::size_t count) {
-  // Whole-frame if either side is whole-frame (a carried whole-frame, or this
-  // frame's own count 0), or if the union would overflow the cap. Otherwise
-  // concatenate carried (older) ++ this frame's rects; order is irrelevant to
-  // FB_DAMAGE_CLIPS, which is an unordered set of dirty regions.
-  const bool whole =
-      carried_damage_whole_ || count == 0 || carried_damage_count_ + count > k_max_damage;
-  if (!whole) {
-    out.reserve(carried_damage_count_ + count);
-    out.assign(carried_damage_.begin(),
-               carried_damage_.begin() + static_cast<std::ptrdiff_t>(carried_damage_count_));
-    out.insert(out.end(), buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(count));
-  }
-  carried_damage_count_ = 0;
-  carried_damage_whole_ = false;
 }
 
 void ExternalDmaBufRing::release(AcquiredBuffer acquired) noexcept {
@@ -298,27 +167,11 @@ void ExternalDmaBufRing::release(AcquiredBuffer acquired) noexcept {
 
 void ExternalDmaBufRing::release_with_fence(
     AcquiredBuffer acquired, std::optional<drm::sync::SyncFence> release_fence) noexcept {
-  const std::uintptr_t token = opaque_to_token(acquired.opaque);
-  if (token == 0) {
-    return;  // never-submitted sentinel
-  }
-  // A buffer still holding the live token (the current frame, or an idle
-  // hold-last-frame re-commit) is still on screen — signaling "free" would race
-  // the producer into overwriting a live scanout buffer. Fire only once the token
-  // has been superseded by a newer advance.
-  if (token == scanning_token_) {
-    return;
-  }
-  // Erase-on-fire collapses the several idle re-holds that share one token down
-  // to a single release, and makes the fire keyed purely by token identity (no
-  // ordering/overflow assumptions). A token not present was already fired.
-  for (auto it = outstanding_.begin(); it != outstanding_.end(); ++it) {
-    if (it->token == token) {
-      const std::size_t slot = it->slot;
-      outstanding_.erase(it);
-      fire_release(slot, std::move(release_fence));
-      return;
-    }
+  // The presenter decides whether this acquisition's token may retire (never
+  // while it is still the live/held frame) and maps it back to its slot key; the
+  // ring fires its per-slot leave-scanout callback.
+  if (auto key = presenter_.release(detail::RingPresenter::opaque_to_token(acquired.opaque)); key) {
+    fire_release(static_cast<std::size_t>(*key), std::move(release_fence));
   }
 }
 
@@ -345,25 +198,10 @@ drm::expected<void, std::error_code> ExternalDmaBufRing::on_session_resumed(
   }
   fd_ = new_fd;
 
-  // Abandon any in-flight handoff and live-slot bookkeeping — the commit that
-  // would have consumed them was lost with the old fd.
-  {
-    const std::scoped_lock lock(mu_);
-    pending_slot_.reset();
-    pending_fence_.reset();
-    pending_damage_count_ = 0;
-  }
-  scanning_slot_.reset();
-  // Reset release tracking: pre-resume buffers are abandoned (the scene drains
-  // its deferred-release ring on pause). Clearing outstanding_ and the token
-  // counters means any stale post-resume release finds no entry and no-ops.
-  outstanding_.clear();
-  next_token_ = 0;
-  scanning_token_ = 0;
-  // Drop damage carried from pre-resume drops: those frames belong to the dead
-  // fd's session and must not bleed into the first post-resume presented frame.
-  carried_damage_count_ = 0;
-  carried_damage_whole_ = false;
+  // Abandon all pending/in-flight/scanning presentation state and damage carried
+  // from the dead fd's session — the commit that would have consumed them was
+  // lost with the old fd, and any stale post-resume release finds no entry.
+  presenter_.reset();
 
   // The old fd is dead: drop cached FB IDs + GEM handles without ioctls (they
   // were reclaimed on fd close) and re-import every slot's duped fds on new_fd.
