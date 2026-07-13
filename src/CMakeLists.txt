@@ -49,6 +49,7 @@ set(DRM_CXX_SOURCES
   scene/detail/external_ring_core.cpp
   scene/external_dma_buf_source.cpp
   scene/external_dma_buf_ring.cpp
+  scene/external_dma_buf_pool.cpp
   scene/dma_buf_source_cache.cpp
   scene/gbm_buffer_source.cpp
   scene/gbm_surface_source.cpp
@@ -438,6 +439,7 @@ install(FILES
     scene/dumb_buffer_source.hpp
     scene/external_dma_buf_source.hpp
     scene/external_dma_buf_ring.hpp
+    scene/external_dma_buf_pool.hpp
     scene/dma_buf_source_cache.hpp
     scene/gbm_buffer_source.hpp
     scene/gbm_surface_source.hpp
@@ -451,6 +453,13 @@ install(FILES
     scene/v4l2_camera_source.hpp
     scene/v4l2_decoder_source.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene)
+
+# Internal detail headers, but transitively public: the installed
+# external_dma_buf_ring.hpp / external_dma_buf_pool.hpp include them.
+install(FILES
+    scene/detail/dmabuf_slot.hpp
+    scene/detail/external_ring_core.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/scene/detail)
 
 # GstAppsinkSource header only installs when the gate is on — matches
 # the capture / csd pattern.

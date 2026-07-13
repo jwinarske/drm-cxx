@@ -118,6 +118,14 @@ test('test_external_dma_buf_ring_vkms',
   is_parallel : false,
 )
 
+test('test_external_dma_buf_pool_vkms',
+  executable('test_external_dma_buf_pool_vkms',
+    'integration/test_external_dma_buf_pool_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
 test('test_external_dma_buf_ring_scene_vkms',
   executable('test_external_dma_buf_ring_scene_vkms',
     'integration/test_external_dma_buf_ring_scene_vkms.cpp',
@@ -603,6 +611,13 @@ test('test_external_dma_buf_source',
 test('test_external_dma_buf_ring',
   executable('test_external_dma_buf_ring',
     'unit/test_external_dma_buf_ring.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_external_dma_buf_pool',
+  executable('test_external_dma_buf_pool',
+    'unit/test_external_dma_buf_pool.cpp',
     dependencies : test_deps,
   ),
 )
