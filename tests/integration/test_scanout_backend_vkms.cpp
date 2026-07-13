@@ -11,10 +11,16 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/present/gbm_producer.hpp>
 #include <drm-cxx/present/scanout_backend.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>
+#include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
+#include <drm_fourcc.h>
 #include <xf86drm.h>
+#include <xf86drmMode.h>
 
+#include <cstdint>
+#include <cstdlib>
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <optional>
@@ -170,4 +176,96 @@ TEST(ScanoutBackendVkms, VrrAutoArmsFromProfileAndCommits) {
   (*backend)->set_vrr(true);
   auto r3 = (*backend)->present(0);
   ASSERT_TRUE(r3.has_value()) << "present (vrr on): " << r3.error().message();
+}
+
+// RestorePolicy::SavedCrtc snapshots the CRTC at create() and puts it back when
+// the backend is destroyed, so a display board returns to its prior state (fbcon
+// / the previous framebuffer) instead of freezing on the last committed frame.
+//
+// Observed via the legacy CRTC framebuffer (`drmModeGetCrtc::buffer_id`): the
+// backend commits atomically, which does NOT update that legacy field, so this
+// test drives it directly with legacy modesets. Establish a known framebuffer
+// on the CRTC, create the backend (which snapshots it), disable the CRTC, then
+// destroy the backend and confirm SavedCrtc reprogrammed the original.
+TEST(ScanoutBackendVkms, SavedCrtcRestoresCrtcOnTeardown) {
+  const char* env = std::getenv("DRM_CXX_TEST_CARD");
+  const std::optional<std::string> path =
+      (env != nullptr && *env != '\0') ? std::optional<std::string>(env) : find_vkms_node();
+  if (!path.has_value()) {
+    GTEST_SKIP() << "vkms not loaded (or set DRM_CXX_TEST_CARD to a modeset card).";
+  }
+
+  auto dev = drm::Device::open(*path);
+  ASSERT_TRUE(dev.has_value()) << "Device::open: " << dev.error().message();
+  const int fd = dev->fd();
+
+  // Find a connected connector + a usable CRTC + its first mode.
+  drmModeRes* res = drmModeGetResources(fd);
+  ASSERT_NE(res, nullptr);
+  std::uint32_t crtc_id = 0;
+  std::uint32_t connector_id = 0;
+  drmModeModeInfo mode{};
+  for (int i = 0; i < res->count_connectors && crtc_id == 0; ++i) {
+    drmModeConnector* conn = drmModeGetConnector(fd, res->connectors[i]);
+    if (conn == nullptr) {
+      continue;
+    }
+    if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0 && res->count_crtcs > 0) {
+      connector_id = conn->connector_id;
+      crtc_id = res->crtcs[0];
+      mode = conn->modes[0];
+    }
+    drmModeFreeConnector(conn);
+  }
+  drmModeFreeResources(res);
+  if (crtc_id == 0) {
+    GTEST_SKIP() << "no connected connector with a mode";
+  }
+
+  // A dumb framebuffer to stand in for the prior on-screen contents (fbcon).
+  // DumbBufferSource owns the buffer + FB; keep it alive for the whole test.
+  auto prior =
+      drm::scene::DumbBufferSource::create(*dev, mode.hdisplay, mode.vdisplay, DRM_FORMAT_XRGB8888);
+  ASSERT_TRUE(prior.has_value()) << "dumb source: " << prior.error().message();
+  auto prior_buf = (*prior)->acquire();
+  ASSERT_TRUE(prior_buf.has_value()) << "acquire: " << prior_buf.error().message();
+  const std::uint32_t prior_fb = prior_buf->fb_id;
+  ASSERT_NE(prior_fb, 0U);
+
+  // Establish the known prior CRTC state via a legacy modeset.
+  ASSERT_EQ(drmModeSetCrtc(fd, crtc_id, prior_fb, 0, 0, &connector_id, 1, &mode), 0);
+  {
+    drmModeCrtcPtr c = drmModeGetCrtc(fd, crtc_id);
+    ASSERT_NE(c, nullptr);
+    ASSERT_EQ(c->buffer_id, prior_fb) << "prior legacy modeset did not take";
+    drmModeFreeCrtc(c);
+  }
+
+  drm::present::GbmScanoutProducer producer(*dev);
+  drm::present::ScanoutBackend::Config cfg;
+  cfg.restore = drm::present::ScanoutBackend::RestorePolicy::SavedCrtc;
+  auto backend = drm::present::ScanoutBackend::create(*dev, producer, cfg);
+  ASSERT_TRUE(backend.has_value()) << "create: " << backend.error().message();
+  ASSERT_EQ((*backend)->target().crtc_id, crtc_id);
+
+  // Take the CRTC away from its prior contents (disable it) so the restore is
+  // observable rather than a no-op.
+  ASSERT_EQ(drmModeSetCrtc(fd, crtc_id, 0, 0, 0, nullptr, 0, nullptr), 0);
+  {
+    drmModeCrtcPtr c = drmModeGetCrtc(fd, crtc_id);
+    ASSERT_NE(c, nullptr);
+    ASSERT_EQ(c->buffer_id, 0U) << "CRTC should be disabled before teardown";
+    drmModeFreeCrtc(c);
+  }
+
+  // Destroy the backend: SavedCrtc must reprogram the framebuffer captured at
+  // create() time.
+  (*backend).reset();
+  drmModeCrtcPtr after = drmModeGetCrtc(fd, crtc_id);
+  ASSERT_NE(after, nullptr);
+  const std::uint32_t restored_fb = after->buffer_id;
+  drmModeFreeCrtc(after);
+  EXPECT_EQ(restored_fb, prior_fb) << "SavedCrtc must restore the prior CRTC framebuffer";
+
+  drmModeSetCrtc(fd, crtc_id, 0, 0, 0, nullptr, 0, nullptr);  // leave the CRTC clean
 }
