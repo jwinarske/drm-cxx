@@ -48,6 +48,7 @@
 #include <optional>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace drm {
 class Device;
@@ -111,6 +112,16 @@ class ExternalDmaBufPool : public LayerBufferSource {
   /// Number of buffers currently imported/cached (observability + tests).
   [[nodiscard]] std::size_t cached_count() const noexcept;
 
+  /// Switch to a new buffer generation (a decoder resolution / format change).
+  /// Updates the geometry future submits import under and marks every currently
+  /// cached buffer for retirement: each is torn down on a later acquire() once no
+  /// in-flight commit still references it (deferred past in-flight tokens, like
+  /// LRU eviction). The producer must submit the new generation under **fresh
+  /// keys** (a reallocated pool has new buffer identities); reusing an old key
+  /// before its buffer retires is unsupported. The modifier is unchanged.
+  void reset_generation(std::uint32_t width, std::uint32_t height,
+                        std::uint32_t drm_fourcc) noexcept;
+
   // ── LayerBufferSource ──────────────────────────────────────────────
   [[nodiscard]] drm::expected<AcquiredBuffer, std::error_code> acquire() override;
   void release(AcquiredBuffer acquired) noexcept override;
@@ -147,6 +158,9 @@ class ExternalDmaBufPool : public LayerBufferSource {
   // skipping any the presenter still references. Caller holds slots_mu_ and runs
   // on the commit thread (so the presenter's liveness view is stable).
   void prune_locked() noexcept;
+  // Tear down every generation-retired buffer no in-flight commit still holds.
+  // Caller holds slots_mu_ and runs on the commit thread.
+  void sweep_retiring_locked() noexcept;
 
   int fd_{-1};
   SourceFormat format_{};
@@ -161,6 +175,8 @@ class ExternalDmaBufPool : public LayerBufferSource {
   std::unordered_map<std::uintptr_t, detail::DmaBufSlot> slots_;
   std::list<std::uintptr_t> lru_;
   std::unordered_map<std::uintptr_t, std::list<std::uintptr_t>::iterator> lru_pos_;
+  // Keys of a superseded generation awaiting deferred teardown on retire.
+  std::unordered_set<std::uintptr_t> retiring_;
 
   // Presentation state machine, keyed by buffer_key. See external_ring_core.hpp.
   detail::RingPresenter presenter_;
