@@ -112,6 +112,14 @@ struct CommitReport {
   /// zero on the cheap path where an unchanged layer keeps its prior
   /// FB binding.
   std::size_t fbs_attached{0};
+  /// Subset of `properties_written`: layers that got an FB_DAMAGE_CLIPS blob
+  /// this commit — one per natively-placed layer whose source reported a
+  /// non-empty, in-bounds damage region within the rect budget. Zero on a
+  /// full-frame commit (no damage, over budget, degenerate clips, or a plane /
+  /// driver without the property). The census signal for the damaged-commit
+  /// path: it tells a scanout-bandwidth-sensitive consumer whether partial
+  /// updates are actually reaching the kernel.
+  std::size_t damage_clips_armed{0};
 
   /// Layers whose acquire fence was handed to the kernel as the plane's
   /// IN_FENCE_FD this commit — i.e. the real explicit-sync path: the display

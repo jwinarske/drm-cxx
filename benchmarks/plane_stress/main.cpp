@@ -23,7 +23,10 @@
 //
 // CSV columns (one row per commit):
 //   frame, wall_us, commit_us, test_commits, assigned, composited,
-//   unassigned, props, fbs, buckets
+//   unassigned, props, fbs, buckets, fast_path, damage_clips, idle
+// (fast_path / idle are 0/1 flags; damage_clips is the per-frame count of
+//  FB_DAMAGE_CLIPS blobs armed — nonzero only on a driver that exposes the
+//  property and a source that reports damage.)
 //
 // The benchmark requires a real KMS device (libseat or root). Output
 // is visible on the connected display while the benchmark runs.
@@ -503,7 +506,8 @@ int main(int argc, char** argv) {
     }
     csv = &csv_file;
   }
-  *csv << "frame,wall_us,commit_us,test_commits,assigned,composited,unassigned,props,fbs,buckets\n";
+  *csv << "frame,wall_us,commit_us,test_commits,assigned,composited,unassigned,props,fbs,buckets,"
+          "fast_path,damage_clips,idle\n";
 
   drm::println(
       stderr, "plane_stress: layers={} formats=[{}{}{}{}] tile={}x{} churn={} rate={} duration={}s",
@@ -621,7 +625,9 @@ int main(int argc, char** argv) {
     *csv << frame_idx << ',' << wall_us << ',' << commit_us << ',' << report->test_commits_issued
          << ',' << report->layers_assigned << ',' << report->layers_composited << ','
          << report->layers_unassigned << ',' << report->properties_written << ','
-         << report->fbs_attached << ',' << report->composition_buckets << '\n';
+         << report->fbs_attached << ',' << report->composition_buckets << ','
+         << static_cast<int>(report->fb_delta_fast_path) << ',' << report->damage_clips_armed << ','
+         << static_cast<int>(report->skipped_idle) << '\n';
 
     cum_assigned += report->layers_assigned;
     cum_composited += report->layers_composited;

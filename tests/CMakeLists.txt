@@ -176,6 +176,14 @@ target_link_libraries(test_layer_scene_minimization_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_layer_scene_minimization_vkms)
 
+add_executable(test_layer_scene_census_vkms
+  integration/test_layer_scene_census_vkms.cpp)
+target_link_libraries(test_layer_scene_census_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_layer_scene_census_vkms)
+
 add_executable(test_layer_scene_content_type_vkms
   integration/test_layer_scene_content_type_vkms.cpp)
 target_link_libraries(test_layer_scene_content_type_vkms PRIVATE
