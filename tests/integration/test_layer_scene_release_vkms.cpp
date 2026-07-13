@@ -43,6 +43,7 @@
 #include <xf86drmMode.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -160,15 +161,17 @@ inline std::uint64_t decode_id(void* opaque) noexcept {
 class TrackingSource : public LayerBufferSource {
  public:
   struct Event {
-    enum class Kind : std::uint8_t { Acquire, Release };
+    enum class Kind : std::uint8_t { Acquire, Release, Destroy };
     Kind kind;
-    std::uint64_t id;  // unique per acquire; release matches by id
+    std::uint64_t id;  // unique per acquire; release matches by id (0 for Destroy)
   };
 
   TrackingSource(std::unique_ptr<DumbBufferSource> inner, std::vector<Event>& transcript)
       : inner_(std::move(inner)), transcript_(transcript) {}
 
-  ~TrackingSource() override = default;
+  // Records its own destruction so tests can assert *when* the scene tears the
+  // source down (the source-retire deferral orders this after its releases).
+  ~TrackingSource() override { transcript_.push_back({Event::Kind::Destroy, 0}); }
 
   drm::expected<AcquiredBuffer, std::error_code> acquire() override {
     auto r = inner_->acquire();
@@ -402,6 +405,77 @@ TEST(LayerSceneReleaseVkms, TestCommitsReleaseImmediately) {
   EXPECT_EQ(count_acquires(transcript), 2U);
   EXPECT_EQ(released_ids(transcript).size(), 2U)
       << "every test() releases immediately, regardless of count";
+
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+// A layer removed while its buffers are still in flight must not have its source
+// destroyed synchronously (the old behavior released on-scan buffers early and
+// tore the layer down out from under the deferred-release ring). Instead the
+// source is retired: its buffers drain through the ring with their release
+// fences, and it is destroyed only afterward.
+TEST(LayerSceneReleaseVkms, RemoveLayerDefersSourceRetirement) {
+  const char* env = std::getenv("DRM_CXX_TEST_CARD");
+  const std::optional<std::string> node =
+      (env != nullptr && *env != '\0') ? std::optional<std::string>(env) : find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+
+  std::vector<TrackingSource::Event> transcript;
+  const auto has_destroy = [&transcript]() {
+    for (const auto& e : transcript) {
+      if (e.kind == TrackingSource::Event::Kind::Destroy) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner.has_value()) << inner.error().message();
+  LayerDesc layer;
+  layer.source = std::make_unique<TrackingSource>(std::move(*inner), transcript);
+  layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.zpos = 1;
+  auto handle_r = fx.scene->add_layer(std::move(layer));
+  ASSERT_TRUE(handle_r.has_value()) << handle_r.error().message();
+
+  // Two commits: acquisitions 0 and 1 are in flight, neither released yet.
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  ASSERT_TRUE(released_ids(transcript).empty());
+
+  // Remove the layer while both buffers are still on the deferred-release ring.
+  fx.scene->remove_layer(*handle_r);
+  // The regression guard: removal must NOT synchronously release the on-scan
+  // buffers, nor destroy the source.
+  EXPECT_TRUE(released_ids(transcript).empty())
+      << "remove_layer must defer, not synchronously release, in-flight buffers";
+  EXPECT_FALSE(has_destroy()) << "the source must outlive its in-flight buffers";
+
+  // The retired source's buffers drain through the ring on the next commits.
+  ASSERT_TRUE(fx.scene->commit().has_value());  // releases id 0
+  EXPECT_EQ(released_ids(transcript).size(), 1U);
+  EXPECT_FALSE(has_destroy());
+  ASSERT_TRUE(fx.scene->commit().has_value());  // releases id 1
+  EXPECT_EQ(released_ids(transcript).size(), 2U);
+
+  // One more commit rotates the retire ring far enough to destroy the source —
+  // strictly after both releases.
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  ASSERT_TRUE(has_destroy()) << "the retired source must eventually be destroyed";
+  ASSERT_FALSE(transcript.empty());
+  EXPECT_EQ(transcript.back().kind, TrackingSource::Event::Kind::Destroy)
+      << "destruction must be ordered after every buffer release";
+  EXPECT_EQ(released_ids(transcript).size(), 2U);
 
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }
