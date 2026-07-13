@@ -243,6 +243,26 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
     }
   }
 
+  // FB-only fast path: only content (FB_ID / damage / fence) changed on already-
+  // placed layers — geometry, format, and modifier are byte-identical to what
+  // the kernel last accepted (property_hash match). Reuse the cached allocation
+  // and skip the redundant TEST_ONLY; the real commit's atomic_check stays the
+  // arbiter, and a rejection invalidates the cache (see finalize_frame). Real
+  // commits only — an explicit test() must still probe.
+  if (!test_only && previous_allocation_valid_ && !has_new_layer && is_fb_only_frame()) {
+    auto result = apply_previous_allocation(output, req, commit_flags, crtc_index,
+                                            /*test_only=*/false, /*skip_test=*/true);
+    if (result.has_value()) {
+      diagnostics_.fb_delta_fast_path = true;
+      output.mark_clean();
+      return result;
+    }
+    if (result.error() == std::errc::permission_denied) {
+      return result;
+    }
+    // Anything else (e.g. reserved-plane overlap): fall through to a tested path.
+  }
+
   // Fast path: nothing changed since last frame
   if (!output.any_layer_dirty() && previous_allocation_valid_ && !has_new_layer) {
     auto result = apply_previous_allocation(output, req, commit_flags, crtc_index, test_only);
@@ -276,11 +296,35 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   return full_search(output, req, commit_flags, crtc_index, test_only);
 }
 
+bool Allocator::is_fb_only_frame() const {
+  // Every plane we committed last frame must still map to the same layer, and
+  // that layer's current property_hash() must match what we recorded at commit.
+  // property_hash() excludes FB_ID and IN_FENCE_FD, so a match proves only
+  // content changed — geometry, format, and modifier are identical to the
+  // assignment the kernel already accepted. Any placement / format / modifier
+  // edit, or a layer that vanished this frame, defeats the fast path.
+  if (previous_allocation_.empty()) {
+    return false;
+  }
+  return std::all_of(previous_allocation_.begin(), previous_allocation_.end(),
+                     [this](const auto& entry) {
+                       const auto& [plane_id, layer] = entry;
+                       if (scratch_current_set_.count(layer) == 0) {
+                         return false;  // a previously-placed layer is gone this frame
+                       }
+                       const auto it = last_committed_.find(plane_id);
+                       // Same plane/layer baseline, and geometry/format/modifier unchanged
+                       // since the kernel accepted it (property_hash excludes FB_ID/fence).
+                       return it != last_committed_.end() && it->second.layer == layer &&
+                              it->second.hash == layer->property_hash();
+                     });
+}
+
 // ── Warm-start from previous frame ────────────────────────────
 
 drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation(
     Output& output, AtomicRequest& req, const uint32_t flags, const uint32_t crtc_index,
-    const bool test_only) {
+    const bool test_only, const bool skip_test) {
   // Bail to full_search when the caller's external_reserved set
   // overlaps with our remembered allocation. The previous frame's
   // assignment placed a layer where the caller now wants the canvas
@@ -312,18 +356,25 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
         std::make_error_code(std::errc::resource_unavailable_try_again));
   }
 
-  if (auto ec = try_test_commit(previous_allocation_, flags, crtc_index); ec) {
-    // EACCES means the kernel revoked our master (libseat pause_cb may
-    // not have arrived yet — drmIsMaster lags). Propagate it up so the
-    // caller can soft-pause; flattening it to EAGAIN here would hide
-    // the real signal. Other failures stay flattened to EAGAIN, which
-    // is the established "warm-start didn't fit, fall through to a
-    // fresh search" signal at higher layers.
-    if (ec == std::errc::permission_denied) {
-      return drm::unexpected<std::error_code>(ec);
+  // FB-only fast path bypasses re-validation: the caller proved via
+  // is_fb_only_frame() that geometry/format/modifier are unchanged from the
+  // last accepted commit, so the cached assignment is still valid. The real
+  // commit's atomic_check remains the arbiter (a rejection invalidates the
+  // cache — see finalize_frame).
+  if (!skip_test) {
+    if (auto ec = try_test_commit(previous_allocation_, flags, crtc_index); ec) {
+      // EACCES means the kernel revoked our master (libseat pause_cb may
+      // not have arrived yet — drmIsMaster lags). Propagate it up so the
+      // caller can soft-pause; flattening it to EAGAIN here would hide
+      // the real signal. Other failures stay flattened to EAGAIN, which
+      // is the established "warm-start didn't fit, fall through to a
+      // fresh search" signal at higher layers.
+      if (ec == std::errc::permission_denied) {
+        return drm::unexpected<std::error_code>(ec);
+      }
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::resource_unavailable_try_again));
     }
-    return drm::unexpected<std::error_code>(
-        std::make_error_code(std::errc::resource_unavailable_try_again));
   }
 
   // TEST passed → populate the caller's request so the real commit
@@ -1346,7 +1397,7 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
   // CRTC_ID + dest rect + src rect under MODESET, where the kernel
   // rejects the partial commit with EINVAL).
   if (!test_only) {
-    last_committed_[plane_id] = LastCommitted{&layer, layer.snapshot()};
+    last_committed_[plane_id] = LastCommitted{&layer, layer.snapshot(), layer.property_hash()};
   }
   return {};
 }

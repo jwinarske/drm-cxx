@@ -208,8 +208,10 @@ TEST(LayerSceneMinimizationVkms, SteadyStateWritesOnlyFbIdPerAssignedLayer) {
   EXPECT_EQ(second->properties_written, 1U)
       << "steady state should emit only FB_ID per assigned layer";
   EXPECT_EQ(second->fbs_attached, 1U) << "FB_ID re-attaches every frame";
-  EXPECT_EQ(second->test_commits_issued, 1U)
-      << "warm steady state still re-validates the cached assignment with one TEST_ONLY";
+  EXPECT_EQ(second->test_commits_issued, 0U)
+      << "steady state takes the FB-only fast path — no redundant TEST_ONLY";
+  EXPECT_TRUE(second->fb_delta_fast_path)
+      << "an FB-only frame must reuse the cached allocation without re-testing";
 
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }
@@ -304,8 +306,9 @@ TEST(LayerSceneMinimizationVkms, NewLayerInWarmStateLandsOnHardwarePlane) {
   ASSERT_TRUE(fx.scene->commit().has_value());
   auto warm = fx.scene->commit();
   ASSERT_TRUE(warm.has_value()) << warm.error().message();
-  ASSERT_EQ(warm->test_commits_issued, 1U)
-      << "second commit should be the warm-start re-validation, not full_search";
+  ASSERT_EQ(warm->test_commits_issued, 0U)
+      << "second steady-state commit takes the FB-only fast path, not full_search";
+  ASSERT_TRUE(warm->fb_delta_fast_path);
 
   // Add a new overlay layer mid-flight, sized so it cannot scale (VKMS
   // overlay can't scale) and small enough to fit on top of bg without
@@ -352,12 +355,13 @@ TEST(LayerSceneMinimizationVkms, NewLayerInWarmStateLandsOnHardwarePlane) {
   EXPECT_NE(over_entry->plane_id, bg_entry->plane_id)
       << "overlay must be on a different plane from bg";
 
-  // And the next frame, with both layers known to previous_allocation_,
-  // should re-engage the warm-start re-validation (one TEST_ONLY).
+  // And the next frame, with both layers known to previous_allocation_ and
+  // unchanged, takes the FB-only fast path — no TEST_ONLY at all.
   auto steady = fx.scene->commit();
   ASSERT_TRUE(steady.has_value()) << steady.error().message();
-  EXPECT_EQ(steady->test_commits_issued, 1U)
-      << "warm-start should re-engage now that previous_allocation_ knows the new layer";
+  EXPECT_EQ(steady->test_commits_issued, 0U)
+      << "both layers cached and unchanged — steady state skips the redundant TEST_ONLY";
+  EXPECT_TRUE(steady->fb_delta_fast_path);
   EXPECT_EQ(steady->layers_assigned, 2U);
   EXPECT_EQ(steady->layers_composited, 0U);
 
@@ -410,6 +414,60 @@ TEST(LayerSceneMinimizationVkms, TranslatingLayerEmitsOnlyOneRectProperty) {
   EXPECT_EQ(report->properties_written, 2U)
       << "expected FB_ID + CRTC_X, got " << report->properties_written;
   EXPECT_EQ(report->fbs_attached, 1U) << "FB_ID always re-emits";
+
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+// The FB-only fast path's full lifecycle: a steady frame skips the TEST_ONLY,
+// a placement change defeats it (the layer is re-validated), and the frame
+// after that — with the new placement cached — is back on the fast path.
+TEST(LayerSceneMinimizationVkms, FbOnlyFastPathReTestsOnPlacementChange) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+
+  // Sub-screen layer so it can be translated without scaling (VKMS can't scale).
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+  const std::uint32_t layer_w = fb_w / 2U;
+  const std::uint32_t layer_h = fb_h / 2U;
+  auto src = DumbBufferSource::create(*fx.dev, layer_w, layer_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(src.has_value());
+
+  LayerDesc d;
+  d.source = std::move(*src);
+  d.display.src_rect = drm::scene::Rect{0, 0, layer_w, layer_h};
+  d.display.dst_rect = drm::scene::Rect{32, 32, layer_w, layer_h};
+  d.display.zpos = 1;
+  auto handle_r = fx.scene->add_layer(std::move(d));
+  ASSERT_TRUE(handle_r.has_value());
+  const auto handle = *handle_r;
+
+  ASSERT_TRUE(fx.scene->commit().has_value());  // cold: full_search
+  auto steady = fx.scene->commit();
+  ASSERT_TRUE(steady.has_value()) << steady.error().message();
+  EXPECT_EQ(steady->test_commits_issued, 0U) << "steady FB-only frame skips the TEST_ONLY";
+  EXPECT_TRUE(steady->fb_delta_fast_path);
+
+  // Translate (same dimensions → no scaling, VKMS accepts). CRTC_X moves, so
+  // property_hash changes and the fast path must NOT trigger.
+  auto* layer = fx.scene->get_layer(handle);
+  ASSERT_NE(layer, nullptr);
+  layer->set_dst_rect(drm::scene::Rect{64, 32, layer_w, layer_h});
+  auto moved = fx.scene->commit();
+  ASSERT_TRUE(moved.has_value()) << moved.error().message();
+  EXPECT_FALSE(moved->fb_delta_fast_path) << "a placement change must defeat the FB-only fast path";
+  EXPECT_GE(moved->test_commits_issued, 1U) << "a moved layer must be re-validated with a TEST";
+
+  // New placement is cached → the next unchanged frame is FB-only again.
+  auto resteady = fx.scene->commit();
+  ASSERT_TRUE(resteady.has_value()) << resteady.error().message();
+  EXPECT_EQ(resteady->test_commits_issued, 0U) << "fast path re-engages once the move is cached";
+  EXPECT_TRUE(resteady->fb_delta_fast_path);
 
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }

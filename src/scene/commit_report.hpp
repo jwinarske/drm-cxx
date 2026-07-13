@@ -132,9 +132,17 @@ struct CommitReport {
 
   /// Internal test commits issued by the allocator while searching
   /// for a valid plane assignment. Cold-start commits can spend the
-  /// whole budget (default 16); warm-start commits should normally
-  /// be 0.
+  /// whole budget (default 16); warm-start commits are 1, and the
+  /// FB-only fast path (see `fb_delta_fast_path`) is 0.
   std::size_t test_commits_issued{0};
+
+  /// true when this commit took the FB-only fast path: only content
+  /// (FB_ID / damage / fence) changed on already-placed layers, so the
+  /// allocator reused the cached plane assignment and skipped the
+  /// TEST_ONLY re-validation entirely (`test_commits_issued == 0`). The
+  /// steady-state signal a single-layer consumer asserts to confirm it is
+  /// paying one atomic commit per frame, not two.
+  bool fb_delta_fast_path{false};
 
   /// true when the scene's auto-derive built an
   /// `HdrSourceMetadata` from a layer's `source_eotf` but the

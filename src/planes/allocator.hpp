@@ -218,8 +218,13 @@ class Allocator {
     // DRM_MODE_ATOMIC_TEST_ONLY commits issued during this apply() while
     // probing for a viable plane assignment. 1 in steady state (warm
     // re-validation of the cached assignment); higher when the cache
-    // misses and full_search has to preseed/greedy/backtrack.
+    // misses and full_search has to preseed/greedy/backtrack. 0 when the
+    // FB-only fast path skipped re-validation entirely.
     std::size_t test_commits_issued{0};
+    // True when apply() reused the cached allocation and skipped the TEST_ONLY
+    // because only content (FB_ID / damage / fence) changed on already-placed
+    // layers. Implies test_commits_issued == 0 for the frame.
+    bool fb_delta_fast_path{false};
   };
   [[nodiscard]] Diagnostics diagnostics() const noexcept { return diagnostics_; }
 
@@ -236,9 +241,20 @@ class Allocator {
   void set_test_preparer(TestPreparer preparer);
 
  private:
-  // §13.3 Warm-start: try previous frame's allocation
+  // §13.3 Warm-start: try previous frame's allocation. When `skip_test` is set
+  // (FB-only fast path), the internal TEST_ONLY re-validation is bypassed and
+  // the cached assignment is re-emitted directly; the real commit's
+  // atomic_check is then the sole arbiter.
   drm::expected<std::size_t, std::error_code> apply_previous_allocation(
-      Output& output, AtomicRequest& req, uint32_t flags, uint32_t crtc_index, bool test_only);
+      Output& output, AtomicRequest& req, uint32_t flags, uint32_t crtc_index, bool test_only,
+      bool skip_test = false);
+
+  // True when every plane in previous_allocation_ still maps to the same layer
+  // and that layer's property_hash() matches what was committed for it — i.e.
+  // only FB_ID / IN_FENCE_FD / scene-side damage could have changed. The
+  // precondition for skipping the TEST_ONLY. Relies on scratch_current_set_
+  // being populated (done at the top of apply()).
+  [[nodiscard]] bool is_fb_only_frame() const;
 
   // Full search with all improvements
   drm::expected<std::size_t, std::error_code> full_search(Output& output, AtomicRequest& req,
@@ -424,6 +440,11 @@ class Allocator {
   struct LastCommitted {
     const Layer* layer{nullptr};
     Layer::PropertySnapshot properties;
+    // property_hash() at commit time (excludes FB_ID / IN_FENCE_FD). The
+    // FB-only fast path compares a layer's current hash against this to prove
+    // geometry, format, and modifier are unchanged since the kernel last
+    // accepted them, so the redundant TEST_ONLY can be skipped.
+    std::size_t hash{0};
   };
   std::unordered_map<uint32_t, LastCommitted> last_committed_;
 

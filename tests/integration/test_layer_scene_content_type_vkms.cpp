@@ -215,7 +215,9 @@ TEST(LayerSceneContentTypeVkms, ContentTypeChangeForcesReallocation) {
   ASSERT_TRUE(fx.scene->commit().has_value());
   auto steady = fx.scene->commit();
   ASSERT_TRUE(steady.has_value()) << steady.error().message();
-  EXPECT_EQ(steady->test_commits_issued, 1U) << "steady state should be a warm-start reuse";
+  EXPECT_EQ(steady->test_commits_issued, 0U)
+      << "steady state takes the FB-only fast path — no redundant TEST_ONLY";
+  EXPECT_TRUE(steady->fb_delta_fast_path);
 
   // Promote the candidate to Video. The setter flags the layer.
   auto* layer = fx.scene->get_layer(handle);
@@ -238,7 +240,9 @@ TEST(LayerSceneContentTypeVkms, ContentTypeChangeForcesReallocation) {
   // warm-start reuse again.
   auto after = fx.scene->commit();
   ASSERT_TRUE(after.has_value()) << after.error().message();
-  EXPECT_EQ(after->test_commits_issued, 1U) << "invalidation must not be sticky";
+  EXPECT_EQ(after->test_commits_issued, 0U)
+      << "invalidation must not be sticky — the next steady frame is back on the fast path";
+  EXPECT_TRUE(after->fb_delta_fast_path);
 
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }
