@@ -39,6 +39,7 @@
 #pragma once
 
 #include "buffer_source.hpp"
+#include "detail/dmabuf_slot.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
@@ -57,16 +58,6 @@ class Device;
 }  // namespace drm
 
 namespace drm::scene {
-
-/// Per-plane shape of an externally-allocated DMA-BUF. `fd` is the
-/// dma-buf descriptor (caller-owned; the source dups it). `offset` and
-/// `pitch` are the plane's offset into that fd and its row stride in
-/// bytes — V4L2 / libcamera report these directly.
-struct ExternalPlaneInfo {
-  int fd{-1};
-  std::uint32_t offset{0};
-  std::uint32_t pitch{0};
-};
 
 /// `LayerBufferSource` wrapping a caller-owned DMA-BUF as a
 /// scanout-ready KMS framebuffer. See file comment for the full
@@ -116,20 +107,20 @@ class ExternalDmaBufSource : public LayerBufferSource {
   // below (the GPU EGLImage import path); on GPU-less builds it is
   // dropped when the allocator finds no plane for it.
   [[nodiscard]] drm::expected<DmaBufDesc, std::error_code> export_dma_buf() override {
-    if (plane_count_ == 0) {
+    if (slot_.plane_count == 0) {
       return drm::unexpected<std::error_code>(
           std::make_error_code(std::errc::function_not_supported));
     }
     DmaBufDesc d;
-    d.n_planes = static_cast<std::uint32_t>(plane_count_);
+    d.n_planes = static_cast<std::uint32_t>(slot_.plane_count);
     d.drm_fourcc = format_.drm_fourcc;
     d.modifier = format_.modifier;
     d.width = format_.width;
     d.height = format_.height;
-    for (std::size_t i = 0; i < plane_count_; ++i) {
-      d.fds.at(i) = planes_.at(i).duped_fd;
-      d.offsets.at(i) = planes_.at(i).offset;
-      d.pitches.at(i) = planes_.at(i).pitch;
+    for (std::size_t i = 0; i < slot_.plane_count; ++i) {
+      d.fds.at(i) = slot_.planes.at(i).duped_fd;
+      d.offsets.at(i) = slot_.planes.at(i).offset;
+      d.pitches.at(i) = slot_.planes.at(i).pitch;
     }
     return d;
   }
@@ -159,19 +150,8 @@ class ExternalDmaBufSource : public LayerBufferSource {
   /// destructor.
   void fire_on_release_once() noexcept;
 
-  static constexpr std::size_t k_max_planes = 4;
-
-  struct PlaneRecord {
-    int duped_fd{-1};
-    std::uint32_t gem_handle{0};
-    std::uint32_t offset{0};
-    std::uint32_t pitch{0};
-  };
-
   int fd_{-1};
-  std::uint32_t fb_id_{0};
-  std::array<PlaneRecord, k_max_planes> planes_{};
-  std::size_t plane_count_{0};
+  detail::DmaBufSlot slot_;  // the single imported buffer — see detail/dmabuf_slot.hpp
   SourceFormat format_{};
   std::optional<drm::sync::SyncFence> pending_fence_;
   std::function<void()> on_release_;
