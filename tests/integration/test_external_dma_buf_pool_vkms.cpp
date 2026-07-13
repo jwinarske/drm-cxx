@@ -320,3 +320,64 @@ TEST(ExternalDmaBufPoolVkms, ResetGenerationRetiresOldBuffers) {
   ASSERT_TRUE(held.has_value());
   EXPECT_EQ((*pool)->cached_count(), 1U);  // only the new-generation B remains
 }
+
+// Degradation: a submit whose planes fail validation is skipped entirely — not
+// imported, and never handed to the presenter — so the layer holds its last good
+// frame instead of blanking.
+TEST(ExternalDmaBufPoolVkms, SubmitBadPlanesSkippedHoldsLastFrame) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR);
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds[0], probe->stride));
+  auto a = (*pool)->acquire();
+  ASSERT_TRUE(a.has_value());
+  const std::uint32_t fb_a = a->fb_id;
+
+  // A bad plane (fd < 0) fails validation before any import.
+  std::array<drm::scene::ExternalPlaneInfo, 1> bad{drm::scene::ExternalPlaneInfo{-1, 0, 1}};
+  (*pool)->submit(0xBAD, drm::span<const drm::scene::ExternalPlaneInfo>(bad.data(), bad.size()));
+  EXPECT_EQ((*pool)->cached_count(), 1U);      // not imported
+  EXPECT_FALSE((*pool)->has_fresh_content());  // never reached the presenter
+
+  auto held = (*pool)->acquire();  // holds A, not EAGAIN
+  ASSERT_TRUE(held.has_value()) << held.error().message();
+  EXPECT_EQ(held->fb_id, fb_a);
+}
+
+// Degradation: a plane fd that dups but is not an importable dma-buf fails at
+// PRIME/AddFB2. The frame is dropped (not cached) and the last good frame holds.
+TEST(ExternalDmaBufPoolVkms, SubmitImportFailureHoldsLastFrame) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR);
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds[0], probe->stride));
+  auto a = (*pool)->acquire();
+  ASSERT_TRUE(a.has_value());
+  const std::uint32_t fb_a = a->fb_id;
+
+  // A real fd that passes validation but is not a dma-buf: PRIME import fails.
+  const int not_dmabuf = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+  ASSERT_GE(not_dmabuf, 0);
+  std::array<drm::scene::ExternalPlaneInfo, 1> bad{
+      drm::scene::ExternalPlaneInfo{not_dmabuf, 0, probe->stride}};
+  (*pool)->submit(0xBAD2, drm::span<const drm::scene::ExternalPlaneInfo>(bad.data(), bad.size()));
+  ::close(not_dmabuf);
+  EXPECT_EQ((*pool)->cached_count(), 1U);  // import failed → not cached
+  EXPECT_FALSE((*pool)->has_fresh_content());
+
+  auto held = (*pool)->acquire();
+  ASSERT_TRUE(held.has_value()) << held.error().message();
+  EXPECT_EQ(held->fb_id, fb_a);
+}
