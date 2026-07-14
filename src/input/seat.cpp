@@ -10,17 +10,29 @@
 #include <libinput.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
+#include <cstdarg>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <fcntl.h>
 #include <libudev.h>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <unistd.h>
 #include <utility>
 
 namespace drm::input {
+
+// libinput's user_data. See the declaration in seat.hpp for why both
+// the opener and the log sink have to share this one slot.
+struct SeatContext {
+  InputDeviceOpener opener;
+  LogHandler log;
+};
 
 namespace {
 
@@ -31,15 +43,15 @@ auto* ud(void* p) {
   return static_cast<struct udev*>(p);
 }
 
-// Trampolines bridging libinput's C callback ABI to our
-// InputDeviceOpener. user_data is a pointer to the Seat-owned
-// InputDeviceOpener (heap-allocated so its address survives moves).
-// Both callbacks are present; whether they delegate to ::open or to a
-// caller-provided lambda depends on how the opener was constructed.
+// Trampolines bridging libinput's C callback ABI to our SeatContext.
+// user_data is a pointer to the Seat-owned SeatContext (heap-allocated
+// so its address survives moves). Both callbacks are present; whether
+// they delegate to ::open or to a caller-provided lambda depends on how
+// the opener was constructed.
 int on_open_restricted(const char* path, int flags, void* user_data) {
-  const auto* opener = static_cast<const InputDeviceOpener*>(user_data);
-  if (opener != nullptr && opener->open) {
-    return opener->open(path, flags);
+  const auto* ctx = static_cast<const SeatContext*>(user_data);
+  if (ctx != nullptr && ctx->opener.open) {
+    return ctx->opener.open(path, flags);
   }
   int const fd = ::open(path, flags | O_CLOEXEC);
   if (fd < 0) {
@@ -49,9 +61,9 @@ int on_open_restricted(const char* path, int flags, void* user_data) {
 }
 
 void on_close_restricted(int fd, void* user_data) {
-  const auto* opener = static_cast<const InputDeviceOpener*>(user_data);
-  if (opener != nullptr && opener->close) {
-    opener->close(fd);
+  const auto* ctx = static_cast<const SeatContext*>(user_data);
+  if (ctx != nullptr && ctx->opener.close) {
+    ctx->opener.close(fd);
     return;
   }
   ::close(fd);
@@ -62,7 +74,72 @@ const struct libinput_interface li_interface = {
     on_close_restricted,
 };
 
+// libinput hands the log handler only the context, so the SeatContext
+// comes back out of the user_data slot it was installed into.
+void on_log(struct libinput* ctx_li, enum libinput_log_priority priority, const char* format,
+            va_list args) {
+  const auto* ctx = static_cast<const SeatContext*>(libinput_get_user_data(ctx_li));
+  if (ctx == nullptr) {
+    return;
+  }
+  detail::dispatch_log(ctx->log, static_cast<int>(priority), format, args);
+}
+
+libinput_log_priority to_libinput_priority(LogPriority p) noexcept {
+  switch (p) {
+    case LogPriority::Debug:
+      return LIBINPUT_LOG_PRIORITY_DEBUG;
+    case LogPriority::Info:
+      return LIBINPUT_LOG_PRIORITY_INFO;
+    case LogPriority::Error:
+      break;
+  }
+  return LIBINPUT_LOG_PRIORITY_ERROR;
+}
+
 }  // namespace
+
+namespace detail {
+
+LogPriority map_log_priority(int libinput_priority) noexcept {
+  if (libinput_priority <= LIBINPUT_LOG_PRIORITY_DEBUG) {
+    return LogPriority::Debug;
+  }
+  if (libinput_priority <= LIBINPUT_LOG_PRIORITY_INFO) {
+    return LogPriority::Info;
+  }
+  return LogPriority::Error;
+}
+
+void dispatch_log(const LogHandler& handler, int libinput_priority, const char* format,
+                  va_list args) {
+  if (!handler || format == nullptr) {
+    return;
+  }
+
+  // vsnprintf consumes the va_list, and libinput makes no promise about
+  // what it does with args afterward — copy rather than move through.
+  std::array<char, 1024> buf{};
+  va_list copy;
+  va_copy(copy, args);
+  int const n = std::vsnprintf(buf.data(), buf.size(), format, copy);
+  va_end(copy);
+  if (n < 0) {
+    return;
+  }
+
+  // n is the length that *would* have been written; clamp to what was.
+  auto const len = std::min(static_cast<size_t>(n), buf.size() - 1);
+  std::string_view msg(buf.data(), len);
+  // libinput terminates its messages with a newline. Structured sinks
+  // add their own framing, so hand over the bare message.
+  while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) {
+    msg.remove_suffix(1);
+  }
+  handler(map_log_priority(libinput_priority), msg);
+}
+
+}  // namespace detail
 
 Seat::~Seat() {
   for (void* p : keyboard_devices_) {
@@ -81,7 +158,7 @@ Seat::Seat(Seat&& other) noexcept
     : li_(other.li_),
       udev_(other.udev_),
       handler_(std::move(other.handler_)),
-      opener_(std::move(other.opener_)),
+      ctx_(std::move(other.ctx_)),
       keyboard_devices_(std::move(other.keyboard_devices_)),
       last_leds_(other.last_leds_),
       fd_(other.fd_) {
@@ -106,7 +183,7 @@ Seat& Seat::operator=(Seat&& other) noexcept {
     li_ = other.li_;
     udev_ = other.udev_;
     handler_ = std::move(other.handler_);
-    opener_ = std::move(other.opener_);
+    ctx_ = std::move(other.ctx_);
     keyboard_devices_ = std::move(other.keyboard_devices_);
     last_leds_ = other.last_leds_;
     fd_ = other.fd_;
@@ -119,7 +196,7 @@ Seat& Seat::operator=(Seat&& other) noexcept {
 }
 
 drm::expected<Seat, std::error_code> Seat::open(SeatOptions opts) {
-  return Seat::open(opts, InputDeviceOpener{});
+  return Seat::open(std::move(opts), InputDeviceOpener{});
 }
 
 drm::expected<Seat, std::error_code> Seat::open(SeatOptions opts, InputDeviceOpener opener) {
@@ -131,18 +208,29 @@ drm::expected<Seat, std::error_code> Seat::open(SeatOptions opts, InputDeviceOpe
   }
 
   Seat seat;
-  // Heap-allocate the opener so its address is stable for libinput's
+  // Heap-allocate the context so its address is stable for libinput's
   // user_data, regardless of how Seat moves later.
-  seat.opener_ = std::make_unique<InputDeviceOpener>(std::move(opener));
+  seat.ctx_ =
+      std::make_unique<SeatContext>(SeatContext{std::move(opener), std::move(opts.log_handler)});
 
   seat.udev_ = udev_new();
   if (seat.udev_ == nullptr) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
 
-  seat.li_ = libinput_udev_create_context(&li_interface, seat.opener_.get(), ud(seat.udev_));
+  seat.li_ = libinput_udev_create_context(&li_interface, seat.ctx_.get(), ud(seat.udev_));
   if (seat.li_ == nullptr) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
+  }
+
+  // Install before assign_seat: that call is what enumerates the seat's
+  // devices, so a handler installed after it would miss every
+  // device-added diagnostic — the ones a consumer most wants. Leave
+  // libinput's default handler and its ERROR threshold alone when the
+  // caller didn't opt in.
+  if (seat.ctx_->log) {
+    libinput_log_set_handler(li(seat.li_), &on_log);
+    libinput_log_set_priority(li(seat.li_), to_libinput_priority(opts.log_priority));
   }
 
   std::string const seat_name(opts.seat_name);
