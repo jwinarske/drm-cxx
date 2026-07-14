@@ -8,10 +8,12 @@
 
 #include <xkbcommon/xkbcommon.h>
 
+#include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
 #include <gtest/gtest.h>
 #include <string>
+#include <string_view>
 #include <variant>
 
 // ── Event type tests ──────────────────────────────────────────
@@ -381,6 +383,105 @@ TEST(KeyboardTest, ReloadWithBogusOptsLeavesKeymapIntact) {
   a_down.pressed = true;
   kb.process_key(a_down);
   EXPECT_STREQ(a_down.utf8, "a");
+}
+
+// ── Seat log routing ──────────────────────────────────────────
+//
+// The libinput priority values below are spelled as the literals from
+// libinput.h (DEBUG=10, INFO=20, ERROR=30) rather than the enum, so the
+// test keeps <libinput.h> out and would notice an ABI renumber.
+
+namespace {
+
+constexpr int li_debug = 10;
+constexpr int li_info = 20;
+constexpr int li_error = 30;
+
+// dispatch_log takes a va_list, and only a C-style variadic function can
+// produce one — which is the whole point: this stands in for libinput's
+// own printf-style call site.
+// NOLINTNEXTLINE(modernize-avoid-variadic-functions) — mirrors libinput's ABI
+void call_dispatch(const drm::input::LogHandler& handler, int priority, const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  drm::input::detail::dispatch_log(handler, priority, format, args);
+  va_end(args);
+}
+
+}  // namespace
+
+TEST(SeatLogTest, MapsEachLibinputPriority) {
+  using drm::input::LogPriority;
+  EXPECT_EQ(drm::input::detail::map_log_priority(li_debug), LogPriority::Debug);
+  EXPECT_EQ(drm::input::detail::map_log_priority(li_info), LogPriority::Info);
+  EXPECT_EQ(drm::input::detail::map_log_priority(li_error), LogPriority::Error);
+}
+
+TEST(SeatLogTest, MapsUnknownPrioritiesToNearestBand) {
+  using drm::input::LogPriority;
+  // Between the named values — round up to the next named band, so an
+  // unclassifiable message errs toward being seen rather than dropped.
+  EXPECT_EQ(drm::input::detail::map_log_priority(15), LogPriority::Info);
+  EXPECT_EQ(drm::input::detail::map_log_priority(25), LogPriority::Error);
+  // Below DEBUG and above ERROR: clamp rather than drop.
+  EXPECT_EQ(drm::input::detail::map_log_priority(0), LogPriority::Debug);
+  EXPECT_EQ(drm::input::detail::map_log_priority(999), LogPriority::Error);
+}
+
+TEST(SeatLogTest, ExpandsVarargsAndForwardsPriority) {
+  drm::input::LogPriority got_priority{};
+  std::string got_msg;
+  drm::input::LogHandler const handler = [&](drm::input::LogPriority p, std::string_view msg) {
+    got_priority = p;
+    got_msg = msg;
+  };
+
+  call_dispatch(handler, li_error, "client bug: event processing lagging by %dms (%s)\n", 42,
+                "pointer");
+
+  EXPECT_EQ(got_priority, drm::input::LogPriority::Error);
+  EXPECT_EQ(got_msg, "client bug: event processing lagging by 42ms (pointer)");
+}
+
+TEST(SeatLogTest, StripsLibinputTrailingNewline) {
+  std::string got_msg;
+  drm::input::LogHandler const handler = [&](drm::input::LogPriority, std::string_view msg) {
+    got_msg = msg;
+  };
+
+  call_dispatch(handler, li_info, "added device\n");
+  EXPECT_EQ(got_msg, "added device");
+
+  // Interior newlines are the message's own business — only strip the tail.
+  call_dispatch(handler, li_info, "line one\nline two\n");
+  EXPECT_EQ(got_msg, "line one\nline two");
+}
+
+TEST(SeatLogTest, EmptyHandlerIsANoOp) {
+  drm::input::LogHandler const empty;
+  // Must not dereference the empty std::function.
+  call_dispatch(empty, li_error, "dropped %d", 1);
+}
+
+TEST(SeatLogTest, OverlongMessageIsTruncatedNotOverrun) {
+  std::string got_msg;
+  drm::input::LogHandler const handler = [&](drm::input::LogPriority, std::string_view msg) {
+    got_msg = msg;
+  };
+
+  std::string const huge(4096, 'x');
+  call_dispatch(handler, li_error, "%s", huge.c_str());
+
+  // Clamped to the internal buffer rather than reporting vsnprintf's
+  // would-have-written length, which would over-read.
+  EXPECT_LT(got_msg.size(), huge.size());
+  EXPECT_EQ(got_msg, std::string(got_msg.size(), 'x'));
+}
+
+TEST(SeatLogTest, DefaultOptionsOptOut) {
+  drm::input::SeatOptions const opts;
+  EXPECT_FALSE(opts.log_handler);
+  EXPECT_EQ(opts.log_priority, drm::input::LogPriority::Error);
 }
 
 // ── Seat tests ────────────────────────────────────────────────
