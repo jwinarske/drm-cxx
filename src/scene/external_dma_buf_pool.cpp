@@ -6,6 +6,7 @@
 #include "buffer_source.hpp"
 #include "detail/dmabuf_slot.hpp"
 #include "detail/external_ring_core.hpp"
+#include "log.hpp"
 
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -41,7 +42,7 @@ bool pool_debug() noexcept {
 
 void debug_step(const char* step) noexcept {
   if (pool_debug()) {
-    std::fprintf(stderr, "[drm-cxx] ExternalDmaBufPool: %s\n", step);
+    drm::detail::log_channel(drm::LogLevel::Debug, "[ExternalDmaBufPool] {}", step);
   }
 }
 

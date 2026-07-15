@@ -244,8 +244,8 @@ void Seat::on_enable_trampoline(libseat* seat, void* userdata) {
     int new_fd = -1;
     const int new_id = libseat_open_device(seat, path.c_str(), &new_fd);
     if (new_id < 0) {
-      drm::println(stderr, "Seat: reopen {} on resume failed: {}", path,
-                   std::system_category().message(errno));
+      drm::log_error("Seat: reopen {} on resume failed: {}", path,
+                     std::system_category().message(errno));
       continue;
     }
     dev.device_id = new_id;
@@ -281,7 +281,7 @@ std::optional<Seat> Seat::open() {
 
   impl->seat = libseat_open_seat(&impl->listener, impl.get());
   if (impl->seat == nullptr) {
-    drm::println(stderr, "libseat_open_seat failed: {}", std::system_category().message(errno));
+    drm::log_error("libseat_open_seat failed: {}", std::system_category().message(errno));
     return std::nullopt;
   }
 
@@ -290,8 +290,8 @@ std::optional<Seat> Seat::open() {
   // on successful open.
   while (!impl->active) {
     if (libseat_dispatch(impl->seat, -1) < 0) {
-      drm::println(stderr, "libseat_dispatch (initial) failed: {}",
-                   std::system_category().message(errno));
+      drm::log_error("libseat_dispatch (initial) failed: {}",
+                     std::system_category().message(errno));
       libseat_close_seat(impl->seat);
       return std::nullopt;
     }
@@ -313,7 +313,7 @@ std::optional<Seat::DeviceHandle> Seat::take_device(const std::string_view path,
   int fd = -1;
   const int device_id = libseat_open_device(impl_->seat, key.c_str(), &fd);
   if (device_id < 0) {
-    drm::println(stderr, "libseat_open_device({}): {}", key, std::system_category().message(errno));
+    drm::log_error("libseat_open_device({}): {}", key, std::system_category().message(errno));
     return std::nullopt;
   }
   impl_->devices[key] = TrackedDevice{key, fd, device_id, opts.preserve_fd_across_resume};
