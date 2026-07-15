@@ -1,6 +1,135 @@
 # Changelog
 
-## unreleased — EGL Streams, GbmSurfaceSource, SceneSet multi-CRTC, V4l2CameraSource, camera VAAPI tiers, CSD Tier 0
+## v2.0.0 — 2026-07-15: present spine, format registry, foreign producers, EGL Streams, multi-CRTC, HDR/color, CSD presenters
+
+The major bump is earned by two source-breaking changes (below), not only by the
+size of the additive surface. Every consumer must recompile: four more public
+signatures changed compatibly at the source level but not at the ABI level.
+
+### Breaking changes
+
+- **`drm::planes::PlaneCapabilities::supports_format_modifier(uint32_t, uint64_t)` is removed.**
+  Plane format/modifier eligibility is now decided by `drm::fmt::FormatTable`,
+  built per-plane in `PlaneRegistry`. Migrate to
+  `plane.format_table.supports(fourcc, drm::fmt::Modifier{modifier})` — note the
+  modifier is a typed `drm::fmt::Modifier` there, not a raw `uint64_t` — or to
+  `PlaneCapabilities::bandwidth_class(modifier)` (which does take a plain
+  `uint64_t`) when the question is cost rather than support.
+- **`drm::scene::CompositeCanvas::drm_fourcc()` is no longer `static`.** It is a
+  virtual member overriding `CompositionTarget`, so the canvas can report the
+  format it actually allocated rather than a fixed one. Call it on an instance.
+  `CompositeCanvas::modifier()` is unchanged and remains `static`.
+- **ABI: all consumers must rebuild.** Beyond the two above, four public
+  signatures gained defaulted parameters or shifted layout —
+  `Allocator::apply` (now takes `bool test_only = false`),
+  `session::Seat::take_device` (now takes `TakeDeviceOpts opts = {}`),
+  `LayerScene::commit`, and `planes::Layer::properties`. Source-compatible; not
+  binary-compatible.
+
+### `drm::present` — scanout spine (new)
+
+- **`ScanoutBackend` + the `ScanoutProducer` seam** — a render-to-scanout path
+  that owns buffer rotation and commit, with three producers: `GbmScanoutProducer`,
+  `GlScanoutProducer` (EGL/GLES) and `VkScanoutProducer` (Vulkan). The core never
+  link-binds `libEGL` or `libvulkan` — producers reach them through `dlopen` and
+  the dynamic loader, so a build with the headers present still runs on a target
+  without the runtimes.
+- **`BufferRing`** — slot pool behind the producers, with buffer-age reporting for
+  partial repaint.
+- **`ScanoutTarget` / `display::ScanoutTarget`** — output discovery for the spine.
+- **Modifier negotiation across all planes**, not just the primary.
+- **`DumbScanoutSink`** — presents CPU-rendered frames through a dumb-buffer ring
+  for GPU-less targets, with vsync pacing, RGB565 (16-bpp) scanout to halve
+  bandwidth on legacy SoCs, damage-aware `present`, and a `DumbRingSource` that
+  drives buffer-age partial repaint.
+- **Opt-in `RestorePolicy`** — restores the CRTC on teardown instead of leaving
+  the last frame latched.
+
+### `drm::present` — frame economy
+
+- **`FrameEconomy`** — idle suppression: an unchanged frame is skipped rather than
+  committed, wired into `ScanoutBackend`. Paired with per-frame damage and
+  buffer-age tracking so a partial repaint replays only what changed.
+  `FB_DAMAGE_CLIPS` is opt-in and driver-dependent — some drivers advertise it on
+  only a subset of their planes and others not at all, so the damage hint is a
+  no-op on those and the full redraw stands (see `docs/hardware.md` for the
+  per-board picture).
+- **VRR driven from the `DriverProfile`** in `ScanoutBackend`, plus async flip.
+- **Page-flip epoll integration** and `EINTR`-safe dispatch.
+
+### `drm::present` — explicit sync
+
+- **`IN_FENCE_FD` / `OUT_FENCE_PTR`** — acquire fences from Vulkan and GL
+  producers (the GL side exports via EGL native-fence), and a scanout-completion
+  fence so a producer knows when a buffer is reusable. Enables cross-device
+  scanout. Fence counters surface in `CommitReport`.
+
+### `drm::fmt` — format/modifier registry (new)
+
+- **`drm::fmt`** — format-modifier and hardware-compression module: `classify()`,
+  `describe()`, `BandwidthClass`, per-format scanout cost, and
+  `rotation_compatible`. Vendor decoding covers NVIDIA compression (corrected) and
+  VeriSilicon (vendor `0x0b`).
+- **`FormatTable`** — built per-plane in `PlaneRegistry` and now the single gate on
+  plane format/modifier eligibility, replacing the hand-rolled parser (this is what
+  removed `supports_format_modifier`).
+- **Fixes:** misaligned read while parsing the `IN_FORMATS` modifier blob;
+  LINEAR/INVALID-modifier dma-bufs import via plain `AddFB2`.
+
+### `drm::display` — driver profile, HDR, color pipeline
+
+- **`DriverProfile`** — capability probe, including `FB_DAMAGE_CLIPS`, VRR and PSR.
+- **CRTC color pipeline** — DEGAMMA / CTM / GAMMA.
+- **HDR** — EDID-sourced HDR / colorimetry / wide-gamut, `HdrMetadataCache` wired
+  into `LayerScene::set_output_metadata`, and a `ToneMapper` for CPU HDR↔SDR
+  fallback with a LUT-accelerated inner loop. The tone mapper is a correctness
+  fallback, not a real-time path.
+- **EDID make/model/serial + physical size**, connector `mode_list`, vrefresh
+  range, and one shared `crtc_for_connector()` across the output pickers.
+
+### `drm::scene` — external producers
+
+- **`ExternalDmaBufRing`** — for external rotating DMA-BUF producers (the
+  CEF/water class of producer), carrying per-frame damage, keeping the
+  `acquire()` damage drain allocation-free under lock, and carrying damage across
+  a fence-deadline drop rather than dropping it.
+- **`ExternalDmaBufPool`** — lazy, dynamically populated dma-buf source, bounded
+  with LRU eviction and a `reset_generation` for decoder resolution changes.
+- **`DmaBufSourceCache`** and a DMA-BUF export API for direct GPU composition.
+- **`V4l2DecoderSource`** — over V4L2 stateful decoders (real H.264), with
+  DMA-BUF export and `has_fresh_content` reporting for idle-skip.
+
+### `drm::scene` — GPU composition
+
+- **`GlCompositor`** — GPU-backed composition fallback for `LayerScene`, with a
+  hardened software-renderer guard for zink.
+
+### `drm::csd` — presenters
+
+- **`CompositePresenter`** (software composite onto one plane),
+  **`FramebufferPresenter`** (`/dev/fb0` blit), and **`probe_presenter`** for
+  startup KMS presenter selection, plus a composite-presenter desktop backdrop.
+- **Incremental damage** — damage-clipped compositing and blit-damage for the
+  framebuffer presenter.
+
+### `drm::capture` — JPEG
+
+- **libjpeg-backed JPEG encoder** behind a build option, plus an NV12 encoder and
+  camera snapshot.
+
+### `drm::log` — every message redirectable
+
+- **libinput and libseat diagnostics now route into `drm::log`**, tagged
+  `[libinput]` / `[libseat]`, so they follow `set_log_sink` instead of escaping to
+  the wrapped libraries' own stderr handlers. `input::SeatOptions::log_handler`
+  overrides the default routing for a consumer that wants libinput's stream kept
+  separate.
+- **drm-cxx's own output too** — `src/` no longer writes to stderr/stdout outside
+  `log.hpp`'s default sink. The `DRM_ALLOC_DEBUG` / `DRM_EXT_DMABUF_DEBUG`
+  channels are redirectable while keeping their env-var gate as their threshold
+  (the gate is not subject to the global level — asking for a channel by name is
+  not vetoed by the default, mirroring GStreamer's per-category thresholds).
+
 
 ### `drm::scene` — EGL Streams
 
