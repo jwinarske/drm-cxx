@@ -640,12 +640,19 @@ jobs:
           # <drm-cxx/...> include prefix, matching the GN include-symlink action.
           mkdir -p gninc && ln -sfn "$PWD/src" gninc/drm-cxx
           inc=(-Igninc -Isrc $(pkg-config --cflags libdrm gbm))
-          # C++20 pulls the vendored polyfills; C++23 uses libc++ std::*.
-          poly=()
-          if [ "${{ matrix.std }}" = "c++20" ]; then
-            poly=(-Ithird_party/tl-expected/include -Ithird_party/tcb-span/include
-                  -Ithird_party/fmt/include -DFMT_HEADER_ONLY)
-          fi
+          # The vendored polyfills are offered to BOTH standards, because which
+          # one a header picks is decided by feature-test macros, not by -std.
+          # detail/format.hpp needs *both* __cpp_lib_print and __cpp_lib_format
+          # before it uses the standard library, and libc++-18 (what
+          # ubuntu-24.04 ships) defines __cpp_lib_print but withholds
+          # __cpp_lib_format — its <format> was not complete enough to
+          # advertise. So even at -std=c++23 that header correctly falls back to
+          # {fmt}, and without this path on the include line it fails to find
+          # fmt/format.h. Offering the polyfills costs nothing when the standard
+          # library does advertise the macros: the fallback #else is not
+          # compiled, so the includes go unused.
+          poly=(-Ithird_party/tl-expected/include -Ithird_party/tcb-span/include
+                -Ithird_party/fmt/include -DFMT_HEADER_ONLY)
           rc=0
           for src in "${sources[@]}"; do
             clang++ -std=${{ matrix.std }} -stdlib=libc++ -fsyntax-only \

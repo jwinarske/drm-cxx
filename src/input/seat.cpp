@@ -4,6 +4,7 @@
 #include "seat.hpp"
 
 #include "keyboard.hpp"
+#include "log.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 
@@ -85,6 +86,22 @@ void on_log(struct libinput* ctx_li, enum libinput_log_priority priority, const 
   detail::dispatch_log(ctx->log, static_cast<int>(priority), format, args);
 }
 
+// Default destination when the caller supplied no sink: drm::log, so
+// libinput's diagnostics follow set_log_sink like the rest of the library.
+void log_to_drm_log(LogPriority priority, std::string_view msg) {
+  switch (priority) {
+    case LogPriority::Debug:
+      drm::log_debug("[libinput] {}", msg);
+      return;
+    case LogPriority::Info:
+      drm::log_info("[libinput] {}", msg);
+      return;
+    case LogPriority::Error:
+      break;
+  }
+  drm::log_error("[libinput] {}", msg);
+}
+
 libinput_log_priority to_libinput_priority(LogPriority p) noexcept {
   switch (p) {
     case LogPriority::Debug:
@@ -113,7 +130,7 @@ LogPriority map_log_priority(int libinput_priority) noexcept {
 
 void dispatch_log(const LogHandler& handler, int libinput_priority, const char* format,
                   va_list args) {
-  if (!handler || format == nullptr) {
+  if (format == nullptr) {
     return;
   }
 
@@ -136,7 +153,16 @@ void dispatch_log(const LogHandler& handler, int libinput_priority, const char* 
   while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) {
     msg.remove_suffix(1);
   }
-  handler(map_log_priority(libinput_priority), msg);
+
+  auto const priority = map_log_priority(libinput_priority);
+  if (handler) {
+    handler(priority, msg);
+    return;
+  }
+  // No caller-supplied sink: route into drm::log so a consumer that has
+  // already redirected the library via set_log_sink picks libinput's
+  // diagnostics up too, without wiring a second hook.
+  log_to_drm_log(priority, msg);
 }
 
 }  // namespace detail
@@ -225,13 +251,16 @@ drm::expected<Seat, std::error_code> Seat::open(SeatOptions opts, InputDeviceOpe
 
   // Install before assign_seat: that call is what enumerates the seat's
   // devices, so a handler installed after it would miss every
-  // device-added diagnostic — the ones a consumer most wants. Leave
-  // libinput's default handler and its ERROR threshold alone when the
-  // caller didn't opt in.
-  if (seat.ctx_->log) {
-    libinput_log_set_handler(li(seat.li_), &on_log);
-    libinput_log_set_priority(li(seat.li_), to_libinput_priority(opts.log_priority));
-  }
+  // device-added diagnostic — the ones a consumer most wants.
+  //
+  // Installed unconditionally, not just when the caller supplied a sink:
+  // with no sink the trampoline forwards into drm::log, so libinput's
+  // diagnostics follow set_log_sink like the rest of the library instead
+  // of escaping to libinput's own stderr handler. The default threshold
+  // (Error) matches libinput's own, so opting out of a sink does not opt
+  // into extra chatter.
+  libinput_log_set_handler(li(seat.li_), &on_log);
+  libinput_log_set_priority(li(seat.li_), to_libinput_priority(opts.log_priority));
 
   std::string const seat_name(opts.seat_name);
   if (libinput_udev_assign_seat(li(seat.li_), seat_name.c_str()) != 0) {

@@ -3,6 +3,7 @@
 
 #include "dmabuf_slot.hpp"
 
+#include "../../log.hpp"
 #include "../buffer_source.hpp"  // ExternalPlaneInfo, SourceFormat
 
 #include <drm-cxx/detail/expected.hpp>
@@ -44,10 +45,10 @@ void debug_step(const char* step, int saved_errno) noexcept {
     return;
   }
   if (saved_errno != 0) {
-    std::fprintf(stderr, "[drm-cxx] dmabuf_slot: %s (errno=%d: %s)\n", step, saved_errno,
-                 std::strerror(saved_errno));
+    drm::detail::log_channel(drm::LogLevel::Debug, "[dmabuf_slot] {} (errno={}: {})", step,
+                             saved_errno, std::strerror(saved_errno));
   } else {
-    std::fprintf(stderr, "[drm-cxx] dmabuf_slot: %s\n", step);
+    drm::detail::log_channel(drm::LogLevel::Debug, "[dmabuf_slot] {}", step);
   }
 }
 
@@ -109,15 +110,16 @@ drm::expected<void, std::error_code> import_slot(int fd, DmaBufSlot& slot,
   if (rc != 0 || slot.fb_id == 0) {
     const auto ec = last_errno_or(std::errc::io_error);
     if (debug_enabled()) {
-      std::fprintf(stderr,
-                   "[drm-cxx] dmabuf_slot: drmModeAddFB2WithModifiers (errno=%d: %s) — "
-                   "w=%u h=%u fourcc=0x%08x mod=0x%016lx use_mod=%d planes=%zu\n",
-                   ec.value(), std::strerror(ec.value()), fmt.width, fmt.height, fmt.drm_fourcc,
-                   static_cast<unsigned long>(slot.modifier), use_modifiers ? 1 : 0,
-                   slot.plane_count);
+      drm::detail::log_channel(drm::LogLevel::Debug,
+                               "[dmabuf_slot] drmModeAddFB2WithModifiers (errno={}: {}) — "
+                               "w={} h={} fourcc=0x{:08x} mod=0x{:016x} use_mod={} planes={}",
+                               ec.value(), std::strerror(ec.value()), fmt.width, fmt.height,
+                               fmt.drm_fourcc, slot.modifier, use_modifiers ? 1 : 0,
+                               slot.plane_count);
       for (std::size_t i = 0; i < slot.plane_count; ++i) {
-        std::fprintf(stderr, "[drm-cxx]   plane[%zu] handle=%u pitch=%u offset=%u\n", i,
-                     handles.at(i), pitches.at(i), offsets.at(i));
+        drm::detail::log_channel(drm::LogLevel::Debug,
+                                 "[dmabuf_slot]   plane[{}] handle={} pitch={} offset={}", i,
+                                 handles.at(i), pitches.at(i), offsets.at(i));
       }
     }
     return drm::unexpected<std::error_code>(ec);

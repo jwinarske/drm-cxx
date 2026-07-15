@@ -5,6 +5,7 @@
 
 #include "buffer_source.hpp"
 #include "detail/dmabuf_slot.hpp"
+#include "log.hpp"
 
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -34,10 +35,11 @@ void debug_step(const char* step, int saved_errno = 0) {
     return;
   }
   if (saved_errno != 0) {
-    std::fprintf(stderr, "[drm-cxx] ExternalDmaBufSource::create: %s (errno=%d: %s)\n", step,
-                 saved_errno, std::strerror(saved_errno));
+    drm::detail::log_channel(drm::LogLevel::Debug,
+                             "[ExternalDmaBufSource::create] {} (errno={}: {})", step, saved_errno,
+                             std::strerror(saved_errno));
   } else {
-    std::fprintf(stderr, "[drm-cxx] ExternalDmaBufSource::create: %s\n", step);
+    drm::detail::log_channel(drm::LogLevel::Debug, "[ExternalDmaBufSource::create] {}", step);
   }
 }
 

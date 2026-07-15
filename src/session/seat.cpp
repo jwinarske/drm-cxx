@@ -18,9 +18,13 @@ extern "C" {
 
 #include "drm-cxx/detail/format.hpp"
 #include "input/seat.hpp"  // drm::input::InputDeviceOpener
+#include "log.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -100,29 +104,48 @@ struct TrackedDevice {
   bool preserve_fd_across_resume{false};
 };
 
-// Route libseat's own diagnostics to stderr so they surface alongside
-// our drm::println output. libseat delivers messages as printf-style
-// + va_list; drm::println is fmt-style, so we use vfprintf here.
-// Default level suppresses everything; we bump it to ERROR — enough
-// to surface backend-selection failures without being chatty.
+// Route libseat's own diagnostics into drm::log, tagged `[libseat]`, so
+// backend-selection failures and revocation errors follow set_log_sink
+// like the rest of the library instead of escaping to stderr. libseat
+// delivers printf-style + va_list, so the line is rendered here and
+// handed to drm::log pre-formatted.
+//
+// libseat's handler is process-global (no context argument, no
+// user_data), which is why this takes no per-instance callback — the
+// destination is a process-global sink either way.
 void seat_log_trampoline(libseat_log_level level, const char* format, va_list args) {
-  const char* tag = "libseat";
+  if (format == nullptr) {
+    return;
+  }
+  std::array<char, 1024> buf{};
+  va_list copy;
+  va_copy(copy, args);
+  int const n = std::vsnprintf(buf.data(), buf.size(), format, copy);
+  va_end(copy);
+  if (n < 0) {
+    return;
+  }
+  auto const len = std::min(static_cast<size_t>(n), buf.size() - 1);
+  std::string_view msg(buf.data(), len);
+  while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) {
+    msg.remove_suffix(1);
+  }
   switch (level) {
-    case LIBSEAT_LOG_LEVEL_ERROR:
-      tag = "libseat error";
-      break;
     case LIBSEAT_LOG_LEVEL_INFO:
-      tag = "libseat info";
-      break;
+      drm::log_info("[libseat] {}", msg);
+      return;
     case LIBSEAT_LOG_LEVEL_DEBUG:
-      tag = "libseat debug";
-      break;
+      drm::log_debug("[libseat] {}", msg);
+      return;
+    case LIBSEAT_LOG_LEVEL_ERROR:
+      drm::log_error("[libseat] {}", msg);
+      return;
     default:
       break;
   }
-  std::fprintf(stderr, "[%s] ", tag);
-  std::vfprintf(stderr, format, args);
-  std::fprintf(stderr, "\n");
+  // LIBSEAT_LOG_LEVEL_SILENT, or a level a future libseat adds: surface
+  // it rather than drop it, but do not rank it as an error.
+  drm::log_warn("[libseat] {}", msg);
 }
 
 }  // namespace
@@ -221,8 +244,8 @@ void Seat::on_enable_trampoline(libseat* seat, void* userdata) {
     int new_fd = -1;
     const int new_id = libseat_open_device(seat, path.c_str(), &new_fd);
     if (new_id < 0) {
-      drm::println(stderr, "Seat: reopen {} on resume failed: {}", path,
-                   std::system_category().message(errno));
+      drm::log_error("Seat: reopen {} on resume failed: {}", path,
+                     std::system_category().message(errno));
       continue;
     }
     dev.device_id = new_id;
@@ -258,7 +281,7 @@ std::optional<Seat> Seat::open() {
 
   impl->seat = libseat_open_seat(&impl->listener, impl.get());
   if (impl->seat == nullptr) {
-    drm::println(stderr, "libseat_open_seat failed: {}", std::system_category().message(errno));
+    drm::log_error("libseat_open_seat failed: {}", std::system_category().message(errno));
     return std::nullopt;
   }
 
@@ -267,8 +290,8 @@ std::optional<Seat> Seat::open() {
   // on successful open.
   while (!impl->active) {
     if (libseat_dispatch(impl->seat, -1) < 0) {
-      drm::println(stderr, "libseat_dispatch (initial) failed: {}",
-                   std::system_category().message(errno));
+      drm::log_error("libseat_dispatch (initial) failed: {}",
+                     std::system_category().message(errno));
       libseat_close_seat(impl->seat);
       return std::nullopt;
     }
@@ -290,7 +313,7 @@ std::optional<Seat::DeviceHandle> Seat::take_device(const std::string_view path,
   int fd = -1;
   const int device_id = libseat_open_device(impl_->seat, key.c_str(), &fd);
   if (device_id < 0) {
-    drm::println(stderr, "libseat_open_device({}): {}", key, std::system_category().message(errno));
+    drm::log_error("libseat_open_device({}): {}", key, std::system_category().message(errno));
     return std::nullopt;
   }
   impl_->devices[key] = TrackedDevice{key, fd, device_id, opts.preserve_fd_across_resume};

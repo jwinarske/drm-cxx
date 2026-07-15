@@ -79,9 +79,16 @@ using EventHandler = std::function<void(const InputEvent&)>;
 // ── Logging ────────────────────────────────────────────────────
 //
 // libinput emits its own diagnostics — device add/remove chatter,
-// quirk-parse failures, `client bug: event processing lagging` — and
-// by default sends them to its own stderr handler at ERROR priority.
-// A consumer with a structured log sink otherwise loses them.
+// quirk-parse failures, `client bug: event processing lagging`. Left
+// alone it sends them to its own stderr handler, escaping drm::log and
+// any sink a consumer installed with drm::set_log_sink.
+//
+// Seat therefore always installs a libinput log handler. By default it
+// forwards into drm::log with a `[libinput]` tag, so libinput's output
+// follows set_log_sink like every other drm-cxx message. Supplying
+// SeatOptions::log_handler overrides that and routes to the caller
+// instead — for a consumer that wants libinput's stream separated from
+// the library's own.
 
 enum class LogPriority : uint8_t { Debug, Info, Error };
 
@@ -97,14 +104,17 @@ struct SeatOptions {
   std::string_view seat_name = "seat0";
   std::string_view keymap_path;  // Empty = use RMLVO defaults
 
-  /// Sink for libinput's own diagnostics. Empty (the default) leaves
-  /// libinput's default handler in place, which prints to stderr.
+  /// Sink for libinput's own diagnostics. Empty (the default) routes them
+  /// into drm::log, tagged `[libinput]`, where drm::set_log_sink and
+  /// drm::set_log_level apply. Set this only to divert libinput's stream
+  /// somewhere other than the library's own.
   LogHandler log_handler;
 
-  /// Minimum priority forwarded to `log_handler`. Ignored when
-  /// `log_handler` is empty — the default therefore costs nothing and
-  /// leaves libinput's own ERROR threshold untouched for consumers that
-  /// never opt in.
+  /// Threshold libinput itself applies before calling us at all. The
+  /// default matches libinput's own, so the routing above costs nothing
+  /// extra; raise it to Info/Debug to also collect device add/remove
+  /// chatter and quirk diagnostics. Note drm::log's level gates on top of
+  /// this when `log_handler` is empty — a message must pass both.
   LogPriority log_priority = LogPriority::Error;
 };
 

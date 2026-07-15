@@ -102,6 +102,28 @@ inline void emit(LogLevel level, std::string_view message) {
   }
 }
 
+/// Emit a line belonging to an opt-in diagnostic channel — one already
+/// gated by its own switch, such as the `DRM_ALLOC_DEBUG` /
+/// `DRM_EXT_DMABUF_DEBUG` environment variables.
+///
+/// Deliberately bypasses the global level: the channel's own gate *is*
+/// its threshold. This mirrors GStreamer, where `GST_DEBUG=cat:5` raises
+/// a named category above the default threshold
+/// (`gst_debug_set_threshold_for_name`, and `GST_LEVEL_DEFAULT` is
+/// `GST_LEVEL_NONE`) — asking for a category by name is not vetoed by the
+/// default. Routing the wrong way would mean `DRM_ALLOC_DEBUG=1` printed
+/// nothing at the default Info level, which reads as the switch being
+/// broken.
+///
+/// What it does *not* bypass is the sink: channel output goes wherever
+/// `set_log_sink` points, so it survives on targets whose stderr goes
+/// nowhere. Callers must check their own gate before calling — this pays
+/// full formatting cost unconditionally.
+template <typename... Args>
+void log_channel(LogLevel level, drm::format_string<Args...> fmt, Args&&... args) {
+  emit(level, drm::format(fmt, std::forward<Args>(args)...));
+}
+
 }  // namespace detail
 
 inline void set_log_level(LogLevel level) {

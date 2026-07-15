@@ -4,12 +4,14 @@
 #include "allocator.hpp"
 
 #include "../core/device.hpp"
+#include "../log.hpp"
 #include "../modeset/atomic.hpp"
 #include "planes/layer.hpp"
 #include "planes/output.hpp"
 #include "planes/plane_registry.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
 
@@ -36,6 +38,18 @@ namespace {
 bool alloc_debug() {
   static const bool enabled = std::getenv("DRM_ALLOC_DEBUG") != nullptr;
   return enabled;
+}
+
+// DRM_ALLOC_DEBUG's own gate is this channel's threshold, so the line goes
+// to drm::log's sink without the global level getting a second veto — see
+// drm::detail::log_channel. Routed rather than printed so it still arrives
+// on targets whose stderr goes nowhere.
+template <typename... Args>
+void alloc_log(drm::format_string<Args...> fmt, Args&&... args) {
+  if (!alloc_debug()) {
+    return;
+  }
+  drm::detail::log_channel(drm::LogLevel::Debug, fmt, std::forward<Args>(args)...);
 }
 
 const char* plane_type_name(drm::planes::DRMPlaneType t) {
@@ -500,10 +514,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     while (!placeable.empty() && test_commits_this_frame_ < max_test_commits_) {
       auto attempt = place_group(placeable, all_available_planes, flags, crtc_index);
       if (!attempt.empty()) {
-        if (alloc_debug()) {
-          std::fprintf(stderr, "[drm-cxx] partial-fallback PASS with %zu of %zu layer(s)\n",
-                       attempt.size(), placeable.size());
-        }
+        alloc_log("[alloc] partial-fallback PASS with {} of {} layer(s)", attempt.size(),
+                  placeable.size());
         best_assignment = std::move(attempt);
         total_assigned = best_assignment.size();
         break;
@@ -512,10 +524,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
       if (victim == nullptr) {
         break;
       }
-      if (alloc_debug()) {
-        std::fprintf(stderr, "[drm-cxx] partial-fallback drop most-constrained layer=%p\n",
-                     static_cast<const void*>(victim));
-      }
+      alloc_log("[alloc] partial-fallback drop most-constrained layer={}",
+                static_cast<const void*>(victim));
       placeable.erase(std::find(placeable.begin(), placeable.end(), victim));
     }
   }
@@ -628,18 +638,18 @@ std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_pr
           const auto& p = *planes.at(j);
           const auto& lay = *layers.at(i);
           const auto z = lay.property("zpos");
-          std::fprintf(stderr,
-                       "[drm-cxx] cand: layer=%zu plane=%u (%s) score=%d "
-                       "layer_zpos=%lld plane_zpos=[%lld,%lld] is_comp=%d\n",
-                       i, p.id, plane_type_name(p.type), s,
-                       z.has_value() ? static_cast<long long>(*z) : -1LL,
-                       p.zpos_min.has_value() ? static_cast<long long>(*p.zpos_min) : -1LL,
-                       p.zpos_max.has_value() ? static_cast<long long>(*p.zpos_max) : -1LL,
-                       lay.is_composition_layer() ? 1 : 0);
+          alloc_log(
+              "[alloc] cand: layer={} plane={} ({}) score={} layer_zpos={} "
+              "plane_zpos=[{},{}] is_comp={}",
+              i, p.id, plane_type_name(p.type), s,
+              z.has_value() ? static_cast<long long>(*z) : -1LL,
+              p.zpos_min.has_value() ? static_cast<long long>(*p.zpos_min) : -1LL,
+              p.zpos_max.has_value() ? static_cast<long long>(*p.zpos_max) : -1LL,
+              lay.is_composition_layer() ? 1 : 0);
         }
-      } else if (alloc_debug()) {
-        std::fprintf(stderr, "[drm-cxx] incompat: layer=%zu plane=%u (%s)\n", i, planes.at(j)->id,
-                     plane_type_name(planes.at(j)->type));
+      } else {
+        alloc_log("[alloc] incompat: layer={} plane={} ({})", i, planes.at(j)->id,
+                  plane_type_name(planes.at(j)->type));
       }
     }
   }
@@ -650,12 +660,10 @@ std::vector<std::pair<Layer*, const PlaneCapabilities*>> Allocator::bipartite_pr
     auto m = scratch_matching_.match_for_left(i);
     if (m.has_value()) {
       result.emplace_back(layers.at(i), planes.at(*m));
-      if (alloc_debug()) {
-        std::fprintf(stderr, "[drm-cxx] preseed: layer=%zu → plane=%u (%s)\n", i, planes.at(*m)->id,
-                     plane_type_name(planes.at(*m)->type));
-      }
-    } else if (alloc_debug()) {
-      std::fprintf(stderr, "[drm-cxx] preseed: layer=%zu UNMATCHED\n", i);
+      alloc_log("[alloc] preseed: layer={} → plane={} ({})", i, planes.at(*m)->id,
+                plane_type_name(planes.at(*m)->type));
+    } else {
+      alloc_log("[alloc] preseed: layer={} UNMATCHED", i);
     }
   }
 
@@ -713,15 +721,13 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
   }
 
   if (alloc_debug()) {
-    std::fprintf(stderr, "[drm-cxx] TEST preseed assignment:\n");
+    alloc_log("[alloc] TEST preseed assignment:");
     for (const auto& [pid, lay] : assignment) {
-      std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", pid, static_cast<const void*>(lay));
+      alloc_log("[alloc]   plane={} ← layer={}", pid, static_cast<const void*>(lay));
     }
   }
   const bool preseed_ok = !try_test_commit(assignment, flags, crtc_index);
-  if (alloc_debug()) {
-    std::fprintf(stderr, "[drm-cxx] TEST preseed → %s\n", preseed_ok ? "PASS" : "FAIL");
-  }
+  alloc_log("[alloc] TEST preseed → {}", preseed_ok ? "PASS" : "FAIL");
   if (preseed_ok) {
     return assignment;
   }
@@ -753,15 +759,13 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
   }
 
   if (alloc_debug()) {
-    std::fprintf(stderr, "[drm-cxx] TEST greedy assignment:\n");
+    alloc_log("[alloc] TEST greedy assignment:");
     for (const auto& [pid, lay] : assignment) {
-      std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", pid, static_cast<const void*>(lay));
+      alloc_log("[alloc]   plane={} ← layer={}", pid, static_cast<const void*>(lay));
     }
   }
   const bool greedy_ok = !try_test_commit(assignment, flags, crtc_index);
-  if (alloc_debug()) {
-    std::fprintf(stderr, "[drm-cxx] TEST greedy → %s\n", greedy_ok ? "PASS" : "FAIL");
-  }
+  alloc_log("[alloc] TEST greedy → {}", greedy_ok ? "PASS" : "FAIL");
   if (greedy_ok) {
     return assignment;
   }
@@ -1123,10 +1127,8 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
   // plane-on-inactive-CRTC with EINVAL for every TEST.
   if (test_preparer_) {
     if (auto r = test_preparer_(test_req, flags); !r) {
-      if (alloc_debug()) {
-        std::fprintf(stderr, "[drm-cxx] test_preparer FAIL: %s (errno=%d)\n",
-                     r.error().message().c_str(), r.error().value());
-      }
+      alloc_log("[alloc] test_preparer FAIL: {} (errno={})", r.error().message(),
+                r.error().value());
       return r.error();
     }
   }
@@ -1145,12 +1147,8 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
   // Apply each assigned layer's properties
   for (const auto& [plane_id, layer] : assignment) {
     if (auto result = apply_layer_to_plane(*layer, plane_id, test_req); !result.has_value()) {
-      if (alloc_debug()) {
-        std::fprintf(stderr,
-                     "[drm-cxx] apply_layer_to_plane FAIL plane=%u layer=%p: %s (errno=%d)\n",
-                     plane_id, static_cast<const void*>(layer), result.error().message().c_str(),
-                     result.error().value());
-      }
+      alloc_log("[alloc] apply_layer_to_plane FAIL plane={} layer={}: {} (errno={})", plane_id,
+                static_cast<const void*>(layer), result.error().message(), result.error().value());
       return result.error();
     }
   }
@@ -1160,11 +1158,10 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
   const auto result = test_req.test(flags);
 
   if (!result.has_value() && alloc_debug()) {
-    std::fprintf(stderr, "[drm-cxx] atomic TEST FAIL: %s (errno=%d) — assignment:\n",
-                 result.error().message().c_str(), result.error().value());
+    alloc_log("[alloc] atomic TEST FAIL: {} (errno={}) — assignment:", result.error().message(),
+              result.error().value());
     for (const auto& [plane_id, layer] : assignment) {
-      std::fprintf(stderr, "[drm-cxx]   plane=%u ← layer=%p\n", plane_id,
-                   static_cast<const void*>(layer));
+      alloc_log("[alloc]   plane={} ← layer={}", plane_id, static_cast<const void*>(layer));
     }
   }
 
