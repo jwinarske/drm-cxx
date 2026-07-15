@@ -5,6 +5,7 @@
 #include "input/keyboard.hpp"
 #include "input/pointer.hpp"
 #include "input/seat.hpp"
+#include "log.hpp"
 
 #include <xkbcommon/xkbcommon.h>
 
@@ -14,7 +15,9 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
+#include <vector>
 
 // ── Event type tests ──────────────────────────────────────────
 
@@ -457,10 +460,88 @@ TEST(SeatLogTest, StripsLibinputTrailingNewline) {
   EXPECT_EQ(got_msg, "line one\nline two");
 }
 
-TEST(SeatLogTest, EmptyHandlerIsANoOp) {
+// RAII sink capture: drm::set_log_sink is process-global, so restore it (and
+// the level) however the test exits, or a failure here silently reroutes every
+// later test's logging.
+namespace {
+class ScopedLogCapture {
+ public:
+  explicit ScopedLogCapture(drm::LogLevel level = drm::LogLevel::Debug)
+      : prev_level_(drm::get_log_level()) {
+    drm::set_log_level(level);
+    drm::set_log_sink([this](drm::LogLevel lvl, std::string_view msg) {
+      lines_.emplace_back(lvl, std::string(msg));
+    });
+  }
+  ~ScopedLogCapture() {
+    drm::set_log_sink(nullptr);
+    drm::set_log_level(prev_level_);
+  }
+  ScopedLogCapture(const ScopedLogCapture&) = delete;
+  ScopedLogCapture& operator=(const ScopedLogCapture&) = delete;
+  ScopedLogCapture(ScopedLogCapture&&) = delete;
+  ScopedLogCapture& operator=(ScopedLogCapture&&) = delete;
+
+  [[nodiscard]] const std::vector<std::pair<drm::LogLevel, std::string>>& lines() const {
+    return lines_;
+  }
+
+ private:
+  drm::LogLevel prev_level_;
+  std::vector<std::pair<drm::LogLevel, std::string>> lines_;
+};
+}  // namespace
+
+TEST(SeatLogTest, EmptyHandlerRoutesIntoDrmLog) {
+  ScopedLogCapture cap;
   drm::input::LogHandler const empty;
-  // Must not dereference the empty std::function.
-  call_dispatch(empty, li_error, "dropped %d", 1);
+
+  call_dispatch(empty, li_error, "client bug: event processing lagging by %dms", 42);
+
+  ASSERT_EQ(cap.lines().size(), 1U);
+  EXPECT_EQ(cap.lines()[0].first, drm::LogLevel::Error);
+  // Tagged so a consumer can tell libinput's stream from drm-cxx's own.
+  EXPECT_EQ(cap.lines()[0].second, "[libinput] client bug: event processing lagging by 42ms");
+}
+
+TEST(SeatLogTest, EmptyHandlerMapsPriorityOntoDrmLogLevel) {
+  ScopedLogCapture cap;
+  drm::input::LogHandler const empty;
+
+  call_dispatch(empty, li_debug, "added device");
+  call_dispatch(empty, li_info, "quirks loaded");
+  call_dispatch(empty, li_error, "boom");
+
+  ASSERT_EQ(cap.lines().size(), 3U);
+  EXPECT_EQ(cap.lines()[0].first, drm::LogLevel::Debug);
+  EXPECT_EQ(cap.lines()[1].first, drm::LogLevel::Info);
+  EXPECT_EQ(cap.lines()[2].first, drm::LogLevel::Error);
+}
+
+TEST(SeatLogTest, SuppliedHandlerOverridesDrmLog) {
+  ScopedLogCapture cap;
+  std::string got;
+  drm::input::LogHandler const handler = [&](drm::input::LogPriority, std::string_view msg) {
+    got = msg;
+  };
+
+  call_dispatch(handler, li_error, "to the caller");
+
+  EXPECT_EQ(got, "to the caller");
+  // The caller asked for libinput's stream separately; it must not ALSO be
+  // duplicated into drm::log.
+  EXPECT_TRUE(cap.lines().empty());
+}
+
+TEST(SeatLogTest, DrmLogLevelGatesTheDefaultRoute) {
+  ScopedLogCapture cap(drm::LogLevel::Error);
+  drm::input::LogHandler const empty;
+
+  call_dispatch(empty, li_debug, "chatty");
+  call_dispatch(empty, li_error, "kept");
+
+  ASSERT_EQ(cap.lines().size(), 1U);
+  EXPECT_EQ(cap.lines()[0].second, "[libinput] kept");
 }
 
 TEST(SeatLogTest, OverlongMessageIsTruncatedNotOverrun) {
@@ -478,9 +559,11 @@ TEST(SeatLogTest, OverlongMessageIsTruncatedNotOverrun) {
   EXPECT_EQ(got_msg, std::string(got_msg.size(), 'x'));
 }
 
-TEST(SeatLogTest, DefaultOptionsOptOut) {
+TEST(SeatLogTest, DefaultOptionsRouteIntoDrmLogAtErrorThreshold) {
   drm::input::SeatOptions const opts;
+  // No caller sink => the trampoline forwards into drm::log.
   EXPECT_FALSE(opts.log_handler);
+  // Matches libinput's own default threshold, so the routing adds no chatter.
   EXPECT_EQ(opts.log_priority, drm::input::LogPriority::Error);
 }
 
