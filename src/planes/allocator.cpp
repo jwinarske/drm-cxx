@@ -920,6 +920,28 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
   // §13.6 Content-type priority
   s += layer_priority(layer) / 10;
 
+  // Warm-start stability: strongly prefer keeping a layer on the plane it
+  // held last frame. The bipartite matcher maximizes cardinality first and
+  // uses this score only to order tie-breaks (matching.hpp visits high-score
+  // edges first), so this never places fewer layers and never overrides
+  // format/zpos/type validity — plane_statically_compatible gates the edges
+  // and the TEST_ONLY commit is the correctness arbiter. Without it, any
+  // change to the layer *set* (e.g. Flutter inserting a UI backing-store
+  // slice while the platform-view overlays stay put) drops warm-start and
+  // makes full_search re-solve from scratch, reshuffling already-placed
+  // layers onto different planes — every overlay reprograms in one commit,
+  // seen as flicker. The bonus is deliberately larger than the sum of the
+  // structural terms above so, among equal-cardinality matchings, the prior
+  // assignment wins; a genuinely new layer still displaces an old one only
+  // when a plane is contested (cardinality forces it).
+  constexpr int warm_stability_bonus = 100;
+  if (previous_allocation_valid_) {
+    if (const auto it = previous_allocation_.find(plane.id);
+        it != previous_allocation_.end() && it->second == &layer) {
+      s += warm_stability_bonus;
+    }
+  }
+
   // Penalize previously failed combinations
   s -= static_cast<int>(failure_cache_.hit_count(plane.id, layer.property_hash()));
 

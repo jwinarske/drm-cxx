@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.0.1 — 2026-07-21: allocator warm-start stability
+
+### Fixes
+
+- **`Allocator::score_pair` now adds a warm-start stability bonus.** When the
+  layer *set* changes between frames — e.g. a compositor inserting or
+  re-splitting a backing-store layer while overlay layers stay put —
+  `full_search` re-solved the whole plane assignment from scratch and could
+  reshuffle already-placed layers onto different planes, reprogramming every
+  overlay in one commit (visible as flicker). Scoring now strongly prefers
+  keeping a layer on the plane it held last frame. The bipartite matcher
+  maximizes cardinality first and uses the score only to order tie-breaks, so
+  this never places fewer layers and never overrides format/zpos/type validity;
+  a genuinely new layer still displaces an old one only when a plane is
+  contested.
+
 ## v2.0.0 — 2026-07-15: present spine, format registry, foreign producers, EGL Streams, multi-CRTC, HDR/color, CSD presenters
 
 The major bump is earned by two source-breaking changes (below), not only by the
