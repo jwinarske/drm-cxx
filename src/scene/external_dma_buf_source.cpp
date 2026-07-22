@@ -10,6 +10,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <cstdint>
 #include <cstdio>
@@ -111,9 +112,20 @@ drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufSource::acquire() {
   AcquiredBuffer acq;
   acq.fb_id = slot_.fb_id;
   acq.opaque = nullptr;
-  // Hand back the producer's render-done fence (if any) and clear the slot so a
-  // re-acquire without a fresh render doesn't re-submit a stale/empty fence.
-  acq.acquire_fence = std::exchange(pending_fence_, std::nullopt);
+  // Hand back a DUP of the producer's render-done fence (if any) WITHOUT
+  // clearing it. The scene acquires each source twice per frame — a TEST
+  // commit then the real commit — and a move-only fence would survive only the
+  // first, leaving the real commit unsynced (the buffer scanned before the
+  // producer's GPU writes finish). Duplicating keeps pending_fence_ live for
+  // the second acquire; a fresh set_acquire_fence replaces it next frame, and
+  // re-arming an already-signaled fence on a later commit is harmless (the
+  // kernel proceeds immediately). Ownership of each dup rides its
+  // AcquiredBuffer and closes on release.
+  if (pending_fence_.has_value()) {
+    if (auto dup = drm::sync::SyncFence::import_fd(pending_fence_->fd()); dup) {
+      acq.acquire_fence = std::move(dup.value());
+    }
+  }
   return acq;
 }
 
