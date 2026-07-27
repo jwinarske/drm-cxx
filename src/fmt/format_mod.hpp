@@ -253,6 +253,21 @@ class ScanoutBuffer {
     return plane_formats.supports(fourcc, Modifier{DRM_FORMAT_MOD_LINEAR}) ||
            plane_formats.supports(fourcc, Modifier{DRM_FORMAT_MOD_INVALID});
   }
+  // Broadcom SAND (vc4): IN_FORMATS advertises the base modifier (column
+  // height = 0), but a producer bakes its buffer's column height into the
+  // modifier — e.g. the rpi-hevc-dec hands out SAND128 with the column height
+  // set to the coded image height. The kernel reads the column height from the
+  // FB, not IN_FORMATS, and accepts any on a plane that advertises the base, so
+  // match by SAND code (low byte 3/4/5 = SAND64/128/256) and let the height
+  // ride; the atomic TEST_ONLY commit downstream remains the ground truth.
+  if (m.vendor() == DRM_FORMAT_MOD_VENDOR_BROADCOM) {
+    const std::uint64_t code = m.value & 0xffULL;
+    if (code >= 3 && code <= 5) {
+      const Modifier base{(static_cast<std::uint64_t>(DRM_FORMAT_MOD_VENDOR_BROADCOM) << 56) |
+                          code};
+      return plane_formats.supports(fourcc, base);
+    }
+  }
   return false;
 }
 
