@@ -32,8 +32,6 @@ class Output {
   void sort_layers_by_zpos();
 
  private:
-  void rebuild_layer_ptrs();
-
   uint32_t crtc_id_;
   std::vector<std::unique_ptr<Layer>> owned_layers_;
   std::vector<Layer*> layer_ptrs_;

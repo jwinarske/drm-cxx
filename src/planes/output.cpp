@@ -93,11 +93,4 @@ void Output::sort_layers_by_zpos() {
   });
 }
 
-void Output::rebuild_layer_ptrs() {
-  layer_ptrs_.clear();
-  for (const auto& l : owned_layers_) {
-    layer_ptrs_.push_back(l.get());
-  }
-}
-
 }  // namespace drm::planes
