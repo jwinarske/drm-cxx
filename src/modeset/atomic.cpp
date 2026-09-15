@@ -4,6 +4,7 @@
 #include "atomic.hpp"
 
 #include "../core/device.hpp"
+#include "log.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 
@@ -12,9 +13,22 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <system_error>
+#include <utility>
 
 namespace drm {
+
+namespace {
+// One env check for the whole module. DRM_ALLOC_DEBUG also enables it, so the
+// allocator's own trace and the request contents come out together -- reading
+// one without the other is what makes an EINVAL hard to place.
+bool atomic_debug() {
+  static const bool enabled =
+      std::getenv("DRM_ATOMIC_DEBUG") != nullptr || std::getenv("DRM_ALLOC_DEBUG") != nullptr;
+  return enabled;
+}
+}  // namespace
 
 AtomicRequest::AtomicRequest(const Device& dev) : req_(drmModeAtomicAlloc()), drm_fd_(dev.fd()) {}
 
@@ -29,9 +43,10 @@ AtomicRequest::~AtomicRequest() {
 }
 
 AtomicRequest::AtomicRequest(AtomicRequest&& other) noexcept
-    : req_(other.req_), drm_fd_(other.drm_fd_) {
+    : req_(other.req_), drm_fd_(other.drm_fd_), trace_(std::move(other.trace_)) {
   other.req_ = nullptr;
   other.drm_fd_ = -1;
+  other.trace_.clear();
 }
 
 AtomicRequest& AtomicRequest::operator=(AtomicRequest&& other) noexcept {
@@ -41,8 +56,10 @@ AtomicRequest& AtomicRequest::operator=(AtomicRequest&& other) noexcept {
     }
     req_ = other.req_;
     drm_fd_ = other.drm_fd_;
+    trace_ = std::move(other.trace_);
     other.req_ = nullptr;
     other.drm_fd_ = -1;
+    other.trace_.clear();
   }
   return *this;
 }
@@ -57,7 +74,33 @@ drm::expected<void, std::error_code> AtomicRequest::add_property(uint32_t object
   if (ret < 0) {
     return drm::unexpected<std::error_code>(std::error_code(-ret, std::system_category()));
   }
+  if (atomic_debug()) {
+    trace_.push_back(Entry{object_id, property_id, value});
+  }
   return {};
+}
+
+void AtomicRequest::dump(const char* why) const {
+  if (!atomic_debug()) {
+    return;
+  }
+  // Routed through log_channel rather than log_debug: this is opt-in via an
+  // env var, so the global level should not get a second veto -- the same
+  // reasoning as the allocator trace this accompanies.
+  drm::detail::log_channel(drm::LogLevel::Debug, "[atomic] {}: {} propert{} in this request", why,
+                           trace_.size(), trace_.size() == 1 ? "y" : "ies");
+  for (const Entry& e : trace_) {
+    const char* name = "?";
+    drmModePropertyRes* pr = drm_fd_ >= 0 ? drmModeGetProperty(drm_fd_, e.property_id) : nullptr;
+    if (pr != nullptr) {
+      name = pr->name;
+    }
+    drm::detail::log_channel(drm::LogLevel::Debug, "[atomic]   obj={:<4} {:<24} = {}", e.object_id,
+                             name, e.value);
+    if (pr != nullptr) {
+      drmModeFreeProperty(pr);
+    }
+  }
 }
 
 drm::expected<void, std::error_code> AtomicRequest::test(uint32_t flags) {

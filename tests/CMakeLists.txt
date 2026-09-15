@@ -26,6 +26,7 @@ set(DRM_CXX_TESTS
   test_layer
   test_output
   test_plane_allocator
+  test_plane_alpha
   test_input
   test_key_repeater
   test_mode

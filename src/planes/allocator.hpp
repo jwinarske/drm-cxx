@@ -351,6 +351,11 @@ class Allocator {
   // write path, no minimization. Used by try_test_commit (its
   // throwaway request has no kernel state to inherit from) and by the
   // legacy composition-layer arming.
+  /// Narrow a property value to the plane's advertised range; see the
+  /// definition for why alpha needs it.
+  [[nodiscard]] std::uint64_t clamp_to_plane(uint32_t plane_id, std::string_view name,
+                                             std::uint64_t value) const;
+
   drm::expected<void, std::error_code> apply_layer_to_plane(const Layer& layer, uint32_t plane_id,
                                                             AtomicRequest& req) const;
 

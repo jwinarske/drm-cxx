@@ -48,6 +48,28 @@ enum class ColorRange : uint8_t {
   Full,
 };
 
+/// Map a 16-bit layer alpha onto the range a plane advertises.
+///
+/// Alpha is a fraction of full opacity, so this rescales rather than clamps:
+/// a layer at half alpha must become half of @p alpha_max, not @p alpha_max
+/// itself. Clamping would turn every partially transparent layer opaque on a
+/// plane advertising 8-bit alpha -- a silent visual bug. Rounds to nearest so
+/// full opacity lands exactly on @p alpha_max, and is the identity for a plane
+/// advertising the full 16 bits.
+///
+/// Writing an out-of-range alpha is not a soft failure: the kernel rejects the
+/// whole atomic commit with EINVAL, which surfaces as a dropped layer that
+/// mentions nothing about alpha.
+[[nodiscard]] constexpr std::uint64_t rescale_alpha(std::uint64_t value,
+                                                    std::uint64_t alpha_max) noexcept {
+  constexpr std::uint64_t k_alpha_full = 0xFFFFU;
+  const std::uint64_t clamped = value < k_alpha_full ? value : k_alpha_full;
+  if (alpha_max >= k_alpha_full) {
+    return clamped;
+  }
+  return ((clamped * alpha_max) + (k_alpha_full / 2U)) / k_alpha_full;
+}
+
 struct PlaneCapabilities {
   uint32_t id{};
   uint32_t possible_crtcs{};
@@ -84,6 +106,15 @@ struct PlaneCapabilities {
   /// property. Independent of `has_pixel_blend_mode` — some hardware
   /// exposes one without the other.
   bool has_per_plane_alpha{false};
+
+  /// Largest value the plane's `"alpha"` property accepts, read from the
+  /// property's advertised range. The DRM docs describe alpha as 16-bit, and
+  /// 0xFFFF is the common maximum, but it is not guaranteed: vendor drivers
+  /// ship 8-bit alpha and advertise [0, 255]. Writing 0xFFFF there makes the
+  /// kernel reject the whole atomic commit with EINVAL -- which surfaces as a
+  /// silently dropped layer, not as an alpha problem. Defaults to 0xFFFF for
+  /// planes whose range cannot be read.
+  std::uint64_t alpha_max{0xFFFFU};
   /// Cached enum integer for `"pixel blend mode" = "Pre-multiplied"`,
   /// when the plane advertises that enum value. The integer is
   /// driver-defined — the kernel hands back enum values in the order
