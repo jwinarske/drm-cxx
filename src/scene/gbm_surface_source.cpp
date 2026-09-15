@@ -72,12 +72,18 @@ constexpr std::uint32_t k_default_usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDER
   struct gbm_surface* surf = nullptr;
 
   if (cfg.modifier != DRM_FORMAT_MOD_INVALID) {
-#ifdef HAVE_GBM_BO_CREATE_WITH_MODIFIERS2
     const std::uint64_t mod = cfg.modifier;
+#if defined(HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
     surf = gbm_surface_create_with_modifiers2(gdev, cfg.width, cfg.height, cfg.drm_format, &mod, 1,
                                               usage);
 #else
-    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
+    // v1 has no usage argument; it implies scanout+rendering, which is what
+    // every caller here asks for. Falling back matters on more than old Mesa:
+    // vendor gbm implementations ship v1 only, and refusing an explicit
+    // modifier there defeats the LINEAR fallback a driver with no IN_FORMATS
+    // depends on -- the surface path would fail on exactly the hardware that
+    // fallback exists for. Mirrors gbm/buffer.cpp.
+    surf = gbm_surface_create_with_modifiers(gdev, cfg.width, cfg.height, cfg.drm_format, &mod, 1);
 #endif
   } else {
     surf = gbm_surface_create(gdev, cfg.width, cfg.height, cfg.drm_format, usage);
