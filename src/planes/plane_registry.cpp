@@ -189,6 +189,11 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
       }
     } else if (std::strcmp(prop->name, "alpha") == 0) {
       caps.has_per_plane_alpha = true;
+      // Honor the advertised maximum rather than assuming the 16-bit
+      // full-scale the DRM docs describe; see PlaneCapabilities::alpha_max.
+      if ((prop->flags & DRM_MODE_PROP_RANGE) != 0U && prop->count_values >= 2) {
+        caps.alpha_max = prop->values[1];
+      }
     } else if (std::strcmp(prop->name, "COLOR_ENCODING") == 0) {
       caps.has_color_encoding = true;
       if ((prop->flags & DRM_MODE_PROP_ENUM) != 0U) {

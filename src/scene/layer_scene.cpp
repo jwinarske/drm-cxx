@@ -587,6 +587,14 @@ class LayerScene::Impl {
     } else {
       kr = req.commit(kernel_flags, user_data);
     }
+    if (!kr.has_value()) {
+      // The scene's own commit, as opposed to the allocator's probing TESTs.
+      // A rejection here is a real dropped frame rather than a placement
+      // that did not fit, and the errno alone names no property -- so print
+      // what was actually asked for. Gated by the same env var; silent
+      // otherwise.
+      req.dump(test_only ? "scene test rejected" : "scene commit rejected");
+    }
 
     drm::sync::SyncFence committed_fence;  // empty unless this commit produced one
     if (want_out_fence && !test_only && kr.has_value() && (out_fd >= 0)) {
@@ -2738,7 +2746,11 @@ class LayerScene::Impl {
     // that ended at 0x8000). Pin to fully opaque so the canvas's own
     // per-pixel alpha is the only modulator.
     if (plane.has_per_plane_alpha) {
-      if (auto r = write("alpha", 0xFFFFU); !r) {
+      // plane.alpha_max, not a literal 0xFFFF: the property's range is the
+      // driver's to declare, and a plane advertising [0, 255] rejects the
+      // larger value -- taking the entire commit down with it. Same discipline
+      // as the zpos clamp below.
+      if (auto r = write("alpha", plane.alpha_max); !r) {
         return r;
       }
     }

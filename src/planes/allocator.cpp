@@ -1185,6 +1185,10 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
     for (const auto& [plane_id, layer] : assignment) {
       alloc_log("[alloc]   plane={} ← layer={}", plane_id, static_cast<const void*>(layer));
     }
+    // EINVAL names no property, so print the ones we asked for. Without this
+    // the only way forward is bisecting the set by hand against a driver that
+    // accepts the same plane under a smaller one.
+    test_req.dump("rejected request");
   }
 
   // Record in failure cache
@@ -1291,6 +1295,33 @@ bool Allocator::zpos_is_fixed(const uint32_t plane_id) const {
   return false;
 }
 
+// Rescale a property value into the range the plane actually advertises.
+//
+// Only alpha needs this today. Layers carry a 16-bit alpha because that is
+// what the DRM docs describe, but the range is the driver's to declare and it
+// varies: vendor drivers ship 8-bit alpha advertising [0, 255]. Writing 0xFFFF
+// to one of those fails the whole atomic commit with EINVAL, and since a
+// rejected TEST reads as "this assignment does not fit", it surfaces as a
+// silently dropped layer with no mention of alpha.
+//
+// Rescaled, not clamped -- see rescale_alpha() for why.
+//
+// Lives here rather than at the layer, which does not know its plane, and is
+// shared by both apply paths so they cannot drift.
+std::uint64_t Allocator::clamp_to_plane(const uint32_t plane_id, const std::string_view name,
+                                        const std::uint64_t value) const {
+  if (name != "alpha") {
+    return value;
+  }
+  for (const PlaneCapabilities& caps : registry_.all()) {
+    if (caps.id != plane_id) {
+      continue;
+    }
+    return rescale_alpha(value, caps.alpha_max);
+  }
+  return value;
+}
+
 drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer& layer,
                                                                      const uint32_t plane_id,
                                                                      AtomicRequest& req) const {
@@ -1315,7 +1346,14 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer
     if (name == "zpos" && zpos_is_fixed(plane_id)) {
       continue;
     }
-    if (auto result = req.add_property(plane_id, *prop_id, value); !result.has_value()) {
+    // Clamp alpha into the plane's advertised range. Layers carry a 16-bit
+    // alpha because that is what the DRM docs describe, but the range is the
+    // driver's to declare and vendor drivers ship 8-bit alpha advertising
+    // [0, 255]. Writing 0xFFFF there fails the whole commit with EINVAL, and
+    // because a rejected TEST just means "this assignment does not fit", it
+    // surfaces as a silently dropped layer with no mention of alpha.
+    if (auto result = req.add_property(plane_id, *prop_id, clamp_to_plane(plane_id, name, value));
+        !result.has_value()) {
       return result;
     }
   }
@@ -1394,7 +1432,9 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
     if (!need_write) {
       continue;
     }
-    if (auto result = req.add_property(plane_id, *prop_id, value); !result.has_value()) {
+    if (auto result =
+            req.add_property(plane_id, *prop_id, clamp_to_plane(plane_id, prop_name(tag), value));
+        !result.has_value()) {
       return result;
     }
     ++diagnostics_.properties_written;
