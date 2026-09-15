@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <system_error>
+#include <vector>
 
 namespace drm {
 
@@ -37,6 +38,16 @@ class AtomicRequest {
   /// failed to allocate.
   [[nodiscard]] drmModeAtomicReq* native_handle() const noexcept { return req_; }
 
+  /// Log every (object, property, value) this request carries, resolving
+  /// property ids to names. No-op unless DRM_ATOMIC_DEBUG or DRM_ALLOC_DEBUG
+  /// is set, and nothing is recorded when they are not.
+  ///
+  /// An atomic TEST that returns EINVAL says only that the kernel disliked
+  /// *something*. libdrm keeps the request opaque, so without this the next
+  /// step is bisecting a property set by hand against a driver that accepts
+  /// the same plane under a smaller one. @p why labels the dump.
+  void dump(const char* why) const;
+
   ~AtomicRequest();
 
   AtomicRequest(AtomicRequest&& /*other*/) noexcept;
@@ -45,8 +56,16 @@ class AtomicRequest {
   AtomicRequest& operator=(const AtomicRequest&) = delete;
 
  private:
+  struct Entry {
+    uint32_t object_id;
+    uint32_t property_id;
+    uint64_t value;
+  };
+
   drmModeAtomicReq* req_{};
   int drm_fd_{-1};
+  // Populated only while debugging; see dump().
+  std::vector<Entry> trace_;
 };
 
 }  // namespace drm
