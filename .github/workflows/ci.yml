@@ -271,7 +271,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/blend2d-install
-          key: blend2d-main-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.version }}
+          key: blend2d-6dbc2cefbc99-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.version }}
 
       - name: Build blend2d from source
         if: steps.cache-blend2d.outputs.cache-hit != 'true'
@@ -279,8 +279,22 @@ jobs:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
         run: |
-          git clone --depth 1 https://github.com/asmjit/asmjit asmjit-src
-          git clone --depth 1 https://github.com/blend2d/blend2d blend2d-src
+          # Pinned, not tracked. Both were cloned from main, so an upstream
+          # release changed this build with no commit here: Blend2D v0.21.3
+          # (2026-09-05) raised the standard its target requires, and because
+          # blend2d is linked PRIVATE to drm-cxx that raised only the library's
+          # C++ standard. drm::span is std::span at C++20 and tcb::span at
+          # C++17, so the library and the examples stopped agreeing on the type
+          # and examples/ failed to link against the one span-taking export
+          # they call. These SHAs are what the last green run used.
+          fetch_pinned() {  # url sha dir
+            git init -q "$3"
+            git -C "$3" remote add origin "$1"
+            git -C "$3" fetch -q --depth 1 origin "$2"
+            git -C "$3" checkout -q FETCH_HEAD
+          }
+          fetch_pinned https://github.com/asmjit/asmjit 0bd5787b54b575ed94bf32ac452153b34385c514 asmjit-src
+          fetch_pinned https://github.com/blend2d/blend2d 6dbc2cefbc996379e07104e34519a440b49b15d7 blend2d-src
           cmake -S blend2d-src -B blend2d-src/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/blend2d-install" \
@@ -492,7 +506,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/blend2d-install
-          key: blend2d-main-${{ runner.os }}-clang-19
+          key: blend2d-6dbc2cefbc99-${{ runner.os }}-clang-19
 
       - name: Build blend2d from source
         if: steps.cache-blend2d.outputs.cache-hit != 'true'
@@ -500,8 +514,22 @@ jobs:
           CC: clang-19
           CXX: clang++-19
         run: |
-          git clone --depth 1 https://github.com/asmjit/asmjit asmjit-src
-          git clone --depth 1 https://github.com/blend2d/blend2d blend2d-src
+          # Pinned, not tracked. Both were cloned from main, so an upstream
+          # release changed this build with no commit here: Blend2D v0.21.3
+          # (2026-09-05) raised the standard its target requires, and because
+          # blend2d is linked PRIVATE to drm-cxx that raised only the library's
+          # C++ standard. drm::span is std::span at C++20 and tcb::span at
+          # C++17, so the library and the examples stopped agreeing on the type
+          # and examples/ failed to link against the one span-taking export
+          # they call. These SHAs are what the last green run used.
+          fetch_pinned() {  # url sha dir
+            git init -q "$3"
+            git -C "$3" remote add origin "$1"
+            git -C "$3" fetch -q --depth 1 origin "$2"
+            git -C "$3" checkout -q FETCH_HEAD
+          }
+          fetch_pinned https://github.com/asmjit/asmjit 0bd5787b54b575ed94bf32ac452153b34385c514 asmjit-src
+          fetch_pinned https://github.com/blend2d/blend2d 6dbc2cefbc996379e07104e34519a440b49b15d7 blend2d-src
           cmake -S blend2d-src -B blend2d-src/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/blend2d-install" \
