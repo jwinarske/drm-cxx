@@ -14,6 +14,24 @@
 # Single-source examples in basics/, scene/, and allocator/ that need
 # nothing beyond drm-cxx itself. Each entry is "<bucket>/<name>"; the
 # CMake target name is the basename.
+# The library keeps its gbm capability probes PRIVATE, so an example calling the
+# same entrypoints cannot see them and ends up calling whatever the headers
+# happen to declare. That builds on a new libgbm and fails on an older one --
+# which is how examples/ came to use gbm_bo_create_with_modifiers2 and
+# gbm_bo_get_fd_for_plane unguarded while the library guards the first and
+# never uses the second.
+find_package(Threads REQUIRED)
+
+function(_drm_cxx_example_gbm_defines _target)
+  if(HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
+    target_compile_definitions(${_target} PRIVATE
+        HAVE_GBM_BO_CREATE_WITH_MODIFIERS2=1)
+  endif()
+  if(HAVE_GBM_BO_GET_FD_FOR_PLANE)
+    target_compile_definitions(${_target} PRIVATE HAVE_GBM_BO_GET_FD_FOR_PLANE=1)
+  endif()
+endfunction()
+
 foreach(_path
     basics/atomic_modeset
     basics/hotplug_monitor
@@ -32,6 +50,12 @@ foreach(_path
   add_executable(${_ex} ${_path}/main.cpp)
   target_link_libraries(${_ex} PRIVATE drm-cxx::drm-cxx)
   target_include_directories(${_ex} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  _drm_cxx_example_gbm_defines(${_ex})
+  # Before glibc 2.34 the pthread_* and dl* symbols live in their own
+  # libraries rather than libc; linking them is required there and a no-op
+  # after. v4l2_decode spawns a decode thread, and the vulkan examples dlopen
+  # the loader.
+  target_link_libraries(${_ex} PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 endforeach()
 
 # camera — libcamera + libyuv are example-only deps. libyuv (which
@@ -322,7 +346,9 @@ if(DRM_CXX_VULKAN)
   # vulkan.hpp dynamic dispatch — links only drm-cxx (no libvulkan); vendored
   # third_party/Vulkan-Headers (SYSTEM include).
   add_executable(vulkan_scene advanced/vulkan_scene/main.cpp)
-  target_link_libraries(vulkan_scene PRIVATE drm-cxx::drm-cxx)
+  # These dlopen the Vulkan loader. Before glibc 2.34 the dl* symbols live in
+  # libdl, not libc, so an explicit link is required there and harmless after.
+  target_link_libraries(vulkan_scene PRIVATE drm-cxx::drm-cxx ${CMAKE_DL_LIBS})
   target_include_directories(vulkan_scene PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_include_directories(vulkan_scene SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Vulkan-Headers/include)
@@ -332,7 +358,7 @@ if(DRM_CXX_VULKAN)
   # vulkan.hpp dynamic dispatch (VK_NO_PROTOTYPES) — links only drm-cxx, no
   # libvulkan; uses the vendored third_party/Vulkan-Headers (SYSTEM include).
   add_executable(vulkan_offload_scanout advanced/vulkan_offload_scanout/main.cpp)
-  target_link_libraries(vulkan_offload_scanout PRIVATE drm-cxx::drm-cxx)
+  target_link_libraries(vulkan_offload_scanout PRIVATE drm-cxx::drm-cxx ${CMAKE_DL_LIBS})
   target_include_directories(vulkan_offload_scanout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_include_directories(vulkan_offload_scanout SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Vulkan-Headers/include)
@@ -350,6 +376,7 @@ if(TARGET PkgConfig::offload_egl AND TARGET PkgConfig::offload_gles)
     PkgConfig::offload_egl
     PkgConfig::offload_gles)
   target_include_directories(egl_offload_scanout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  _drm_cxx_example_gbm_defines(egl_offload_scanout)
 
   # gbm_surface_scanout — compositor-path counterpart: a gbm_surface swapchain,
   # the only path Mesa hands out displayable-DCC (retile) on amdgpu.
@@ -359,6 +386,7 @@ if(TARGET PkgConfig::offload_egl AND TARGET PkgConfig::offload_gles)
     PkgConfig::offload_egl
     PkgConfig::offload_gles)
   target_include_directories(gbm_surface_scanout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  _drm_cxx_example_gbm_defines(gbm_surface_scanout)
 endif()
 
 add_subdirectory(scene/signage_player)

@@ -189,10 +189,16 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "no compression modifier offered by the display\n");
     return 1;
   }
+#if defined(HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
   gbm_surface* surf = gbm_surface_create_with_modifiers2(
       gbm, w, h, fourcc, mods.data(), mods.size(), GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+#else
+  // v1 (mesa 17+) implies scanout+rendering rather than taking usage flags.
+  gbm_surface* surf =
+      gbm_surface_create_with_modifiers(gbm, w, h, fourcc, mods.data(), mods.size());
+#endif
   if (surf == nullptr) {
-    std::fprintf(stderr, "gbm_surface_create_with_modifiers2 failed\n");
+    std::fprintf(stderr, "gbm_surface_create_with_modifiers failed\n");
     return 1;
   }
 
@@ -235,7 +241,21 @@ int main(int argc, char** argv) {
   std::vector<int> fds(nplanes, -1);
   for (unsigned i = 0; i < nplanes; ++i) {
     const int plane = static_cast<int>(i);
-    fds[i] = gbm_bo_get_fd_for_plane(front, plane);
+#if defined(HAVE_GBM_BO_GET_FD_FOR_PLANE)
+    fds[i] = gbm_bo_get_fd_for_plane(front, plane);  // dup'd; we own it
+#else
+    // Pre-mesa-21.1 gbm exports the whole buffer, not a plane. That is
+    // equivalent for the single-plane formats this example scans out;
+    // a multi-planar buffer genuinely cannot be exported here.
+    if (nplanes > 1) {
+      std::fprintf(stderr,
+                   "this libgbm has no gbm_bo_get_fd_for_plane; cannot "
+                   "export a %u-plane buffer\n",
+                   nplanes);
+      return 1;
+    }
+    fds[i] = gbm_bo_get_fd(front);
+#endif
     planes[i].dmabuf_fd = fds[i];
     planes[i].stride = gbm_bo_get_stride_for_plane(front, plane);
     planes[i].offset = gbm_bo_get_offset(front, plane);
