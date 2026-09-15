@@ -134,6 +134,10 @@ include(CheckSymbolExists)
 set(CMAKE_REQUIRED_INCLUDES ${gbm_INCLUDE_DIRS})
 set(CMAKE_REQUIRED_LIBRARIES ${gbm_LIBRARIES})
 check_symbol_exists(gbm_bo_create_with_modifiers2 "gbm.h" HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
+# gbm_bo_get_fd_for_plane — per-plane dma-buf export, mesa 21.1. The
+# examples fall back to gbm_bo_get_fd for single-plane buffers when it is
+# missing; a multi-planar buffer genuinely cannot be exported without it.
+check_symbol_exists(gbm_bo_get_fd_for_plane "gbm.h" HAVE_GBM_BO_GET_FD_FOR_PLANE)
 unset(CMAKE_REQUIRED_INCLUDES)
 unset(CMAKE_REQUIRED_LIBRARIES)
 pkg_check_modules(libinput       REQUIRED IMPORTED_TARGET libinput)
