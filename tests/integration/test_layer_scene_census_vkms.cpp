@@ -334,11 +334,13 @@ TEST(LayerSceneCensusVkms, WidgetScaleDamage) {
   EXPECT_EQ(c.test_commits, 1U) << "damage is content, not placement — still one cold TEST_ONLY";
   EXPECT_EQ(c.fast_path_frames, static_cast<std::size_t>(k_frames - 1))
       << "a damaged frame keeps the FB-only fast path (geometry unchanged)";
-  // The damage-clip count is driver-gated. On a driver that exposes
-  // FB_DAMAGE_CLIPS (amdgpu, vc4, …) every committed frame arms exactly one
-  // for this full-screen layer; on a driver without it (vkms) the scene falls
-  // back to full-frame and arms none. Probe the driver and assert the exact
-  // count for its capability — so the gate is precise on both.
+  // The damage-clip count is driver-gated: a driver that exposes
+  // FB_DAMAGE_CLIPS arms exactly one per committed frame for this full-screen
+  // layer, and one without it falls back to full-frame and arms none. Which
+  // driver is which is probed below rather than listed here -- measured, the
+  // property is rarer than it looks: vkms exposes it on no plane, and neither
+  // does vc4 (0 of 60 on a Pi 4, 0 of 56 on a Pi 5) or msm (0 of 14). Naming
+  // capable drivers in a comment is how this one came to claim vc4 was one.
   auto profile = drm::display::DriverProfile::probe(*fx.dev);
   ASSERT_TRUE(profile.has_value()) << profile.error().message();
   if (profile->fb_damage_clips) {

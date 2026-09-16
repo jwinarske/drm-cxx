@@ -34,7 +34,12 @@ const char* connector_type_name(std::uint32_t connector_type) noexcept {
     case DRM_MODE_CONNECTOR_Composite:
       return "Composite";
     case DRM_MODE_CONNECTOR_SVIDEO:
-      return "S-Video";
+      // "SVIDEO", not "S-Video": this table stands in for
+      // drmModeGetConnectorTypeName, which can return nullptr on older
+      // libdrm, so it has to answer with the same spelling libdrm and the
+      // kernel use. Every other entry already matches; this was the one that
+      // had drifted.
+      return "SVIDEO";
     case DRM_MODE_CONNECTOR_LVDS:
       return "LVDS";
     case DRM_MODE_CONNECTOR_Component:
