@@ -46,6 +46,10 @@ class AtomicRequest {
   /// *something*. libdrm keeps the request opaque, so without this the next
   /// step is bisecting a property set by hand against a driver that accepts
   /// the same plane under a smaller one. @p why labels the dump.
+  ///
+  /// A driver that rejects some frames and accepts others makes a single dump
+  /// much less useful than a pair: LayerScene therefore dumps a rejection and
+  /// then the next request that succeeds, so the two can be diffed.
   void dump(const char* why) const;
 
   ~AtomicRequest();

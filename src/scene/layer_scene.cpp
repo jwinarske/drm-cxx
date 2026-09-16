@@ -587,13 +587,29 @@ class LayerScene::Impl {
     } else {
       kr = req.commit(kernel_flags, user_data);
     }
+    // A rejection alone does not say what is wrong with it. When a driver
+    // rejects some frames and accepts others -- measured on a split-display
+    // SoC that rejects roughly every other scene test -- the useful artifact
+    // is a rejected request next to an accepted one, because the difference
+    // between them is the answer. So dump the rejection, and then dump the
+    // next request that succeeds.
+    //
+    // Only the one that follows a rejection: dumping every accepted frame
+    // would bury the pair in hundreds of identical ones, and the neighbour is
+    // what makes the diff readable. Gated by the same env var; silent
+    // otherwise, and `dumped_since_rejection_` stays false when it is off
+    // because dump() records nothing then.
     if (!kr.has_value()) {
       // The scene's own commit, as opposed to the allocator's probing TESTs.
       // A rejection here is a real dropped frame rather than a placement
       // that did not fit, and the errno alone names no property -- so print
-      // what was actually asked for. Gated by the same env var; silent
-      // otherwise.
+      // what was actually asked for.
       req.dump(test_only ? "scene test rejected" : "scene commit rejected");
+      saw_rejection_ = true;
+    } else if (saw_rejection_) {
+      saw_rejection_ = false;
+      req.dump(test_only ? "scene test accepted (first after a rejection)"
+                         : "scene commit accepted (first after a rejection)");
     }
 
     drm::sync::SyncFence committed_fence;  // empty unless this commit produced one
@@ -3215,6 +3231,11 @@ class LayerScene::Impl {
       LayerScene::OutputTransferFunction::Default};
   bool regamma_tf_user_set_{false};
   bool async_flip_supported_{false};  // DRM_CAP_ASYNC_PAGE_FLIP, probed at create
+  // Set when a scene test or commit is rejected, cleared by the next one that
+  // succeeds, so the request that follows a rejection can be dumped alongside
+  // it. Debug-only in effect: dump() records nothing unless DRM_ATOMIC_DEBUG
+  // or DRM_ALLOC_DEBUG is set.
+  bool saw_rejection_{false};
   int last_written_regamma_{-1};
 
   // connector Colorspace property tracking. Cached
