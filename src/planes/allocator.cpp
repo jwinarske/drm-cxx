@@ -79,15 +79,17 @@ std::optional<bool> TestCache::lookup(uint32_t plane_id, std::size_t prop_hash) 
 void TestCache::record(uint32_t plane_id, std::size_t prop_hash, const bool passed) {
   auto& entry = cache_.try_emplace(std::make_pair(plane_id, prop_hash)).first->second;
   entry.passed = passed;
-  entry.hits++;
+  if (!passed) {
+    entry.failures++;
+  }
 }
 
-std::size_t TestCache::hit_count(uint32_t plane_id, std::size_t prop_hash) const {
+std::size_t TestCache::failure_count(uint32_t plane_id, std::size_t prop_hash) const {
   const auto it = cache_.find({plane_id, prop_hash});
-  if (it == cache_.end()) {
+  if (it == cache_.end() || it->second.passed) {
     return 0;
   }
-  return it->second.hits;
+  return it->second.failures;
 }
 
 void TestCache::clear() noexcept {
@@ -942,8 +944,13 @@ int Allocator::score_pair(const PlaneCapabilities& plane, const Layer& layer) co
     }
   }
 
-  // Penalize previously failed combinations
-  s -= static_cast<int>(failure_cache_.hit_count(plane.id, layer.property_hash()));
+  // Penalize previously failed combinations. Failures only: a hit count that
+  // also grew on success made a plane the kernel keeps accepting decay at the
+  // same rate as one it keeps rejecting, so the search walked away from the
+  // plane that worked. Measured on a display with one usable primary out of
+  // five: the accepted plane was tried ten times and then never again while
+  // the allocator cycled the seven overlays, all rejected, ~53 times each.
+  s -= static_cast<int>(failure_cache_.failure_count(plane.id, layer.property_hash()));
 
   return s;
 }
