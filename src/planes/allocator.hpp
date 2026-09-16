@@ -136,13 +136,18 @@ class TestCache {
  public:
   [[nodiscard]] std::optional<bool> lookup(uint32_t plane_id, std::size_t prop_hash) const;
   void record(uint32_t plane_id, std::size_t prop_hash, bool passed);
-  [[nodiscard]] std::size_t hit_count(uint32_t plane_id, std::size_t prop_hash) const;
+  // How many times this combination has been *rejected*. Zero for one that
+  // passed, so scoring cannot penalize a plane for succeeding.
+  [[nodiscard]] std::size_t failure_count(uint32_t plane_id, std::size_t prop_hash) const;
   void clear() noexcept;
 
  private:
   struct Entry {
+    // The latest verdict, and how many times this combination has been
+    // rejected. Successes do not increment, so the count is a penalty and not
+    // a visit tally.
     bool passed{};
-    std::size_t hits{0};
+    std::size_t failures{0};
   };
   std::map<std::pair<uint32_t, std::size_t>, Entry> cache_;
 };

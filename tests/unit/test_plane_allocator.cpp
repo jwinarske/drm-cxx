@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -163,4 +164,58 @@ TEST(PowerAwareBias, CostBias) {
   // Monotonic and bounded at 3.
   EXPECT_GE(cost_bias(std::uint64_t(7680) * 4320 * 4), cost_bias(std::uint64_t(1920) * 1080 * 4));
   EXPECT_EQ(cost_bias(std::uint64_t(1) << 40), 3);  // saturates
+}
+
+// The scoring penalty counts rejections, not visits. It used to subtract the
+// raw hit count, which grew on success too -- so a plane the kernel kept
+// accepting decayed at the same rate as one it kept rejecting, and the search
+// walked away from the only plane that worked. Measured on a display with one
+// usable primary out of five: the accepted plane was chosen ten times and then
+// never again while the allocator cycled seven overlays, all rejected.
+TEST(TestCacheTest, SuccessesAreNotCountedAsFailures) {
+  drm::planes::TestCache cache;
+  constexpr std::size_t kHash = 0x1234;
+
+  for (int i = 0; i < 5; ++i) {
+    cache.record(97, kHash, true);
+  }
+  EXPECT_EQ(cache.failure_count(97, kHash), 0U)
+      << "a plane the kernel accepts must carry no penalty, however often it "
+         "is used";
+  EXPECT_EQ(cache.lookup(97, kHash), std::optional<bool>(true));
+}
+
+TEST(TestCacheTest, FailuresAccumulate) {
+  drm::planes::TestCache cache;
+  constexpr std::size_t kHash = 0x1234;
+
+  cache.record(100, kHash, false);
+  EXPECT_EQ(cache.failure_count(100, kHash), 1U);
+  cache.record(100, kHash, false);
+  EXPECT_EQ(cache.failure_count(100, kHash), 2U);
+  EXPECT_EQ(cache.lookup(100, kHash), std::optional<bool>(false));
+}
+
+// A combination that starts failing and then succeeds stops being penalized:
+// the verdict is the latest one, not a tally of history. Without this a plane
+// that was rejected while some other state was wrong would stay penalized
+// after the real cause was fixed.
+TEST(TestCacheTest, LatestVerdictWins) {
+  drm::planes::TestCache cache;
+  constexpr std::size_t kHash = 0x1234;
+
+  cache.record(97, kHash, false);
+  cache.record(97, kHash, false);
+  EXPECT_EQ(cache.failure_count(97, kHash), 2U);
+
+  cache.record(97, kHash, true);
+  EXPECT_EQ(cache.failure_count(97, kHash), 0U);
+  EXPECT_EQ(cache.lookup(97, kHash), std::optional<bool>(true));
+}
+
+// Untouched combinations are unknown, not failed.
+TEST(TestCacheTest, UnknownIsNotAFailure) {
+  drm::planes::TestCache cache;
+  EXPECT_EQ(cache.failure_count(999, 0x1U), 0U);
+  EXPECT_FALSE(cache.lookup(999, 0x1U).has_value());
 }
