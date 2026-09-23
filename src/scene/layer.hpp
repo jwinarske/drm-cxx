@@ -200,6 +200,15 @@ class Layer {
   // already knows the value is changing (e.g. animation tickers) and
   // wants to skip the comparison.
 
+  /// Update `display.src_rect_fixed` only if it differs. Marks dirty on
+  /// change.
+  void set_src_rect_fixed_if_changed(std::optional<FixedRect> r) noexcept {
+    if (display_.src_rect_fixed != r) {
+      display_.src_rect_fixed = r;
+      dirty_ = true;
+    }
+  }
+
   /// Update `display.src_rect` only if it differs. Marks dirty on change.
   void set_src_rect_if_changed(Rect r) noexcept {
     if (display_.src_rect != r) {

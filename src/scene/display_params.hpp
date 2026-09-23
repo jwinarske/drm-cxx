@@ -46,6 +46,19 @@ enum class ColorPrimaries : std::uint8_t {
 /// `uint32_t w/h` match `CRTC_W/H`.
 using Rect = drm::planes::Rect;
 
+/// A source rectangle in 16.16 fixed point: the kernel's own SRC_* encoding,
+/// for a crop at sub-pixel precision (a Wayland viewport source rect, for one,
+/// is in 1/256ths of a pixel). 1.0 is 0x10000.
+struct FixedRect {
+  std::uint32_t x{}, y{};
+  std::uint32_t w{}, h{};
+
+  [[nodiscard]] bool operator==(const FixedRect& o) const noexcept {
+    return x == o.x && y == o.y && w == o.w && h == o.h;
+  }
+  [[nodiscard]] bool operator!=(const FixedRect& o) const noexcept { return !(*this == o); }
+};
+
 /// amdgpu per-plane color pipeline — the `AMD_PLANE_*` properties of amdgpu's
 /// DRM/KMS color-management uAPI, used for HDR / tone-mapping / wide-gamut.
 /// Presence-gated: planes or drivers without the properties ignore this
@@ -119,6 +132,11 @@ struct AmdPlaneColor {
 /// implies the plane must support scaling.
 struct DisplayParams {
   Rect src_rect{};
+  /// The source crop at sub-pixel precision. When set it takes precedence over
+  /// `src_rect` and is written to SRC_X/Y/W/H as is; a zero width or height
+  /// still means the buffer's full extent. Paths that sample in whole pixels
+  /// (the composition fallback) round it. nullopt: `src_rect` applies.
+  std::optional<FixedRect> src_rect_fixed;
   Rect dst_rect{};
   std::uint64_t rotation{0};    // DRM_MODE_ROTATE_* | DRM_MODE_REFLECT_*
   std::uint16_t alpha{0xFFFF};  // 0xFFFF = fully opaque
@@ -154,6 +172,12 @@ struct DisplayParams {
   AmdPlaneColor amd_color{};
 
   [[nodiscard]] constexpr bool needs_scaling() const noexcept {
+    if (src_rect_fixed.has_value()) {
+      return static_cast<std::uint64_t>(src_rect_fixed->w) !=
+                 (static_cast<std::uint64_t>(dst_rect.w) << 16U) ||
+             static_cast<std::uint64_t>(src_rect_fixed->h) !=
+                 (static_cast<std::uint64_t>(dst_rect.h) << 16U);
+    }
     return src_rect.w != dst_rect.w || src_rect.h != dst_rect.h;
   }
 };
