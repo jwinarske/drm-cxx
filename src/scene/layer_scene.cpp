@@ -1219,14 +1219,23 @@ class LayerScene::Impl {
     // atomic TEST failing on every controller (amdgpu DC, RPi5 vc4): the layer
     // never carried a valid source rectangle, so direct assignment to any
     // plane was rejected and the frame fell back to composition.
-    const std::uint32_t src_w = d.src_rect.w != 0 ? d.src_rect.w : fmt.width;
-    const std::uint32_t src_h = d.src_rect.h != 0 ? d.src_rect.h : fmt.height;
-    dst.set_property(drm::planes::PropTag::SrcX,
-                     to_16_16(static_cast<std::uint32_t>(d.src_rect.x)));
-    dst.set_property(drm::planes::PropTag::SrcY,
-                     to_16_16(static_cast<std::uint32_t>(d.src_rect.y)));
-    dst.set_property(drm::planes::PropTag::SrcW, to_16_16(src_w));
-    dst.set_property(drm::planes::PropTag::SrcH, to_16_16(src_h));
+    if (d.src_rect_fixed.has_value()) {
+      // Already 16.16: written as given, so a sub-pixel crop survives.
+      const FixedRect& f = *d.src_rect_fixed;
+      dst.set_property(drm::planes::PropTag::SrcX, f.x);
+      dst.set_property(drm::planes::PropTag::SrcY, f.y);
+      dst.set_property(drm::planes::PropTag::SrcW, f.w != 0 ? f.w : to_16_16(fmt.width));
+      dst.set_property(drm::planes::PropTag::SrcH, f.h != 0 ? f.h : to_16_16(fmt.height));
+    } else {
+      const std::uint32_t src_w = d.src_rect.w != 0 ? d.src_rect.w : fmt.width;
+      const std::uint32_t src_h = d.src_rect.h != 0 ? d.src_rect.h : fmt.height;
+      dst.set_property(drm::planes::PropTag::SrcX,
+                       to_16_16(static_cast<std::uint32_t>(d.src_rect.x)));
+      dst.set_property(drm::planes::PropTag::SrcY,
+                       to_16_16(static_cast<std::uint32_t>(d.src_rect.y)));
+      dst.set_property(drm::planes::PropTag::SrcW, to_16_16(src_w));
+      dst.set_property(drm::planes::PropTag::SrcH, to_16_16(src_h));
+    }
 
     // Format + modifier let the allocator statically screen planes for
     // compatibility before any test commit. The allocator reads both
@@ -2007,7 +2016,15 @@ class LayerScene::Impl {
         acq->cached_dma_buf.reset();
         continue;
       }
-      const CompositeRect src_rect{d.src_rect.x, d.src_rect.y, d.src_rect.w, d.src_rect.h};
+      // The canvas samples whole pixels, so a sub-pixel crop rounds to the
+      // nearest one.
+      const auto round_px = [](std::uint32_t v) { return (v + 0x8000U) >> 16U; };
+      const CompositeRect src_rect =
+          d.src_rect_fixed.has_value()
+              ? CompositeRect{static_cast<std::int32_t>(round_px(d.src_rect_fixed->x)),
+                              static_cast<std::int32_t>(round_px(d.src_rect_fixed->y)),
+                              round_px(d.src_rect_fixed->w), round_px(d.src_rect_fixed->h)}
+              : CompositeRect{d.src_rect.x, d.src_rect.y, d.src_rect.w, d.src_rect.h};
       const CompositeRect dst_rect{d.dst_rect.x, d.dst_rect.y, d.dst_rect.w, d.dst_rect.h};
       composition_canvas_->blend(src, src_rect, dst_rect);
       ++composited;

@@ -125,6 +125,22 @@ TEST(SceneDisplayParams, TranslationAloneDoesNotImplyScaling) {
   EXPECT_FALSE(dp.needs_scaling());
 }
 
+// A 16.16 source rect scales exactly when its size, not rounded to whole
+// pixels, differs from the destination's.
+TEST(SceneDisplayParams, FixedSrcRectScalesOnItsExactSize) {
+  drm::scene::DisplayParams dp;
+  dp.src_rect = drm::scene::Rect{0, 0, 10, 10};  // ignored once fixed is set
+  dp.dst_rect = drm::scene::Rect{0, 0, 800, 600};
+  dp.src_rect_fixed = drm::scene::FixedRect{0x8000U, 0, 800U << 16U, 600U << 16U};
+  EXPECT_FALSE(dp.needs_scaling());  // a half-pixel offset alone is no scale
+
+  dp.src_rect_fixed->w = (800U << 16U) - 0x8000U;  // 799.5 px onto 800
+  EXPECT_TRUE(dp.needs_scaling());
+
+  dp.src_rect_fixed.reset();  // back to the whole-pixel rect
+  EXPECT_TRUE(dp.needs_scaling());
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // CommitReport & CompositeCanvasConfig
 // ─────────────────────────────────────────────────────────────────────
@@ -345,6 +361,18 @@ TEST(SceneLayerIfChanged, SrcRectDirtiesOnChangeOnly) {
   layer.mark_clean();
   layer.set_src_rect_if_changed(drm::scene::Rect{0, 0, 100, 100});
   EXPECT_FALSE(layer.is_dirty());
+}
+
+TEST(SceneLayerIfChanged, FixedSrcRectDirtiesOnChangeOnly) {
+  auto layer = make_clean_layer();
+  const drm::scene::FixedRect r{0x8000U, 0, 100U << 16U, 100U << 16U};
+  layer.set_src_rect_fixed_if_changed(r);
+  EXPECT_TRUE(layer.is_dirty());
+  layer.mark_clean();
+  layer.set_src_rect_fixed_if_changed(r);
+  EXPECT_FALSE(layer.is_dirty());
+  layer.set_src_rect_fixed_if_changed(std::nullopt);
+  EXPECT_TRUE(layer.is_dirty());
 }
 
 TEST(SceneLayerIfChanged, RotationDirtiesOnChangeOnly) {
