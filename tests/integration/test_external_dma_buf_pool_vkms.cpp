@@ -321,6 +321,121 @@ TEST(ExternalDmaBufPoolVkms, ResetGenerationRetiresOldBuffers) {
   EXPECT_EQ((*pool)->cached_count(), 1U);  // only the new-generation B remains
 }
 
+// retire() of a buffer off screen tears it down at the next sweep, without
+// waiting for LRU pressure.
+TEST(ExternalDmaBufPoolVkms, RetireTearsDownAnIdleBuffer) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR);
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds.at(0), probe->stride));
+  (*pool)->submit(0xB, one(p, probe->dmabuf_fds.at(1), probe->stride));
+  auto b = (*pool)->acquire();  // B scanning; A was superseded before scanout
+  ASSERT_TRUE(b.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 2U);
+
+  (*pool)->retire(0xA);
+  EXPECT_EQ((*pool)->cached_count(), 2U);  // torn down on the commit thread
+  auto held = (*pool)->acquire();          // sweep
+  ASSERT_TRUE(held.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 1U);
+}
+
+// A retired buffer that is still on screen stays until a later frame displaces
+// it and the commit that scanned it retires.
+TEST(ExternalDmaBufPoolVkms, RetireWaitsForTheBufferToLeaveScanout) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR);
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds.at(0), probe->stride));
+  auto a = (*pool)->acquire();  // A scanning, token outstanding
+  ASSERT_TRUE(a.has_value());
+  (*pool)->retire(0xA);
+  auto still = (*pool)->acquire();  // idle-hold A: still on screen
+  ASSERT_TRUE(still.has_value());
+  EXPECT_EQ(still->fb_id, a->fb_id);
+  EXPECT_EQ((*pool)->cached_count(), 1U);
+
+  (*pool)->submit(0xB, one(p, probe->dmabuf_fds.at(1), probe->stride));
+  auto b = (*pool)->acquire();  // B displaces A
+  ASSERT_TRUE(b.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 2U);  // A's commits have not retired
+
+  (*pool)->release_with_fence(std::move(*a), std::nullopt);
+  (*pool)->release_with_fence(std::move(*still), std::nullopt);
+  auto held = (*pool)->acquire();  // sweep: A is referenced by nothing now
+  ASSERT_TRUE(held.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 1U);
+}
+
+// A retired key may name a different dma-buf if it comes back, so its cached
+// import must not stand in for it: until the old import is gone the frame is
+// skipped, and after that the key imports afresh.
+TEST(ExternalDmaBufPoolVkms, RetiredKeyImportsAfreshOnlyOnceTornDown) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR);
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds.at(0), probe->stride));
+  auto a = (*pool)->acquire();  // A scanning
+  ASSERT_TRUE(a.has_value());
+  (*pool)->retire(0xA);
+
+  // Key A again, now naming buffer 1, while the old import is on screen: the
+  // frame is skipped and the old buffer holds.
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds.at(1), probe->stride));
+  auto held = (*pool)->acquire();
+  ASSERT_TRUE(held.has_value());
+  EXPECT_EQ(held->fb_id, a->fb_id);
+
+  // Displace and retire the old import, then key A imports buffer 1 afresh.
+  (*pool)->submit(0xB, one(p, probe->dmabuf_fds.at(1), probe->stride));
+  auto b = (*pool)->acquire();
+  ASSERT_TRUE(b.has_value());
+  (*pool)->release_with_fence(std::move(*a), std::nullopt);
+  (*pool)->release_with_fence(std::move(*held), std::nullopt);
+  auto swept = (*pool)->acquire();  // tears the old A down
+  ASSERT_TRUE(swept.has_value());
+  EXPECT_EQ((*pool)->cached_count(), 1U);
+
+  (*pool)->submit(0xA, one(p, probe->dmabuf_fds.at(1), probe->stride));
+  EXPECT_EQ((*pool)->cached_count(), 2U);  // a fresh import under key A
+  auto fresh = (*pool)->acquire();
+  ASSERT_TRUE(fresh.has_value());
+  EXPECT_NE(fresh->fb_id, 0U);
+}
+
+TEST(ExternalDmaBufPoolVkms, RetireOfAnUnknownKeyIsANoOp) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR);
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+  (*pool)->retire(0x99);
+  // Never retired, so the key is not stale and imports normally.
+  (*pool)->submit(0x99, one(p, probe->dmabuf_fds.at(0), probe->stride));
+  EXPECT_EQ((*pool)->cached_count(), 1U);
+}
+
 // Degradation: a submit whose planes fail validation is skipped entirely — not
 // imported, and never handed to the presenter — so the layer holds its last good
 // frame instead of blanking.

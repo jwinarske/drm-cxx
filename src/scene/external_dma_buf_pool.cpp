@@ -93,6 +93,14 @@ void ExternalDmaBufPool::submit(std::uintptr_t buffer_key,
                                 drm::span<const DamageRect> damage) noexcept {
   {
     const std::scoped_lock lock(slots_mu_);
+    if (stale_.count(buffer_key) != 0) {
+      // retire()d, and its old import is not torn down yet (a commit still
+      // holds it). The key may name a different dma-buf now, so the cached
+      // fb_id cannot stand in for it, and a second import cannot be keyed the
+      // same. Hold the last frame; once the sweep has run the key is new.
+      debug_step("submit: key retired and not yet torn down — frame skipped");
+      return;
+    }
     if (slots_.find(buffer_key) == slots_.end()) {
       // First sight of this key: validate + import its planes, caching the fb_id.
       if (planes.empty() || planes.size() > detail::k_max_planes) {
@@ -147,6 +155,17 @@ void ExternalDmaBufPool::reset_generation(std::uint32_t width, std::uint32_t hei
   for (const auto& [key, slot] : slots_) {
     retiring_.insert(key);
   }
+}
+
+void ExternalDmaBufPool::retire(std::uintptr_t buffer_key) noexcept {
+  const std::scoped_lock lock(slots_mu_);
+  if (slots_.find(buffer_key) == slots_.end()) {
+    return;
+  }
+  // Torn down by the next acquire()'s sweep once nothing references it -- on
+  // the commit thread, where the presenter's liveness view is stable.
+  retiring_.insert(buffer_key);
+  stale_.insert(buffer_key);
 }
 
 drm::expected<AcquiredBuffer, std::error_code> ExternalDmaBufPool::acquire() {
@@ -224,6 +243,7 @@ void ExternalDmaBufPool::evict_locked(std::uintptr_t buffer_key) noexcept {
     lru_.erase(it->second);
     lru_pos_.erase(it);
   }
+  stale_.erase(buffer_key);  // gone; the key is free for a fresh import
 }
 
 void ExternalDmaBufPool::sweep_retiring_locked() noexcept {
@@ -311,6 +331,7 @@ drm::expected<void, std::error_code> ExternalDmaBufPool::on_session_resumed(
   for (const std::uintptr_t key : dropped) {
     slots_.erase(key);
     retiring_.erase(key);
+    stale_.erase(key);
     if (auto it = lru_pos_.find(key); it != lru_pos_.end()) {
       lru_.erase(it->second);
       lru_pos_.erase(it);

@@ -109,6 +109,20 @@ class ExternalDmaBufPool : public LayerBufferSource {
               std::optional<drm::sync::SyncFence> acquire = std::nullopt,
               drm::span<const DamageRect> damage = {}) noexcept;
 
+  /// The producer will not show `buffer_key` again: tear its import down (FB,
+  /// GEM handles, duped fds) as soon as no in-flight commit still holds it,
+  /// rather than leaving it to LRU pressure -- the same deferral eviction and
+  /// reset_generation() use. A buffer still scanning out stays on screen until
+  /// a later frame displaces it. An unknown key is a no-op. Thread-safe vs
+  /// acquire()/release().
+  ///
+  /// Unlike a generation retirement, this is final for the import: the key may
+  /// name a different dma-buf if it is ever submitted again. Until the old
+  /// import is gone, such a submit() is skipped and the layer holds its last
+  /// frame; after that the key is new and imports afresh. A producer that
+  /// never reuses a retired key never sees the skip.
+  void retire(std::uintptr_t buffer_key) noexcept;
+
   /// Number of buffers currently imported/cached (observability + tests).
   [[nodiscard]] std::size_t cached_count() const noexcept;
 
@@ -177,6 +191,10 @@ class ExternalDmaBufPool : public LayerBufferSource {
   std::unordered_map<std::uintptr_t, std::list<std::uintptr_t>::iterator> lru_pos_;
   // Keys of a superseded generation awaiting deferred teardown on retire.
   std::unordered_set<std::uintptr_t> retiring_;
+  // Keys retire()d individually. Also in retiring_; kept apart because a
+  // resubmit must not revive the cached import the way a generation
+  // retirement's does. Cleared when the import is torn down.
+  std::unordered_set<std::uintptr_t> stale_;
 
   // Presentation state machine, keyed by buffer_key. See external_ring_core.hpp.
   detail::RingPresenter presenter_;
