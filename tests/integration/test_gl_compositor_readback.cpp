@@ -25,12 +25,15 @@
 #include "scene/gl_compositor.hpp"
 
 #include <drm-cxx/core/device.hpp>
+#include <drm-cxx/core/egl_loader.hpp>
 #include <drm-cxx/detail/span.hpp>
 
 #include <drm_fourcc.h>
 #include <gbm.h>
 #include <xf86drmMode.h>
 
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -334,6 +337,150 @@ TEST(GlCompositorReadback, SoftwareRendererRejectedByDefault) {
   auto sw = drm::scene::GlCompositor::create(*dev, relaxed);
   EXPECT_TRUE(sw.has_value())
       << "allow_software create should succeed where the strict create was rejected";
+}
+
+namespace {
+
+// A context of the test's own, current on this thread the way an embedder's
+// render context is when it drives the scene. Surfaceless, so it needs
+// EGL_KHR_surfaceless_context; ok() is false where that is missing.
+class CallerContext {
+ public:
+  explicit CallerContext(int drm_fd) {
+    const auto& egl = drm::detail::egl_loader();
+    if (!egl.loaded || (egl.get_platform_display_core == nullptr) ||
+        (egl.get_current_context == nullptr)) {
+      return;
+    }
+    gbm_ = gbm_create_device(drm_fd);
+    if (gbm_ == nullptr) {
+      return;
+    }
+    display_ = egl.get_platform_display_core(EGL_PLATFORM_GBM_KHR, gbm_, nullptr);
+    if ((display_ == EGL_NO_DISPLAY) || (egl.initialize(display_, nullptr, nullptr) != EGL_TRUE) ||
+        (egl.bind_api(EGL_OPENGL_ES_API) != EGL_TRUE)) {
+      return;
+    }
+    const EGLint cfg_attrs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE};
+    EGLConfig config = nullptr;
+    EGLint n = 0;
+    if ((egl.choose_config(display_, cfg_attrs, &config, 1, &n) != EGL_TRUE) || (n == 0)) {
+      return;
+    }
+    const EGLint ctx_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+    context_ = egl.create_context(display_, config, EGL_NO_CONTEXT, ctx_attrs);
+    if (context_ == EGL_NO_CONTEXT) {
+      return;
+    }
+    ok_ = egl.make_current(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_) == EGL_TRUE;
+  }
+
+  ~CallerContext() {
+    const auto& egl = drm::detail::egl_loader();
+    if (display_ != EGL_NO_DISPLAY) {
+      egl.make_current(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      if (context_ != EGL_NO_CONTEXT) {
+        egl.destroy_context(display_, context_);
+      }
+      egl.terminate(display_);
+    }
+    if (gbm_ != nullptr) {
+      gbm_device_destroy(gbm_);
+    }
+  }
+
+  CallerContext(const CallerContext&) = delete;
+  CallerContext& operator=(const CallerContext&) = delete;
+  CallerContext(CallerContext&&) = delete;
+  CallerContext& operator=(CallerContext&&) = delete;
+
+  [[nodiscard]] bool ok() const { return ok_; }
+  [[nodiscard]] bool still_current() const {
+    const auto& egl = drm::detail::egl_loader();
+    return egl.get_current_context() == context_ && egl.get_current_display() == display_ &&
+           egl.get_current_surface(EGL_DRAW) == EGL_NO_SURFACE;
+  }
+
+ private:
+  gbm_device* gbm_{nullptr};
+  EGLDisplay display_{EGL_NO_DISPLAY};
+  EGLContext context_{EGL_NO_CONTEXT};
+  bool ok_{false};
+};
+
+}  // namespace
+
+// The compositor runs on the thread that drives the scene, which in an embedder
+// is its render thread, with its own context current. Every compositor call
+// makes the compositor's context current to do its work; the caller's has to
+// be current again when each returns, or the caller's next draw lands in the
+// compositor's context and its next swap fails.
+TEST(GlCompositorReadback, CallersContextSurvivesAFrame) {
+  auto dev = open_gl_kms_device();
+  if (!dev) {
+    GTEST_SKIP() << "no GL-capable KMS card — GPU path not exercisable";
+  }
+  CallerContext caller(dev->fd());
+  if (!caller.ok()) {
+    GTEST_SKIP() << "no surfaceless EGL context for the caller on this stack";
+  }
+
+  drm::scene::CompositeCanvasConfig cfg;
+  cfg.canvas_width = 64;
+  cfg.canvas_height = 64;
+  cfg.allow_software_renderer = true;
+  auto comp = drm::scene::GlCompositor::create(*dev, cfg);
+  ASSERT_TRUE(comp.has_value()) << comp.error().message();
+  EXPECT_TRUE(caller.still_current()) << "create() left its own context current";
+
+  std::vector<std::uint8_t> red(static_cast<std::size_t>(16) * 16U * 4U, 0U);
+  drm::scene::CompositeSrc src;
+  src.pixels = drm::span<const std::uint8_t>(red.data(), red.size());
+  src.src_stride_bytes = 16U * 4U;
+  src.src_width = 16;
+  src.src_height = 16;
+  src.drm_fourcc = DRM_FORMAT_XRGB8888;
+
+  (*comp)->begin_frame();
+  EXPECT_TRUE(caller.still_current()) << "begin_frame()";
+  (*comp)->clear();
+  EXPECT_TRUE(caller.still_current()) << "clear()";
+  (*comp)->blend(src, drm::scene::CompositeRect{0, 0, 16, 16},
+                 drm::scene::CompositeRect{0, 0, 16, 16});
+  EXPECT_TRUE(caller.still_current()) << "blend()";
+  ASSERT_TRUE((*comp)->flush().has_value());
+  EXPECT_TRUE(caller.still_current()) << "flush()";
+
+  // And the frame still drew, now that each call brings its context back.
+  std::vector<std::uint8_t> px;
+  ASSERT_TRUE((*comp)->read_back(px).has_value());
+  ASSERT_FALSE(px.empty());
+
+  comp->reset();
+  EXPECT_TRUE(caller.still_current()) << "the destructor unbound the caller's context";
+}
+
+// The same when create() gives up part-way: on a software renderer, without
+// allow_software_renderer, it brings a context up, looks at the renderer and
+// tears it all down again. Before, that left no context current at all.
+TEST(GlCompositorReadback, CallersContextSurvivesARejectedCreate) {
+  auto dev = open_gl_kms_device();
+  if (!dev) {
+    GTEST_SKIP() << "no GL-capable KMS card — GPU path not exercisable";
+  }
+  CallerContext caller(dev->fd());
+  if (!caller.ok()) {
+    GTEST_SKIP() << "no surfaceless EGL context for the caller on this stack";
+  }
+  drm::scene::CompositeCanvasConfig strict;
+  strict.canvas_width = 64;
+  strict.canvas_height = 64;
+  strict.allow_software_renderer = false;
+  // Rejected on llvmpipe, accepted on a GPU; either way the caller keeps its
+  // context.
+  auto comp = drm::scene::GlCompositor::create(*dev, strict);
+  EXPECT_TRUE(caller.still_current())
+      << (comp ? "an accepted" : "a rejected") << " create() changed the current context";
 }
 
 #else
