@@ -40,6 +40,9 @@ jobs:
             cxx: clang++-20
 
     name: ${{ matrix.compiler }}-${{ matrix.version }}
+    env:
+      # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
+      APT_PACKAGES: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev hwdata ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -49,9 +52,15 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
-          packages: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev hwdata ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
+          packages: ${{ env.APT_PACKAGES }}
           version: 1.0
+
+      # The cached install reports success even when apt failed, and
+      # caches the empty result; install anything it left out.
+      - name: Verify dependencies
+        run: |
+          # shellcheck disable=SC2086 # one argument per package
+          .github/scripts/ensure-apt-packages.sh $APT_PACKAGES
 
       # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
       # 0.1.1). Build the 0.2.0 tag from source and cache the install prefix
@@ -112,6 +121,18 @@ jobs:
   build-cxx23:
     runs-on: ubuntu-24.04
     name: gcc-14-cxx23
+    env:
+      # Examples are built here (the std::format path is used heavily in
+      # examples — the bug this lane guards lived in egl_scene), so pull the
+      # example-facing deps too: libegl/libgles (egl_scene + gl_present land
+      # on a present `egl`/`glesv2` dependency, independent of -Degl),
+      # libxcursor (mouse_cursor/xcursor_smoke link the library's cursor
+      # module unconditionally), libseat (session), libgstreamer
+      # (GstAppsinkSource + video_player). blend2d / libcamera / thorvg
+      # examples auto-skip without their deps (they're feature-gated), which
+      # is fine — the std::format coverage they'd add is verified elsewhere.
+      # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
+      APT_PACKAGES: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libegl1-mesa-dev libgles2-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev hwdata g++-14
 
     steps:
       - uses: actions/checkout@v4
@@ -121,18 +142,15 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          # Examples are built here (the std::format path is used heavily in
-          # examples — the bug this lane guards lived in egl_scene), so pull the
-          # example-facing deps too: libegl/libgles (egl_scene + gl_present land
-          # on a present `egl`/`glesv2` dependency, independent of -Degl),
-          # libxcursor (mouse_cursor/xcursor_smoke link the library's cursor
-          # module unconditionally), libseat (session), libgstreamer
-          # (GstAppsinkSource + video_player). blend2d / libcamera / thorvg
-          # examples auto-skip without their deps (they're feature-gated), which
-          # is fine — the std::format coverage they'd add is verified elsewhere.
-          # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
-          packages: meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libegl1-mesa-dev libgles2-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev hwdata g++-14
+          packages: ${{ env.APT_PACKAGES }}
           version: 1.0
+
+      # The cached install reports success even when apt failed, and
+      # caches the empty result; install anything it left out.
+      - name: Verify dependencies
+        run: |
+          # shellcheck disable=SC2086 # one argument per package
+          .github/scripts/ensure-apt-packages.sh $APT_PACKAGES
 
       # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
       # 0.1.1). Same source-build + cache pattern as the other jobs.
@@ -191,6 +209,16 @@ jobs:
             cxx: clang++-19
 
     name: cmake-${{ matrix.compiler }}-${{ matrix.version }}
+    env:
+      # libyuv-dev satisfies examples/scene/camera's libyuv pkg-config probe.
+      # libva-dev (libva + libva-drm) lights up the camera example's
+      # hardware MJPEG decode path; without it the example silently
+      # falls back to CPU libyuv decode.
+      # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps
+      # (yaml/jinja2/ply drive its source-generators; libyaml-dev is the
+      # runtime config parser). hwdata supplies the pnp.ids file
+      # libdisplay-info reads at build time.
+      APT_PACKAGES: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libva-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -200,16 +228,15 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          # libyuv-dev satisfies examples/scene/camera's libyuv pkg-config probe.
-          # libva-dev (libva + libva-drm) lights up the camera example's
-          # hardware MJPEG decode path; without it the example silently
-          # falls back to CPU libyuv decode.
-          # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps
-          # (yaml/jinja2/ply drive its source-generators; libyaml-dev is the
-          # runtime config parser). hwdata supplies the pnp.ids file
-          # libdisplay-info reads at build time.
-          packages: cmake meson ninja-build pkg-config libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libva-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata ${{ matrix.compiler == 'gcc' && format('g++-{0}', matrix.version) || format('clang-{0}', matrix.version) }}
+          packages: ${{ env.APT_PACKAGES }}
           version: 1.0
+
+      # The cached install reports success even when apt failed, and
+      # caches the empty result; install anything it left out.
+      - name: Verify dependencies
+        run: |
+          # shellcheck disable=SC2086 # one argument per package
+          .github/scripts/ensure-apt-packages.sh $APT_PACKAGES
 
       # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
       # 0.1.1). Build the 0.2.0 tag from source and cache the install prefix.
@@ -425,6 +452,35 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     name: lint
+    env:
+      # libyuv-dev satisfies examples/scene/camera's libyuv pkg-config probe.
+      # libgstreamer1.0-dev / libgstreamer-plugins-base1.0-dev satisfy the
+      # gstreamer-1.0 / gstreamer-app-1.0 / gstreamer-allocators-1.0 /
+      # gstreamer-video-1.0 probes so scene/gst_appsink_source.cpp and
+      # examples/scene/video_player land in compile_commands.json with
+      # proper include paths — without them tidy's find-walk parses
+      # video_player/main.cpp with default flags and reports bogus
+      # "<gst/gst.h> not found" / "<memory> unused" lints.
+      # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps.
+      # libva-dev (libva + libva-drm) covers the camera example's
+      # vaapi_jpeg_decoder TU so it lands in compile_commands.json
+      # for tidy; absent, tidy walks it with default flags and lints
+      # a half-parsed TU.
+      # libegl1-mesa-dev + libgles2-mesa-dev cover scene/egl_runtime,
+      # scene/stream_capability, scene/egl_stream_source, and
+      # scene/egl_stream_builder so the EGL Streams TUs land in
+      # compile_commands.json for tidy. Mesa's libEGL is enough for
+      # the headers — no NVIDIA proprietary userspace needed at lint
+      # time; the runtime probe only ever reports Unsupported on
+      # Mesa hosts (intentional and tested).
+      # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
+      # glslang-tools provides glslangValidator so cluster_sim_vulkan's
+      # SPV-header custom_targets fire and the TU lands in
+      # compile_commands.json (without it, meson hits subdir_done() and
+      # tidy's find-walk lints the file with default flags, then reports
+      # bogus "bg_frag_spv.h not found" / unused-include / uninitialized-
+      # variable cascades from the parse failure).
+      APT_PACKAGES: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libva-dev libegl1-mesa-dev libgles2-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata clang-19 clang-tidy-19 clang-format-19 glslang-tools
     permissions:
       contents: read
 
@@ -440,35 +496,15 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          # libyuv-dev satisfies examples/scene/camera's libyuv pkg-config probe.
-          # libgstreamer1.0-dev / libgstreamer-plugins-base1.0-dev satisfy the
-          # gstreamer-1.0 / gstreamer-app-1.0 / gstreamer-allocators-1.0 /
-          # gstreamer-video-1.0 probes so scene/gst_appsink_source.cpp and
-          # examples/scene/video_player land in compile_commands.json with
-          # proper include paths — without them tidy's find-walk parses
-          # video_player/main.cpp with default flags and reports bogus
-          # "<gst/gst.h> not found" / "<memory> unused" lints.
-          # python3-{yaml,jinja2,ply} + libyaml-dev are libcamera build deps.
-          # libva-dev (libva + libva-drm) covers the camera example's
-          # vaapi_jpeg_decoder TU so it lands in compile_commands.json
-          # for tidy; absent, tidy walks it with default flags and lints
-          # a half-parsed TU.
-          # libegl1-mesa-dev + libgles2-mesa-dev cover scene/egl_runtime,
-          # scene/stream_capability, scene/egl_stream_source, and
-          # scene/egl_stream_builder so the EGL Streams TUs land in
-          # compile_commands.json for tidy. Mesa's libEGL is enough for
-          # the headers — no NVIDIA proprietary userspace needed at lint
-          # time; the runtime probe only ever reports Unsupported on
-          # Mesa hosts (intentional and tested).
-          # hwdata supplies the pnp.ids file libdisplay-info reads at build time.
-          # glslang-tools provides glslangValidator so cluster_sim_vulkan's
-          # SPV-header custom_targets fire and the TU lands in
-          # compile_commands.json (without it, meson hits subdir_done() and
-          # tidy's find-walk lints the file with default flags, then reports
-          # bogus "bg_frag_spv.h not found" / unused-include / uninitialized-
-          # variable cascades from the parse failure).
-          packages: cmake meson ninja-build libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev libvulkan-dev libseat-dev libxcursor-dev libyuv-dev libva-dev libegl1-mesa-dev libgles2-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libyaml-dev python3-yaml python3-jinja2 python3-ply hwdata clang-19 clang-tidy-19 clang-format-19 glslang-tools
+          packages: ${{ env.APT_PACKAGES }}
           version: 1.0
+
+      # The cached install reports success even when apt failed, and
+      # caches the empty result; install anything it left out.
+      - name: Verify dependencies
+        run: |
+          # shellcheck disable=SC2086 # one argument per package
+          .github/scripts/ensure-apt-packages.sh $APT_PACKAGES
 
       # libdisplay-info >=0.2.0 isn't packaged on ubuntu-24.04 (noble ships
       # 0.1.1). Without it, src/display/edid.cpp drops out of
@@ -646,6 +682,8 @@ jobs:
       matrix:
         std: [c++20, c++23]
     name: gn-libc++-${{ matrix.std }}
+    env:
+      APT_PACKAGES: clang libc++-dev libc++abi-dev libdrm-dev libgbm-dev pkg-config
     steps:
       - uses: actions/checkout@v4
         with:
@@ -654,8 +692,15 @@ jobs:
       - name: Install dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: clang libc++-dev libc++abi-dev libdrm-dev libgbm-dev pkg-config
+          packages: ${{ env.APT_PACKAGES }}
           version: 1.0
+
+      # The cached install reports success even when apt failed, and
+      # caches the empty result; install anything it left out.
+      - name: Verify dependencies
+        run: |
+          # shellcheck disable=SC2086 # one argument per package
+          .github/scripts/ensure-apt-packages.sh $APT_PACKAGES
 
       - name: Compile drm_cxx_min sources under clang + libc++
         run: |
