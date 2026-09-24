@@ -94,6 +94,9 @@ class GlCompositor : public CompositionTarget {
   [[nodiscard]] drm::expected<void, std::error_code> init_egl();
   // Tear EGL down (surface/context/display) — must run before source_ dies.
   void teardown_egl() noexcept;
+  // Make the compositor's context and surface current on this thread. Each
+  // entry point restores the caller's on the way out (see CallerEglState).
+  [[nodiscard]] bool make_current() const noexcept;
 
   // Import a CompositeSrc's dma-buf (1..3 planes) as an EGLImage
   // (EGL_LINUX_DMA_BUF_EXT) for direct sampling. Returns EGL_NO_IMAGE_KHR when

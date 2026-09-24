@@ -48,6 +48,13 @@ void initialize_runtime(EglLoader& rt) noexcept {
   rt.destroy_surface = resolve_sym<decltype(rt.destroy_surface)>(rt.handle, "eglDestroySurface");
   rt.choose_config = resolve_sym<decltype(rt.choose_config)>(rt.handle, "eglChooseConfig");
   rt.bind_api = resolve_sym<decltype(rt.bind_api)>(rt.handle, "eglBindAPI");
+  rt.get_current_context =
+      resolve_sym<decltype(rt.get_current_context)>(rt.handle, "eglGetCurrentContext");
+  rt.get_current_display =
+      resolve_sym<decltype(rt.get_current_display)>(rt.handle, "eglGetCurrentDisplay");
+  rt.get_current_surface =
+      resolve_sym<decltype(rt.get_current_surface)>(rt.handle, "eglGetCurrentSurface");
+  rt.query_api = resolve_sym<decltype(rt.query_api)>(rt.handle, "eglQueryAPI");
   rt.get_platform_display_core =
       resolve_sym<decltype(rt.get_platform_display_core)>(rt.handle, "eglGetPlatformDisplay");
   rt.get_config_attrib =

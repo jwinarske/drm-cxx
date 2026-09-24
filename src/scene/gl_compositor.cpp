@@ -46,6 +46,81 @@ namespace {
   return std::make_error_code(code);
 }
 
+// What the calling thread had current on entry to a compositor call, put back
+// on the way out.
+//
+// The compositor runs on whatever thread drives the scene, which in an
+// embedder is typically its render thread with its own context current. Each
+// call here makes the compositor's context current to do its work; without
+// this the caller's stays unbound afterwards -- its next draw lands in our
+// context, or, once ours is torn down, in none, and its next swap fails with
+// EGL_BAD_SURFACE. The bound client API is put back as well, since init binds
+// OpenGL ES.
+//
+// Inert on a libEGL that does not export the eglGetCurrent* queries.
+class CallerEglState {
+ public:
+  CallerEglState() noexcept {
+    const auto& egl = drm::detail::egl_loader();
+    armed_ = (egl.get_current_context != nullptr) && (egl.get_current_display != nullptr) &&
+             (egl.get_current_surface != nullptr) && (egl.make_current != nullptr);
+    if (!armed_) {
+      return;
+    }
+    display_ = egl.get_current_display();
+    draw_ = egl.get_current_surface(EGL_DRAW);
+    read_ = egl.get_current_surface(EGL_READ);
+    context_ = egl.get_current_context();
+    if (egl.query_api != nullptr) {
+      api_ = egl.query_api();
+    }
+  }
+
+  ~CallerEglState() {
+    if (!armed_) {
+      return;
+    }
+    const auto& egl = drm::detail::egl_loader();
+    // The API first: eglMakeCurrent binds for the current one.
+    if ((api_ != 0) && (egl.query_api != nullptr) && (egl.bind_api != nullptr) &&
+        (egl.query_api() != api_)) {
+      egl.bind_api(api_);
+    }
+    if ((egl.get_current_context() == context_) && (egl.get_current_surface(EGL_DRAW) == draw_) &&
+        (egl.get_current_surface(EGL_READ) == read_)) {
+      return;
+    }
+    if (context_ == EGL_NO_CONTEXT) {
+      // Nothing was current: release what the compositor made current.
+      EGLDisplay current = egl.get_current_display();
+      if (current != EGL_NO_DISPLAY) {
+        egl.make_current(current, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+      }
+      return;
+    }
+    if (egl.make_current(display_, draw_, read_, context_) != EGL_TRUE) {
+      // A destructor must not throw, and formatting a log line can.
+      try {
+        drm::log_warn("GlCompositor: could not restore the caller's EGL context");
+      } catch (...) {  // NOLINT(bugprone-empty-catch)
+      }
+    }
+  }
+
+  CallerEglState(const CallerEglState&) = delete;
+  CallerEglState& operator=(const CallerEglState&) = delete;
+  CallerEglState(CallerEglState&&) = delete;
+  CallerEglState& operator=(CallerEglState&&) = delete;
+
+ private:
+  bool armed_{false};
+  EGLDisplay display_{EGL_NO_DISPLAY};
+  EGLSurface draw_{EGL_NO_SURFACE};
+  EGLSurface read_{EGL_NO_SURFACE};
+  EGLContext context_{EGL_NO_CONTEXT};
+  EGLenum api_{0};
+};
+
 // Opt-in: when the default GL renderer is software, retry the context with
 // MESA_LOADER_DRIVER_OVERRIDE=zink to reach hardware GL via zink (GL-on-Vulkan)
 // on embedded split-GPU boards whose Mesa GL on the display node is software
@@ -235,6 +310,7 @@ GlCompositor::~GlCompositor() {
 drm::expected<void, std::error_code> GlCompositor::init_egl() {
   const auto& egl = drm::detail::egl_loader();
   const auto& gl = drm::detail::gles_loader();
+  const CallerEglState caller;
 
   EGLDisplay display =
       egl.get_platform_display_core(EGL_PLATFORM_GBM_KHR, source_->native_device(), nullptr);
@@ -401,7 +477,11 @@ void GlCompositor::teardown_egl() noexcept {
   armable_ = false;
   auto* const display = static_cast<EGLDisplay>(display_);
   if (display != nullptr) {
-    if (egl.make_current != nullptr) {
+    // Release the compositor's context if this thread has it current. Only
+    // then: releasing unconditionally unbinds whatever the caller has current.
+    const bool ours_current = (egl.get_current_context == nullptr) ||
+                              (egl.get_current_context() == static_cast<EGLContext>(context_));
+    if ((egl.make_current != nullptr) && ours_current) {
       egl.make_current(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     }
     if ((surface_ != nullptr) && (egl.destroy_surface != nullptr)) {
@@ -426,16 +506,21 @@ void GlCompositor::teardown_egl() noexcept {
   frame_open_ = false;
 }
 
-void GlCompositor::begin_frame() noexcept {
+bool GlCompositor::make_current() const noexcept {
   const auto& egl = drm::detail::egl_loader();
-  const auto& gl = drm::detail::gles_loader();
-  frame_open_ = false;
   if ((display_ == nullptr) || (surface_ == nullptr) || (context_ == nullptr)) {
-    return;
+    return false;
   }
-  if (egl.make_current(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
-                       static_cast<EGLSurface>(surface_),
-                       static_cast<EGLContext>(context_)) != EGL_TRUE) {
+  return egl.make_current(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_),
+                          static_cast<EGLSurface>(surface_),
+                          static_cast<EGLContext>(context_)) == EGL_TRUE;
+}
+
+void GlCompositor::begin_frame() noexcept {
+  const auto& gl = drm::detail::gles_loader();
+  const CallerEglState caller;
+  frame_open_ = false;
+  if (!make_current()) {
     return;
   }
   gl.viewport(0, 0, static_cast<drm::detail::GLsizei>(width_),
@@ -449,6 +534,10 @@ void GlCompositor::begin_frame() noexcept {
 
 void GlCompositor::clear() noexcept {
   if (!frame_open_) {
+    return;
+  }
+  const CallerEglState caller;
+  if (!make_current()) {
     return;
   }
   const auto& gl = drm::detail::gles_loader();
@@ -522,6 +611,10 @@ bool GlCompositor::supports_dma_buf_import(std::uint32_t drm_fourcc) const noexc
 void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
                          const CompositeRect& dst_rect) noexcept {
   if (!frame_open_) {
+    return;
+  }
+  const CallerEglState caller;
+  if (!make_current()) {
     return;
   }
   const bool is_rgb =
@@ -672,9 +765,14 @@ void GlCompositor::draw_source_quad(std::int32_t attr_pos, std::int32_t attr_uv,
 
 drm::expected<void, std::error_code> GlCompositor::flush() noexcept {
   const auto& egl = drm::detail::egl_loader();
+  const CallerEglState caller;
   frame_open_ = false;
   if ((display_ == nullptr) || (surface_ == nullptr)) {
     return drm::unexpected<std::error_code>(err(std::errc::not_connected));
+  }
+  // eglSwapBuffers acts on the surface current on this thread.
+  if (!make_current()) {
+    return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }
   if (egl.swap_buffers(static_cast<EGLDisplay>(display_), static_cast<EGLSurface>(surface_)) !=
       EGL_TRUE) {

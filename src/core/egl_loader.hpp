@@ -65,6 +65,12 @@ struct EglLoader {
   decltype(&eglDestroySurface) destroy_surface{nullptr};
   decltype(&eglChooseConfig) choose_config{nullptr};
   decltype(&eglBindAPI) bind_api{nullptr};
+  // What the calling thread has current, so a component that makes its own
+  // context current can put the caller's back. Core EGL, resolved via dlsym.
+  decltype(&eglGetCurrentContext) get_current_context{nullptr};
+  decltype(&eglGetCurrentDisplay) get_current_display{nullptr};
+  decltype(&eglGetCurrentSurface) get_current_surface{nullptr};
+  decltype(&eglQueryAPI) query_api{nullptr};
   // EGL 1.5 core entry point — uses EGLAttrib (intptr_t) attribute
   // lists, distinct from the EXT variant (`get_platform_display`,
   // EGLint*). Needed for `EGL_DRM_MASTER_FD_EXT` which is documented
