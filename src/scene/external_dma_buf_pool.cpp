@@ -87,10 +87,9 @@ ExternalDmaBufPool::~ExternalDmaBufPool() {
   }
 }
 
-void ExternalDmaBufPool::submit(std::uintptr_t buffer_key,
-                                drm::span<const ExternalPlaneInfo> planes,
-                                std::optional<drm::sync::SyncFence> acquire,
-                                drm::span<const DamageRect> damage) noexcept {
+drm::expected<void, std::error_code> ExternalDmaBufPool::submit(
+    std::uintptr_t buffer_key, drm::span<const ExternalPlaneInfo> planes,
+    std::optional<drm::sync::SyncFence> acquire, drm::span<const DamageRect> damage) noexcept {
   {
     const std::scoped_lock lock(slots_mu_);
     if (stale_.count(buffer_key) != 0) {
@@ -99,18 +98,20 @@ void ExternalDmaBufPool::submit(std::uintptr_t buffer_key,
       // fb_id cannot stand in for it, and a second import cannot be keyed the
       // same. Hold the last frame; once the sweep has run the key is new.
       debug_step("submit: key retired and not yet torn down — frame skipped");
-      return;
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::resource_unavailable_try_again));
     }
     if (slots_.find(buffer_key) == slots_.end()) {
       // First sight of this key: validate + import its planes, caching the fb_id.
       if (planes.empty() || planes.size() > detail::k_max_planes) {
         debug_step("submit: bad plane count — frame skipped");
-        return;
+        return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
       }
       for (const auto& p : planes) {
         if (p.fd < 0 || p.pitch == 0) {
           debug_step("submit: bad plane fields — frame skipped");
-          return;
+          return drm::unexpected<std::error_code>(
+              std::make_error_code(std::errc::invalid_argument));
         }
       }
       detail::DmaBufSlot slot;
@@ -118,13 +119,13 @@ void ExternalDmaBufPool::submit(std::uintptr_t buffer_key,
       if (auto r = detail::dup_planes(slot, planes); !r) {
         detail::close_slot_fds(slot);
         debug_step("submit: dup_planes failed — holding last frame");
-        return;
+        return drm::unexpected<std::error_code>(r.error());
       }
       if (auto r = detail::import_slot(fd_, slot, format_); !r) {
         detail::teardown_slot(fd_, slot);
         detail::close_slot_fds(slot);
         debug_step("submit: import failed — holding last frame");
-        return;
+        return drm::unexpected<std::error_code>(r.error());
       }
       slots_.emplace(buffer_key, slot);
     }
@@ -135,6 +136,7 @@ void ExternalDmaBufPool::submit(std::uintptr_t buffer_key,
     retiring_.erase(buffer_key);
   }
   presenter_.submit(static_cast<detail::SlotKey>(buffer_key), std::move(acquire), damage);
+  return {};
 }
 
 std::size_t ExternalDmaBufPool::cached_count() const noexcept {

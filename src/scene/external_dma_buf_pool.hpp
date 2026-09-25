@@ -101,13 +101,18 @@ class ExternalDmaBufPool : public LayerBufferSource {
   /// Producer hands in the buffer to scan out next, identified by `buffer_key`,
   /// with its dma-buf `planes` and (optionally) a render-done fence + damage.
   /// The first submit of a key imports its planes and caches the fb_id; later
-  /// submits of the same key reuse it (the `planes` are then ignored). An import
-  /// failure logs (DRM_EXT_DMABUF_DEBUG) and skips the frame — the presenter
-  /// holds the last good buffer rather than blanking the layer. Thread-safe vs
-  /// acquire()/release(). `planes` must be 1..4 with each fd >= 0 and pitch != 0.
-  void submit(std::uintptr_t buffer_key, drm::span<const ExternalPlaneInfo> planes,
-              std::optional<drm::sync::SyncFence> acquire = std::nullopt,
-              drm::span<const DamageRect> damage = {}) noexcept;
+  /// submits of the same key reuse it (the `planes` are then ignored). A frame
+  /// that cannot be taken is skipped -- the presenter holds the last good buffer
+  /// rather than blanking the layer -- and the reason returned, so a caller can
+  /// route the buffer elsewhere: the import's error when the device refuses it
+  /// (e.g. EINVAL for a modifier its planes cannot scan out), errc::invalid_argument
+  /// for bad `planes`, errc::resource_unavailable_try_again for a key retired and
+  /// not yet torn down. Thread-safe vs acquire()/release(). `planes` must be
+  /// 1..4 with each fd >= 0 and pitch != 0.
+  drm::expected<void, std::error_code> submit(
+      std::uintptr_t buffer_key, drm::span<const ExternalPlaneInfo> planes,
+      std::optional<drm::sync::SyncFence> acquire = std::nullopt,
+      drm::span<const DamageRect> damage = {}) noexcept;
 
   /// The producer will not show `buffer_key` again: tear its import down (FB,
   /// GEM handles, duped fds) as soon as no in-flight commit still holds it,
