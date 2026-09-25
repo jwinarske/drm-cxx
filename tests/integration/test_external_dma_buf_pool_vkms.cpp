@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -153,6 +154,26 @@ TEST(ExternalDmaBufPoolVkms, LazyImportCachesByKey) {
   // A new key imports on first sight.
   (*pool)->submit(k_key_b, one(pb, probe->dmabuf_fds[1], probe->stride));
   EXPECT_EQ((*pool)->cached_count(), 2U);
+}
+
+TEST(ExternalDmaBufPoolVkms, SubmitReportsAFrameItCannotTake) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  std::array<drm::scene::ExternalPlaneInfo, 1> p{};
+
+  // A modifier the device cannot scan out: the import is refused, and the
+  // caller hears about it instead of finding an empty pool at commit time.
+  auto tiled = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                      DRM_FORMAT_MOD_BROADCOM_UIF);
+  ASSERT_TRUE(tiled.has_value()) << tiled.error().message();
+  auto refused = (*tiled)->submit(0xA, one(p, probe->dmabuf_fds[0], probe->stride));
+  EXPECT_FALSE(refused.has_value());
+  EXPECT_EQ((*tiled)->cached_count(), 0U);
+  auto none = (*tiled)->acquire();
+  ASSERT_FALSE(none.has_value());
+  EXPECT_EQ(none.error(), std::make_error_code(std::errc::resource_unavailable_try_again));
 }
 
 TEST(ExternalDmaBufPoolVkms, AcquireAdvancesThenHoldsIdle) {
@@ -456,7 +477,10 @@ TEST(ExternalDmaBufPoolVkms, SubmitBadPlanesSkippedHoldsLastFrame) {
 
   // A bad plane (fd < 0) fails validation before any import.
   std::array<drm::scene::ExternalPlaneInfo, 1> bad{drm::scene::ExternalPlaneInfo{-1, 0, 1}};
-  (*pool)->submit(0xBAD, drm::span<const drm::scene::ExternalPlaneInfo>(bad.data(), bad.size()));
+  auto rejected = (*pool)->submit(
+      0xBAD, drm::span<const drm::scene::ExternalPlaneInfo>(bad.data(), bad.size()));
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.error(), std::make_error_code(std::errc::invalid_argument));
   EXPECT_EQ((*pool)->cached_count(), 1U);      // not imported
   EXPECT_FALSE((*pool)->has_fresh_content());  // never reached the presenter
 
@@ -487,8 +511,10 @@ TEST(ExternalDmaBufPoolVkms, SubmitImportFailureHoldsLastFrame) {
   ASSERT_GE(not_dmabuf, 0);
   std::array<drm::scene::ExternalPlaneInfo, 1> bad{
       drm::scene::ExternalPlaneInfo{not_dmabuf, 0, probe->stride}};
-  (*pool)->submit(0xBAD2, drm::span<const drm::scene::ExternalPlaneInfo>(bad.data(), bad.size()));
+  auto refused = (*pool)->submit(
+      0xBAD2, drm::span<const drm::scene::ExternalPlaneInfo>(bad.data(), bad.size()));
   ::close(not_dmabuf);
+  EXPECT_FALSE(refused.has_value());
   EXPECT_EQ((*pool)->cached_count(), 1U);  // import failed → not cached
   EXPECT_FALSE((*pool)->has_fresh_content());
 
