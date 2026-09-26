@@ -201,6 +201,7 @@ struct Renderer::Impl {
   std::uint32_t crtc_id{0};
   std::uint32_t crtc_index{0};
   std::uint32_t plane_id{0};  // 0 in legacy path
+  std::uint32_t reserved_plane_id{0};
   std::uint32_t forced_plane_id{0};
   std::uint32_t preferred_size{0};
   PlanePath path{PlanePath::kLegacy};
@@ -911,6 +912,9 @@ struct SelectedPlane {
   PlanePath path{PlanePath::kLegacy};
   std::uint32_t cursor_max_w{0};
   std::uint32_t cursor_max_h{0};
+  // The CRTC cursor plane the legacy ioctls drive, when legacy was preferred
+  // over it.
+  std::uint32_t legacy_plane_id{0};
 };
 
 bool plane_supports_argb8888(const drm::planes::PlaneCapabilities& cap) {
@@ -920,7 +924,7 @@ bool plane_supports_argb8888(const drm::planes::PlaneCapabilities& cap) {
 drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& dev,
                                                            std::uint32_t crtc_index,
                                                            std::uint32_t forced_plane_id,
-                                                           bool allow_legacy) {
+                                                           bool allow_legacy, bool prefer_legacy) {
   auto registry = drm::planes::PlaneRegistry::enumerate(dev);
   if (!registry) {
     return drm::unexpected<std::error_code>(registry.error());
@@ -950,6 +954,10 @@ drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& de
   // overlay selection every time they exist.
   for (const auto* cap : candidates) {
     if (cap->type == drm::planes::DRMPlaneType::CURSOR && plane_supports_argb8888(*cap)) {
+      if (prefer_legacy && allow_legacy) {
+        // The legacy ioctls drive this same plane, asynchronously.
+        return SelectedPlane{0, PlanePath::kLegacy, 0, 0, cap->id};
+      }
       return SelectedPlane{cap->id, PlanePath::kAtomicCursor, cap->cursor_max_w, cap->cursor_max_h};
     }
   }
@@ -998,7 +1006,7 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
 
-  auto selected = select_plane(dev, *idx, cfg.forced_plane_id, cfg.allow_legacy);
+  auto selected = select_plane(dev, *idx, cfg.forced_plane_id, cfg.allow_legacy, cfg.prefer_legacy);
   if (!selected) {
     return drm::unexpected<std::error_code>(selected.error());
   }
@@ -1008,6 +1016,8 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
   impl->crtc_id = cfg.crtc_id;
   impl->crtc_index = *idx;
   impl->plane_id = selected->plane_id;
+  impl->reserved_plane_id =
+      selected->path == PlanePath::kLegacy ? selected->legacy_plane_id : selected->plane_id;
   impl->forced_plane_id = cfg.forced_plane_id;
   impl->preferred_size = cfg.preferred_size;
   impl->path = selected->path;
@@ -1388,6 +1398,10 @@ PlanePath Renderer::path() const noexcept {
 
 std::uint32_t Renderer::plane_id() const noexcept {
   return impl_->plane_id;
+}
+
+std::uint32_t Renderer::reserved_plane_id() const noexcept {
+  return impl_->reserved_plane_id;
 }
 
 Rotation Renderer::rotation() const noexcept {
