@@ -160,6 +160,16 @@ struct RendererConfig {
   /// calls won't coalesce with an AtomicRequest).
   bool allow_legacy = true;
 
+  /// Drive the CRTC's cursor plane through drmModeSetCursor/drmModeMoveCursor
+  /// rather than atomic commits. On an atomic driver the legacy cursor ioctls
+  /// run as an async plane update (legacy_cursor_update) that does not wait
+  /// for vblank, so a moving pointer does not contend with the caller's
+  /// scanout commits. The atomic path's blocking one-plane commit per move
+  /// does: on vc4 it cost the scanout two vblanks in three while the pointer
+  /// moved. Only when the CRTC has a cursor plane; needs allow_legacy; ignored
+  /// with forced_plane_id.
+  bool prefer_legacy = false;
+
   /// Cursor orientation at create() time. Can be changed later via
   /// set_rotation(); stored here so create() knows whether to
   /// configure a hardware rotation property up front or commit to
@@ -280,6 +290,11 @@ class Renderer {
 
   [[nodiscard]] PlanePath path() const noexcept;
   [[nodiscard]] std::uint32_t plane_id() const noexcept;
+  /// The plane the cursor occupies, for a caller keeping its own commits
+  /// off it: plane_id() on the atomic paths; on the legacy path the CRTC's
+  /// cursor plane the kernel drives, when prefer_legacy chose it over one,
+  /// else 0.
+  [[nodiscard]] std::uint32_t reserved_plane_id() const noexcept;
   [[nodiscard]] Rotation rotation() const noexcept;
 
   /// Change rotation after create(). Returns std::errc::not_supported
