@@ -164,7 +164,7 @@ inline std::uint64_t decode_id(void* opaque) noexcept {
 class TrackingSource : public LayerBufferSource {
  public:
   struct Event {
-    enum class Kind : std::uint8_t { Acquire, Release };
+    enum class Kind : std::uint8_t { Acquire, Release, Retired };
     Kind kind;
     std::uint64_t id;  // unique per acquire; release matches by id
   };
@@ -216,6 +216,8 @@ class TrackingSource : public LayerBufferSource {
   drm::expected<drm::BufferMapping, std::error_code> map(drm::MapAccess access) override {
     return inner_->map(access);
   }
+
+  void on_retired() noexcept override { transcript_.push_back({Event::Kind::Retired, 0}); }
 
   void on_session_paused() noexcept override { inner_->on_session_paused(); }
 
@@ -278,6 +280,16 @@ std::vector<std::uint64_t> released_ids(const std::vector<TrackingSource::Event>
     }
   }
   return out;
+}
+
+std::size_t count_retired(const std::vector<TrackingSource::Event>& transcript) {
+  std::size_t n = 0;
+  for (const auto& e : transcript) {
+    if (e.kind == TrackingSource::Event::Kind::Retired) {
+      ++n;
+    }
+  }
+  return n;
 }
 
 std::size_t count_acquires(const std::vector<TrackingSource::Event>& transcript) {
@@ -471,6 +483,7 @@ TEST(LayerSceneReleaseVkms, RemoveLayerDefersSourceRetirement) {
   EXPECT_TRUE(released_ids(transcript).empty())
       << "remove_layer must defer, not synchronously release, in-flight buffers";
   EXPECT_FALSE(*destroyed) << "the source must outlive its in-flight buffers";
+  EXPECT_EQ(count_retired(transcript), 1U) << "the removed layer's source must be told it retired";
 
   // The retired source's buffers drain through the ring on the next commits.
   ASSERT_TRUE(fx.scene->commit().has_value());  // releases id 0
@@ -535,6 +548,8 @@ TEST(LayerSceneReleaseVkms, ReplaceSourceRetiresOldToProducer) {
   EXPECT_TRUE(released_ids(t_old).empty())
       << "replace_source must defer, not synchronously release, in-flight buffers";
   EXPECT_FALSE(*old_destroyed);
+  EXPECT_EQ(count_retired(t_old), 1U) << "the displaced source must be told it retired";
+  EXPECT_EQ(count_retired(t_new), 0U);
 
   // Next commits acquire from the NEW source; the OLD source's buffers drain to
   // IT (not the replacement).

@@ -162,6 +162,7 @@ class ExternalDmaBufRing : public LayerBufferSource {
   [[nodiscard]] bool wants_release_fence() const noexcept override {
     return static_cast<bool>(on_release_);
   }
+  void on_retired() noexcept override { presenter_.retire_scanning(); }
   /// True iff a submit awaits acquisition — i.e. the producer has a fresh frame
   /// the next commit will scan out (vs an idle hold-last-frame). Drives the
   /// scene's all-idle Skip. Thread-safe vs submit()/acquire().

@@ -224,6 +224,38 @@ TEST(ExternalDmaBufRingVkms, RotatesSlotsAndHoldsIdle) {
   r.release(std::move(*a2));
 }
 
+// A retired ring gets no newer frame, so its scanning slot would never be
+// displaced. on_retired lets it release with its last acquisition.
+TEST(ExternalDmaBufRingVkms, RetiredRingReleasesItsScanningSlot) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+
+  std::vector<std::size_t> released;
+  drm::scene::ExternalDmaBufRing::Options opts;
+  opts.on_release = [&released](std::size_t slot, std::optional<drm::sync::SyncFence> /*f*/) {
+    released.push_back(slot);
+  };
+
+  std::vector<std::array<drm::scene::ExternalPlaneInfo, 1>> storage;
+  auto slots = slots_of(*probe, storage);
+  auto ring = drm::scene::ExternalDmaBufRing::create(
+      probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+      drm::span<const drm::scene::ExternalSlotDesc>(slots.data(), slots.size()), std::move(opts));
+  ASSERT_TRUE(ring.has_value()) << ring.error().message();
+  auto& r = **ring;
+
+  r.submit(1);
+  auto a = r.acquire();
+  ASSERT_TRUE(a.has_value()) << a.error().message();
+
+  r.on_retired();
+  r.release(std::move(*a));
+  ASSERT_EQ(released.size(), 1U);
+  EXPECT_EQ(released[0], 1U);
+}
+
 // submit(slot, fence, damage) round-trips the dirty-region list onto
 // AcquiredBuffer::damage for the scene's FB_DAMAGE_CLIPS path, and honors the
 // two contract rules: replace-not-union on re-submit, and over-cap -> whole-frame
