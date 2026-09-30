@@ -241,6 +241,15 @@ class LayerBufferSource {
   /// which is what enables the Skip.
   [[nodiscard]] virtual bool has_fresh_content() const noexcept { return true; }
 
+  /// The scene acquires from this source no more: its layer was removed, or
+  /// `LayerScene::replace_source` swapped it out. Its in-flight buffers still
+  /// come back through `release()` / `release_with_fence()`, after the commits
+  /// that displace them. A source that holds its on-screen buffer back from
+  /// release until a newer frame supersedes it (ExternalDmaBufRing,
+  /// ExternalDmaBufPool) must let it go with those: no newer frame is coming,
+  /// and the producer would never get the buffer back. Default no-op.
+  virtual void on_retired() noexcept {}
+
   /// Which binding contract this source participates in.
   [[nodiscard]] virtual BindingModel binding_model() const noexcept = 0;
 

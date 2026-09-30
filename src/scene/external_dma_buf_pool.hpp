@@ -149,6 +149,7 @@ class ExternalDmaBufPool : public LayerBufferSource {
   [[nodiscard]] bool wants_release_fence() const noexcept override {
     return static_cast<bool>(on_release_);
   }
+  void on_retired() noexcept override { presenter_.retire_scanning(); }
   [[nodiscard]] bool has_fresh_content() const noexcept override {
     return presenter_.has_fresh_frame();
   }

@@ -406,6 +406,7 @@ class LayerScene::Impl {
     // assignment — is untouched; the next commit acquires from new_source.
     auto old_source = layer->exchange_source(std::move(new_source));
     LayerBufferSource* const old_raw = old_source.get();
+    old_raw->on_retired();
     // Retarget this layer's still-in-flight acquisitions at the retiring source
     // so they release to the producer that made them, not the replacement. An
     // entry already retired (by a prior rapid replace) keeps its earlier target.
@@ -508,6 +509,7 @@ class LayerScene::Impl {
     // destroyed only after they have all drained (see finalize_frame). A moved-
     // from unique_ptr is null, so the slot's Layer is gone either way.
     if (slot->scene_layer) {
+      slot->scene_layer->source().on_retired();
       retire_pending_.push_back(std::move(slot->scene_layer));
     }
     slot->alive = false;

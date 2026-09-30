@@ -11,12 +11,15 @@
 #include "core/device.hpp"
 
 #include <drm-cxx/dumb/buffer.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>  // ExternalPlaneInfo
 #include <drm-cxx/scene/external_dma_buf_pool.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -242,6 +245,40 @@ TEST(ExternalDmaBufPoolVkms, ReleaseFiresForDisplacedKey) {
   // Retiring B must NOT fire: it is still the live/scanning frame.
   (*pool)->release_with_fence(std::move(*a2), std::nullopt);
   EXPECT_EQ(released.size(), 1U);
+}
+
+// A retired pool (its layer removed, or its source replaced) gets no newer
+// frame, so its scanning key would never be displaced. on_retired lets it
+// release with its last acquisition, once.
+TEST(ExternalDmaBufPoolVkms, RetiredPoolReleasesItsScanningKey) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  std::vector<std::uintptr_t> released;
+  drm::scene::ExternalDmaBufPool::Options opts;
+  opts.on_release = [&](std::uintptr_t key, std::optional<drm::sync::SyncFence> /*f*/) {
+    released.push_back(key);
+  };
+  auto pool = drm::scene::ExternalDmaBufPool::create(probe->dev, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                     DRM_FORMAT_MOD_LINEAR, std::move(opts));
+  ASSERT_TRUE(pool.has_value()) << pool.error().message();
+  std::array<drm::scene::ExternalPlaneInfo, 1> pa{};
+
+  (*pool)->submit(0xA, one(pa, probe->dmabuf_fds[0], probe->stride));
+  auto a1 = (*pool)->acquire();
+  ASSERT_TRUE(a1.has_value());
+  auto hold = (*pool)->acquire();  // idle hold, same token
+  ASSERT_TRUE(hold.has_value());
+
+  // Still live: no release.
+  (*pool)->release_with_fence(std::move(*a1), std::nullopt);
+  EXPECT_TRUE(released.empty());
+
+  (*pool)->on_retired();
+  (*pool)->release_with_fence(std::move(*hold), std::nullopt);
+  ASSERT_EQ(released.size(), 1U);
+  EXPECT_EQ(released[0], 0xAU);
 }
 
 // buffer_key is a buffer *identity*, independent of the fd, so distinct keys can

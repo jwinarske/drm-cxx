@@ -88,6 +88,10 @@ class RingPresenter {
   // is still live/held or was already released.
   [[nodiscard]] std::optional<SlotKey> release(std::uintptr_t token) noexcept;
 
+  // The source is retired: no advance will supersede the scanning buffer, so
+  // its token releases like a superseded one. Commit-thread only.
+  void retire_scanning() noexcept { scanning_token_ = 0; }
+
   // The key currently on screen, if any (for export_dma_buf()).
   [[nodiscard]] std::optional<SlotKey> scanning_key() const noexcept { return scanning_key_; }
 
