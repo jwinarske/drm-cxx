@@ -11,13 +11,18 @@
 namespace drm {
 
 std::string_view format_name(uint32_t format) {
+  // A switch rather than a lookup table: fourccs are non-contiguous 32-bit
+  // codes, so an indexed table would be mostly holes and a map would cost an
+  // allocation. The compiler turns this into a jump table or binary search.
   switch (format) {
+    // 8-bit indexed and packed RGB.
     case DRM_FORMAT_C8:
       return "C8";
     case DRM_FORMAT_RGB332:
       return "RGB332";
     case DRM_FORMAT_BGR233:
       return "BGR233";
+    // 16-bit packed RGB: 4:4:4:4, 5:5:5:1 and 5:6:5.
     case DRM_FORMAT_XRGB4444:
       return "XRGB4444";
     case DRM_FORMAT_XBGR4444:
@@ -54,6 +59,7 @@ std::string_view format_name(uint32_t format) {
       return "RGB565";
     case DRM_FORMAT_BGR565:
       return "BGR565";
+    // 24- and 32-bit packed RGB, 8 bits per channel.
     case DRM_FORMAT_RGB888:
       return "RGB888";
     case DRM_FORMAT_BGR888:
@@ -74,6 +80,7 @@ std::string_view format_name(uint32_t format) {
       return "RGBA8888";
     case DRM_FORMAT_BGRA8888:
       return "BGRA8888";
+    // 10 bits per color channel, 2 bits alpha.
     case DRM_FORMAT_XRGB2101010:
       return "XRGB2101010";
     case DRM_FORMAT_XBGR2101010:
@@ -90,6 +97,7 @@ std::string_view format_name(uint32_t format) {
       return "RGBA1010102";
     case DRM_FORMAT_BGRA1010102:
       return "BGRA1010102";
+    // 16-bit half-float per channel.
     case DRM_FORMAT_XRGB16161616F:
       return "XRGB16161616F";
     case DRM_FORMAT_XBGR16161616F:
@@ -98,6 +106,7 @@ std::string_view format_name(uint32_t format) {
       return "ARGB16161616F";
     case DRM_FORMAT_ABGR16161616F:
       return "ABGR16161616F";
+    // Semi-planar YUV: luma plane plus one interleaved chroma plane.
     case DRM_FORMAT_NV12:
       return "NV12";
     case DRM_FORMAT_NV21:
@@ -118,12 +127,14 @@ std::string_view format_name(uint32_t format) {
       return "P012";
     case DRM_FORMAT_P016:
       return "P016";
+    // Packed YUV 4:2:2 in u16 samples.
     case DRM_FORMAT_Y210:
       return "Y210";
     case DRM_FORMAT_Y212:
       return "Y212";
     case DRM_FORMAT_Y216:
       return "Y216";
+    // Fully planar YUV: separate Y, U and V planes (YVU swaps the last two).
     case DRM_FORMAT_YUV410:
       return "YUV410";
     case DRM_FORMAT_YVU410:
