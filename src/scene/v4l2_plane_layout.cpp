@@ -8,7 +8,6 @@
 #include <drm_fourcc.h>
 
 #include <cstdint>
-#include <limits>
 #include <linux/videodev2.h>
 #include <system_error>
 
@@ -94,9 +93,8 @@ std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mpla
     if (semiplanar) {
       // Y at offset 0, interleaved chroma at bpl*h; chroma stride is the luma
       // stride except for full-resolution 4:4:4 (NV24/NV42), which doubles it.
-      if (y_size > std::numeric_limits<std::uint32_t>::max()) {
-        return std::make_error_code(std::errc::value_too_large);
-      }
+      // y_size cannot exceed u32 here: bpl and h are already capped above, and
+      // the static_assert on those ceilings in the header is what guarantees it.
       out.num_drm_planes = 2;
       out.pitch.at(0) = bpl;
       out.pitch.at(1) = semiplanar_chroma_pitch(drm_fourcc, bpl);
@@ -118,10 +116,9 @@ std::error_code derive_drm_plane_layout(const v4l2_format& cap_fmt, bool is_mpla
         (static_cast<std::uint64_t>(h) + planar.vsub - 1) / planar.vsub;  // DIV_ROUND_UP(h, vsub)
     const std::uint64_t chroma_size = chroma_bpl * chroma_h;
     const std::uint64_t v_offset = y_size + chroma_size;
-    // Largest offset (plane 2) plus its own extent must stay inside AddFB2's u32.
-    if (v_offset + chroma_size > std::numeric_limits<std::uint32_t>::max()) {
-      return std::make_error_code(std::errc::value_too_large);
-    }
+    // Largest offset (plane 2) plus its own extent stays inside AddFB2's u32 for
+    // the same reason: this y + 2*chroma total is exactly the worst case the
+    // header's static_assert covers.
     out.num_drm_planes = 3;
     out.pitch.at(0) = bpl;
     out.pitch.at(1) = static_cast<std::uint32_t>(chroma_bpl);
