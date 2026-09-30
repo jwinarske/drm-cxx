@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <linux/videodev2.h>
 #include <system_error>
 
@@ -28,6 +29,19 @@ inline constexpr std::size_t k_drm_max_planes = 4;
 // buffer. 16K is past every shipping display; 64K is past any real stride.
 inline constexpr std::uint32_t k_max_image_dim = 16384U;
 inline constexpr std::uint32_t k_max_bytes_per_line = 65536U;
+
+// These two ceilings are what makes every AddFB2 offset this file computes fit
+// in the u32 the ioctl takes -- the point of capping them, per the paragraph
+// above. The widest layout is planar YUV at 4:4:4, where the last offset plus
+// its own extent is y + 2*chroma and each of the three is at most
+// k_max_bytes_per_line * k_max_image_dim. Assert that here, at the ceilings
+// themselves, so raising either one past the point where an offset could wrap
+// fails the build instead of silently reintroducing the overflow the cap
+// exists to prevent.
+static_assert(3ULL * k_max_bytes_per_line * k_max_image_dim <=
+                  std::numeric_limits<std::uint32_t>::max(),
+              "k_max_bytes_per_line * k_max_image_dim must leave room for a "
+              "three-plane layout inside AddFB2's u32 offsets");
 
 // How a V4L2 CAPTURE format echo maps onto DRM AddFB2's per-plane
 // handle/pitch/offset arrays. Each DRM plane records which V4L2 dmabuf_fd it
