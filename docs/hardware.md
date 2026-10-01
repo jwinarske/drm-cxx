@@ -44,6 +44,9 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `vc4`        | VideoCore IV (RPi Zero 2 W)         | 6.18.33-rpt (trixie)| Software/dumb scanout @ 1600x900, **hardware GLES present** (`egl_scene` ~60fps, `gl_present`, `gbm_surface_scanout` VC4-T-tiled), single-plane→56-plane scene/composition, present-path profiling. No hardware Vulkan (llvmpipe only). |
 | `imx-drm`    | i.MX8M Mini LCDIF (Nitrogen8M Mini, NXP BSP) | 6.1.22 (Yocto) | `drm::fmt`: **no-`IN_FORMATS` fallback** — `FormatTable::from_plane` returns `ENOENT`, caller assumes LINEAR-only (legacy fourccs, no modifier surface). |
 | `imx-drm`    | i.MX93 LCDIFv3 (FRDM-IMX93, NXP BSP) | 6.18.2 (Yocto) | Software/dumb-buffer scanout @ 720p60 (`software_present`, `damage_present`, `ring_present`, `idle_present`, `atomic_modeset`), single-plane CPU composition (`minimal_kms_probe`, `scene_*`, `layered_demo`), present-path profiling matrix. No GPU. |
+| `imx-drm` + `galcore` | i.MX8M Plus LCDIFv3 ×3 + Vivante GC7000UL (IEI B643, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS and VPU→KMS blocked by platform limits (see quirks). |
+| `vc4` + `v3d` | VideoCore VII (Raspberry Pi 5, 8 GB) | 6.18.33-rpt (trixie) | Full example + test matrix on HDMI 1280×1440: every present/scene/allocator/cursor/Blend2D-CSD example, **GL and Vulkan scanout at 60 fps** (`egl_scene`, `vulkan_scene`, `vk_present`, `vk_out_fence`, offload demos), multi-plane native placement (`scene_priority` 8/8 assigned). 100/100 test binaries against `card0`. |
+| `msm_drm` (downstream SDE) | SA8155P (Adreno 640) | 5.4 vendor | KMS on a shared-display node: present spine, **GL and Vulkan scanout at 60 fps**, Vulkan OUT_FENCE, native multi-plane placement with **multirect virtual-plane pairing**, GPU composition, Blend2D text. 83/84 test binaries. See quirks for the controller's plane rules. |
 
 What's **not** validated:
 
@@ -498,6 +501,364 @@ Guidance for an i.MX93 UI:
   (**30 Hz**); off-multiple rates (40/48 Hz) beat against the fixed 60 Hz vblank
   for ~7–8 ms jitter and **VRR will not fix it**. For tight pacing use
   `--rt`-style SCHED_FIFO + `mlockall`, not VRR.
+
+### i.MX8M Plus LCDIFv3 + Vivante GC7000UL
+
+Validation board: **IEI B643 panel PC** (NXP **i.MX8M Plus**, quad Cortex-A53
+@ 1.6 GHz, **aarch64**, 3.5 GiB), NXP i.MX Yocto BSP (`fsl-imx-xwayland`),
+**kernel 6.6.23**, glibc 2.39, GCC 13.2. Two DRM nodes:
+
+- **`card0` = `vivante`** (`galcore` 6.4.11) — the GC7000UL GPU. **Render-only:
+  no CRTC, no connector.** Anything that picks "the first card" lands here and
+  fails (see the test note below).
+- **`card1` = `imx-drm`** — three **LCDIFv3** CRTCs (ids 33/36/39), each with
+  exactly **one PRIMARY plane** (31/34/37, `zpos` immutable at 0) and **no
+  overlay, no cursor**. Only the third CRTC (39) is wired to the DW-HDMI bridge
+  (`HDMI-A-1`); the other two have no connector on this board. The
+  encoder's `possible_crtcs` is therefore a single bit — legacy `SetCrtc` on CRTC
+  33 returns `EINVAL`.
+- `renderD128` (GPU), plus the Hantro VPU (`vsi_v4l2dec` / `vsi_v4l2enc`) and the
+  ISI mem2mem scaler/CSC on `/dev/video*`.
+
+`driver_caps /dev/dri/card1`: `addfb2_modifiers=false`, `async_page_flip=false`,
+prime import/export=true, **`fb_damage_clips=false`**, **`vrr_capable=true`**,
+psr=none, census `PRIMARY=3 OVERLAY=0 CURSOR=0` (with the cap/registry cursor
+`[WARN]` — `DRM_CAP_CURSOR_*` claims 64×64 but there is no cursor plane). Plane
+formats are `XR24 AR24 RG16 XB24 AB24 AR15 XR15` with **no `IN_FORMATS`**
+(LINEAR-only) — **no YUV at all**. Validated on a **240 Hz-capable** HDMI
+monitor (EDID range 48–240 Hz), but imx-drm exposes only five modes, topping out
+at **1920×1080@60** (plus 1280×1024@75): the NXP DW-HDMI path filters the
+high-refresh modes out. Every run here therefore scanned out at 60 Hz.
+
+**Build — cross from an x86_64 host against the board's own sysroot:**
+`scripts/build_imx8mp.sh <ssh-target> [--deploy]` does all of the below
+(toolchain fetch + checksum, sysroot mirror, dependency cross-builds, drm-cxx,
+rpath scrub, deploy). Pitfalls it handles, each of which was hit:
+
+- **Match the compiler to the BSP's libstdc++.** The image ships libstdc++ 13
+  (`GLIBCXX_3.4.32`). A newer host cross-GCC (16) **rejects GCC 13's libstdc++
+  headers** (`use of built-in trait '__is_trivially_copyable' in function
+  signature`), and a `-static-libstdc++` from another version needs a
+  `libstdc++.a` the BSP doesn't ship. Use the **Arm GNU Toolchain 13.2.rel1**
+  (`aarch64-none-linux-gnu`) with `--sysroot=<board sysroot>`: its own 13.2
+  headers, linked dynamically against the board's `libstdc++.so.6`.
+- **Never `-static-libgcc` on `libdrm-cxx.so`.** It embeds a private copy of the
+  DWARF unwinder; an exception thrown by the board's `libstdc++` then runs
+  `libgcc_s`'s `_Unwind_RaiseException`, which calls the embedded personality's
+  `_Unwind_SetGR` with a foreign context → `abort()`. Symptom: **any C++
+  exception crossing the library is `std::terminate`** (`test_csd_theme` aborts
+  on the toml++ `parse_error` that `load_theme_string` catches). Link
+  `libgcc_s` dynamically — the BSP has it.
+- **Filter the sysroot's own `-I/usr/include` / `-L/usr/lib` out of pkg-config.**
+  pkgconf stops recognizing them as system dirs once they are sysroot-prefixed,
+  so `-isystem <sysroot>/usr/include` lands ahead of libstdc++ and
+  `#include_next <stdlib.h>` fails. A two-line `pkg-config` wrapper that drops
+  exactly those two flags (and sets `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR`)
+  fixes it.
+- **Use `gcc-ar`, not `ar`,** for the `ar` binary: the build is LTO and static
+  helper archives (`test_patterns_painters`, `signage_playlist`) need the LTO
+  plugin or their symbols vanish at link time.
+- **C++23 still needs `{fmt}` here** — libstdc++ 13 has `std::format` but no
+  `std::print`, so the adapter takes the vendored header-only fmt path
+  (automatic; nothing to install).
+
+**Dependencies the BSP lacks**, cross-built by the script and deployed to the
+board's `/usr/local`: `libdisplay-info` 0.2.0 (BSP has none; the build reads the
+host's hwdata `pnp.ids`), `libseat` (seatd 0.9.1, for `session`), googletest
+1.15.2 (tests), ThorVG 1.0.4 (`thorvg_janitor`), Blend2D (capture/CSD/mdi),
+libyuv (`cluster_sim` UVC rear-view), and a link-only GStreamer 1.24.0
+(`video_player`; see Cameras below).
+The BSP has no `/etc/ld.so.conf.d/` and does not search `/usr/local/lib*` —
+create the directory with a `usr-local.conf` and run `ldconfig`. Present on the
+image already: libdrm 2.4.116, NXP GBM 21.3.5 (`libgbm_viv`), EGL/GLESv2 (Vivante),
+Vulkan loader 1.3.275, libinput, xkbcommon, libjpeg. Absent and not built:
+libcamera (`camera`), libva.
+
+**Running:** the BSP starts a desktop compositor service that holds DRM master on
+`card1`; stop it (service + its socket unit) before running KMS examples, start
+it again afterwards. Always pass **`/dev/dri/card1`** explicitly — with two
+cards the examples' device picker prompts on stdin. The BSP ships no XCursor
+themes (set `XCURSOR_PATH` at one), and the `keyboard` demo's font path is the
+absolute build-dir path baked in at configure time, so it only finds the font
+when run from an identical path.
+
+**Fixed while validating here:**
+
+- **Layers shut out of a fixed-`zpos` PRIMARY.** The allocator required a
+  layer's `zpos` to lie inside a plane's range even when the plane's `zpos` is a
+  fixed slot it never writes, and LayerScene's primary-anchor reservation
+  mirrored that — so on a single-PRIMARY controller any layer with `zpos ≥ 1`
+  was always composited, even alone. Now: a fixed-slot plane admits any `zpos`,
+  and the allocator instead checks that placed layers stack in the order they
+  request (`planes/zpos_order.hpp`; the kernel accepts an inverted stack, so
+  TEST cannot catch it). The scene treats the unique lowest layer as
+  PRIMARY-eligible when every other layer sits above the slot, and the canvas
+  may now use the plane the allocator parked the composition placeholder on.
+  For every assignment admissible before, the stacking check is a no-op.
+
+- **`AddFB2` of an explicit LINEAR on a modifier-less driver.** imx-drm lacks
+  `DRM_CAP_ADDFB2_MODIFIERS` and rejects `DRM_MODE_FB_MODIFIERS` outright —
+  even with `DRM_FORMAT_MOD_LINEAR`, which is exactly its implicit layout. Every
+  dma-buf import (`ExternalDmaBufSource`/`Ring`, `GbmSurfaceSource`,
+  `gbm::Buffer`, `fmt::import_dmabuf`/`ScanoutBuffer`, the V4L2 and GStreamer
+  sources) now goes through one helper that takes the legacy path for INVALID,
+  and for LINEAR when the cap is absent. This was the cause of every
+  `ExternalDmaBufRing` failure on this board (and applies equally to the i.MX93,
+  i.MX8MM, tilcdc and other LCDIF-class controllers).
+- **Vulkan drivers that omit core-promoted extensions.** The VeriSilicon
+  Vulkan 1.3 driver does not list `VK_KHR_external_semaphore` (core since 1.1),
+  so requesting it by name failed `vkCreateDevice` with
+  `ErrorExtensionNotPresent`. `VkScanoutProducer` now requests the 1.1-promoted
+  names only when listed.
+- **`GstAppsinkSource` dma-buf import never worked.** `locate_plane_fd` passed
+  `NULL` for `gst_buffer_find_memory`'s `length` out-param, which GStreamer
+  rejects (`assertion 'length != NULL' failed` → `Protocol error`), so every
+  dma-buf-backed sample failed; only CPU-memory samples (e.g. `videotestsrc`)
+  played. Found with the G2D pipelines here.
+- **No-`IN_FORMATS` planes in the `drm::fmt` examples.** `compressed_scanout`,
+  `gbm_surface_scanout`, `egl_offload_scanout`, `vulkan_offload_scanout` treated
+  a missing `IN_FORMATS` as fatal; they now pair the legacy fourcc list with
+  LINEAR. `cluster_sim_vulkan` maps `candidate_modifiers()`'s INVALID ("driver
+  picks") to LINEAR before intersecting with the Vulkan modifier list.
+
+**GPU (Vivante GC7000UL):**
+
+- **GLES/EGL works end to end.** GBM on `card1` allocates from the display's
+  contiguous pool and the GPU renders straight into it: `egl_scene`,
+  `gl_present`, `shadertoy_egl`, `gbm_surface_scanout` and `egl_offload_scanout`
+  (GPU-rendered LINEAR scanned out) all present.
+- **Explicit sync validated:** `test_explicit_sync_fence_gl` arms a genuine GPU
+  acquire fence as the plane's `IN_FENCE_FD`.
+- **GPU composition is active** — `GlCompositor` reports EGL dma-buf import and
+  the NV12 external-sampler path available.
+- **Vulkan cannot reach this display.** Vulkan-exported dma-bufs are
+  scatter-gather; imx-drm is a GEM-DMA driver with no IOMMU in front of the
+  LCDIF, so `drmPrimeFDToHandle` has to bounce the whole buffer through swiotlb
+  and fails (`swiotlb buffer is full (sz: 8355840 bytes)` → `ENOMEM`). Blocked:
+  `vk_present`, `vk_out_fence`, `vulkan_scene`, `vulkan_offload_scanout`,
+  `cluster_sim_vulkan`. `vulkan_display` enumerates the display. A Vulkan path
+  here needs the buffer allocated display-side (GBM on `card1` or the
+  `linux,cma` dma-heap) and *imported* into Vulkan, which `VkScanoutProducer`
+  does not do today.
+
+**Single PRIMARY with a fixed `zpos` slot.** The PRIMARY's `zpos` range is
+`[0, 0]`. A lone layer now lands on it natively whatever `zpos` it asks for
+(see the fix above): the `layer_scene_census` static and widget-damage scenarios
+run 1 TEST total, the FB-only fast path on 29 of 30 frames, and 39 property
+writes instead of 300. What still composites is what this plane physically
+cannot host: more than one overlapping layer (`scene_*`, `layered_demo`,
+`minimal_kms_probe`, `plane_stress`), and any layer that is not full-screen —
+the LCDIFv3 PRIMARY cannot position or scale, so a moved or smaller layer fails
+TEST and goes to the canvas (census `scroll`: 4 TESTs to learn that, then
+composited every frame).
+
+**Composition cost is dominated by texture upload.** `GlCompositor` samples
+dumb-buffer layers through their CPU mapping (`glTexImage2D` every frame, even
+for unchanged content); on Vivante that upload is a CPU-side retile —
+`gcoTEXTURE_Upload` is **~89 % of all cycles** in `perf`. Measured:
+`plane_stress` (4 layers, 1080p) **~50 ms/frame (20 fps)**; `egl_scene` (2
+layers) **~4.5 fps**. The EGLImage import path is only taken for map-less
+sources today, so dumb-buffer scenes here pay the upload on every layer, every
+frame.
+
+**Video:** the Hantro decoder decodes H.264/HEVC/VP8/VP9 to `NV12`/`P010`/`DTRC`,
+but the LCDIFv3 planes have no YUV formats, so `V4l2DecoderSource::create` fails
+at `AddFB2` (`EINVAL`) — `v4l2_decode` cannot scan the decoder output out
+directly. (`GlCompositor`'s NV12 import could carry it; the source currently
+requires a scanout FB.) For decoded video on screen use the GStreamer + G2D
+pipeline below.
+
+**Cameras (UVC):** validated with a Logitech C270 (USB 2, YUYV/MJPG) and an MX
+Brio (USB 3, YUYV/MJPG/NV12), together on one hub.
+
+- **Capture → Hantro H.264 encode works.** `camera_record --v4l2-encoder
+  /dev/video0` (the `vsi_v4l2enc` node) records Constrained Baseline H.264 at
+  640×480 (C270), 1280×720 and 1920×1080 (Brio), and from **both cameras
+  concurrently** through the single encoder; every stream decodes cleanly with
+  correct color.
+- **Direct camera scanout is impossible here** — neither YUYV nor NV12 is a
+  plane format, so `v4l2_camera_demo` refuses up front (its plane-format check),
+  as does `V4l2CameraSource`.
+- **CPU path:** `cluster_sim`'s UVC rear-view (YUYV→XRGB via libyuv into a dumb
+  buffer, composited into the scene) shows the live camera, but the multi-layer
+  scene is GPU-composited every frame and is **visibly choppy** (see the
+  composition-cost note above). libyuv is not in the BSP;
+  `scripts/build_imx8mp.sh` cross-builds it.
+- **Hardware path (preferred): GStreamer + G2D.** `video_player --launch` with
+  NXP's 2D engine doing the color conversion keeps the CPU out of the pixels:
+  - camera: `v4l2src device=/dev/videoN ! video/x-raw,format=YUY2,width=1280,height=720
+    ! imxvideoconvert_g2d ! video/x-raw,format=BGRx,width=1920,height=1080 ! appsink name=sink`
+  - file: `filesrc location=clip.h264 ! h264parse ! vpudec ! imxvideoconvert_g2d
+    ! video/x-raw,format=BGRx,width=1920,height=1080 ! appsink name=sink` (Hantro decode + G2D)
+
+  **Have G2D scale to the mode size.** `video_player` sizes its one layer to the
+  display mode, and the LCDIFv3 PRIMARY cannot scale; a 1280×720 sample against
+  a 1920×1080 `SRC_*` rect fails the atomic TEST (`EINVAL`), the layer is dropped,
+  no plane is armed, and the player stalls on a black screen waiting for a flip
+  that never comes. With G2D scaling, the camera runs at 30 fps with a commit per
+  vblank and zero drops, and is **visibly smooth** — against the choppy CPU
+  libyuv path above. The file pipeline (60 s 720p H.264, Hantro `vpudec` + G2D
+  upscale) is equally smooth: one commit per vblank, zero drops, and no
+  `AddFB2`/PRIME import in steady state (the decoder's buffer pool cycles through
+  cached FBs). Route camera and decoded video through G2D on this SoC.
+
+  G2D's output is a contiguous dma-buf, so `GstAppsinkSource` imports it
+  zero-copy onto the PRIMARY (unlike Vulkan exports). `--file` (decodebin3 →
+  NXP V4L2 decoder → CPU `videoconvert`) and the default `videotestsrc` also
+  play.
+- The BSP ships the GStreamer 1.24.0 runtime (with the NXP `vpu`/`imxvideoconvert`
+  plugins) but no headers; the build script cross-builds the matching 1.24.0
+  core + plugins-base as a link-only stage that is never deployed, so
+  `video_player` runs on the board's own GStreamer. The BSP kernel has no `vivid`/`vicodec`, so the V4L2 integration tests
+  skip on this board.
+
+**VRR is advertised but does nothing.** `vrr_capable=true` and the sink offers
+48–240 Hz, but at 48 Hz — inside the sink's range, below the 60 Hz mode —
+`vrr_sweep --vrr` measures the same jitter as the control (7.19 vs 7.19 ms): the
+LCDIFv3+DW-HDMI path never stretches the timing. (40 Hz is below the sink's VRR
+floor, so its identical 8.33 ms is expected either way.) Targets above 60 Hz
+clamp to 60 because of the mode the controller offers, not the monitor. With
+`--vrr`, 30 Hz measured 0.05 ms jitter vs 1.75 ms without (and `--rt` alone did
+not help); 30 Hz is an exact divisor of 60, so this is pacing, not VRR.
+
+**Tests:** with `DRM_CXX_TEST_CARD=/dev/dri/card1`, 96 of 98 test binaries pass
+(729 tests). The remaining 3 cases in 2 `*_vkms` binaries
+(`layer_scene_census` `FullFrameScroll` / `MultiLayerOverlap`,
+`layer_scene_content_type`) assert native placement for scenes this single,
+non-scaling PRIMARY physically cannot host (see above).
+
+**Example status** (on-device, `card1`):
+
+| Status | Examples |
+|--------|----------|
+| Works | `driver_caps`, `plane_caps`, `minimal_kms_probe`, `multi_crtc_probe` (`--scene-test`), `stream_probe`, `scene_formats`, `vulkan_display`, `xcursor_smoke`, `atomic_modeset`, `software_present`, `damage_present`, `ring_present`, `idle_present`, `vrr_sweep`, `compressed_scanout`, `layered_demo`, `video_grid`, `overlay_planes`, `scene_warm_start`, `scene_priority`, `test_patterns`, `signage_player`, `hdr_demo`, `cluster_sim`, `thorvg_janitor`, `hotplug_monitor`, `cursor_scene`, `keyboard`, `capture_demo`, `csd_smoke`, `mdi_demo`, `egl_scene`, `gl_present`, `egl_offload_scanout`, `gbm_surface_scanout`, `shadertoy_egl`, `plane_stress`, `allocator_torture`, `tone_mapper_bench` |
+| Works with cameras / video | `camera_record` (C270 + MX Brio → Hantro H.264, incl. both at once), `cluster_sim` UVC rear-view (libyuv; choppy), `video_player` (videotestsrc, `--file`, and the hardware `vpudec`/`v4l2src` → `imxvideoconvert_g2d` pipelines) |
+| Platform limit | `vk_present`, `vk_out_fence`, `vulkan_scene`, `vulkan_offload_scanout`, `cluster_sim_vulkan` (Vulkan export not contiguous); `v4l2_decode`, `v4l2_camera_demo` (no YUV scanout); `mouse_cursor`, `cursor_rotate` (no cursor plane → `Renderer::create` `ENODEV`) |
+| Not applicable | `dual_display`, `video_wall_multi` (one connected output); `stream_demo` (no EGL Streams) |
+| Not built | `camera` (libcamera) |
+
+#### Present-path profiling (decision guide)
+
+All numbers at **1920×1080**, CPU governor `performance` (1.6 GHz), one A53
+thread. CPU/frame is `user+sys` over 600 frames; **load@60** is the share of one
+core needed for 60 fps (the board has 4).
+
+| Workload (`software_present` unless noted) | render scope       | CPU/frame | load@60 (1 core) | takeaway |
+|--------------------------------------------|--------------------|-----------|------------------|----------|
+| XRGB8888, full redraw, `--vsync`            | full 1080p         | 6.56 ms   | ~39 %            | baseline; holds 60 fps vsync-locked |
+| XRGB8888, `--no-damage`                     | full 1080p         | 6.54 ms   | ~39 %            | damage hint is a **no-op** (`fb_damage_clips=false`) |
+| RGB565 (`--rgb565`)                         | full 1080p         | 4.73 ms   | ~28 %            | ~28 % cheaper (half the bytes) |
+| `ring_present`                              | buffer-age repaint | 6.58 ms   | ~39 %            | no gain over full redraw at this size |
+| `damage_present`                            | partial (box only) | 2.93 ms   | ~18 %            | **incremental rendering ~2.2× cheaper** |
+| `idle_present` (change every 30th frame)    | skip unchanged     | 0.15 ms   | ~1 %             | **idle-skip is the biggest lever** (96 % of flips avoided) |
+| `plane_stress` (4 composited layers)        | GPU composition    | —         | —                | ~50 ms/frame, upload-bound (see above) |
+| `tone_mapper_bench` HLG→BT.709              | CPU tone map       | 668 ms    | —                | CPU tone mapping is not real-time here |
+
+Guidance for an i.MX8M Plus UI:
+
+- **Render with GLES straight into a GBM surface on `card1`** (`egl_scene` /
+  `gl_present` / `GbmSurfaceSource`) and present it as the *only* layer on the
+  PRIMARY (a lone full-screen layer lands natively at any `zpos`). That avoids
+  composition entirely.
+- **Avoid multi-layer LayerScenes** until the upload cost is addressed: with one
+  plane every extra layer is composited, and each composited dumb-buffer layer
+  costs ~10 ms of CPU retile per frame.
+- **Software rendering is viable** at 1080p60 (~39 % of one core for full
+  redraws); damage-driven and idle-skip rendering cut that to ~18 % and ~1 %.
+- **Pacing:** 60 Hz is clean (≤0.1 ms jitter); 30 Hz works; 40/48 Hz beat
+  against the fixed vblank (~7–8 ms jitter) and VRR does not help.
+- **Video and Vulkan need a bridge:** decode to NV12 and convert to RGB (ISI
+  mem2mem or GPU) before scanout; render Vulkan into display-allocated buffers.
+
+### Raspberry Pi 5 (vc4 + v3d)
+
+Validation board: **Raspberry Pi 5 Model B** (BCM2712, quad Cortex-A76,
+8 GB), Raspberry Pi OS trixie, **kernel 6.18.33-rpt**, glibc 2.41. Three nodes:
+`card0` = **vc4** (HDMI; the validated output is `HDMI-A-1` at 1280×1440),
+`card1` = **drm-rp1-dsi** (`DSI-2`, 800×1280), `card2`/`renderD128` = **v3d**
+(render-only; Mesa renderonly pairs it with vc4 for GBM). No compositor runs, so a
+non-root user in `video`/`render`/`input` is DRM master as the first opener.
+
+- **Build:** the repo's `rpi5-trixie` emb target (`-mcpu=cortex-a76`, tests on),
+  with `-D DRM_CXX_VULKAN=ON` added — V3DV is a real Vulkan driver here. glibc 2.41
+  matches the trixie toolchain, so nothing extra is shipped; run with
+  `LD_LIBRARY_PATH=<deploy>/src`.
+- **Everything that needs only one display works:** all present-spine,
+  scene, allocator, cursor (`mouse_cursor`, `cursor_rotate` — real cursor planes),
+  Blend2D/CSD (`capture_demo`, `csd_smoke`, `mdi_demo`, `cluster_sim`) and GPU
+  examples. `egl_scene` and `vulkan_scene` hold **60 fps**; `vk_out_fence` produced
+  and signaled an OUT_FENCE on 60/60 frames; Vulkan- and GL-rendered LINEAR buffers
+  scan out (`vulkan_offload_scanout`, `egl_offload_scanout`). vc4 has enough planes
+  that multi-layer scenes place natively (`scene_priority` 8/8, `scene_formats`
+  4/4, `minimal_kms_probe` 3 assigned).
+- **Tests:** 100/100 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card0`.
+- **Not applicable here:** `dual_display`/`video_wall_multi` (one connected
+  output on `card0`), `stream_demo` (no EGL Streams), `v4l2_decode` (the Pi 5's
+  hardware decoder is HEVC-only — no H.264), `v4l2_camera_demo`/`camera_record`
+  (no camera; no hardware encoder).
+
+### SA8155P (Adreno 640 + downstream display driver)
+
+Validation target: **SA8155P**, vendor kernel **5.4**, glibc 2.31. The display
+driver reports `msm_drm` but is the **downstream SDE** stack, not upstream DPU, and
+the target is a shared-display split: one controller publishes a connector per
+display consumer, and only the consumer actually presenting is lit.
+
+- **Nodes and connectors.** The KMS node used is `card1` (`card0` has no `/dev`
+  node). `driver_caps`: `addfb2_modifiers=true`, `async_page_flip=false`,
+  `fb_damage_clips=false`, `vrr_capable=true`, census `PRIMARY=5 OVERLAY=9
+  CURSOR=0`. Several connectors report *connected* (`Virtual-1` 4096×2160,
+  `DSI-3` 1920×720, `DP-4` 1280×720) but only **`DP-4`** is the visible panel — a
+  rank- or first-connected pick renders flawlessly into an unlit slot. Pin it with
+  **`DRM_CXX_CONNECTOR=DP-4`** (honored by the example output pickers and by
+  `ScanoutBackend::Config::connector_id`). Leave the platform's own display
+  services running; drm-cxx only needs `card1`, which is free when nothing else
+  presents on it.
+- **Planes.** No plane publishes `IN_FORMATS` (LINEAR via the legacy format
+  list); every plane's `zpos` is **mutable `[0, 10]`**. Two controller rules matter:
+  - **Multirect virtual planes.** 7 of the 14 planes are the second rectangle of
+    a hardware pipe, published as their own OVERLAY and marked in the read-only
+    `capabilities` blob with `primary_smart_plane_id=<parent>`. Staged without the
+    parent the driver rejects them (`r1 only virt plane:N not supported`). The
+    registry records the parent (`PlaneCapabilities::multirect_parent`), the
+    allocator only places a virtual plane alongside its parent, and the canvas only
+    lands on one whose parent is armed.
+  - **Equal `zpos` = source split.** Two planes on the same stage are read as a
+    left/right split pair and rejected unless adjacent (`invalid coordinates,
+    stage:N`). LayerScene now lowers distinct `zpos` values when layers tie.
+- **Build — clang against a glibc-2.31 (bullseye-class) sysroot.** The Arm GNU
+  toolchains' own libstdc++ needs newer glibc, so C++ links with **clang +
+  the sysroot's GCC 10 libstdc++** (`--gcc-toolchain=<sysroot>/usr
+  -stdlib=libstdc++ -fuse-ld=lld`) at **C++17** (fmt and the span/expected
+  polyfills are vendored). `libdisplay-info` is linked from the sysroot's static
+  archive; the target has no `libseat`, so `session` is off. **Blend2D** requires
+  C++20 `std::bit_cast`, which GCC 10's libstdc++ lacks — build it with the
+  sysroot's **LLVM 18 libc++ linked statically and hidden**
+  (`-nostdlib++ -Wl,-Bstatic -lc++ -lc++abi -Wl,--exclude-libs,ALL`): the
+  resulting `libblend2d.so` needs only glibc ≥2.29 and exports no C++ runtime, so
+  drm-cxx stays on libstdc++ across Blend2D's C ABI. Restrict the CMake toolchain's
+  package lookup to the sysroot (`CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY`) — a host
+  `tomlplusplus` package otherwise leaks into the cross configure.
+- **Fonts** live outside `/usr/share/fonts` on this image; point the text
+  renderers at one with **`DRM_CXX_FONT=<path.ttf>`** (checked first by the CSD
+  renderer and the signage/cluster/camera examples).
+- **GPU:** GL and Vulkan both scan out — `egl_scene`, `gl_present`,
+  `shadertoy_egl`, `vulkan_scene`, `vk_present`, `vk_out_fence` (OUT_FENCE 60/60),
+  `vulkan_offload_scanout`, `gbm_surface_scanout`. `egl_scene`/`vulkan_scene` hold
+  **60 fps**. `vulkan_display` (VK_KHR_display) and `egl_offload_scanout`
+  (`eglCreateImage` on the display node's bo) fail on this stack.
+- **Native multi-plane works:** `scene_formats` 4/4 assigned, `scene_warm_start`
+  3/3, `plane_stress` 4 layers native at one commit per vblank.
+- **Tests:** 83/84 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card1`.
+- **Known limitation — canvas stage budget.** When a scene needs both many native
+  planes and the composition canvas (`scene_priority` with 8 layers,
+  `allocator_torture`, the pin test), the allocator's native assignment passes
+  TEST alone but adding the canvas exceeds the layer mixer's stages and the commit
+  is rejected without a driver log. The canvas-plane TEST/fallback cannot fix this
+  (every candidate fails); it needs canvas-aware allocation (test the canvas with
+  the assignment, demote a native layer when it does not fit).
+- `mouse_cursor`/`cursor_rotate` expect an already-active CRTC and exit when none
+  is (no cursor plane exists either); `cursor_scene` works.
 
 ### TI AM335x (BeagleBone Black, tilcdc)
 
