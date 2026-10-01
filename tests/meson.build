@@ -207,6 +207,20 @@ test('test_plane_allocator',
   ),
 )
 
+test('test_multirect',
+  executable('test_multirect',
+    'unit/test_multirect.cpp',
+    dependencies : test_deps,
+  ),
+)
+
+test('test_zpos_order',
+  executable('test_zpos_order',
+    'unit/test_zpos_order.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_input',
   executable('test_input',
     'unit/test_input.cpp',

@@ -3,6 +3,7 @@
 
 #include "layer_scene.hpp"
 
+#include "../planes/multirect.hpp"
 #include "buffer_source.hpp"
 #include "commit_report.hpp"
 #include "compatibility_report.hpp"
@@ -59,6 +60,7 @@
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
@@ -886,6 +888,9 @@ class LayerScene::Impl {
     // fd swap (registry was re-enumerated above); drop the cached
     // values so the next composing frame re-resolves from scratch.
     last_canvas_plane_id_.reset();
+    canvas_proven_planes_.clear();
+    canvas_rejected_planes_.clear();
+    canvas_testing_ = true;
     cached_crtc_index_.reset();
     // Empirical mixing result is tied to the prior fd's kernel state;
     // re-probe under the fresh fd if the caller wants the upgrade.
@@ -1003,6 +1008,9 @@ class LayerScene::Impl {
     // dirty-rect tracker resets too.
     composition_canvas_.reset();
     last_canvas_plane_id_.reset();
+    canvas_proven_planes_.clear();
+    canvas_rejected_planes_.clear();
+    canvas_testing_ = true;
     cached_crtc_index_.reset();
     // The mixing probe's last verdict was for the previous CRTC; on
     // the new one the driver may behave differently. Re-probe on
@@ -1180,8 +1188,11 @@ class LayerScene::Impl {
   // Copy scene::Layer state into the planes::Layer property bag. The
   // allocator and the AtomicRequest it builds read from this bag to
   // write plane properties.
+  // `zpos_hint` fills an unset zpos; with `hint_overrides` it replaces the
+  // caller's (only ever for bottom_slot_layer(), where that keeps the order).
   static void lower_layer(const Layer& src, drm::planes::Layer& dst, std::uint32_t fb_id,
-                          std::uint32_t crtc_id, std::optional<std::uint64_t> default_zpos_hint) {
+                          std::uint32_t crtc_id, std::optional<std::uint64_t> default_zpos_hint,
+                          bool hint_overrides = false) {
     const auto& d = src.display();
     const auto fmt = src.source().format();
     const bool driver_owns_binding =
@@ -1255,10 +1266,10 @@ class LayerScene::Impl {
     if (d.rotation != 0) {
       dst.set_property(drm::planes::PropTag::Rotation, d.rotation);
     }
-    if (d.zpos.has_value()) {
-      dst.set_property(drm::planes::PropTag::Zpos, static_cast<std::uint64_t>(*d.zpos));
-    } else if (default_zpos_hint.has_value()) {
+    if (default_zpos_hint.has_value() && (hint_overrides || !d.zpos.has_value())) {
       dst.set_property(drm::planes::PropTag::Zpos, *default_zpos_hint);
+    } else if (d.zpos.has_value()) {
+      dst.set_property(drm::planes::PropTag::Zpos, static_cast<std::uint64_t>(*d.zpos));
     }
     // Always emit the layer's intended alpha. Earlier versions skipped
     // the write when `d.alpha == 0xFFFF` and no caller had touched it,
@@ -1347,6 +1358,44 @@ class LayerScene::Impl {
     return canvas_format_for_plane(p).has_value();
   }
 
+  // The layer that can take PRIMARY's fixed zpos slot even though its
+  // caller-set zpos differs from it: the unique lowest zpos, with every other
+  // layer requesting a zpos strictly above the slot. Lowering it at the slot
+  // then keeps the requested stacking on any plane assignment — on a
+  // single-PRIMARY controller (i.MX LCDIF, tilcdc: slot 0) that is any lone
+  // layer at zpos >= 1, which otherwise never reaches the only plane. nullptr
+  // when any layer leaves zpos unset (the existing hint covers that) or the
+  // condition fails (e.g. amdgpu layers at zpos <= 2 keep today's behavior).
+  static const Layer* bottom_slot_layer(const std::vector<const Layer*>& layers,
+                                        std::uint64_t pin) {
+    const Layer* lowest = nullptr;
+    int lowest_z = 0;
+    bool unique = true;
+    for (const Layer* l : layers) {
+      const auto z = l->display().zpos;
+      if (!z.has_value()) {
+        return nullptr;
+      }
+      if (lowest == nullptr || *z < lowest_z) {
+        lowest = l;
+        lowest_z = *z;
+        unique = true;
+      } else if (*z == lowest_z) {
+        unique = false;
+      }
+    }
+    if (lowest == nullptr || !unique) {
+      return nullptr;
+    }
+    for (const Layer* l : layers) {
+      const int z = l->display().zpos.value_or(lowest_z);  // all set: checked above
+      if (l != lowest && (z < 0 || static_cast<std::uint64_t>(z) <= pin)) {
+        return nullptr;
+      }
+    }
+    return lowest;
+  }
+
   // Decide whether to reserve a canvas plane up front for this
   // commit. Returns the plane id to reserve, or nullopt when neither
   // overflow nor primary-anchor reservation is needed.
@@ -1413,6 +1462,16 @@ class LayerScene::Impl {
           primary_eligible_layer = true;
           break;
         }
+      }
+      if (!primary_eligible_layer) {
+        std::vector<const Layer*> live;
+        live.reserve(slots_.size());
+        for (const auto& slot : slots_) {
+          if (slot.alive && slot.scene_layer != nullptr) {
+            live.push_back(slot.scene_layer.get());
+          }
+        }
+        primary_eligible_layer = bottom_slot_layer(live, pin) != nullptr;
       }
       if (!primary_eligible_layer && layer_count() > 0) {
         return primary_fallback->id;
@@ -1664,37 +1723,44 @@ class LayerScene::Impl {
   // (the do_commit pre-reservation kept it out of the allocator's
   // pool, so it should still be free here); otherwise we fall back to
   // the OVERLAY-then-PRIMARY scan. Never returns CURSOR.
-  const drm::planes::PlaneCapabilities* find_free_canvas_plane(
-      std::uint32_t crtc_index, const std::vector<AcquisitionSlot>& acquisitions) {
-    // Build the set of planes already armed by the allocator (from any
-    // assigned layer) plus any plane the allocator routed the empty
-    // composition_planes_layer_ to. Reused scratch member to keep this
-    // off the per-frame heap.
+  //
+  // Fills `out` with every eligible plane in preference order; out.front()
+  // is the plane this has always picked. compose_unassigned TESTs them in
+  // order (arm_canvas_tested) because a free, format-compatible plane can
+  // still be one the driver refuses on its own — e.g. a multirect pipe's
+  // second rectangle, which some display controllers expose as a separate
+  // OVERLAY that is only valid alongside its parent.
+  void canvas_plane_candidates(std::uint32_t crtc_index,
+                               const std::vector<AcquisitionSlot>& acquisitions,
+                               std::vector<const drm::planes::PlaneCapabilities*>& out) {
+    out.clear();
+    // Build the set of planes already armed by the allocator for an
+    // assigned layer. Reused scratch member to keep this off the per-frame
+    // heap.
     //
-    // Exception: when composition_planes_layer_'s slot equals
-    // last_canvas_plane_id_, that's the do_commit pre-reservation
-    // landing on the same plane the allocator's any_composited path
-    // pre-armed for the empty composition layer. They're the *same*
-    // canvas slot — we want to land there, not avoid it. Skipping the
-    // composition_planes_layer_ entry in that case lets the preferred
-    // path below return the reserved plane instead of bailing out
-    // with "no free plane for canvas" while every other plane is
-    // assigned to a placed layer.
+    // The plane the allocator's any_composited path routed the empty
+    // composition_planes_layer_ to is deliberately *not* in-use: that
+    // placeholder is the canvas slot, so the canvas may land there. Counting
+    // it as taken left a single-plane CRTC (i.MX LCDIF, tilcdc) with "no free
+    // plane for canvas" — and the layer dropped — whenever composition ran
+    // without a do_commit pre-reservation. Multi-plane CRTCs still prefer a
+    // free OVERLAY below, as before.
     scratch_in_use_.clear();
-    scratch_in_use_.reserve(acquisitions.size() + 1);
+    scratch_in_use_.reserve(acquisitions.size());
     for (const auto& acq : acquisitions) {
       if (auto pid = acq.planes_layer->assigned_plane_id(); pid.has_value()) {
-        scratch_in_use_.push_back(*pid);
-      }
-    }
-    if (auto pid = composition_planes_layer_.assigned_plane_id(); pid.has_value()) {
-      if (!last_canvas_plane_id_.has_value() || *pid != *last_canvas_plane_id_) {
         scratch_in_use_.push_back(*pid);
       }
     }
     auto is_in_use = [&](std::uint32_t pid) {
       return std::find(scratch_in_use_.begin(), scratch_in_use_.end(), pid) !=
              scratch_in_use_.end();
+    };
+    // A multirect virtual plane can only host the canvas while its parent is
+    // armed this frame (planes/multirect.hpp); staged alone the driver
+    // rejects it.
+    auto pairable = [&](const drm::planes::PlaneCapabilities& p) {
+      return drm::planes::detail::multirect_pairing_ok(p.multirect_parent, is_in_use);
     };
 
     // Preferred path: the do_commit pre-reservation already pinned a
@@ -1709,14 +1775,15 @@ class LayerScene::Impl {
           continue;
         }
         if (is_in_use(p->id) || p->type == drm::planes::DRMPlaneType::CURSOR ||
-            !plane_hosts_canvas(*p)) {
+            !plane_hosts_canvas(*p) || !pairable(*p)) {
           break;  // reservation invalidated this frame; fall back below
         }
-        return p;
+        out.push_back(p);
+        break;
       }
     }
 
-    const drm::planes::PlaneCapabilities* primary_fallback = nullptr;
+    std::vector<const drm::planes::PlaneCapabilities*> primaries;
     for (const auto* p : registry_.for_crtc(crtc_index)) {
       if (p->type == drm::planes::DRMPlaneType::CURSOR) {
         continue;
@@ -1724,42 +1791,177 @@ class LayerScene::Impl {
       if (is_in_use(p->id)) {
         continue;
       }
-      if (!plane_hosts_canvas(*p)) {
+      if (!plane_hosts_canvas(*p) || !pairable(*p)) {
         continue;
       }
-      if (p->type == drm::planes::DRMPlaneType::OVERLAY) {
-        return p;
+      if (std::find(out.begin(), out.end(), p) != out.end()) {
+        continue;  // the preferred (reserved) plane, already first
       }
-      // Remember the first eligible PRIMARY but keep looking for an
-      // OVERLAY — OVERLAY is the safer placement when the scene has a
-      // dedicated background layer on PRIMARY.
-      if (primary_fallback == nullptr) {
-        primary_fallback = p;
+      // OVERLAYs first, PRIMARYs after — OVERLAY is the safer placement
+      // when the scene has a dedicated background layer on PRIMARY.
+      if (p->type == drm::planes::DRMPlaneType::OVERLAY) {
+        out.push_back(p);
+      } else {
+        primaries.push_back(p);
       }
     }
-    return primary_fallback;
+    out.insert(out.end(), primaries.begin(), primaries.end());
+  }
+
+  // Arm the canvas on the first candidate the kernel accepts. A candidate is
+  // TESTed once — the whole frame request with the canvas armed on it — and
+  // the verdict cached per plane until the next resume/rebind, so a settled
+  // scene pays nothing per frame. A rejected candidate's writes are rolled
+  // back via the libdrm request cursor and the next one is tried. When every
+  // candidate fails (or the request cannot be tested), the first is armed
+  // exactly as before this check existed and testing stops until the next
+  // resume/rebind: the outcome is never worse than picking out.front()
+  // blind. Returns the armed plane, or nullptr if arming itself failed.
+  const drm::planes::PlaneCapabilities* arm_canvas_tested(
+      drm::AtomicRequest& req, const std::vector<const drm::planes::PlaneCapabilities*>& candidates,
+      std::int32_t zpos, CommitReport& report, std::uint32_t test_flags) {
+    auto listed = [](const std::vector<std::uint32_t>& v, std::uint32_t id) {
+      return std::find(v.begin(), v.end(), id) != v.end();
+    };
+    if (!canvas_testing_ || !req.valid()) {
+      const auto* first = candidates.front();
+      return arm_composition_canvas(req, *first, zpos, report) ? first : nullptr;
+    }
+    for (const auto* p : candidates) {
+      if (listed(canvas_rejected_planes_, p->id)) {
+        continue;
+      }
+      const int cursor = req.cursor();
+      const auto props_before = report.properties_written;
+      const auto fbs_before = report.fbs_attached;
+      if (!arm_composition_canvas(req, *p, zpos, report)) {
+        req.rollback(cursor);
+        report.properties_written = props_before;
+        report.fbs_attached = fbs_before;
+        continue;
+      }
+      if (listed(canvas_proven_planes_, p->id)) {
+        return p;
+      }
+      const auto verdict = req.test(test_flags);
+      if (verdict) {
+        canvas_proven_planes_.push_back(p->id);
+        return p;
+      }
+      if (verdict.error() == std::errc::permission_denied) {
+        return p;  // lost master: no verdict about the plane, keep it armed
+      }
+      drm::log_debug("scene::LayerScene: canvas plane {} rejected by TEST ({}); trying next", p->id,
+                     verdict.error().message());
+      req.rollback(cursor);
+      report.properties_written = props_before;
+      report.fbs_attached = fbs_before;
+      canvas_rejected_planes_.push_back(p->id);
+    }
+    // Nothing passed: the frame is likely rejected for a reason unrelated to
+    // the canvas plane. Forget this frame's rejections, stop testing, and arm
+    // the first candidate as the pre-TEST code did.
+    canvas_rejected_planes_.clear();
+    canvas_testing_ = false;
+    const auto* first = candidates.front();
+    return arm_composition_canvas(req, *first, zpos, report) ? first : nullptr;
   }
 
   // Pick a zpos for the canvas plane that puts composited content
   // above every hardware-assigned layer AND above any explicit zpos
   // the composited layers carry. Returns 0 when no signal exists,
   // which is the conservative "let the kernel pick" sentinel.
-  static std::int32_t choose_canvas_zpos(const std::vector<AcquisitionSlot>& acquisitions,
-                                         const std::vector<AcquisitionSlot*>& composited) {
+  // Give every layer that lowers a zpos a distinct one. DRM allows equal zpos
+  // (the kernel orders ties by plane id), but some display controllers read
+  // two planes on one stage as a source-split left/right pair and reject them
+  // unless they sit side by side. Already-distinct values are left alone; ties
+  // are broken in scene order (the PRIMARY-hint target first, so it keeps the
+  // pinned slot) by bumping later layers to strictly increasing values. When
+  // that would push past the CRTC planes' largest zpos (tight ranges, e.g.
+  // [0, 3]) nothing is changed, so such drivers lower exactly what they did.
+  // Fills scratch_zpos_overrides_ with only the layers whose value changes.
+  void uniquify_zpos(const std::vector<AcquisitionSlot>& acquisitions, const Layer* hint_target) {
+    scratch_zpos_overrides_.clear();
+    struct Entry {
+      const Layer* layer;
+      std::int64_t z;
+      int rank;  // 0 = hint target (wins ties), 1 = everyone else
+      std::size_t order;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(acquisitions.size());
+    for (std::size_t i = 0; i < acquisitions.size(); ++i) {
+      const Layer* l = acquisitions[i].scene_layer;
+      if (l == hint_target && primary_zpos_hint_.has_value()) {
+        entries.push_back({l, static_cast<std::int64_t>(*primary_zpos_hint_), 0, i});
+      } else if (const auto z = l->display().zpos; z.has_value()) {
+        entries.push_back({l, *z, 1, i});
+      }
+    }
+    std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+      return std::tie(a.z, a.rank, a.order) < std::tie(b.z, b.rank, b.order);
+    });
+    bool any_tie = false;
+    for (std::size_t i = 1; i < entries.size(); ++i) {
+      any_tie = any_tie || entries[i].z == entries[i - 1].z;
+    }
+    if (!any_tie) {
+      return;
+    }
+    std::optional<std::int64_t> cap;
+    if (const auto crtc_index = resolve_crtc_index(); crtc_index.has_value()) {
+      for (const auto* p : registry_.for_crtc(*crtc_index)) {
+        if (p->type != drm::planes::DRMPlaneType::CURSOR && p->zpos_max.has_value()) {
+          cap = std::max(cap.value_or(0), static_cast<std::int64_t>(*p->zpos_max));
+        }
+      }
+    }
+    std::int64_t prev = std::numeric_limits<std::int64_t>::min();
+    std::vector<std::pair<const Layer*, std::uint64_t>> bumped;
+    for (const auto& e : entries) {
+      const std::int64_t v =
+          (prev == std::numeric_limits<std::int64_t>::min()) ? e.z : std::max(e.z, prev + 1);
+      if (v < 0 || (cap.has_value() && v > *cap)) {
+        return;  // no room: keep the requested (tied) values
+      }
+      if (v != e.z) {
+        bumped.emplace_back(e.layer, static_cast<std::uint64_t>(v));
+      }
+      prev = v;
+    }
+    scratch_zpos_overrides_ = std::move(bumped);
+  }
+
+  // The zpos a layer was lowered with this frame (uniquify_zpos override, else
+  // its own), for placing the canvas above it.
+  std::optional<std::int64_t> lowered_zpos(const Layer* l) const {
+    for (const auto& [layer, z] : scratch_zpos_overrides_) {
+      if (layer == l) {
+        return static_cast<std::int64_t>(z);
+      }
+    }
+    if (const auto z = l->display().zpos; z.has_value()) {
+      return *z;
+    }
+    return std::nullopt;
+  }
+
+  std::int32_t choose_canvas_zpos(const std::vector<AcquisitionSlot>& acquisitions,
+                                  const std::vector<AcquisitionSlot*>& composited) const {
     std::int32_t max_explicit = 0;
     bool have_signal = false;
     for (const auto& acq : acquisitions) {
       if (!acq.planes_layer->assigned_plane_id().has_value()) {
         continue;  // unassigned layers feed the composited list, not the floor
       }
-      if (auto z = acq.scene_layer->display().zpos; z.has_value()) {
-        max_explicit = std::max(max_explicit, *z);
+      if (auto z = lowered_zpos(acq.scene_layer); z.has_value()) {
+        max_explicit = std::max(max_explicit, static_cast<std::int32_t>(*z));
         have_signal = true;
       }
     }
     for (const auto* acq : composited) {
-      if (auto z = acq->scene_layer->display().zpos; z.has_value()) {
-        max_explicit = std::max(max_explicit, *z);
+      if (auto z = lowered_zpos(acq->scene_layer); z.has_value()) {
+        max_explicit = std::max(max_explicit, static_cast<std::int32_t>(*z));
         have_signal = true;
       }
     }
@@ -1854,7 +2056,7 @@ class LayerScene::Impl {
   // Best-effort composition. Updates `report.layers_composited` and
   // `report.composition_buckets` for layers it absorbs.
   void compose_unassigned(std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
-                          CommitReport& report) {
+                          CommitReport& report, std::uint32_t test_flags) {
     // Collect layers needing composition that also have CPU pixels
     // available. Sources without a CPU mapping (future EGL Streams,
     // tiled GBM BOs) report `errc::function_not_supported`; we drop
@@ -1926,7 +2128,9 @@ class LayerScene::Impl {
       drm::log_warn("scene::LayerScene: composition fallback could not resolve CRTC index");
       return;
     }
-    const auto* target_plane = find_free_canvas_plane(*crtc_index, acquisitions);
+    canvas_plane_candidates(*crtc_index, acquisitions, scratch_canvas_candidates_);
+    const auto* target_plane =
+        scratch_canvas_candidates_.empty() ? nullptr : scratch_canvas_candidates_.front();
     if (target_plane == nullptr) {
       drm::log_warn(
           "scene::LayerScene: composition fallback found no free plane for canvas; {} "
@@ -1940,7 +2144,7 @@ class LayerScene::Impl {
       cfg.canvas_width = mode_.hdisplay;
       cfg.canvas_height = mode_.vdisplay;
       // Allocate the canvas in a format `target_plane` actually scans out
-      // — find_free_canvas_plane only returns a canvas-capable plane, so
+      // — canvas_plane_candidates only lists canvas-capable planes, so
       // this is always set. On the common path it's ARGB8888 (no
       // conversion); on tilcdc-class controllers it's XBGR8888 / RGB565.
       cfg.output_fourcc = canvas_format_for_plane(*target_plane).value_or(DRM_FORMAT_ARGB8888);
@@ -2050,13 +2254,15 @@ class LayerScene::Impl {
     }
 
     const std::int32_t canvas_zpos = choose_canvas_zpos(acquisitions, scratch_composited_);
-    if (auto r = arm_composition_canvas(req, *target_plane, canvas_zpos, report); !r) {
-      drm::log_warn("scene::LayerScene: arm composition canvas failed: {}", r.error().message());
+    const auto* armed =
+        arm_canvas_tested(req, scratch_canvas_candidates_, canvas_zpos, report, test_flags);
+    if (armed == nullptr) {
+      drm::log_warn("scene::LayerScene: arm composition canvas failed");
       return;
     }
     report.layers_composited += composited;
     report.composition_buckets += 1U;
-    last_canvas_plane_id_ = target_plane->id;
+    last_canvas_plane_id_ = armed->id;
   }
 
   // Classify every acquired layer as AssignedToPlane / Composited /
@@ -3126,6 +3332,15 @@ class LayerScene::Impl {
   // them moments later. Cleared on session resume (fresh fd) and on
   // any frame where composition didn't run.
   std::optional<std::uint32_t> last_canvas_plane_id_;
+  // Canvas-plane TEST verdicts (arm_canvas_tested); cleared with the plane
+  // registry on resume/rebind. canvas_testing_ drops to false once every
+  // candidate has failed, restoring the untested pick.
+  std::vector<std::uint32_t> canvas_proven_planes_;
+  std::vector<std::uint32_t> canvas_rejected_planes_;
+  std::vector<const drm::planes::PlaneCapabilities*> scratch_canvas_candidates_;
+  // Per-frame zpos overrides from uniquify_zpos (layers whose value changed).
+  std::vector<std::pair<const Layer*, std::uint64_t>> scratch_zpos_overrides_;
+  bool canvas_testing_{true};
 
   // Per-frame scratch vectors. Keeping them as members avoids the
   // per-frame heap allocation that a fresh local vector would incur
@@ -3384,16 +3599,32 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
         }
       }
     }
+    if (!already_targeted && hint_target == nullptr) {
+      std::vector<const Layer*> acquired;
+      acquired.reserve(acquisitions.size());
+      for (const auto& acq : acquisitions) {
+        acquired.push_back(acq.scene_layer);
+      }
+      hint_target = bottom_slot_layer(acquired, *primary_zpos_hint_);
+    }
   }
+  uniquify_zpos(acquisitions, hint_target);
   for (const auto& acq : acquisitions) {
     // acquire_all only pushes slots whose scene_layer + planes_layer
     // are both non-null (the slot.alive guard plus add_layer always
     // wires planes_layer before alive flips true), so the dereferences
     // below are safe even though the analyzer can't prove it.
-    const std::optional<std::uint64_t> per_layer_hint =
+    std::optional<std::uint64_t> per_layer_hint =
         (acq.scene_layer == hint_target) ? primary_zpos_hint_ : std::nullopt;
+    bool overrides = acq.scene_layer == hint_target;
+    for (const auto& [layer, z] : scratch_zpos_overrides_) {
+      if (layer == acq.scene_layer) {
+        per_layer_hint = z;
+        overrides = true;
+      }
+    }
     lower_layer(*acq.scene_layer,  // NOLINT(clang-analyzer-core.NonNullParamChecker)
-                *acq.planes_layer, acq.buffer.fb_id, crtc_id_, per_layer_hint);
+                *acq.planes_layer, acq.buffer.fb_id, crtc_id_, per_layer_hint, overrides);
   }
 
   // Modeset state: on the first commit after create()/rebind() we must
@@ -3572,7 +3803,11 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // report.layers_composited and report.composition_buckets; the
   // dropped tally below is the residual that wasn't rescued
   // (no CPU mapping, no free plane, canvas alloc failed).
-  compose_unassigned(acquisitions, req, report);
+  // TEST flags for the canvas-plane check: the frame's modeset allowance, but
+  // never PAGE_FLIP_EVENT (TEST_ONLY together with an event is EINVAL).
+  const std::uint32_t canvas_test_flags =
+      DRM_MODE_ATOMIC_TEST_ONLY | (first_commit_ ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0U);
+  compose_unassigned(acquisitions, req, report, canvas_test_flags);
 
   // Subtract skipped layers from the residual: they're flow-controlled
   // (no new frame this vblank), not dropped, and the warning below

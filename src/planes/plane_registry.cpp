@@ -4,6 +4,7 @@
 #include "plane_registry.hpp"
 
 #include "../core/device.hpp"
+#include "multirect.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
@@ -17,6 +18,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -158,6 +160,15 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
             caps.rotation_bits |= (uint64_t{1} << en.value);
           }
         }
+      }
+    } else if (std::strcmp(prop->name, "capabilities") == 0 &&
+               (prop->flags & DRM_MODE_PROP_BLOB) != 0U && prop_vals[i] != 0U) {
+      // Driver-private text blob; only its multirect marker is consumed.
+      if (auto* blob = drmModeGetPropertyBlob(fd, static_cast<uint32_t>(prop_vals[i]));
+          blob != nullptr) {
+        caps.multirect_parent = detail::parse_multirect_parent(
+            std::string_view(static_cast<const char*>(blob->data), blob->length));
+        drmModeFreePropertyBlob(blob);
       }
     } else if (std::strcmp(prop->name, "SRC_W") == 0) {
       // If SRC_W exists and is different from CRTC_W range, scaling is supported

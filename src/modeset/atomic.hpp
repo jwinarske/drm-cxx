@@ -28,6 +28,13 @@ class AtomicRequest {
 
   drm::expected<void, std::error_code> test(uint32_t flags = DRM_MODE_ATOMIC_TEST_ONLY);
 
+  /// Position marker for rollback(): everything added after cursor() was
+  /// taken can be dropped again, e.g. to try one plane choice, TEST it, and
+  /// undo it if the kernel refuses. Also rewinds the debug trace, so dump()
+  /// shows only what the request really carries.
+  [[nodiscard]] int cursor() const noexcept;
+  void rollback(int cursor) noexcept;
+
   drm::expected<void, std::error_code> commit(uint32_t flags, void* user_data = nullptr);
 
   /// Underlying libdrm handle. Exposed for EGL Streams: NVIDIA's

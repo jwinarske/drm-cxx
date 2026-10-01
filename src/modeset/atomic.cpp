@@ -103,6 +103,22 @@ void AtomicRequest::dump(const char* why) const {
   }
 }
 
+int AtomicRequest::cursor() const noexcept {
+  return (req_ != nullptr) ? drmModeAtomicGetCursor(req_) : 0;
+}
+
+void AtomicRequest::rollback(const int cursor) noexcept {
+  if (req_ == nullptr || cursor < 0) {
+    return;
+  }
+  drmModeAtomicSetCursor(req_, cursor);
+  // trace_ holds one entry per add_property() since construction, exactly
+  // like the libdrm request, so the same index truncates it.
+  if (static_cast<std::size_t>(cursor) < trace_.size()) {
+    trace_.resize(static_cast<std::size_t>(cursor));
+  }
+}
+
 drm::expected<void, std::error_code> AtomicRequest::test(uint32_t flags) {
   if ((req_ == nullptr) || drm_fd_ < 0) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
