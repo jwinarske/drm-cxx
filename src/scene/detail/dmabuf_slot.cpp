@@ -3,6 +3,7 @@
 
 #include "dmabuf_slot.hpp"
 
+#include "../../core/addfb2.hpp"
 #include "../../log.hpp"
 #include "../buffer_source.hpp"  // ExternalPlaneInfo, SourceFormat
 
@@ -10,7 +11,6 @@
 #include <drm-cxx/detail/span.hpp>
 
 #include <drm.h>
-#include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -99,17 +99,14 @@ drm::expected<void, std::error_code> import_slot(int fd, DmaBufSlot& slot,
     modifiers.at(i) = slot.modifier;
   }
 
-  // Pass MODIFIERS only when the caller advertised one; forwarding INVALID
-  // through DRM_MODE_FB_MODIFIERS is rejected by drivers that never took the
-  // ADDFB2_MODIFIERS capability path.
-  const bool use_modifiers = slot.modifier != k_mod_invalid;
-  const int rc = drmModeAddFB2WithModifiers(fd, fmt.width, fmt.height, fmt.drm_fourcc,
-                                            handles.data(), pitches.data(), offsets.data(),
-                                            use_modifiers ? modifiers.data() : nullptr, &slot.fb_id,
-                                            use_modifiers ? DRM_MODE_FB_MODIFIERS : 0U);
+  // INVALID / LINEAR-without-the-cap take the legacy path (see add_fb2).
+  const int rc =
+      drm::detail::add_fb2(fd, fmt.width, fmt.height, fmt.drm_fourcc, handles.data(),
+                           pitches.data(), offsets.data(), modifiers.data(), &slot.fb_id);
   if (rc != 0 || slot.fb_id == 0) {
     const auto ec = last_errno_or(std::errc::io_error);
     if (debug_enabled()) {
+      const bool use_modifiers = drm::detail::addfb2_needs_modifiers(fd, slot.modifier);
       drm::detail::log_channel(drm::LogLevel::Debug,
                                "[dmabuf_slot] drmModeAddFB2WithModifiers (errno={}: {}) — "
                                "w={} h={} fourcc=0x{:08x} mod=0x{:016x} use_mod={} planes={}",

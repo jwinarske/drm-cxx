@@ -114,14 +114,9 @@ int main(int argc, char** argv) {
   std::printf("output: connector %u, crtc %u, primary plane %u, %ux%u\n", target->connector_id,
               target->crtc_id, target->primary_plane, w, h);
 
-  auto tbl = fmt::FormatTable::from_plane(fd, target->primary_plane);
-  if (!tbl) {
-    std::fprintf(stderr, "no IN_FORMATS: %s\n", tbl.error().message().c_str());
-    close(fd);
-    return 1;
-  }
+  const auto tbl = kms::plane_format_table(fd, target->primary_plane);
 
-  auto candidates = rank_candidates(*tbl, DRM_FORMAT_XRGB8888);
+  auto candidates = rank_candidates(tbl, DRM_FORMAT_XRGB8888);
   std::printf("candidates (best first):\n");
   for (fmt::Modifier const m : candidates) {
     std::printf("  %s\n", fmt::describe(m).c_str());

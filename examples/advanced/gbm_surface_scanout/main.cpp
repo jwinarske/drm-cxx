@@ -150,13 +150,8 @@ int main(int argc, char** argv) {
   std::printf("display %s: crtc %u, primary plane %u, %ux%u\n", path, target->crtc_id,
               target->primary_plane, w, h);
 
-  auto tbl = fmt::FormatTable::from_plane(fd, target->primary_plane);
-  if (!tbl) {
-    std::fprintf(stderr, "no IN_FORMATS: %s\n", tbl.error().message().c_str());
-    close(fd);
-    return 1;
-  }
-  auto candidates = rank(tbl->modifiers_for(fourcc));
+  const auto tbl = kms::plane_format_table(fd, target->primary_plane);
+  auto candidates = rank(tbl.modifiers_for(fourcc));
 
   gbm_device* gbm = gbm_create_device(fd);
   if (gbm == nullptr) {

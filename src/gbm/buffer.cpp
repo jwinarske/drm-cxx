@@ -3,13 +3,12 @@
 
 #include "buffer.hpp"
 
+#include "../core/addfb2.hpp"
 #include "device.hpp"
 
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/detail/expected.hpp>
 
-#include <drm_fourcc.h>
-#include <drm_mode.h>
 #include <gbm.h>
 #include <xf86drmMode.h>
 
@@ -262,10 +261,8 @@ drm::expected<Buffer, std::error_code> Buffer::create(const GbmDevice& dev, cons
     std::uint32_t strides[4] = {stride, 0, 0, 0};
     std::uint32_t offsets[4] = {0, 0, 0, 0};
     std::uint64_t modifiers[4] = {resolved_modifier, 0, 0, 0};
-    const bool use_modifiers = resolved_modifier != DRM_FORMAT_MOD_INVALID;
-    const int rc = drmModeAddFB2WithModifiers(
-        drm_fd, cfg.width, cfg.height, cfg.drm_format, handles, strides, offsets,
-        use_modifiers ? modifiers : nullptr, &fb_id, use_modifiers ? DRM_MODE_FB_MODIFIERS : 0);
+    const int rc = drm::detail::add_fb2(drm_fd, cfg.width, cfg.height, cfg.drm_format, handles,
+                                        strides, offsets, modifiers, &fb_id);
     if (rc != 0) {
       const auto ec = std::error_code(errno != 0 ? errno : EIO, std::system_category());
       gbm_bo_destroy(bo);

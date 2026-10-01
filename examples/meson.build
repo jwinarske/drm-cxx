@@ -191,7 +191,9 @@ subdir('scene/hdr_demo')
 # probe entirely, or -Dthorvg_janitor=enabled to hard-require ThorVG.
 thorvg_feature = get_option('thorvg_janitor')
 if not thorvg_feature.disabled()
-  thorvg_dep = dependency('thorvg', required : thorvg_feature.enabled(),
+  # Upstream ThorVG 1.x installs thorvg-1.pc; pre-1.x and some distros ship
+  # thorvg.pc. Probe both (matches the CMake build's thorvg-1 probe).
+  thorvg_dep = dependency('thorvg-1', 'thorvg', required : thorvg_feature.enabled(),
                           version : '>=1.0.4')
   if thorvg_dep.found()
     subdir('scene/thorvg_janitor')

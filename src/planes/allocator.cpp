@@ -7,8 +7,10 @@
 #include "../log.hpp"
 #include "../modeset/atomic.hpp"
 #include "planes/layer.hpp"
+#include "planes/multirect.hpp"
 #include "planes/output.hpp"
 #include "planes/plane_registry.hpp"
+#include "planes/zpos_order.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/format.hpp>
@@ -372,6 +374,13 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
         std::make_error_code(std::errc::resource_unavailable_try_again));
   }
 
+  // A zpos change since last frame can invert a stack that involves a
+  // fixed-slot plane; TEST would not notice, so re-search instead.
+  if (!stacking_consistent(previous_allocation_) || !multirect_complete(previous_allocation_)) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+
   // FB-only fast path bypasses re-validation: the caller proved via
   // is_fb_only_frame() that geometry/format/modifier are unchanged from the
   // last accepted commit, so the cached assignment is still valid. The real
@@ -728,7 +737,14 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
       alloc_log("[alloc]   plane={} ← layer={}", pid, static_cast<const void*>(lay));
     }
   }
-  const bool preseed_ok = !try_test_commit(assignment, flags, crtc_index);
+  // The matching is order-blind; an inverted stack would pass TEST (the
+  // kernel accepts it) yet render wrong, so reject it here and go greedy.
+  // Likewise a virtual multirect plane matched without its parent.
+  const bool preseed_stacks = stacking_consistent(assignment) && multirect_complete(assignment);
+  if (!preseed_stacks) {
+    alloc_log("[alloc] preseed inverts the zpos stack or orphans a multirect plane → greedy");
+  }
+  const bool preseed_ok = preseed_stacks && !try_test_commit(assignment, flags, crtc_index);
   alloc_log("[alloc] TEST preseed → {}", preseed_ok ? "PASS" : "FAIL");
   if (preseed_ok) {
     return assignment;
@@ -741,23 +757,34 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
   std::unordered_map<uint32_t, bool> used_planes;
   std::unordered_map<Layer*, bool> assigned_layers;
 
-  for (const auto& cand : candidates) {
-    if (used_planes.count(cand.plane->id) != 0) {
-      continue;
+  // Two passes: ordinary planes first, then multirect virtual planes, each
+  // only once its parent has been taken in the first pass.
+  for (int pass = 0; pass < 2; ++pass) {
+    for (const auto& cand : candidates) {
+      if (cand.plane->multirect_parent.has_value() != (pass == 1)) {
+        continue;
+      }
+      if (used_planes.count(cand.plane->id) != 0) {
+        continue;
+      }
+      if (assigned_layers.count(cand.layer) != 0) {
+        continue;
+      }
+      if (auto cached = failure_cache_.lookup(cand.plane->id, cand.layer->property_hash());
+          cached.has_value() && !*cached) {
+        continue;
+      }
+      if (probe_rejected(crtc_index, cand.plane->id, *cand.layer)) {
+        continue;
+      }
+      if (!fits_stacking(assignment, cand.plane->id, *cand.layer) ||
+          !fits_multirect(assignment, cand.plane->id)) {
+        continue;
+      }
+      assignment.insert_or_assign(cand.plane->id, cand.layer);
+      used_planes.insert_or_assign(cand.plane->id, true);
+      assigned_layers.insert_or_assign(cand.layer, true);
     }
-    if (assigned_layers.count(cand.layer) != 0) {
-      continue;
-    }
-    if (auto cached = failure_cache_.lookup(cand.plane->id, cand.layer->property_hash());
-        cached.has_value() && !*cached) {
-      continue;
-    }
-    if (probe_rejected(crtc_index, cand.plane->id, *cand.layer)) {
-      continue;
-    }
-    assignment.insert_or_assign(cand.plane->id, cand.layer);
-    used_planes.insert_or_assign(cand.plane->id, true);
-    assigned_layers.insert_or_assign(cand.layer, true);
   }
 
   if (alloc_debug()) {
@@ -781,7 +808,16 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
   });
 
   for (auto& [fst, snd] : assigned_vec) {
+    if (assignment.count(fst) == 0) {
+      continue;  // already dropped as an orphaned multirect child
+    }
     assignment.erase(fst);
+    // Dropping a multirect parent orphans its virtual plane; drop that too.
+    for (const auto& [pid, lay] : assigned_vec) {
+      if (const auto* c = caps_of(pid); c != nullptr && c->multirect_parent == fst) {
+        assignment.erase(pid);
+      }
+    }
     if (auto ec = try_test_commit(assignment, flags, crtc_index); !ec) {
       break;
     }
@@ -1025,7 +1061,10 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
     return false;
   }
 
-  if (const auto z = layer.property("zpos"); z.has_value()) {
+  // A mutable plane gets the layer's zpos written, so it must lie in range. A
+  // fixed-slot plane is never written: it stacks at its slot whatever the layer
+  // asked, and stacking order is checked per assignment (fits_stacking).
+  if (const auto z = layer.property("zpos"); z.has_value() && !detail::zpos_fixed(plane)) {
     if (plane.zpos_min && *z < *plane.zpos_min) {
       return false;
     }
@@ -1296,10 +1335,62 @@ void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_in
 bool Allocator::zpos_is_fixed(const uint32_t plane_id) const {
   for (const auto& p : registry_.all()) {
     if (p.id == plane_id) {
-      return p.zpos_min.has_value() && p.zpos_max.has_value() && *p.zpos_min == *p.zpos_max;
+      return detail::zpos_fixed(p);
     }
   }
   return false;
+}
+
+bool Allocator::fits_stacking(const PlaneAssignment& assignment, const uint32_t plane_id,
+                              const Layer& layer) const {
+  const PlaneCapabilities* caps = nullptr;
+  for (const auto& p : registry_.all()) {
+    if (p.id == plane_id) {
+      caps = &p;
+    }
+  }
+  if (caps == nullptr) {
+    return true;
+  }
+  const auto z = layer.property("zpos");
+  for (const auto& [other_id, other] : assignment) {
+    if (other_id == plane_id || other == nullptr) {
+      continue;
+    }
+    for (const auto& p : registry_.all()) {
+      if (p.id == other_id && !detail::stacking_consistent(*caps, z, p, other->property("zpos"))) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+const PlaneCapabilities* Allocator::caps_of(const uint32_t plane_id) const {
+  for (const auto& p : registry_.all()) {
+    if (p.id == plane_id) {
+      return &p;
+    }
+  }
+  return nullptr;
+}
+
+bool Allocator::fits_multirect(const PlaneAssignment& assignment, const uint32_t plane_id) const {
+  const PlaneCapabilities* caps = caps_of(plane_id);
+  return caps == nullptr || detail::multirect_pairing_ok(
+                                caps->multirect_parent,
+                                [&](uint32_t parent) { return assignment.count(parent) != 0; });
+}
+
+bool Allocator::multirect_complete(const PlaneAssignment& assignment) const {
+  return std::all_of(assignment.begin(), assignment.end(),
+                     [&](const auto& entry) { return fits_multirect(assignment, entry.first); });
+}
+
+bool Allocator::stacking_consistent(const PlaneAssignment& assignment) const {
+  return std::all_of(assignment.begin(), assignment.end(), [&](const auto& entry) {
+    return entry.second == nullptr || fits_stacking(assignment, entry.first, *entry.second);
+  });
 }
 
 // Rescale a property value into the range the plane actually advertises.
@@ -1512,6 +1603,9 @@ bool Allocator::backtrack(std::vector<Layer*>& layers,
       continue;
     }
     if (probe_rejected(crtc_index, plane->id, *layer)) {
+      continue;
+    }
+    if (!fits_stacking(assignment, plane->id, *layer) || !fits_multirect(assignment, plane->id)) {
       continue;
     }
 

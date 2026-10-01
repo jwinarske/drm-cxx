@@ -87,6 +87,11 @@ struct PlaneCapabilities {
   std::vector<std::pair<uint64_t, drm::fmt::BandwidthClass>> modifier_classes;
   std::optional<uint64_t> zpos_min;
   std::optional<uint64_t> zpos_max;
+  /// For a multirect "virtual" plane (the second rectangle of a hardware pipe
+  /// some controllers publish as its own plane), the id of the parent plane it
+  /// is only valid alongside; nullopt for ordinary planes. Read from the
+  /// driver's read-only `capabilities` blob (`primary_smart_plane_id=`).
+  std::optional<uint32_t> multirect_parent;
   /// Supported rotation/reflect angles as a mask of DRM_MODE_ROTATE_* |
   /// DRM_MODE_REFLECT_* bits, harvested from the `"rotation"` bitmask
   /// property; 0 when the plane exposes no rotation property. A plane can

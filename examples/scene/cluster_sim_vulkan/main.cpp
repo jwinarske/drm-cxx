@@ -381,6 +381,12 @@ void paint_dial_template(std::uint8_t* pixels, std::uint32_t dial_size) noexcept
       "/usr/share/fonts/noto/NotoSans-Bold.ttf",
       "/usr/share/fonts/TTF/Vera.ttf",
   };
+  // DRM_CXX_FONT=<path.ttf> wins: images that keep their fonts outside
+  // /usr/share/fonts (vendor/automotive stacks) have none of the paths below.
+  if (const char* env = std::getenv("DRM_CXX_FONT");
+      env != nullptr && *env != '\0' && face.create_from_file(env) == BL_SUCCESS) {
+    return BL_SUCCESS;
+  }
   for (const char* path : k_candidates) {
     if (face.create_from_file(path) == BL_SUCCESS) {
       return BL_SUCCESS;
@@ -901,7 +907,15 @@ int main(int argc, char* argv[]) try {
   vk_mod_list.pDrmFormatModifierProperties = vk_mods.data();
   VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFormatProperties2(pd, VK_FORMAT_B8G8R8A8_UNORM,
                                                                      &vk_fp);
-  const std::vector<std::uint64_t> kms_mods = scene->candidate_modifiers(DRM_FORMAT_ARGB8888);
+  std::vector<std::uint64_t> kms_mods = scene->candidate_modifiers(DRM_FORMAT_ARGB8888);
+  // A plane without IN_FORMATS (i.MX LCDIF, tilcdc, ...) reports INVALID — "the
+  // driver picks", which on those controllers means LINEAR. Vulkan never lists
+  // INVALID, so match it as LINEAR or the intersection comes up empty.
+  for (auto& m : kms_mods) {
+    if (m == DRM_FORMAT_MOD_INVALID) {
+      m = DRM_FORMAT_MOD_LINEAR;
+    }
+  }
   std::vector<std::uint64_t> modifiers;
   for (const auto& vm : vk_mods) {
     if ((vm.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0U) {

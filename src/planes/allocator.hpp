@@ -400,6 +400,22 @@ class Allocator {
   // to the primary) doesn't poison the whole commit.
   [[nodiscard]] bool zpos_is_fixed(uint32_t plane_id) const;
 
+  // Stacking order (see planes/zpos_order.hpp). A layer may sit on a
+  // fixed-slot plane whatever its zpos, so placement must check that the
+  // placed layers still stack in the order they request — per candidate
+  // pair while building an assignment, and wholesale for a precomputed one.
+  [[nodiscard]] bool fits_stacking(const PlaneAssignment& assignment, uint32_t plane_id,
+                                   const Layer& layer) const;
+  [[nodiscard]] bool stacking_consistent(const PlaneAssignment& assignment) const;
+
+  // Multirect pairing (see planes/multirect.hpp): a virtual plane may only be
+  // used while its parent is in the same assignment. fits_multirect() checks a
+  // candidate against what is already assigned; multirect_complete() a whole
+  // precomputed assignment.
+  [[nodiscard]] const PlaneCapabilities* caps_of(uint32_t plane_id) const;
+  [[nodiscard]] bool fits_multirect(const PlaneAssignment& assignment, uint32_t plane_id) const;
+  [[nodiscard]] bool multirect_complete(const PlaneAssignment& assignment) const;
+
   const Device& dev_;
   PlaneRegistry& registry_;
   PropertyStore prop_store_;

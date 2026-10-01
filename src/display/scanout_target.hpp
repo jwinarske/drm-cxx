@@ -40,6 +40,13 @@ struct ScanoutTarget {
   // plane is visible. Returns std::errc::no_such_device when nothing is hooked up.
   [[nodiscard]] static drm::expected<ScanoutTarget, std::error_code> discover(
       const drm::Device& dev);
+
+  // As above, but for a specific connector (0 = first connected, as above).
+  // For multi-output / shared-display controllers where the first connected
+  // connector is not the one that is lit. Returns std::errc::no_such_device
+  // when that connector is not connected or has no modes.
+  [[nodiscard]] static drm::expected<ScanoutTarget, std::error_code> discover(
+      const drm::Device& dev, std::uint32_t connector_id);
 };
 
 // The id of the PRIMARY plane usable on `crtc_index`, or nullopt. Pure helper

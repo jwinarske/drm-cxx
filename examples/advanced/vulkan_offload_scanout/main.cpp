@@ -72,12 +72,7 @@ int main(int argc, char** argv) {
   const std::uint32_t w = target->mode.hdisplay;
   const std::uint32_t h = target->mode.vdisplay;
 
-  auto disp_tbl = fmt::FormatTable::from_plane(disp_fd, target->primary_plane);
-  if (!disp_tbl) {
-    std::fprintf(stderr, "display plane has no IN_FORMATS: %s\n",
-                 disp_tbl.error().message().c_str());
-    return 1;
-  }
+  const auto disp_tbl = kms::plane_format_table(disp_fd, target->primary_plane);
   std::printf("display %s: crtc %u, plane %u, %ux%u\n", disp_path, target->crtc_id,
               target->primary_plane, w, h);
 
@@ -176,7 +171,7 @@ int main(int argc, char** argv) {
       for (const auto& mp : props) {
         const fmt::Modifier m{mp.drmFormatModifier};
         const bool renderable = (mp.drmFormatModifierTilingFeatures & need) == need;
-        const bool scannable = disp_tbl->supports(pr.fourcc, m);
+        const bool scannable = disp_tbl.supports(pr.fourcc, m);
         if (dump_mods) {
           std::printf("  VK[%c%c%c%c] %-32s render=%d display=%d\n", char(pr.fourcc),
                       char(pr.fourcc >> 8), char(pr.fourcc >> 16), char(pr.fourcc >> 24),

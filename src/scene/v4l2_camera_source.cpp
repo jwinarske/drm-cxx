@@ -3,6 +3,7 @@
 
 #include "v4l2_camera_source.hpp"
 
+#include "../core/addfb2.hpp"
 #include "buffer_source.hpp"
 #include "v4l2_plane_layout.hpp"
 
@@ -12,7 +13,6 @@
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <drm_fourcc.h>
-#include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -187,9 +187,8 @@ struct V4l2CaptureBuffer {
   }
 
   std::uint32_t fb_id = 0;
-  if (drmModeAddFB2WithModifiers(drm_fd, width, height, drm_fourcc, handles.data(), pitches.data(),
-                                 offsets.data(), modifiers.data(), &fb_id,
-                                 DRM_MODE_FB_MODIFIERS) != 0 ||
+  if (drm::detail::add_fb2(drm_fd, width, height, drm_fourcc, handles.data(), pitches.data(),
+                           offsets.data(), modifiers.data(), &fb_id) != 0 ||
       fb_id == 0) {
     int const saved = errno;
     for (auto h : handles) {

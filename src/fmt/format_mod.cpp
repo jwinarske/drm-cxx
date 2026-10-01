@@ -7,6 +7,8 @@
 // everything else -- including scanout_cost_bytes() and its per-format byte
 // accounting -- lives here.
 
+#include "../core/addfb2.hpp"
+
 #include <drm-cxx/core/format.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
@@ -242,9 +244,8 @@ drm::expected<ScanoutBuffer, std::error_code> ScanoutBuffer::create(gbm_device* 
   gather_planes(bo, n, chosen, handles, strides, offsets, mods);
 
   std::uint32_t fb_id = 0;
-  const int ret = drmModeAddFB2WithModifiers(drm_fd, d.width, d.height, d.fourcc, handles.data(),
-                                             strides.data(), offsets.data(), mods.data(), &fb_id,
-                                             DRM_MODE_FB_MODIFIERS);
+  const int ret = drm::detail::add_fb2(drm_fd, d.width, d.height, d.fourcc, handles.data(),
+                                       strides.data(), offsets.data(), mods.data(), &fb_id);
   if (ret != 0) {
     gbm_bo_destroy(bo);
     return drm::unexpected<std::error_code>(errno_ec(-ret));
@@ -301,19 +302,11 @@ drm::expected<ScanoutBuffer, std::error_code> ScanoutBuffer::import_dmabuf(int f
 
   std::uint32_t fb_id = 0;
   if (!err) {
-    if (d.modifier.value == DRM_FORMAT_MOD_INVALID) {
-      // No explicit modifier — e.g. a LINEAR buffer from a GPU whose GBM only
-      // renders LINEAR (PowerVR on StarFive). AddFB2WithModifiers with an
-      // INVALID modifier is ill-formed, and minimal display drivers without
-      // DRM_CAP_ADDFB2_MODIFIERS (e.g. starfive) return ENOSYS for the
-      // modifier'd path regardless. Use plain AddFB2 so the import still lands.
-      if (drmModeAddFB2(fd, d.width, d.height, d.fourcc, handles.data(), strides.data(),
-                        offsets.data(), &fb_id, 0) != 0) {
-        err = errno_ec(errno);
-      }
-    } else if (drmModeAddFB2WithModifiers(fd, d.width, d.height, d.fourcc, handles.data(),
-                                          strides.data(), offsets.data(), mods.data(), &fb_id,
-                                          DRM_MODE_FB_MODIFIERS) != 0) {
+    // INVALID (no explicit modifier, e.g. a LINEAR-only GBM like PowerVR on
+    // StarFive) and LINEAR on a driver without DRM_CAP_ADDFB2_MODIFIERS take
+    // plain AddFB2; those drivers reject the modifier'd path (ENOSYS/EINVAL).
+    if (drm::detail::add_fb2(fd, d.width, d.height, d.fourcc, handles.data(), strides.data(),
+                             offsets.data(), mods.data(), &fb_id) != 0) {
       err = errno_ec(errno);
     }
   }

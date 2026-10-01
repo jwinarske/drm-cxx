@@ -92,13 +92,8 @@ int main(int argc, char** argv) {
   const std::uint32_t h = target->mode.vdisplay;
   const std::uint32_t fourcc = DRM_FORMAT_XRGB8888;
 
-  auto disp_tbl = fmt::FormatTable::from_plane(disp_fd, target->primary_plane);
-  if (!disp_tbl) {
-    std::fprintf(stderr, "display plane has no IN_FORMATS: %s\n",
-                 disp_tbl.error().message().c_str());
-    return 1;
-  }
-  auto candidates = rank(disp_tbl->modifiers_for(fourcc));
+  const auto disp_tbl = kms::plane_format_table(disp_fd, target->primary_plane);
+  auto candidates = rank(disp_tbl.modifiers_for(fourcc));
   std::printf("display %s: crtc %u, primary plane %u, %ux%u\n", disp_path, target->crtc_id,
               target->primary_plane, w, h);
 
@@ -158,9 +153,9 @@ int main(int argc, char** argv) {
       for (EGLuint64KHR const v : egl_mods) {
         const fmt::Modifier m{v};
         std::printf("  RENDER %#018llx %-40s display=%d\n", static_cast<unsigned long long>(v),
-                    fmt::describe(m).c_str(), disp_tbl->supports(fourcc, m) ? 1 : 0);
+                    fmt::describe(m).c_str(), disp_tbl.supports(fourcc, m) ? 1 : 0);
       }
-      for (fmt::Modifier const m : disp_tbl->modifiers_for(fourcc)) {
+      for (fmt::Modifier const m : disp_tbl.modifiers_for(fourcc)) {
         std::printf("  DISPLAY %#018llx %-40s\n", static_cast<unsigned long long>(m.value),
                     fmt::describe(m).c_str());
       }

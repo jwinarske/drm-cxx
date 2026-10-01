@@ -22,10 +22,12 @@
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_core.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <string_view>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <system_error>
@@ -211,10 +213,26 @@ drm::expected<std::unique_ptr<VkScanoutProducer>, std::error_code> VkScanoutProd
 
     const float prio = 1.0F;
     const vk::DeviceQueueCreateInfo qci{{}, qf, 1, &prio};
-    const std::array<const char*, 6> dev_exts{
-        "VK_KHR_external_memory",         "VK_KHR_external_memory_fd",
-        "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier",
-        "VK_KHR_external_semaphore",      "VK_KHR_external_semaphore_fd"};
+    // VK_KHR_external_memory / _semaphore are core since 1.1 (the instance asks
+    // for 1.1), and a 1.1+ driver may leave them off its extension list
+    // (VeriSilicon/Vivante does) — enabling an unlisted name fails createDevice
+    // with ErrorExtensionNotPresent. Request those two only when listed; the
+    // rest have no core equivalent and stay mandatory.
+    const auto listed = impl->physical.enumerateDeviceExtensionProperties();
+    const auto is_listed = [&listed](std::string_view name) {
+      return std::any_of(listed.begin(), listed.end(), [name](const vk::ExtensionProperties& e) {
+        return std::string_view(e.extensionName.data()) == name;
+      });
+    };
+    const bool core_1_1 = impl->physical.getProperties().apiVersion >= VK_API_VERSION_1_1;
+    std::vector<const char*> dev_exts{"VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf",
+                                      "VK_EXT_image_drm_format_modifier",
+                                      "VK_KHR_external_semaphore_fd"};
+    for (const char* promoted : {"VK_KHR_external_memory", "VK_KHR_external_semaphore"}) {
+      if (!core_1_1 || is_listed(promoted)) {
+        dev_exts.push_back(promoted);
+      }
+    }
     impl->device = impl->physical.createDevice(
         vk::DeviceCreateInfo{}.setQueueCreateInfos(qci).setPEnabledExtensionNames(dev_exts));
     VULKAN_HPP_DEFAULT_DISPATCHER.init(impl->device);

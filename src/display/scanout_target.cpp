@@ -76,6 +76,11 @@ std::optional<std::uint32_t> primary_plane_for_crtc(const planes::PlaneRegistry&
 }
 
 drm::expected<ScanoutTarget, std::error_code> ScanoutTarget::discover(const drm::Device& dev) {
+  return discover(dev, 0);
+}
+
+drm::expected<ScanoutTarget, std::error_code> ScanoutTarget::discover(
+    const drm::Device& dev, const std::uint32_t connector_id) {
   const int fd = dev.fd();
   // The PRIMARY plane is only visible once universal planes are enabled.
   (void)dev.enable_universal_planes();
@@ -85,9 +90,12 @@ drm::expected<ScanoutTarget, std::error_code> ScanoutTarget::discover(const drm:
     return drm::unexpected<std::error_code>(no_device());
   }
 
-  // First connected connector that advertises modes.
+  // The requested connector, else the first connected one, that advertises modes.
   drm::Connector conn{nullptr, drmModeFreeConnector};
   for (int i = 0; i < res->count_connectors; ++i) {
+    if (connector_id != 0 && res->connectors[i] != connector_id) {
+      continue;
+    }
     drm::Connector c = drm::get_connector(fd, res->connectors[i]);
     if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
       conn = std::move(c);

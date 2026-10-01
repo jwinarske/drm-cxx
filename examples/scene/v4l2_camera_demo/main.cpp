@@ -44,6 +44,7 @@
 
 #include <drm_fourcc.h>
 #include <drm_mode.h>
+#include <xf86drm.h>
 
 #include <algorithm>
 #include <atomic>
@@ -344,18 +345,22 @@ int main(int argc, char* argv[]) try {
   // chosen DRM device advertises the camera's native format. Without
   // this, V4l2CameraSource::create() returns a bare "Invalid argument"
   // from deep inside drmModeAddFB2 — useless for diagnosing the actual
-  // cause, which on amdgpu DC is the kernel's plane-format whitelist
-  // (NV12 + XRGB-family only; no YUYV / UYVY / NV21).
+  // cause: the display's plane-format list (amdgpu DC: NV12 + XRGB only;
+  // i.MX LCDIF / tilcdc: RGB only, no YUV at all).
   std::uint32_t const drm_fourcc = v4l2_to_drm_fourcc(probed->fourcc);
   if (drm_fourcc == 0 || !any_plane_supports_format(dev, drm_fourcc)) {
+    std::string driver = "this driver";
+    if (drmVersionPtr ver = drmGetVersion(dev.fd()); ver != nullptr) {
+      driver = std::string(ver->name, ver->name_len);
+      drmFreeVersion(ver);
+    }
     drm::println(stderr, "No plane on this DRM device advertises {} — refusing to start.",
                  fourcc_name(probed->fourcc));
+    drm::println(stderr, "  Driver: {} cannot scan out {} (run plane_caps for its format list).",
+                 driver, fourcc_name(probed->fourcc));
     drm::println(stderr,
-                 "  Driver: amdgpu DC's plane whitelist is NV12 + XRGB only; YUYV / UYVY / NV21");
-    drm::println(stderr,
-                 "  are not scanout-capable. Try a camera that advertises NV12 (e.g. Logitech MX");
-    drm::println(stderr,
-                 "  Brio), or run on i915 / RPi / RK3588 where YUYV is supported by the planes.");
+                 "  Try a camera format a plane advertises (amdgpu / VOP2: NV12), or a display");
+    drm::println(stderr, "  whose planes take YUYV (i915, RPi vc4, RK3588).");
     return EXIT_FAILURE;
   }
 
