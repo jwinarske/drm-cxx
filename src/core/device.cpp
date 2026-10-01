@@ -4,6 +4,7 @@
 #include "device.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 
 #include <drm.h>
 #include <xf86drm.h>
@@ -121,15 +122,17 @@ drm::expected<void, std::error_code> Device::drop_master() const {
 }
 
 drm::expected<std::uint32_t, std::error_code> Device::add_framebuffer(
-    std::uint32_t width, std::uint32_t height, std::uint32_t fourcc, const std::uint32_t handles[4],
-    const std::uint32_t strides[4], const std::uint32_t offsets[4],
-    const std::uint64_t modifiers[4], std::uint32_t flags) const {
+    std::uint32_t width, std::uint32_t height, std::uint32_t fourcc,
+    drm::span<const std::uint32_t, 4> handles, drm::span<const std::uint32_t, 4> strides,
+    drm::span<const std::uint32_t, 4> offsets, drm::span<const std::uint64_t, 4> modifiers,
+    std::uint32_t flags) const {
   if (fd_ < 0) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
   std::uint32_t fb_id = 0;
-  const int ret = drmModeAddFB2WithModifiers(fd_, width, height, fourcc, handles, strides, offsets,
-                                             modifiers, &fb_id, flags);
+  const int ret =
+      drmModeAddFB2WithModifiers(fd_, width, height, fourcc, handles.data(), strides.data(),
+                                 offsets.data(), modifiers.data(), &fb_id, flags);
   if (ret != 0 || fb_id == 0) {
     return drm::unexpected<std::error_code>(errno_ec(ret));
   }
