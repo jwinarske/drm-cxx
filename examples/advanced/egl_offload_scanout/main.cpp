@@ -15,6 +15,7 @@
 
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
+#include <drm-cxx/gbm/device.hpp>
 
 #include <drm.h>
 #include <drm_fourcc.h>
@@ -115,6 +116,8 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "eglInitialize failed\n");
     return 1;
   }
+  // Some EGL stacks (Vivante) take over the gbm_device; see gbm::retain_for_egl.
+  drm::gbm::retain_for_egl(gbm, eglQueryString(dpy, EGL_VENDOR));
   eglBindAPI(EGL_OPENGL_ES_API);
   const EGLint cfg_attr[] = {EGL_SURFACE_TYPE, EGL_DONT_CARE, EGL_RENDERABLE_TYPE,
                              EGL_OPENGL_ES2_BIT, EGL_NONE};
@@ -296,7 +299,9 @@ int main(int argc, char** argv) {
   eglDestroyContext(dpy, ctx);
   eglTerminate(dpy);
   gbm_bo_destroy(bo);
-  gbm_device_destroy(gbm);
+  if (!drm::gbm::retained_for_egl(gbm)) {
+    gbm_device_destroy(gbm);
+  }
   if (rend_fd != disp_fd) {
     close(rend_fd);
   }

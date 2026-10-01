@@ -32,6 +32,7 @@
 
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
+#include <drm-cxx/gbm/device.hpp>
 
 #include <drm.h>
 #include <drm_fourcc.h>
@@ -165,6 +166,8 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "eglInitialize failed\n");
     return 1;
   }
+  // Some EGL stacks (Vivante) take over the gbm_device; see gbm::retain_for_egl.
+  drm::gbm::retain_for_egl(gbm, eglQueryString(dpy, EGL_VENDOR));
   eglBindAPI(EGL_OPENGL_ES_API);
   EGLConfig cfg = choose_config(dpy, fourcc);
 
@@ -303,7 +306,9 @@ int main(int argc, char** argv) {
   eglDestroySurface(dpy, egl_surf);
   eglTerminate(dpy);
   gbm_surface_destroy(surf);
-  gbm_device_destroy(gbm);
+  if (!drm::gbm::retained_for_egl(gbm)) {
+    gbm_device_destroy(gbm);
+  }
   close(fd);
   return 0;
 }

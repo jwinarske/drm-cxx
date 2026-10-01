@@ -115,6 +115,8 @@ std::vector<std::uint64_t> GlScanoutProducer::exportable_modifiers(std::uint32_t
   if ((display == EGL_NO_DISPLAY) || (egl.initialize(display, nullptr, nullptr) != EGL_TRUE)) {
     return {};
   }
+  // Vivante's libEGL now owns this device's teardown (see gbm::retain_for_egl).
+  drm::gbm::retain_for_egl((*gbm).raw(), egl.query_string(display, EGL_VENDOR));
 
   std::vector<std::uint64_t> out;
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -167,6 +169,7 @@ GlScanoutProducer::create_buffer(std::uint32_t width, std::uint32_t height, std:
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }
   display_ = display;
+  drm::gbm::retain_for_egl(source_->native_device(), egl.query_string(display, EGL_VENDOR));
   if (egl.bind_api(EGL_OPENGL_ES_API) != EGL_TRUE) {
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }

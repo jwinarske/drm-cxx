@@ -16,6 +16,7 @@
 #include <drm-cxx/core/gles_loader.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/gbm/device.hpp>
 #include <drm-cxx/log.hpp>
 
 #include <drm_fourcc.h>
@@ -318,6 +319,8 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }
   display_ = display;
+  // Vivante's libEGL now owns this device's teardown (see gbm::retain_for_egl).
+  drm::gbm::retain_for_egl(source_->native_device(), egl.query_string(display, EGL_VENDOR));
   if (egl.bind_api(EGL_OPENGL_ES_API) != EGL_TRUE) {
     teardown_egl();
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
