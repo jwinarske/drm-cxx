@@ -44,7 +44,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `vc4`        | VideoCore IV (RPi Zero 2 W)         | 6.18.33-rpt (trixie)| Software/dumb scanout @ 1600x900, **hardware GLES present** (`egl_scene` ~60fps, `gl_present`, `gbm_surface_scanout` VC4-T-tiled), single-plane→56-plane scene/composition, present-path profiling. No hardware Vulkan (llvmpipe only). |
 | `imx-drm`    | i.MX8M Mini LCDIF (Nitrogen8M Mini, NXP BSP) | 6.1.22 (Yocto) | `drm::fmt`: **no-`IN_FORMATS` fallback** — `FormatTable::from_plane` returns `ENOENT`, caller assumes LINEAR-only (legacy fourccs, no modifier surface). |
 | `imx-drm`    | i.MX93 LCDIFv3 (FRDM-IMX93, NXP BSP) | 6.18.2 (Yocto) | Software/dumb-buffer scanout @ 720p60 (`software_present`, `damage_present`, `ring_present`, `idle_present`, `atomic_modeset`), single-plane CPU composition (`minimal_kms_probe`, `scene_*`, `layered_demo`), present-path profiling matrix. No GPU. |
-| `imx-drm` + `galcore` | i.MX8M Plus LCDIFv3 ×3 + Vivante GC7000UL (IEI B643, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS via `VkScanoutProducer`'s CPU-copy tier (no zero-copy path on this driver); VPU output via G2D GStreamer (see quirks). |
+| `imx-drm` + `galcore` | LCDIFv3 ×3 + Vivante GC7000UL (PANZER-PLUS Edge AIoT Computer, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS via `VkScanoutProducer`'s CPU-copy tier (no zero-copy path on this driver); VPU output via G2D GStreamer (see quirks). |
 | `vc4` + `v3d` | VideoCore VII (Raspberry Pi 5, 8 GB) | 6.18.33-rpt (trixie) | Full example + test matrix on HDMI 1280×1440: every present/scene/allocator/cursor/Blend2D-CSD example, **GL and Vulkan scanout at 60 fps** (`egl_scene`, `vulkan_scene`, `vk_present`, `vk_out_fence`, offload demos), multi-plane native placement (`scene_priority` 8/8 assigned). 100/100 test binaries against `card0`. |
 | `msm_drm` (downstream SDE) | SA8155P (Adreno 640) | 5.4 vendor | KMS on a shared-display node: present spine, **GL and Vulkan scanout at 60 fps**, Vulkan OUT_FENCE, native multi-plane placement with **multirect virtual-plane pairing**, GPU composition, Blend2D text. 83/84 test binaries. See quirks for the controller's plane rules. |
 
@@ -502,9 +502,9 @@ Guidance for an i.MX93 UI:
   for ~7–8 ms jitter and **VRR will not fix it**. For tight pacing use
   `--rt`-style SCHED_FIFO + `mlockall`, not VRR.
 
-### i.MX8M Plus LCDIFv3 + Vivante GC7000UL
+### PANZER-PLUS Edge AIoT Computer (LCDIFv3 + Vivante GC7000UL)
 
-Validation board: **IEI B643 panel PC** (NXP **i.MX8M Plus**, quad Cortex-A53
+Validation device: **PANZER-PLUS Edge AIoT Computer** (NXP i.MX8M Plus, quad Cortex-A53
 @ 1.6 GHz, **aarch64**, 3.5 GiB), NXP i.MX Yocto BSP (`fsl-imx-xwayland`),
 **kernel 6.6.23**, glibc 2.39, GCC 13.2. Two DRM nodes:
 
@@ -769,7 +769,7 @@ core needed for 60 fps (the board has 4).
 | `plane_stress` (4 composited layers)        | GPU composition    | —         | —                | ~50 ms/frame, upload-bound (see above) |
 | `tone_mapper_bench` HLG→BT.709              | CPU tone map       | 668 ms    | —                | CPU tone mapping is not real-time here |
 
-Guidance for an i.MX8M Plus UI:
+Guidance for UIs on this device:
 
 - **Render with GLES straight into a GBM surface on `card1`** (`egl_scene` /
   `gl_present` / `GbmSurfaceSource`) and present it as the *only* layer on the
@@ -788,7 +788,7 @@ Guidance for an i.MX8M Plus UI:
 
 ### Raspberry Pi 5 (vc4 + v3d)
 
-Validation board: **Raspberry Pi 5 Model B** (BCM2712, quad Cortex-A76,
+Validation device: **Raspberry Pi 5 Model B** (quad Cortex-A76,
 8 GB), Raspberry Pi OS trixie, **kernel 6.18.33-rpt**, glibc 2.41. Three nodes:
 `card0` = **vc4** (HDMI; the validated output is `HDMI-A-1` at 1280×1440),
 `card1` = **drm-rp1-dsi** (`DSI-2`, 800×1280), `card2`/`renderD128` = **v3d**
