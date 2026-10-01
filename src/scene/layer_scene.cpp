@@ -2076,6 +2076,18 @@ class LayerScene::Impl {
       // (test rigs, diagnostic overlays) typically use linear buffers, so
       // this gate also keeps the log quiet for them.
       diagnose_modifier_rejection(*acq.planes_layer);
+      // Prefer the source's DMA-BUF whenever GPU composition is in play: the
+      // GPU compositor samples it in place, where CPU pixels would be uploaded
+      // (and on some GPUs retiled by the CPU) every frame — on Vivante ~220 ms
+      // for a 1080p layer against ~3.5 ms imported. The blend pass below maps
+      // the source after all if the canvas turns out unable to import it.
+      if (composition_mode_ != LayerScene::Composition::ForceCpu) {
+        if (auto desc = acq.scene_layer->source().export_dma_buf(); desc.has_value()) {
+          acq.cached_dma_buf.emplace(*desc);
+          scratch_composited_.push_back(&acq);
+          continue;
+        }
+      }
       auto mapping = acq.scene_layer->source().map(drm::MapAccess::Read);
       if (!mapping) {
         // `function_not_supported` is the documented contract for an
@@ -2087,19 +2099,8 @@ class LayerScene::Impl {
         // SceneSubmitsFbId source on a driver that routes it to composition).
         // Genuine map failures (EIO, ENOMEM, …) still warn.
         if (mapping.error() == std::errc::function_not_supported) {
-          // No CPU mapping — but if the source can export its DMA-BUF and GPU
-          // composition is in play, the GPU compositor imports it as an EGLImage
-          // and the layer composites instead of blanking. Gated on
-          // composition_mode_ so a CPU-only path still drops it (as before)
-          // rather than arming a canvas that can't sample it; the target's
-          // per-format capability is confirmed in the blend pass below.
-          if (composition_mode_ != LayerScene::Composition::ForceCpu) {
-            if (auto desc = acq.scene_layer->source().export_dma_buf(); desc.has_value()) {
-              acq.cached_dma_buf.emplace(*desc);
-              scratch_composited_.push_back(&acq);
-              continue;
-            }
-          }
+          // (A DMA-BUF export, when GPU composition is in play, was already
+          // tried above.)
           drm::log_debug(
               "scene::LayerScene: layer {} dropped — source is uncompositable "
               "(no CPU mapping, no DMA-BUF export) and the allocator found no plane for it",
@@ -2200,14 +2201,19 @@ class LayerScene::Impl {
       src.src_height = fmt.height;
       src.drm_fourcc = fmt.drm_fourcc;
       src.plane_alpha = d.alpha;
-      if (acq->cached_mapping.has_value()) {
-        // CPU pixels stashed during collection — no second virtual map() call.
-        src.pixels = acq->cached_mapping->pixels();
-        src.src_stride_bytes = acq->cached_mapping->stride();
-      } else if (acq->cached_dma_buf.has_value() &&
-                 composition_canvas_->supports_dma_buf_import(fmt.drm_fourcc)) {
-        // GPU import path: the source's DMA-BUF is sampled directly, so a
-        // map()-less camera layer composites instead of blanking.
+      if (acq->cached_dma_buf.has_value() &&
+          composition_canvas_->supports_dma_buf_import(fmt.drm_fourcc)) {
+        // GPU import path: the source's DMA-BUF is sampled in place — no
+        // per-frame pixel upload, and a map()-less camera layer composites
+        // instead of blanking. The GPU reads it now, so the producer's render
+        // must be done: on a plane KMS would wait the acquire fence, here the
+        // scene does.
+        if (acq->buffer.acquire_fence.has_value()) {
+          if (auto r = acq->buffer.acquire_fence->wait(std::chrono::seconds(1)); !r) {
+            drm::log_warn("scene::LayerScene: composited layer's acquire-fence wait failed: {}",
+                          r.error().message());
+          }
+        }
         const DmaBufDesc& dmabuf = *acq->cached_dma_buf;
         src.dma_n_planes = dmabuf.n_planes;
         src.dma_fds = dmabuf.fds;
@@ -2215,12 +2221,21 @@ class LayerScene::Impl {
         src.dma_pitches = dmabuf.pitches;
         src.dma_modifier = dmabuf.modifier;
       } else {
-        // DMA-BUF-only source this target can't import yet (e.g. NV12 before the
-        // external-sampler path, or a CPU-only canvas): clear the descriptor so
-        // the report doesn't count it composited, and let it fall to the
-        // dropped tally.
+        // CPU pixels: stashed during collection, or — for a source collected by
+        // its DMA-BUF that this canvas can't import (a CPU canvas, an
+        // unsupported format) — mapped now.
         acq->cached_dma_buf.reset();
-        continue;
+        if (!acq->cached_mapping.has_value()) {
+          if (auto mapping = acq->scene_layer->source().map(drm::MapAccess::Read); mapping) {
+            acq->cached_mapping.emplace(std::move(*mapping));
+          }
+        }
+        if (!acq->cached_mapping.has_value()) {
+          // Nothing this target can sample: fall to the dropped tally.
+          continue;
+        }
+        src.pixels = acq->cached_mapping->pixels();
+        src.src_stride_bytes = acq->cached_mapping->stride();
       }
       // The canvas samples whole pixels, so a sub-pixel crop rounds to the
       // nearest one.

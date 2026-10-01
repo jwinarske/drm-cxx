@@ -177,6 +177,10 @@ class GbmSurfaceSource : public LayerBufferSource {
     return BindingModel::SceneSubmitsFbId;
   }
   [[nodiscard]] SourceFormat format() const noexcept override;
+  // The most recently acquired BO as a dma-buf (single-plane layouts), so a
+  // GPU compositor samples the rendered frame in place. One fd per BO, kept
+  // with the BO's FB registration.
+  [[nodiscard]] drm::expected<DmaBufDesc, std::error_code> export_dma_buf() override;
 
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(

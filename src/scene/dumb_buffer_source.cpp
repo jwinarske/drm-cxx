@@ -12,11 +12,16 @@
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/dumb/buffer.hpp>
 
+#include <drm.h>
 #include <drm_fourcc.h>
+#include <xf86drm.h>
 
+#include <cerrno>
 #include <cstdint>
+#include <fcntl.h>  // IWYU pragma: keep -- O_CLOEXEC / O_RDWR behind DRM_CLOEXEC / DRM_RDWR
 #include <memory>
 #include <system_error>
+#include <unistd.h>
 #include <utility>
 
 namespace drm::scene {
@@ -72,7 +77,48 @@ drm::expected<std::unique_ptr<DumbBufferSource>, std::error_code> DumbBufferSour
   // Private constructor; wrap in unique_ptr manually (make_unique can't
   // reach the private ctor without a friend declaration, and polymorphic
   // LayerBufferSource consumers need heap lifetime anyway).
-  return std::unique_ptr<DumbBufferSource>(new DumbBufferSource(std::move(*r), fmt));
+  return std::unique_ptr<DumbBufferSource>(new DumbBufferSource(std::move(*r), fmt, dev.fd()));
+}
+
+DumbBufferSource::~DumbBufferSource() {
+  close_dma_buf();
+}
+
+void DumbBufferSource::close_dma_buf() noexcept {
+  if (dma_buf_fd_ >= 0) {
+    ::close(dma_buf_fd_);
+    dma_buf_fd_ = -1;
+  }
+}
+
+drm::expected<DmaBufDesc, std::error_code> DumbBufferSource::export_dma_buf() {
+  // Semi-planar YUV spans two planes of one allocation; only the single-plane
+  // layout is described here.
+  if (is_semiplanar_yuv(format_.drm_fourcc)) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
+  }
+  if (buffer_.empty() || drm_fd_ < 0) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+  if (dma_buf_fd_ < 0) {
+    int fd = -1;
+    if (drmPrimeHandleToFD(drm_fd_, buffer_.handle(), DRM_CLOEXEC | DRM_RDWR, &fd) != 0 || fd < 0) {
+      const int err = errno;
+      return drm::unexpected<std::error_code>(
+          std::error_code(err != 0 ? err : EIO, std::generic_category()));
+    }
+    dma_buf_fd_ = fd;
+  }
+  DmaBufDesc desc;
+  desc.fds.at(0) = dma_buf_fd_;
+  desc.pitches.at(0) = buffer_.stride();
+  desc.n_planes = 1;
+  desc.drm_fourcc = format_.drm_fourcc;
+  desc.modifier = DRM_FORMAT_MOD_LINEAR;
+  desc.width = format_.width;
+  desc.height = format_.height;
+  return desc;
 }
 
 drm::expected<AcquiredBuffer, std::error_code> DumbBufferSource::acquire() {
@@ -131,6 +177,8 @@ drm::expected<void, std::error_code> DumbBufferSource::on_session_resumed(
   const auto prev_format = format_.drm_fourcc;
 
   buffer_.forget();
+  close_dma_buf();  // exported from the old device's buffer
+  drm_fd_ = new_dev.fd();
 
   auto r = allocate_for_format(new_dev, prev_width, prev_height, prev_format);
   if (!r) {

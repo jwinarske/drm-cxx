@@ -677,6 +677,15 @@ void GlCompositor::blend(const CompositeSrc& src, const CompositeRect& src_rect,
   void* egl_image = EGL_NO_IMAGE_KHR;
   if ((src.dma_n_planes == 1) && dmabuf_import_supported_ && (src.dma_fds.at(0) >= 0)) {
     egl_image = import_dma_buf_image(src);
+    if ((egl_image == EGL_NO_IMAGE_KHR) && src.pixels.empty()) {
+      // The scene prefers import for any source that exports a dma-buf, so a
+      // failure here would blank the layer every frame. Turn import off: from
+      // the next frame supports_dma_buf_import() is false and the scene hands
+      // over CPU pixels instead.
+      drm::log_warn("gl_compositor: dma-buf import failed (0x{:x}); using CPU uploads",
+                    drm::detail::egl_loader().get_error());
+      dmabuf_import_supported_ = false;
+    }
   }
   if (egl_image != EGL_NO_IMAGE_KHR) {
     gl.egl_image_target_texture_2d(drm::detail::gl::k_texture_2d, egl_image);

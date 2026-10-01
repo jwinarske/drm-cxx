@@ -62,7 +62,7 @@ class DumbBufferSource : public LayerBufferSource {
   DumbBufferSource& operator=(const DumbBufferSource&) = delete;
   DumbBufferSource(DumbBufferSource&&) = delete;
   DumbBufferSource& operator=(DumbBufferSource&&) = delete;
-  ~DumbBufferSource() override = default;
+  ~DumbBufferSource() override;
 
   // ── LayerBufferSource ──────────────────────────────────────────────
   [[nodiscard]] drm::expected<AcquiredBuffer, std::error_code> acquire() override;
@@ -73,6 +73,11 @@ class DumbBufferSource : public LayerBufferSource {
   [[nodiscard]] SourceFormat format() const noexcept override { return format_; }
   [[nodiscard]] drm::expected<drm::BufferMapping, std::error_code> map(
       drm::MapAccess access) override;
+  // The buffer as a dma-buf (single-plane formats), so a GPU compositor
+  // samples it in place rather than uploading its pixels every frame. The fd
+  // is exported on first use and kept until the source is destroyed or the
+  // session resumes on a new device.
+  [[nodiscard]] drm::expected<DmaBufDesc, std::error_code> export_dma_buf() override;
   void on_session_paused() noexcept override;
   [[nodiscard]] drm::expected<void, std::error_code> on_session_resumed(
       const drm::Device& new_dev) override;
@@ -83,11 +88,15 @@ class DumbBufferSource : public LayerBufferSource {
   void set_damage(drm::span<const DamageRect> rects);
 
  private:
-  DumbBufferSource(drm::dumb::Buffer buffer, SourceFormat format) noexcept
-      : buffer_(std::move(buffer)), format_(format) {}
+  DumbBufferSource(drm::dumb::Buffer buffer, SourceFormat format, int drm_fd) noexcept
+      : buffer_(std::move(buffer)), format_(format), drm_fd_(drm_fd) {}
+
+  void close_dma_buf() noexcept;
 
   drm::dumb::Buffer buffer_;
   SourceFormat format_{};
+  int drm_fd_{-1};      // the device the buffer lives on (borrowed)
+  int dma_buf_fd_{-1};  // owned; -1 until export_dma_buf() first succeeds
   std::vector<DamageRect> pending_damage_;
 };
 
