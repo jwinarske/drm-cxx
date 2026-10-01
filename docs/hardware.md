@@ -44,7 +44,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `vc4`        | VideoCore IV (RPi Zero 2 W)         | 6.18.33-rpt (trixie)| Software/dumb scanout @ 1600x900, **hardware GLES present** (`egl_scene` ~60fps, `gl_present`, `gbm_surface_scanout` VC4-T-tiled), single-plane→56-plane scene/composition, present-path profiling. No hardware Vulkan (llvmpipe only). |
 | `imx-drm`    | i.MX8M Mini LCDIF (Nitrogen8M Mini, NXP BSP) | 6.1.22 (Yocto) | `drm::fmt`: **no-`IN_FORMATS` fallback** — `FormatTable::from_plane` returns `ENOENT`, caller assumes LINEAR-only (legacy fourccs, no modifier surface). |
 | `imx-drm`    | i.MX93 LCDIFv3 (FRDM-IMX93, NXP BSP) | 6.18.2 (Yocto) | Software/dumb-buffer scanout @ 720p60 (`software_present`, `damage_present`, `ring_present`, `idle_present`, `atomic_modeset`), single-plane CPU composition (`minimal_kms_probe`, `scene_*`, `layered_demo`), present-path profiling matrix. No GPU. |
-| `imx-drm` + `galcore` | LCDIFv3 ×3 + Vivante GC7000UL (PANZER-PLUS Edge AIoT Computer, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS via `VkScanoutProducer`'s CPU-copy tier (no zero-copy path on this driver); VPU output via G2D GStreamer (see quirks). |
+| `imx-drm` + `galcore` | LCDIFv3 ×3 + Vivante GC7000UL (PANZER-PLUS Edge AIoT Computer, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS at 60 fps via `VkScanoutProducer`'s GPU-blit tier (no zero-copy path on this driver); VPU output via G2D GStreamer (see quirks). |
 | `vc4` + `v3d` | VideoCore VII (Raspberry Pi 5, 8 GB) | 6.18.33-rpt (trixie) | Full example + test matrix on HDMI 1280×1440: every present/scene/allocator/cursor/Blend2D-CSD example, **GL and Vulkan scanout at 60 fps** (`egl_scene`, `vulkan_scene`, `vk_present`, `vk_out_fence`, offload demos), multi-plane native placement (`scene_priority` 8/8 assigned). 100/100 test binaries against `card0`. |
 | `msm_drm` (downstream SDE) | SA8155P (Adreno 640) | 5.4 vendor | KMS on a shared-display node: present spine, **GL and Vulkan scanout at 60 fps**, Vulkan OUT_FENCE, native multi-plane placement with **multirect virtual-plane pairing**, GPU composition, Blend2D text. 83/84 test binaries. See quirks for the controller's plane rules. |
 
@@ -631,8 +631,8 @@ when run from an identical path.
   acquire fence as the plane's `IN_FENCE_FD`.
 - **GPU composition is active** — `GlCompositor` reports EGL dma-buf import and
   the NV12 external-sampler path available.
-- **Vulkan reaches this display only through a CPU copy.** There is no
-  zero-copy path in either direction with this BSP's Vulkan driver (6.4.11):
+- **Vulkan reaches this display through a GPU copy, at 60 fps.** Neither
+  zero-copy direction works with this BSP's Vulkan driver (6.4.11):
   - *Export:* every Vulkan-exported dma-buf (either memory type, dedicated or
     not) is scatter-gather. imx-drm is a GEM-DMA driver with no IOMMU in front of
     the LCDIF, so `drmPrimeFDToHandle` has to bounce the buffer through swiotlb
@@ -642,18 +642,46 @@ when run from an identical path.
     buffer-to-image copy into the imported memory all leave the CPU-visible
     contents untouched.
 
-  `VkScanoutProducer` therefore tries, in order: export (zero-copy), a
-  display-side buffer imported into Vulkan — kept only if a GPU write is visible
-  through it (self-checked at create time; Vivante pads image height to 16 rows,
-  so the buffer is allocated with the extra rows) — and finally a **CPU copy**:
-  render into host-visible LINEAR memory and memcpy each frame into one of two
-  display-side dumb buffers (`ExternalDmaBufRing`). Here the third tier is taken:
-  `vk_present` and `vk_out_fence` (OUT_FENCE 60/60) display correctly, at
-  **~50 ms/frame at 1080p (~42 ms CPU)** — the only host-visible memory type is
-  coherent (uncached), so the CPU read runs at ~200 MB/s. Prefer GLES/GBM on this
-  SoC; use Vulkan here for correctness, not throughput. `vulkan_scene`,
-  `vulkan_offload_scanout` and `cluster_sim_vulkan` export by hand and still fail;
-  `vulkan_display` enumerates the display.
+  The GPU's own GL stack *can* read Vulkan's export: an EGLImage over the
+  exported dma-buf samples what Vulkan wrote. `VkScanoutProducer` therefore
+  tries, in order: export (zero-copy); a display-side buffer imported into
+  Vulkan, kept only if a GPU write shows through it (self-checked; Vivante pads
+  image height to 16 rows, so the buffer gets the extra rows); a **GPU blit** —
+  each frame GL draws the exported image as one full-screen quad into a
+  `GlScanoutProducer` surface on `card1`, kept only if a read-back of two test
+  colors matches; and finally a CPU copy into two display-side dumb buffers
+  (`ExternalDmaBufRing`). Here the blit tier is taken: `vk_present` runs at
+  **60.7 fps at 1080p** (600 frames in 9.9 s, vblank-bound, ~9 % of one core;
+  the GL draw is ~5 ms on the GPU) and `vk_out_fence` gets OUT_FENCE on 60/60.
+  The CPU-copy tier it replaces ran ~50 ms/frame (~42 ms CPU), since the only
+  host-visible memory type is uncached (~200 MB/s reads). `vulkan_scene`,
+  `vulkan_offload_scanout` and `cluster_sim_vulkan` export by hand and still
+  fail; `vulkan_display` enumerates the display.
+- **Vivante leaves Vulkan clears in tile status.** A clear
+  (`vkCmdClearColorImage` or a render-pass `LOAD_OP_CLEAR`) on an exported image
+  stays in fast-clear metadata and is never resolved into memory, even across a
+  release to `VK_QUEUE_FAMILY_FOREIGN_EXT` or a layout change. Anything only
+  cleared reads back as stale memory to the display, GL or the CPU; drawn and
+  copied pixels land. Any transfer read of the image resolves the whole surface,
+  so on this vendor (`VK_VENDOR_ID_VSI`) `VkScanoutProducer` appends a 1-pixel
+  image-to-buffer copy after each render, before the release barrier.
+- **Vivante GBM modifier surfaces have two buffers.**
+  `gbm_surface_create_with_modifiers{,2}` builds a two-buffer surface (the
+  plain `gbm_surface_create` gets three), and `LayerScene` keeps two in flight,
+  so the third `eglSwapBuffers` waited forever for a free buffer (`gl_present`
+  hung on frame 3). `GbmSurfaceSource` now asks for LINEAR with the plain create
+  plus `GBM_BO_USE_LINEAR`; `GBM_MULTI_BUFFER` does not raise the count on the
+  modifier path. `gl_present` still segfaults *after* `main` returns, inside a
+  `libEGL` exit handler; the frames all present.
+- **Untested: `galcore.mmu=0` for zero-copy export.** With the GPU MMU off,
+  galcore must allocate every GPU buffer physically contiguous, so a Vulkan
+  export should be importable by the LCDIF and the export tier would win
+  (no copy at all). Not tried: it is a system-wide boot-argument change off
+  NXP's supported configuration, every GPU allocation then competes for the
+  contiguous pool/CMA (with the VPU, ISP and NPU) and is exposed to CMA
+  fragmentation and compaction stalls, and GPU memory isolation between
+  processes is lost. The blit already reaches 60 fps, so it is documented here
+  as an option, not a recommendation.
 
 **Single PRIMARY with a fixed `zpos` slot.** The PRIMARY's `zpos` range is
 `[0, 0]`. A lone layer now lands on it natively whatever `zpos` it asks for

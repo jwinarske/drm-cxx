@@ -91,6 +91,7 @@ void initialize_runtime(GlesLoader& rt) noexcept {
   // GL_OES_EGL_image still runs the CPU-upload compositor.
   rt.egl_image_target_texture_2d = resolve_gl<decltype(rt.egl_image_target_texture_2d)>(
       rt.handle, "glEGLImageTargetTexture2DOES");
+  rt.read_pixels = resolve_gl<decltype(rt.read_pixels)>(rt.handle, "glReadPixels");
 
   // All entry points are mandatory for the compositor; if any is missing treat
   // the whole stack as unusable so the caller falls back to the CPU path.

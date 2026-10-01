@@ -70,6 +70,7 @@ set(DRM_CXX_SOURCES
   present/scanout_format.cpp
   present/gbm_producer.cpp
   present/scanout_backend.cpp
+  present/gl_blit.cpp
   present/gl_scanout_producer.cpp
   present/vk_scanout_producer.cpp)
 

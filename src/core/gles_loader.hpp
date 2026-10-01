@@ -116,6 +116,7 @@ using PFN_glGetString = const unsigned char* (*)(GLenum);
 // current texture. `void*` stands in for GLeglImageOES to avoid a
 // gl2ext.h dependency. Optional — resolved but not required.
 using PFN_glEGLImageTargetTexture2DOES = void (*)(GLenum, void*);
+using PFN_glReadPixels = void (*)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
 
 /// Resolved GLES2 entry-point table. `loaded == true` iff libGLESv2.so.2
 /// dlopened and every entry point below resolved.
@@ -167,6 +168,8 @@ struct GlesLoader {
   // Optional (GL_OES_EGL_image); null on stacks without it. NOT part of
   // the all_present gate, so the CPU-upload compositor still runs.
   PFN_glEGLImageTargetTexture2DOES egl_image_target_texture_2d{nullptr};
+  // Optional; used only for read-back self-checks. Not in the all_present gate.
+  PFN_glReadPixels read_pixels{nullptr};
 };
 
 /// Process-singleton GLES2 runtime accessor. First call dlopens +
