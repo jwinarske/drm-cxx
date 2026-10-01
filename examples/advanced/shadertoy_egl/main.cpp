@@ -305,6 +305,8 @@ int main(int argc, char* argv[]) try {
   std::uint64_t modifier = DRM_FORMAT_MOD_INVALID;
   if (probe_display != EGL_NO_DISPLAY &&
       eglInitialize(probe_display, nullptr, nullptr) == EGL_TRUE) {
+    // Some EGL stacks (Vivante) take over the gbm_device; see gbm::retain_for_egl.
+    drm::gbm::retain_for_egl(probe_gbm->raw(), eglQueryString(probe_display, EGL_VENDOR));
     modifier = pick_modifier(probe_display, scene_mods, DRM_FORMAT_ARGB8888);
     eglTerminate(probe_display);
   }
@@ -329,6 +331,7 @@ int main(int argc, char* argv[]) try {
     drm::println(stderr, "shadertoy_egl: eglInitialize failed: {}", gl_strerror(eglGetError()));
     return EXIT_FAILURE;
   }
+  drm::gbm::retain_for_egl(src_ptr->native_device(), eglQueryString(display, EGL_VENDOR));
   if (eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE) {
     drm::println(stderr, "shadertoy_egl: eglBindAPI: {}", gl_strerror(eglGetError()));
     eglTerminate(display);

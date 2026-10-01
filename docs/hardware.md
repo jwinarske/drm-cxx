@@ -671,8 +671,16 @@ when run from an identical path.
   so the third `eglSwapBuffers` waited forever for a free buffer (`gl_present`
   hung on frame 3). `GbmSurfaceSource` now asks for LINEAR with the plain create
   plus `GBM_BO_USE_LINEAR`; `GBM_MULTI_BUFFER` does not raise the count on the
-  modifier path. `gl_present` still segfaults *after* `main` returns, inside a
-  `libEGL` exit handler; the frames all present.
+  modifier path.
+- **Vivante's `libEGL` destroys GBM devices at exit.**
+  `eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, dev)` records `dev` in a global
+  list that `eglTerminate` never clears, and an exit handler calls
+  `gbm_device_destroy` on every entry. An application that destroyed `dev`
+  first (the correct order everywhere else) crashed at exit about half the time
+  — a use-after-free that depends on whether the freed block was reused.
+  `gbm::retain_for_egl()` records such devices once `EGL_VENDOR` identifies
+  Vivante, and `GbmDevice` then leaves them for `libEGL` to free;
+  `GlScanoutProducer`, `GlCompositor` and the EGL examples call it.
 - **Untested: `galcore.mmu=0` for zero-copy export.** With the GPU MMU off,
   galcore must allocate every GPU buffer physically contiguous, so a Vulkan
   export should be importable by the LCDIF and the export tier would win

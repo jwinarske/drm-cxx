@@ -252,6 +252,8 @@ int main(int argc, char* argv[]) try {
     drm::println(stderr, "egl_scene: eglInitialize (probe) failed: {}", gl_strerror(eglGetError()));
     return EXIT_FAILURE;
   }
+  // Some EGL stacks (Vivante) take over the gbm_device; see gbm::retain_for_egl.
+  drm::gbm::retain_for_egl(probe_gbm->raw(), eglQueryString(probe_display, EGL_VENDOR));
   const std::uint64_t modifier = pick_modifier(probe_display, scene_mods, DRM_FORMAT_ARGB8888);
   eglTerminate(probe_display);
 
@@ -286,6 +288,7 @@ int main(int argc, char* argv[]) try {
     drm::println(stderr, "egl_scene: eglInitialize failed: {}", gl_strerror(eglGetError()));
     return EXIT_FAILURE;
   }
+  drm::gbm::retain_for_egl(src_ptr->native_device(), eglQueryString(display, EGL_VENDOR));
   if (eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE) {
     drm::println(stderr, "egl_scene: eglBindAPI: {}", gl_strerror(eglGetError()));
     eglTerminate(display);
