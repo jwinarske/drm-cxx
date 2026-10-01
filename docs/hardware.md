@@ -702,14 +702,16 @@ the LCDIFv3 PRIMARY cannot position or scale, so a moved or smaller layer fails
 TEST and goes to the canvas (census `scroll`: 4 TESTs to learn that, then
 composited every frame).
 
-**Composition cost is dominated by texture upload.** `GlCompositor` samples
-dumb-buffer layers through their CPU mapping (`glTexImage2D` every frame, even
-for unchanged content); on Vivante that upload is a CPU-side retile —
-`gcoTEXTURE_Upload` is **~89 % of all cycles** in `perf`. Measured:
-`plane_stress` (4 layers, 1080p) **~50 ms/frame (20 fps)**; `egl_scene` (2
-layers) **~4.5 fps**. The EGLImage import path is only taken for map-less
-sources today, so dumb-buffer scenes here pay the upload on every layer, every
-frame.
+**Composition samples layers in place.** `GlCompositor` imports each layer's
+dma-buf as an EGLImage — dumb buffers and GBM surfaces export theirs — instead
+of uploading its CPU pixels. On Vivante the upload was a CPU-side retile
+(`gcoTEXTURE_Upload` ~89 % of all cycles): ~221 ms per 1080p layer, against
+~3.5 ms imported, and CPU writes to a dumb buffer show through the import.
+Measured: `plane_stress` (4 composited 256×256 layers, any churn mode) **60 fps**
+(was 20), ~15 % of one core; `egl_scene` (two full-screen layers, GL + dumb)
+**30 fps** (was 4.4, with the GL layer dropped), now GPU-bound on sampling two
+LINEAR 1080p surfaces. If an import ever fails, `GlCompositor` falls back to the
+CPU upload for good.
 
 **Video:** the Hantro decoder decodes H.264/HEVC/VP8/VP9 to `NV12`/`P010`/`DTRC`,
 but the LCDIFv3 planes have no YUV formats, so `V4l2DecoderSource::create` fails
@@ -811,9 +813,9 @@ Guidance for UIs on this device:
   `gl_present` / `GbmSurfaceSource`) and present it as the *only* layer on the
   PRIMARY (a lone full-screen layer lands natively at any `zpos`). That avoids
   composition entirely.
-- **Avoid multi-layer LayerScenes** until the upload cost is addressed: with one
-  plane every extra layer is composited, and each composited dumb-buffer layer
-  costs ~10 ms of CPU retile per frame.
+- **Multi-layer LayerScenes are fine for UI-sized layers.** With one plane
+  every extra layer is composited, now by the GPU from the layer's dma-buf:
+  several overlay-sized layers hold 60 fps; two full-screen layers run ~30 fps.
 - **Software rendering is viable** at 1080p60 (~39 % of one core for full
   redraws); damage-driven and idle-skip rendering cut that to ~18 % and ~1 %.
 - **Pacing:** 60 Hz is clean (≤0.1 ms jitter); 30 Hz works; 40/48 Hz beat

@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <system_error>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -144,6 +145,9 @@ struct GbmSurfaceSource::Impl {
   // fb_id per gbm_bo*. A gbm_surface rotates among 2–3 BOs in
   // practice; reusing the registration avoids RmFB/AddFB2 churn.
   std::unordered_map<struct gbm_bo*, std::uint32_t> fb_cache;
+  // dma-buf fd per gbm_bo* for export_dma_buf(), owned; dropped with fb_cache.
+  std::unordered_map<struct gbm_bo*, int> dma_buf_fds;
+  struct gbm_bo* current_bo{nullptr};  // last acquire()'s BO
 
   // BOs that have been locked via acquire() and not yet retired via
   // release(). On destruction or pause we release them back to the
@@ -194,6 +198,17 @@ struct GbmSurfaceSource::Impl {
       }
     }
     fb_cache.clear();
+    drop_dma_buf_fds();
+  }
+
+  // Plain closes, no ioctls: safe on the pause path too.
+  void drop_dma_buf_fds() noexcept {
+    for (auto& [bo, fd] : dma_buf_fds) {
+      (void)bo;
+      ::close(fd);
+    }
+    dma_buf_fds.clear();
+    current_bo = nullptr;
   }
 
   // Pause path. The DRM fd is going away — we must not issue any
@@ -206,6 +221,7 @@ struct GbmSurfaceSource::Impl {
   void forget_for_pause() noexcept {
     live_bos.clear();
     fb_cache.clear();
+    drop_dma_buf_fds();
     if (surf != nullptr) {
       gbm_surface_destroy(surf);
       surf = nullptr;
@@ -299,6 +315,7 @@ drm::expected<AcquiredBuffer, std::error_code> GbmSurfaceSource::acquire() {
   }
 
   impl_->live_bos.insert(bo);
+  impl_->current_bo = bo;
   AcquiredBuffer acq;
   acq.fb_id = fb_id;
   acq.opaque = bo;
@@ -327,6 +344,39 @@ void GbmSurfaceSource::release(AcquiredBuffer acquired) noexcept {
   }
   impl_->live_bos.erase(it);
   gbm_surface_release_buffer(impl_->surf, bo);
+}
+
+drm::expected<DmaBufDesc, std::error_code> GbmSurfaceSource::export_dma_buf() {
+  if (!impl_ || impl_->current_bo == nullptr || impl_->live_bos.count(impl_->current_bo) == 0U) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_buffer_space));
+  }
+  struct gbm_bo* bo = impl_->current_bo;
+  if (gbm_bo_get_plane_count(bo) != 1) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::function_not_supported));
+  }
+  int fd = -1;
+  if (auto it = impl_->dma_buf_fds.find(bo); it != impl_->dma_buf_fds.end()) {
+    fd = it->second;
+  } else {
+    errno = 0;
+    fd = gbm_bo_get_fd(bo);
+    if (fd < 0) {
+      const int err = errno;
+      return drm::unexpected<std::error_code>(make_errno(err != 0 ? err : EIO));
+    }
+    impl_->dma_buf_fds.emplace(bo, fd);
+  }
+  DmaBufDesc desc;
+  desc.fds.at(0) = fd;
+  desc.offsets.at(0) = gbm_bo_get_offset(bo, 0);
+  desc.pitches.at(0) = gbm_bo_get_stride(bo);
+  desc.n_planes = 1;
+  desc.drm_fourcc = impl_->fmt.drm_fourcc;
+  desc.modifier = gbm_bo_get_modifier(bo);
+  desc.width = impl_->fmt.width;
+  desc.height = impl_->fmt.height;
+  return desc;
 }
 
 SourceFormat GbmSurfaceSource::format() const noexcept {
