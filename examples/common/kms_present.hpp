@@ -9,6 +9,8 @@
 // examples show exactly what reaches the kernel; in production this is what the
 // drm-cxx allocator + AtomicRequest do for you.
 
+#include "select_connector.hpp"
+
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
 
@@ -47,15 +49,21 @@ inline std::uint32_t prop_id(int fd, std::uint32_t obj, std::uint32_t type, cons
   return id;
 }
 
-// First connected connector, a CRTC its encoders allow, and that CRTC's primary
-// plane. Returns nullopt if nothing is hooked up.
+// First connected (or DRM_CXX_CONNECTOR-pinned) connector, a CRTC its encoders allow, and that
+// CRTC's primary plane. Returns nullopt if nothing is hooked up.
 inline std::optional<Target> pick_target(int fd) {
   drmModeRes* res = drmModeGetResources(fd);
   if (!res) return std::nullopt;
 
   Target t;
   drmModeConnector* conn = nullptr;
+  // DRM_CXX_CONNECTOR=<name> (e.g. DP-4) pins the output; see select_connector.hpp.
+  const auto pinned = drm::examples::connector_override(
+      fd, drm::span<const std::uint32_t>(res->connectors, res->count_connectors));
   for (int i = 0; i < res->count_connectors; ++i) {
+    if (pinned.has_value() && res->connectors[i] != *pinned) {
+      continue;
+    }
     drmModeConnector* c = drmModeGetConnector(fd, res->connectors[i]);
     if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
       conn = c;

@@ -38,13 +38,17 @@
 
 #include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/display/mode_list.hpp>
 
 #include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -104,6 +108,30 @@ inline constexpr std::array<std::uint32_t, 7> k_external_rank = {
   return std::nullopt;
 }
 
+/// `DRM_CXX_CONNECTOR=<name>` (the kernel's "DP-4" / "HDMI-A-1" form) pins the
+/// output, overriding the rank. Needed where the rank lands on a connected but
+/// unlit output — shared-display controllers publish one connected connector
+/// per consumer, and only one of them is on screen. Returns the connector id, or
+/// nullopt when unset or not found (warns on not found).
+[[nodiscard]] inline std::optional<std::uint32_t> connector_override(
+    int fd, drm::span<const std::uint32_t> connector_ids) {
+  const char* want = std::getenv("DRM_CXX_CONNECTOR");
+  if (want == nullptr || *want == '\0') {
+    return std::nullopt;
+  }
+  for (const auto cid : connector_ids) {
+    if (auto c = drm::get_connector(fd, cid); c) {
+      const std::string name = std::string(drm::display::connector_type_name(c->connector_type)) +
+                               "-" + std::to_string(c->connector_type_id);
+      if (name == want) {
+        return cid;
+      }
+    }
+  }
+  std::fprintf(stderr, "DRM_CXX_CONNECTOR=%s: no such connector; using the default pick\n", want);
+  return std::nullopt;
+}
+
 /// IO wrapper: read each connector in `connector_ids`, keep those that
 /// are CONNECTED with at least one mode and an attached encoder, and
 /// pick the highest-ranking by `ranks`. Returns the loaded
@@ -119,6 +147,12 @@ inline constexpr std::array<std::uint32_t, 7> k_external_rank = {
   // Two parallel arrays: the loaded Connector smart pointers and a
   // flat type vector that rank_pick consumes. Loading happens once;
   // rank_pick is pure data.
+  if (const auto pinned = connector_override(fd, connector_ids); pinned.has_value()) {
+    if (auto c = drm::get_connector(fd, *pinned);
+        c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
+      return c;
+    }
+  }
   std::vector<drm::Connector> eligible;
   std::vector<std::uint32_t> types;
   eligible.reserve(connector_ids.size());

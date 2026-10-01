@@ -14,7 +14,10 @@
 //
 //   ./vk_out_fence [/dev/dri/cardN] [frames]
 
+#include "../../common/select_connector.hpp"
+
 #include <drm-cxx/core/device.hpp>
+#include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/present/scanout_backend.hpp>
 #include <drm-cxx/present/vk_scanout_producer.hpp>
@@ -25,6 +28,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 
@@ -43,6 +47,12 @@ int main(int argc, char** argv) try {
     return EXIT_FAILURE;
   }
   drm::present::ScanoutBackend::Config cfg;
+  if (drm::Resources res = drm::get_resources(dev->fd()); res) {
+    cfg.connector_id =
+        drm::examples::connector_override(
+            dev->fd(), drm::span<const std::uint32_t>(res->connectors, res->count_connectors))
+            .value_or(0);
+  }
   cfg.fourcc = DRM_FORMAT_ARGB8888;
   auto backend = drm::present::ScanoutBackend::create(*dev, **producer, cfg);
   if (!backend) {

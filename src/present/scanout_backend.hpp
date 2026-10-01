@@ -71,6 +71,8 @@ class ScanoutBackend {
     fmt::Rotation rotation{fmt::Rotation::Rotate0};
     VrrPolicy vrr{VrrPolicy::Off};
     RestorePolicy restore{RestorePolicy::None};
+    // Output to drive; 0 = the first connected connector (ScanoutTarget::discover).
+    std::uint32_t connector_id{0};
   };
 
   // Discover an output on `dev`, set up a full-screen layer fed by `producer`,

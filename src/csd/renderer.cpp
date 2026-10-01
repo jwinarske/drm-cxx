@@ -24,6 +24,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -65,6 +66,12 @@ bool load_font_face(const RendererConfig& cfg, BLFontFace& out) {
   }
   if (!cfg.try_system_font) {
     return false;
+  }
+  // DRM_CXX_FONT=<path.ttf> wins: images that keep their fonts outside
+  // /usr/share/fonts (vendor/automotive stacks) have none of the paths below.
+  if (const char* env = std::getenv("DRM_CXX_FONT");
+      env != nullptr && *env != '\0' && out.create_from_file(env) == BL_SUCCESS) {
+    return true;
   }
   for (const char* path : k_font_candidates) {
     if (out.create_from_file(path) == BL_SUCCESS) {

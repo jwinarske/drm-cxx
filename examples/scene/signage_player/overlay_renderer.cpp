@@ -34,6 +34,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -109,6 +110,12 @@ BLResult load_default_font_face(BLFontFace& face) noexcept {
       "/usr/share/fonts/noto/NotoSans-Bold.ttf",
       "/usr/share/fonts/TTF/Vera.ttf",
   };
+  // DRM_CXX_FONT=<path.ttf> wins: images that keep their fonts outside
+  // /usr/share/fonts (vendor/automotive stacks) have none of the paths below.
+  if (const char* env = std::getenv("DRM_CXX_FONT");
+      env != nullptr && *env != '\0' && face.create_from_file(env) == BL_SUCCESS) {
+    return BL_SUCCESS;
+  }
   for (const char* path : k_candidates) {
     if (face.create_from_file(path) == BL_SUCCESS) {
       return BL_SUCCESS;

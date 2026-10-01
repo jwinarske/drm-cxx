@@ -75,7 +75,7 @@ drm::expected<std::unique_ptr<ScanoutBackend>, std::error_code> ScanoutBackend::
   (void)dev.enable_universal_planes();
   (void)dev.enable_atomic();
 
-  auto target = display::ScanoutTarget::discover(dev);
+  auto target = display::ScanoutTarget::discover(dev, cfg.connector_id);
   if (!target) {
     return drm::unexpected<std::error_code>(target.error());
   }
