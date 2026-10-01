@@ -4,6 +4,7 @@
 #pragma once
 
 #include <drm-cxx/detail/expected.hpp>
+#include <drm-cxx/detail/span.hpp>
 
 #include <xf86drmMode.h>
 
@@ -45,10 +46,17 @@ class Device {
   /// Create a KMS framebuffer from already-imported GEM handles (mirrors
   /// drmModeAddFB2WithModifiers). `flags` carries DRM_MODE_FB_MODIFIERS when the
   /// modifiers[] are meaningful. Returns the new fb id.
+  ///
+  /// The four plane arrays are fixed-extent spans, not pointers: AddFB2 reads
+  /// exactly four entries from each, and a `const std::uint32_t*` parameter
+  /// would let a caller pass fewer without the compiler noticing. A real
+  /// `std::uint32_t[4]` or `std::array<std::uint32_t, 4>` converts implicitly,
+  /// so this reads the same at the call site; a bare pointer no longer compiles.
   [[nodiscard]] drm::expected<std::uint32_t, std::error_code> add_framebuffer(
       std::uint32_t width, std::uint32_t height, std::uint32_t fourcc,
-      const std::uint32_t handles[4], const std::uint32_t strides[4],
-      const std::uint32_t offsets[4], const std::uint64_t modifiers[4], std::uint32_t flags) const;
+      drm::span<const std::uint32_t, 4> handles, drm::span<const std::uint32_t, 4> strides,
+      drm::span<const std::uint32_t, 4> offsets, drm::span<const std::uint64_t, 4> modifiers,
+      std::uint32_t flags) const;
 
   [[nodiscard]] drm::expected<void, std::error_code> remove_framebuffer(std::uint32_t fb_id) const;
 

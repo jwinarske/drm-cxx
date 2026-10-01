@@ -76,6 +76,8 @@ if(DRM_CXX_HAS_BLEND2D)
     test_csd_probe_presenter)
 endif()
 
+list(APPEND DRM_CXX_TESTS test_add_framebuffer_spans)
+
 foreach(_t ${DRM_CXX_TESTS})
   add_executable(${_t} unit/${_t}.cpp)
   target_link_libraries(${_t} PRIVATE

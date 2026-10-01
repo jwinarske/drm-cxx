@@ -144,6 +144,13 @@ test('test_dumb_scanout_sink_vkms',
   is_parallel : false,
 )
 
+test('test_add_framebuffer_spans',
+  executable('test_add_framebuffer_spans',
+    'unit/test_add_framebuffer_spans.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_acquire_fence',
   executable('test_acquire_fence',
     'unit/test_acquire_fence.cpp',
