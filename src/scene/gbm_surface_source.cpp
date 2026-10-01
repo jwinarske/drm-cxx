@@ -71,7 +71,17 @@ constexpr std::uint32_t k_default_usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDER
   errno = 0;
   struct gbm_surface* surf = nullptr;
 
-  if (cfg.modifier != DRM_FORMAT_MOD_INVALID) {
+  // LINEAR goes through the plain create with GBM_BO_USE_LINEAR first.
+  // Vivante's gbm builds a modifier-list surface (v1 or v2) with only two
+  // buffers, and the scene holds two in flight (one scanning out, one queued
+  // behind it), so the next eglSwapBuffers waits forever for a free one. The
+  // plain create gets the full buffer count, and the layout is the same.
+  if (cfg.modifier == DRM_FORMAT_MOD_LINEAR) {
+    surf =
+        gbm_surface_create(gdev, cfg.width, cfg.height, cfg.drm_format, usage | GBM_BO_USE_LINEAR);
+  }
+  if (surf == nullptr && cfg.modifier != DRM_FORMAT_MOD_INVALID) {
+    errno = 0;
     const std::uint64_t mod = cfg.modifier;
 #if defined(HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
     surf = gbm_surface_create_with_modifiers2(gdev, cfg.width, cfg.height, cfg.drm_format, &mod, 1,
@@ -85,7 +95,7 @@ constexpr std::uint32_t k_default_usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDER
     // fallback exists for. Mirrors gbm/buffer.cpp.
     surf = gbm_surface_create_with_modifiers(gdev, cfg.width, cfg.height, cfg.drm_format, &mod, 1);
 #endif
-  } else {
+  } else if (surf == nullptr) {
     surf = gbm_surface_create(gdev, cfg.width, cfg.height, cfg.drm_format, usage);
   }
 
