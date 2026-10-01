@@ -10,23 +10,37 @@
 #define VK_NO_PROTOTYPES
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage) -- required vulkan.hpp config knob
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
+#include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/dumb/buffer.hpp>
+#include <drm-cxx/gbm/buffer.hpp>
+#include <drm-cxx/gbm/device.hpp>
 #include <drm-cxx/log.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
+#include <drm-cxx/scene/external_dma_buf_ring.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
+#include <drm.h>
 #include <drm_fourcc.h>
+#include <gbm.h>
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_core.h>
+#include <xf86drm.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
+#include <fcntl.h>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -92,17 +106,62 @@ struct VkScanoutProducer::Impl {
   vk::Device device;
   vk::Queue queue;
   std::uint32_t queue_family{0};
+  // Queue family the scanout image is released to after each render and
+  // acquired back from before the next: the display is an external consumer.
+  std::uint32_t foreign_family{VK_QUEUE_FAMILY_EXTERNAL};
   vk::CommandPool cmd_pool;
   vk::CommandBuffer cmd;
   vk::Image image;
   vk::DeviceMemory memory;
+  // Display-side scanout buffer, only when the display could not import the
+  // Vulkan-exported one (see import_display_buffer); Vulkan then imports this.
+  // Declared before the Vulkan objects are torn down in ~Impl, freed after.
+  std::optional<gbm::GbmDevice> gbm_dev;
+  gbm::Buffer display_gbm;
+  dumb::Buffer display_buffer;
   vk::Extent2D extent;
+
+  // How rendered frames reach the display (see create_buffer):
+  //   Export — the display imports Vulkan's own buffer (zero-copy);
+  //   Import — Vulkan imports a display-side buffer (zero-copy, self-checked);
+  //   Copy   — Vulkan renders into host-visible memory and each frame is
+  //            memcpy'd into one of two display-side dumb buffers.
+  enum class Mode : std::uint8_t { Export, Import, Copy };
+  Mode mode{Mode::Export};
+  std::array<dumb::Buffer, 2> copy_buffers;
+  scene::ExternalDmaBufRing* copy_ring{nullptr};  // non-owning; the scene owns it
+  std::array<std::atomic<bool>, 2> copy_slot_free{};
+  std::size_t copy_next{0};
+  void* copy_mapped{nullptr};
+  vk::DeviceSize copy_offset{0};
+  vk::DeviceSize copy_row_pitch{0};
+  bool copy_coherent{true};
   bool first_frame{true};
   // Non-owning: the scene owns the source; the producer outlives the scene
   // (its VkImage memory backs the dmabuf), so this stays valid.
   scene::ExternalDmaBufSource* vk_source{nullptr};
   vk::Semaphore export_sem;  // signaled by each render submit, exported as sync_file
-  vk::Fence reuse_fence;     // CPU-waited before re-recording (image + cmd reuse)
+
+  // Allocate the scanout buffer on the KMS device and import it into Vulkan
+  // as a LINEAR image. Returns the source the scene scans out.
+  drm::expected<std::unique_ptr<scene::ExternalDmaBufSource>, std::error_code>
+  import_display_buffer(std::uint32_t width, std::uint32_t height, std::uint32_t fourcc,
+                        vk::Format format);
+
+  // True when a GPU write through the imported image is visible in the
+  // display buffer's memory. Some drivers accept a dma-buf import yet render
+  // into private memory; scanning that out would show only the stale buffer.
+  bool import_aliases();
+
+  // Host-visible LINEAR render target + two display-side dumb buffers in a ring.
+  drm::expected<std::unique_ptr<scene::LayerBufferSource>, std::error_code> setup_copy(
+      std::uint32_t width, std::uint32_t height, std::uint32_t fourcc, vk::Format format);
+
+  void release_display_side() {
+    display_gbm = gbm::Buffer{};
+    display_buffer = dumb::Buffer{};
+  }
+  vk::Fence reuse_fence;  // CPU-waited before re-recording (image + cmd reuse)
 
   ~Impl() {
     try {
@@ -110,6 +169,9 @@ struct VkScanoutProducer::Impl {
         device.waitIdle();
         if (image) {
           device.destroyImage(image);
+        }
+        if (copy_mapped != nullptr) {
+          device.unmapMemory(memory);
         }
         if (memory) {
           device.freeMemory(memory);
@@ -133,6 +195,342 @@ struct VkScanoutProducer::Impl {
     }
   }
 };
+
+namespace {
+
+// One display-side allocation: an owner (GBM or dumb buffer) plus the dma-buf
+// fd, pitch and size Vulkan imports.
+struct DisplayAlloc {
+  gbm::Buffer gbm;
+  dumb::Buffer dumb;
+  int fd{-1};
+  std::uint32_t pitch{0};
+  std::size_t size{0};
+};
+
+// Allocate `rows` x `width` LINEAR on the KMS device. GBM first: on stacks whose
+// GBM backend allocates through the GPU driver (e.g. i.MX/Vivante), that memory
+// is both scannable and native to the GPU, so a Vulkan import aliases it. A dumb
+// buffer is the fallback — scannable, but a GPU driver may not alias foreign
+// pages on import.
+[[nodiscard]] std::optional<DisplayAlloc> alloc_display(const drm::Device& dev,
+                                                        std::optional<gbm::GbmDevice>& gbm_dev,
+                                                        std::uint32_t width, std::uint32_t rows,
+                                                        std::uint32_t fourcc) {
+  DisplayAlloc a;
+  if (!gbm_dev.has_value()) {
+    if (auto g = gbm::GbmDevice::create(dev.fd()); g) {
+      gbm_dev.emplace(std::move(*g));
+    }
+  }
+  if (gbm_dev.has_value()) {
+    gbm::Config cfg;
+    cfg.width = width;
+    cfg.height = rows;
+    cfg.drm_format = fourcc;
+    cfg.usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+    cfg.modifier = DRM_FORMAT_MOD_LINEAR;
+    cfg.add_fb = false;
+    if (auto bo = gbm::Buffer::create(*gbm_dev, cfg); bo) {
+      if (auto fd = bo->fd(); fd && *fd >= 0) {
+        a.fd = *fd;
+        a.pitch = bo->stride();
+        a.size = static_cast<std::size_t>(bo->stride()) * rows;
+        a.gbm = std::move(*bo);
+        return a;
+      }
+    }
+  }
+  auto buf = dumb::Buffer::create(dev, dumb::Config{width, rows, fourcc, 32, false});
+  if (!buf) {
+    return std::nullopt;
+  }
+  if (drmPrimeHandleToFD(dev.fd(), buf->handle(), DRM_CLOEXEC | DRM_RDWR, &a.fd) != 0 || a.fd < 0) {
+    return std::nullopt;
+  }
+  a.pitch = buf->stride();
+  a.size = buf->size_bytes();
+  a.dumb = std::move(*buf);
+  return a;
+}
+
+}  // namespace
+
+drm::expected<std::unique_ptr<scene::ExternalDmaBufSource>, std::error_code>
+VkScanoutProducer::Impl::import_display_buffer(std::uint32_t width, std::uint32_t height,
+                                               std::uint32_t fourcc, vk::Format format) {
+  auto alloc = alloc_display(*dev, gbm_dev, width, height, fourcc);
+  if (!alloc) {
+    return drm::unexpected<std::error_code>(err(std::errc::not_enough_memory));
+  }
+  try {
+    auto make_image = [&](std::uint32_t pitch) {
+      const vk::SubresourceLayout plane_layout{0, 0, pitch, 0, 0};
+      vk::StructureChain<vk::ImageCreateInfo, vk::ExternalMemoryImageCreateInfo,
+                         vk::ImageDrmFormatModifierExplicitCreateInfoEXT>
+          image_chain{
+              vk::ImageCreateInfo{}
+                  .setImageType(vk::ImageType::e2D)
+                  .setFormat(format)
+                  .setExtent({width, height, 1})
+                  .setMipLevels(1)
+                  .setArrayLayers(1)
+                  .setSamples(vk::SampleCountFlagBits::e1)
+                  .setTiling(vk::ImageTiling::eDrmFormatModifierEXT)
+                  .setUsage(vk::ImageUsageFlagBits::eColorAttachment |
+                            vk::ImageUsageFlagBits::eTransferDst)
+                  .setSharingMode(vk::SharingMode::eExclusive)
+                  .setInitialLayout(vk::ImageLayout::eUndefined),
+              vk::ExternalMemoryImageCreateInfo{vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT},
+              vk::ImageDrmFormatModifierExplicitCreateInfoEXT{}
+                  .setDrmFormatModifier(DRM_FORMAT_MOD_LINEAR)
+                  .setPlaneLayouts(plane_layout)};
+      return device.createImage(image_chain.get<vk::ImageCreateInfo>());
+    };
+    image = make_image(alloc->pitch);
+    vk::MemoryRequirements mr = device.getImageMemoryRequirements(image);
+    // GPUs commonly pad an image's height (Vivante: to 16 rows), so the image
+    // can need more bytes than a width x height buffer holds. Reallocate with
+    // enough extra rows at the same pitch; the framebuffer still covers only
+    // width x height, the padding rows are never scanned out.
+    if (mr.size > alloc->size && alloc->pitch != 0U) {
+      const auto rows = static_cast<std::uint32_t>((mr.size + alloc->pitch - 1U) /
+                                                   static_cast<vk::DeviceSize>(alloc->pitch));
+      auto padded = alloc_display(*dev, gbm_dev, width, rows, fourcc);
+      if (!padded || padded->pitch != alloc->pitch) {
+        throw std::runtime_error("could not allocate a padded display buffer");
+      }
+      ::close(alloc->fd);
+      alloc = std::move(padded);
+    }
+    const vk::MemoryFdPropertiesKHR fd_props = device.getMemoryFdPropertiesKHR(
+        vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT, alloc->fd);
+    const std::uint32_t type_bits = mr.memoryTypeBits & fd_props.memoryTypeBits;
+    std::uint32_t type_index = UINT32_MAX;
+    for (std::uint32_t i = 0; i < 32U; ++i) {
+      if ((type_bits & (1U << i)) != 0U) {
+        type_index = i;
+        break;
+      }
+    }
+    if (type_index == UINT32_MAX || mr.size > alloc->size) {
+      drm::log_warn(
+          "VkScanoutProducer: image needs {} bytes (types 0x{:x}); display buffer is {} bytes "
+          "(fd types 0x{:x}), pitch {}",
+          static_cast<std::uint64_t>(mr.size), mr.memoryTypeBits,
+          static_cast<std::uint64_t>(alloc->size), fd_props.memoryTypeBits, alloc->pitch);
+      throw std::runtime_error("display buffer is not importable for this image");
+    }
+    // Vulkan owns the fd it imports; keep ours for the scene's PRIME import.
+    const int vk_fd = ::fcntl(alloc->fd, F_DUPFD_CLOEXEC, 0);
+    if (vk_fd < 0) {
+      throw std::runtime_error("dup of the display buffer fd failed");
+    }
+    vk::StructureChain<vk::MemoryAllocateInfo, vk::ImportMemoryFdInfoKHR,
+                       vk::MemoryDedicatedAllocateInfo>
+        alloc_chain{
+            vk::MemoryAllocateInfo{mr.size, type_index},
+            vk::ImportMemoryFdInfoKHR{vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT, vk_fd},
+            vk::MemoryDedicatedAllocateInfo{image, nullptr}};
+    try {
+      memory = device.allocateMemory(alloc_chain.get<vk::MemoryAllocateInfo>());
+    } catch (...) {
+      ::close(vk_fd);  // not consumed on failure
+      throw;
+    }
+    device.bindImageMemory(image, memory, 0);
+  } catch (const std::exception& e) {
+    ::close(alloc->fd);
+    if (image) {
+      device.destroyImage(image);
+      image = nullptr;
+    }
+    if (memory) {
+      device.freeMemory(memory);
+      memory = nullptr;
+    }
+    drm::log_warn("VkScanoutProducer: display-side import failed: {}", e.what());
+    return drm::unexpected<std::error_code>(err(std::errc::io_error));
+  }
+
+  const std::array<scene::ExternalPlaneInfo, 1> planes{
+      scene::ExternalPlaneInfo{alloc->fd, 0, alloc->pitch}};
+  auto source = scene::ExternalDmaBufSource::create(
+      *dev, width, height, fourcc, DRM_FORMAT_MOD_LINEAR,
+      drm::span<const scene::ExternalPlaneInfo>(planes.data(), planes.size()));
+  ::close(alloc->fd);  // the source dups it
+  if (!source) {
+    return drm::unexpected<std::error_code>(source.error());
+  }
+  drm::log_info("VkScanoutProducer: scanout buffer allocated display-side via {}",
+                alloc->gbm.empty() ? "a dumb buffer" : "GBM");
+  display_gbm = std::move(alloc->gbm);
+  display_buffer = std::move(alloc->dumb);
+  return source;
+}
+
+bool VkScanoutProducer::Impl::import_aliases() {
+  constexpr std::uint32_t k_marker = 0x01020304U;
+  auto cpu_pixel = [this](std::optional<std::uint32_t> write) -> std::optional<std::uint32_t> {
+    if (!display_gbm.empty()) {
+      auto m = display_gbm.map(write ? drm::MapAccess::Write : drm::MapAccess::Read);
+      if (!m || m->pixels().size() < sizeof(std::uint32_t)) {
+        return std::nullopt;
+      }
+      std::uint32_t v = 0;
+      if (write) {
+        std::memcpy(m->pixels().data(), &*write, sizeof v);
+      }
+      std::memcpy(&v, m->pixels().data(), sizeof v);
+      return v;
+    }
+    if (!display_buffer.empty() && display_buffer.data() != nullptr) {
+      std::uint32_t v = 0;
+      if (write) {
+        std::memcpy(display_buffer.data(), &*write, sizeof v);
+      }
+      std::memcpy(&v, display_buffer.data(), sizeof v);
+      return v;
+    }
+    return std::nullopt;
+  };
+  if (!cpu_pixel(k_marker).has_value()) {
+    return false;
+  }
+  try {
+    const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    cmd.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+    cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer,
+                        {}, {}, {},
+                        vk::ImageMemoryBarrier{{},
+                                               vk::AccessFlagBits::eTransferWrite,
+                                               vk::ImageLayout::eUndefined,
+                                               vk::ImageLayout::eGeneral,
+                                               VK_QUEUE_FAMILY_IGNORED,
+                                               VK_QUEUE_FAMILY_IGNORED,
+                                               image,
+                                               range});
+    cmd.clearColorImage(image, vk::ImageLayout::eGeneral,
+                        vk::ClearColorValue{std::array<float, 4>{0.0F, 1.0F, 0.0F, 1.0F}}, range);
+    cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                        vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {},
+                        vk::ImageMemoryBarrier{vk::AccessFlagBits::eTransferWrite,
+                                               {},
+                                               vk::ImageLayout::eGeneral,
+                                               vk::ImageLayout::eGeneral,
+                                               queue_family,
+                                               foreign_family,
+                                               image,
+                                               range});
+    cmd.end();
+    queue.submit(vk::SubmitInfo{}.setCommandBuffers(cmd), reuse_fence);
+    // Left signaled: the next render_clear's 1-frame-behind gate waits on it.
+    (void)device.waitForFences(reuse_fence, VK_TRUE, UINT64_MAX);
+    cmd.reset();
+  } catch (const std::exception& e) {
+    drm::log_warn("VkScanoutProducer: import self-check failed: {}", e.what());
+    return false;
+  }
+  first_frame = false;  // the image is now GENERAL and released to the display
+  const auto after = cpu_pixel(std::nullopt);
+  return after.has_value() && *after != k_marker;
+}
+
+drm::expected<std::unique_ptr<scene::LayerBufferSource>, std::error_code>
+VkScanoutProducer::Impl::setup_copy(std::uint32_t width, std::uint32_t height, std::uint32_t fourcc,
+                                    vk::Format format) {
+  try {
+    const vk::FormatProperties fp = physical.getFormatProperties(format);
+    if (!(fp.linearTilingFeatures & vk::FormatFeatureFlagBits::eTransferDst)) {
+      return drm::unexpected<std::error_code>(err(std::errc::not_supported));
+    }
+    image = device.createImage(vk::ImageCreateInfo{}
+                                   .setImageType(vk::ImageType::e2D)
+                                   .setFormat(format)
+                                   .setExtent({width, height, 1})
+                                   .setMipLevels(1)
+                                   .setArrayLayers(1)
+                                   .setSamples(vk::SampleCountFlagBits::e1)
+                                   .setTiling(vk::ImageTiling::eLinear)
+                                   .setUsage(vk::ImageUsageFlagBits::eTransferDst)
+                                   .setSharingMode(vk::SharingMode::eExclusive)
+                                   .setInitialLayout(vk::ImageLayout::eUndefined));
+    const vk::MemoryRequirements mr = device.getImageMemoryRequirements(image);
+    const vk::PhysicalDeviceMemoryProperties props = physical.getMemoryProperties();
+    std::uint32_t type_index = UINT32_MAX;
+    for (std::uint32_t i = 0; i < props.memoryTypeCount; ++i) {
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
+      const vk::MemoryPropertyFlags f = props.memoryTypes[i].propertyFlags;
+      if ((mr.memoryTypeBits & (1U << i)) == 0U ||
+          !(f & vk::MemoryPropertyFlagBits::eHostVisible)) {
+        continue;
+      }
+      const bool coherent = static_cast<bool>(f & vk::MemoryPropertyFlagBits::eHostCoherent);
+      if (type_index == UINT32_MAX || coherent) {
+        type_index = i;
+        copy_coherent = coherent;
+      }
+      if (coherent) {
+        break;
+      }
+    }
+    if (type_index == UINT32_MAX) {
+      throw std::runtime_error("no host-visible memory for a LINEAR render target");
+    }
+    memory = device.allocateMemory(vk::MemoryAllocateInfo{mr.size, type_index});
+    device.bindImageMemory(image, memory, 0);
+    copy_mapped = device.mapMemory(memory, 0, VK_WHOLE_SIZE);
+    const vk::SubresourceLayout layout = device.getImageSubresourceLayout(
+        image, vk::ImageSubresource{vk::ImageAspectFlagBits::eColor, 0, 0});
+    copy_offset = layout.offset;
+    copy_row_pitch = layout.rowPitch;
+  } catch (const std::exception& e) {
+    drm::log_warn("VkScanoutProducer: copy-path render target: {}", e.what());
+    return drm::unexpected<std::error_code>(err(std::errc::io_error));
+  }
+
+  std::array<int, 2> fds{-1, -1};
+  std::array<std::array<scene::ExternalPlaneInfo, 1>, 2> planes{};
+  std::array<scene::ExternalSlotDesc, 2> slots{};
+  auto close_fds = [&fds] {
+    for (int& f : fds) {
+      if (f >= 0) {
+        ::close(f);
+        f = -1;
+      }
+    }
+  };
+  for (std::size_t i = 0; i < 2; ++i) {
+    auto buf = dumb::Buffer::create(*dev, dumb::Config{width, height, fourcc, 32, false});
+    if (!buf ||
+        drmPrimeHandleToFD(dev->fd(), buf->handle(), DRM_CLOEXEC | DRM_RDWR, &fds.at(i)) != 0) {
+      close_fds();
+      return drm::unexpected<std::error_code>(buf ? err(std::errc::io_error) : buf.error());
+    }
+    planes.at(i).at(0) = scene::ExternalPlaneInfo{fds.at(i), 0, buf->stride()};
+    slots.at(i) = scene::ExternalSlotDesc{
+        DRM_FORMAT_MOD_LINEAR,
+        drm::span<const scene::ExternalPlaneInfo>(planes.at(i).data(), planes.at(i).size())};
+    copy_buffers.at(i) = std::move(*buf);
+    copy_slot_free.at(i) = true;
+  }
+  scene::ExternalDmaBufRing::Options opts;
+  opts.on_release = [this](std::size_t slot, std::optional<drm::sync::SyncFence> /*fence*/) {
+    if (slot < copy_slot_free.size()) {
+      copy_slot_free.at(slot) = true;
+    }
+  };
+  auto ring = scene::ExternalDmaBufRing::create(
+      *dev, width, height, fourcc,
+      drm::span<const scene::ExternalSlotDesc>(slots.data(), slots.size()), std::move(opts));
+  close_fds();  // the ring dups them
+  if (!ring) {
+    return drm::unexpected<std::error_code>(ring.error());
+  }
+  copy_ring = ring->get();
+  mode = Mode::Copy;
+  return std::unique_ptr<scene::LayerBufferSource>(std::move(*ring));
+}
 
 VkScanoutProducer::VkScanoutProducer() = default;
 VkScanoutProducer::~VkScanoutProducer() = default;
@@ -232,6 +630,12 @@ drm::expected<std::unique_ptr<VkScanoutProducer>, std::error_code> VkScanoutProd
       if (!core_1_1 || is_listed(promoted)) {
         dev_exts.push_back(promoted);
       }
+    }
+    // FOREIGN names "a different device / the display" more precisely than
+    // EXTERNAL; use it when offered.
+    if (is_listed("VK_EXT_queue_family_foreign")) {
+      dev_exts.push_back("VK_EXT_queue_family_foreign");
+      impl->foreign_family = VK_QUEUE_FAMILY_FOREIGN_EXT;
     }
     impl->device = impl->physical.createDevice(
         vk::DeviceCreateInfo{}.setQueueCreateInfos(qci).setPEnabledExtensionNames(dev_exts));
@@ -382,13 +786,58 @@ VkScanoutProducer::create_buffer(std::uint32_t width, std::uint32_t height, std:
   auto source = scene::ExternalDmaBufSource::create(*impl_->dev, width, height, fourcc,
                                                     chosen_modifier, planes);
   ::close(dmabuf_fd);  // ExternalDmaBufSource dups the fd
-  if (!source) {
-    return drm::unexpected<std::error_code>(source.error());
-  }
   impl_->extent = vk::Extent2D{width, height};
-  // Keep a non-owning handle so render_clear can stash the acquire fence on it.
-  impl_->vk_source = (*source).get();
-  return std::unique_ptr<scene::LayerBufferSource>(std::move(*source));
+  if (source) {
+    impl_->mode = Impl::Mode::Export;
+    // Keep a non-owning handle so render_clear can stash the acquire fence on it.
+    impl_->vk_source = (*source).get();
+    return std::unique_ptr<scene::LayerBufferSource>(std::move(*source));
+  }
+  {
+    // The display could not import Vulkan's buffer. Typical cause: a display
+    // controller without an IOMMU (CMA / GEM-DMA, e.g. i.MX LCDIF) importing a
+    // scatter-gather GPU allocation — the PRIME import has to bounce it and
+    // fails (ENOMEM). Reverse the direction: let the display allocate (its
+    // allocator returns memory it can scan out) and have Vulkan import that,
+    // as LINEAR — kept only if a GPU write through the import is actually
+    // visible. Otherwise render into host-visible memory and copy each frame.
+    drm::log_info("VkScanoutProducer: display could not import the Vulkan buffer ({})",
+                  source.error().message());
+    impl_->device.destroyImage(impl_->image);
+    impl_->device.freeMemory(impl_->memory);
+    impl_->image = nullptr;
+    impl_->memory = nullptr;
+
+    const auto renderable = exportable_modifiers(fourcc);
+    if (std::find(renderable.begin(), renderable.end(), DRM_FORMAT_MOD_LINEAR) !=
+        renderable.end()) {
+      if (auto imported = impl_->import_display_buffer(width, height, fourcc, format); imported) {
+        if (impl_->import_aliases()) {
+          drm::log_info(
+              "VkScanoutProducer: zero-copy via a display-side buffer imported into "
+              "Vulkan");
+          impl_->mode = Impl::Mode::Import;
+          impl_->vk_source = (*imported).get();
+          return std::unique_ptr<scene::LayerBufferSource>(std::move(*imported));
+        }
+        drm::log_info("VkScanoutProducer: the Vulkan driver does not alias imported dma-bufs");
+        imported->reset();
+        impl_->device.destroyImage(impl_->image);
+        impl_->device.freeMemory(impl_->memory);
+        impl_->image = nullptr;
+        impl_->memory = nullptr;
+        impl_->release_display_side();
+      }
+    }
+    auto copied = impl_->setup_copy(width, height, fourcc, format);
+    if (!copied) {
+      return drm::unexpected<std::error_code>(copied.error());
+    }
+    drm::log_info(
+        "VkScanoutProducer: no zero-copy path between this GPU and display; each frame is "
+        "copied by the CPU into a display-side buffer");
+    return copied;
+  }
 }
 
 drm::expected<void, std::error_code> VkScanoutProducer::render_clear(std::array<float, 4> rgba) {
@@ -408,21 +857,73 @@ drm::expected<void, std::error_code> VkScanoutProducer::render_clear(std::array<
     impl_->cmd.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
     const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-    const vk::ImageMemoryBarrier to_general{
+    // Acquire from the display (after the first frame the image was released
+    // to it), or initialize on the first frame.
+    const bool first = impl_->first_frame;
+    // The copy path's image never leaves this device; only an exported or
+    // imported image changes hands with the display.
+    const bool shared = impl_->mode != Impl::Mode::Copy;
+    const vk::ImageMemoryBarrier acquire{
         {},
         vk::AccessFlagBits::eTransferWrite,
-        impl_->first_frame ? vk::ImageLayout::eUndefined : vk::ImageLayout::eGeneral,
+        first ? vk::ImageLayout::eUndefined : vk::ImageLayout::eGeneral,
         vk::ImageLayout::eGeneral,
-        VK_QUEUE_FAMILY_IGNORED,
-        VK_QUEUE_FAMILY_IGNORED,
+        (first || !shared) ? VK_QUEUE_FAMILY_IGNORED : impl_->foreign_family,
+        (first || !shared) ? VK_QUEUE_FAMILY_IGNORED : impl_->queue_family,
         impl_->image,
         range};
     impl_->cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
-                               vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, to_general);
+                               vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, acquire);
 
     const vk::ClearColorValue clear{std::array<float, 4>{rgba[0], rgba[1], rgba[2], rgba[3]}};
     impl_->cmd.clearColorImage(impl_->image, vk::ImageLayout::eGeneral, clear, range);
+
+    // Release to the display. Without this a GPU may keep the result only in
+    // its own compression / fast-clear metadata (Vivante tile status) and the
+    // display scans out the untouched memory underneath — a black screen.
+    // Copy path: make the result visible to the host read below instead.
+    const vk::ImageMemoryBarrier release{
+        vk::AccessFlagBits::eTransferWrite,
+        shared ? vk::AccessFlags{} : vk::AccessFlags{vk::AccessFlagBits::eHostRead},
+        vk::ImageLayout::eGeneral,
+        vk::ImageLayout::eGeneral,
+        shared ? impl_->queue_family : VK_QUEUE_FAMILY_IGNORED,
+        shared ? impl_->foreign_family : VK_QUEUE_FAMILY_IGNORED,
+        impl_->image,
+        range};
+    impl_->cmd.pipelineBarrier(
+        vk::PipelineStageFlagBits::eTransfer,
+        shared ? vk::PipelineStageFlagBits::eBottomOfPipe : vk::PipelineStageFlagBits::eHost, {},
+        {}, {}, release);
     impl_->cmd.end();
+
+    if (!shared) {
+      impl_->queue.submit(vk::SubmitInfo{}.setCommandBuffers(impl_->cmd), impl_->reuse_fence);
+      // Left signaled for the next frame's gate (no reset here).
+      (void)impl_->device.waitForFences(impl_->reuse_fence, VK_TRUE, UINT64_MAX);
+      if (!impl_->copy_coherent) {
+        impl_->device.invalidateMappedMemoryRanges(
+            vk::MappedMemoryRange{impl_->memory, 0, VK_WHOLE_SIZE});
+      }
+      // Write the slot the display is not holding; both held only if frames
+      // outrun the flips, in which case the pending one is overwritten.
+      std::size_t slot = impl_->copy_next;
+      if (!impl_->copy_slot_free.at(slot) && impl_->copy_slot_free.at(slot ^ 1U)) {
+        slot ^= 1U;
+      }
+      dumb::Buffer& dst = impl_->copy_buffers.at(slot);
+      const auto* src = static_cast<const std::uint8_t*>(impl_->copy_mapped) + impl_->copy_offset;
+      const std::size_t row_bytes = static_cast<std::size_t>(impl_->extent.width) * 4U;
+      for (std::uint32_t y = 0; y < impl_->extent.height; ++y) {
+        std::memcpy(dst.data() + (static_cast<std::size_t>(y) * dst.stride()),
+                    src + (static_cast<std::size_t>(y) * impl_->copy_row_pitch), row_bytes);
+      }
+      impl_->copy_slot_free.at(slot) = false;
+      impl_->copy_ring->submit(slot);
+      impl_->copy_next = slot ^ 1U;
+      impl_->first_frame = false;
+      return {};
+    }
 
     // Submit WITHOUT a CPU wait: signal the export semaphore (-> sync_file the
     // scene hands KMS as IN_FENCE_FD) and the reuse fence (next-frame gate).

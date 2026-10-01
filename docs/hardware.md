@@ -44,7 +44,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `vc4`        | VideoCore IV (RPi Zero 2 W)         | 6.18.33-rpt (trixie)| Software/dumb scanout @ 1600x900, **hardware GLES present** (`egl_scene` ~60fps, `gl_present`, `gbm_surface_scanout` VC4-T-tiled), single-plane→56-plane scene/composition, present-path profiling. No hardware Vulkan (llvmpipe only). |
 | `imx-drm`    | i.MX8M Mini LCDIF (Nitrogen8M Mini, NXP BSP) | 6.1.22 (Yocto) | `drm::fmt`: **no-`IN_FORMATS` fallback** — `FormatTable::from_plane` returns `ENOENT`, caller assumes LINEAR-only (legacy fourccs, no modifier surface). |
 | `imx-drm`    | i.MX93 LCDIFv3 (FRDM-IMX93, NXP BSP) | 6.18.2 (Yocto) | Software/dumb-buffer scanout @ 720p60 (`software_present`, `damage_present`, `ring_present`, `idle_present`, `atomic_modeset`), single-plane CPU composition (`minimal_kms_probe`, `scene_*`, `layered_demo`), present-path profiling matrix. No GPU. |
-| `imx-drm` + `galcore` | i.MX8M Plus LCDIFv3 ×3 + Vivante GC7000UL (IEI B643, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS and VPU→KMS blocked by platform limits (see quirks). |
+| `imx-drm` + `galcore` | i.MX8M Plus LCDIFv3 ×3 + Vivante GC7000UL (IEI B643, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS via `VkScanoutProducer`'s CPU-copy tier (no zero-copy path on this driver); VPU output via G2D GStreamer (see quirks). |
 | `vc4` + `v3d` | VideoCore VII (Raspberry Pi 5, 8 GB) | 6.18.33-rpt (trixie) | Full example + test matrix on HDMI 1280×1440: every present/scene/allocator/cursor/Blend2D-CSD example, **GL and Vulkan scanout at 60 fps** (`egl_scene`, `vulkan_scene`, `vk_present`, `vk_out_fence`, offload demos), multi-plane native placement (`scene_priority` 8/8 assigned). 100/100 test binaries against `card0`. |
 | `msm_drm` (downstream SDE) | SA8155P (Adreno 640) | 5.4 vendor | KMS on a shared-display node: present spine, **GL and Vulkan scanout at 60 fps**, Vulkan OUT_FENCE, native multi-plane placement with **multirect virtual-plane pairing**, GPU composition, Blend2D text. 83/84 test binaries. See quirks for the controller's plane rules. |
 
@@ -631,15 +631,29 @@ when run from an identical path.
   acquire fence as the plane's `IN_FENCE_FD`.
 - **GPU composition is active** — `GlCompositor` reports EGL dma-buf import and
   the NV12 external-sampler path available.
-- **Vulkan cannot reach this display.** Vulkan-exported dma-bufs are
-  scatter-gather; imx-drm is a GEM-DMA driver with no IOMMU in front of the
-  LCDIF, so `drmPrimeFDToHandle` has to bounce the whole buffer through swiotlb
-  and fails (`swiotlb buffer is full (sz: 8355840 bytes)` → `ENOMEM`). Blocked:
-  `vk_present`, `vk_out_fence`, `vulkan_scene`, `vulkan_offload_scanout`,
-  `cluster_sim_vulkan`. `vulkan_display` enumerates the display. A Vulkan path
-  here needs the buffer allocated display-side (GBM on `card1` or the
-  `linux,cma` dma-heap) and *imported* into Vulkan, which `VkScanoutProducer`
-  does not do today.
+- **Vulkan reaches this display only through a CPU copy.** There is no
+  zero-copy path in either direction with this BSP's Vulkan driver (6.4.11):
+  - *Export:* every Vulkan-exported dma-buf (either memory type, dedicated or
+    not) is scatter-gather. imx-drm is a GEM-DMA driver with no IOMMU in front of
+    the LCDIF, so `drmPrimeFDToHandle` has to bounce the buffer through swiotlb
+    and fails (`swiotlb buffer is full (sz: 8355840 bytes)` → `ENOMEM`).
+  - *Import:* the driver accepts a dma-buf import (from GBM on `card1` or a dumb
+    buffer) but does **not alias** it — a `vkCmdFillBuffer`, an image clear and a
+    buffer-to-image copy into the imported memory all leave the CPU-visible
+    contents untouched.
+
+  `VkScanoutProducer` therefore tries, in order: export (zero-copy), a
+  display-side buffer imported into Vulkan — kept only if a GPU write is visible
+  through it (self-checked at create time; Vivante pads image height to 16 rows,
+  so the buffer is allocated with the extra rows) — and finally a **CPU copy**:
+  render into host-visible LINEAR memory and memcpy each frame into one of two
+  display-side dumb buffers (`ExternalDmaBufRing`). Here the third tier is taken:
+  `vk_present` and `vk_out_fence` (OUT_FENCE 60/60) display correctly, at
+  **~50 ms/frame at 1080p (~42 ms CPU)** — the only host-visible memory type is
+  coherent (uncached), so the CPU read runs at ~200 MB/s. Prefer GLES/GBM on this
+  SoC; use Vulkan here for correctness, not throughput. `vulkan_scene`,
+  `vulkan_offload_scanout` and `cluster_sim_vulkan` export by hand and still fail;
+  `vulkan_display` enumerates the display.
 
 **Single PRIMARY with a fixed `zpos` slot.** The PRIMARY's `zpos` range is
 `[0, 0]`. A lone layer now lands on it natively whatever `zpos` it asks for
@@ -733,7 +747,8 @@ non-scaling PRIMARY physically cannot host (see above).
 |--------|----------|
 | Works | `driver_caps`, `plane_caps`, `minimal_kms_probe`, `multi_crtc_probe` (`--scene-test`), `stream_probe`, `scene_formats`, `vulkan_display`, `xcursor_smoke`, `atomic_modeset`, `software_present`, `damage_present`, `ring_present`, `idle_present`, `vrr_sweep`, `compressed_scanout`, `layered_demo`, `video_grid`, `overlay_planes`, `scene_warm_start`, `scene_priority`, `test_patterns`, `signage_player`, `hdr_demo`, `cluster_sim`, `thorvg_janitor`, `hotplug_monitor`, `cursor_scene`, `keyboard`, `capture_demo`, `csd_smoke`, `mdi_demo`, `egl_scene`, `gl_present`, `egl_offload_scanout`, `gbm_surface_scanout`, `shadertoy_egl`, `plane_stress`, `allocator_torture`, `tone_mapper_bench` |
 | Works with cameras / video | `camera_record` (C270 + MX Brio → Hantro H.264, incl. both at once), `cluster_sim` UVC rear-view (libyuv; choppy), `video_player` (videotestsrc, `--file`, and the hardware `vpudec`/`v4l2src` → `imxvideoconvert_g2d` pipelines) |
-| Platform limit | `vk_present`, `vk_out_fence`, `vulkan_scene`, `vulkan_offload_scanout`, `cluster_sim_vulkan` (Vulkan export not contiguous); `v4l2_decode`, `v4l2_camera_demo` (no YUV scanout); `mouse_cursor`, `cursor_rotate` (no cursor plane → `Renderer::create` `ENODEV`) |
+| Works (CPU copy, ~20 fps @1080p) | `vk_present`, `vk_out_fence` (`VkScanoutProducer` copy tier) |
+| Platform limit | `vulkan_scene`, `vulkan_offload_scanout`, `cluster_sim_vulkan` (export by hand; Vulkan export not contiguous, imports not aliased); `v4l2_decode`, `v4l2_camera_demo` (no YUV scanout); `mouse_cursor`, `cursor_rotate` (no cursor plane → `Renderer::create` `ENODEV`) |
 | Not applicable | `dual_display`, `video_wall_multi` (one connected output); `stream_demo` (no EGL Streams) |
 | Not built | `camera` (libcamera) |
 
@@ -767,8 +782,9 @@ Guidance for an i.MX8M Plus UI:
   redraws); damage-driven and idle-skip rendering cut that to ~18 % and ~1 %.
 - **Pacing:** 60 Hz is clean (≤0.1 ms jitter); 30 Hz works; 40/48 Hz beat
   against the fixed vblank (~7–8 ms jitter) and VRR does not help.
-- **Video and Vulkan need a bridge:** decode to NV12 and convert to RGB (ISI
-  mem2mem or GPU) before scanout; render Vulkan into display-allocated buffers.
+- **Video and Vulkan need a bridge:** decode to NV12 and convert to RGB (G2D via
+  GStreamer) before scanout; Vulkan scans out only through `VkScanoutProducer`'s
+  CPU copy (~20 fps at 1080p), so render with GLES where throughput matters.
 
 ### Raspberry Pi 5 (vc4 + v3d)
 
