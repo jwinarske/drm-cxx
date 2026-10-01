@@ -3,6 +3,7 @@
 
 #include "gst_appsink_source.hpp"
 
+#include "../core/addfb2.hpp"
 #include "buffer_source.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
@@ -16,7 +17,6 @@
 #include <drm-cxx/dumb/buffer.hpp>
 
 #include <drm_fourcc.h>
-#include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -343,9 +343,12 @@ void forget_drm_state_for_pause(GstAppsinkSource::Impl& impl) noexcept {
                                               std::uint32_t plane_height, int& out_fd,
                                               std::uint64_t& out_offset_in_fd) noexcept {
   const std::size_t plane_size = static_cast<std::size_t>(plane_stride) * plane_height;
+  // All three out-params are mandatory: GStreamer guards each with
+  // g_return_val_if_fail, so a NULL `length` fails every lookup.
   unsigned int mem_idx = 0;
+  unsigned int mem_len = 0;
   std::size_t mem_skip = 0;
-  if (gst_buffer_find_memory(buf, plane_offset, plane_size, &mem_idx, nullptr, &mem_skip) == 0) {
+  if (gst_buffer_find_memory(buf, plane_offset, plane_size, &mem_idx, &mem_len, &mem_skip) == 0) {
     return std::make_error_code(std::errc::protocol_error);
   }
   GstMemory* mem = gst_buffer_peek_memory(buf, mem_idx);
@@ -419,10 +422,9 @@ void forget_drm_state_for_pause(GstAppsinkSource::Impl& impl) noexcept {
   }
 
   std::uint32_t fb_id = 0;
-  if (drmModeAddFB2WithModifiers(impl.drm_fd, impl.format_cache.width, impl.format_cache.height,
-                                 impl.format_cache.drm_fourcc, entry.handles.data(), pitches.data(),
-                                 offsets.data(), modifiers.data(), &fb_id,
-                                 DRM_MODE_FB_MODIFIERS) != 0 ||
+  if (drm::detail::add_fb2(impl.drm_fd, impl.format_cache.width, impl.format_cache.height,
+                           impl.format_cache.drm_fourcc, entry.handles.data(), pitches.data(),
+                           offsets.data(), modifiers.data(), &fb_id) != 0 ||
       fb_id == 0) {
     const auto ec = last_errno_or(std::errc::io_error);
     teardown_cached_fb(impl.drm_fd, entry);

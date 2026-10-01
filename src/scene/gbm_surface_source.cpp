@@ -3,6 +3,7 @@
 
 #include "gbm_surface_source.hpp"
 
+#include "../core/addfb2.hpp"
 #include "buffer_source.hpp"
 
 #include <drm-cxx/core/device.hpp>
@@ -11,7 +12,6 @@
 #include <drm-cxx/sync/fence.hpp>
 
 #include <drm_fourcc.h>
-#include <drm_mode.h>
 #include <gbm.h>
 #include <xf86drmMode.h>
 
@@ -105,13 +105,10 @@ constexpr std::uint32_t k_default_usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDER
   std::array<std::uint32_t, 4> offsets{0U, 0U, 0U, 0U};
   const std::uint64_t modifier = gbm_bo_get_modifier(bo);
   std::array<std::uint64_t, 4> modifiers{modifier, 0U, 0U, 0U};
-  const bool use_modifiers = modifier != DRM_FORMAT_MOD_INVALID;
 
   std::uint32_t fb_id = 0;
-  const int rc =
-      drmModeAddFB2WithModifiers(drm_fd, width, height, drm_format, handles.data(), strides.data(),
-                                 offsets.data(), use_modifiers ? modifiers.data() : nullptr, &fb_id,
-                                 use_modifiers ? DRM_MODE_FB_MODIFIERS : 0U);
+  const int rc = drm::detail::add_fb2(drm_fd, width, height, drm_format, handles.data(),
+                                      strides.data(), offsets.data(), modifiers.data(), &fb_id);
   if (rc != 0 || fb_id == 0) {
     const int err = errno;
     return drm::unexpected<std::error_code>(make_errno(err != 0 ? err : EIO));

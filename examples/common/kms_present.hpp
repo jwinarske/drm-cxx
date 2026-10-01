@@ -9,6 +9,10 @@
 // examples show exactly what reaches the kernel; in production this is what the
 // drm-cxx allocator + AtomicRequest do for you.
 
+#include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/fmt/format_mod.hpp>
+
+#include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -17,6 +21,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace kms {
 
@@ -150,6 +156,27 @@ inline int commit_fb(int fd, const Target& t, std::uint32_t fb_id, std::uint32_t
   drmModeAtomicFree(req);
   if (mode_blob) drmModeDestroyPropertyBlob(fd, mode_blob);
   return r;
+}
+
+// The plane's scanout (fourcc, modifier) table. Planes without IN_FORMATS
+// (i.MX LCDIF, tilcdc, ...) still advertise a legacy fourcc list; the kernel
+// contract there is LINEAR-only, so pair each fourcc with LINEAR rather than
+// treating the missing blob as "no formats".
+inline drm::fmt::FormatTable plane_format_table(int fd, std::uint32_t plane_id) {
+  if (auto tbl = drm::fmt::FormatTable::from_plane(fd, plane_id); tbl) {
+    return std::move(*tbl);
+  }
+  std::vector<std::pair<std::uint32_t, std::uint64_t>> pairs;
+  if (drmModePlane* pl = drmModeGetPlane(fd, plane_id); pl != nullptr) {
+    for (std::uint32_t i = 0; i < pl->count_formats; ++i) {
+      pairs.emplace_back(pl->formats[i], DRM_FORMAT_MOD_LINEAR);
+    }
+    drmModeFreePlane(pl);
+  }
+  std::printf("plane %u: no IN_FORMATS -- assuming LINEAR-only (%zu fourcc(s))\n", plane_id,
+              pairs.size());
+  return drm::fmt::FormatTable::from_pairs(
+      drm::span<const std::pair<std::uint32_t, std::uint64_t>>(pairs.data(), pairs.size()));
 }
 
 }  // namespace kms

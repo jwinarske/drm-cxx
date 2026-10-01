@@ -31,6 +31,7 @@
 
 #include <drm_fourcc.h>
 #include <xf86drm.h>
+#include <xf86drmMode.h>
 
 #include <GLES2/gl2.h>
 #include <fcntl.h>
@@ -43,7 +44,9 @@ namespace {
 // First KMS card that isn't vkms. vkms has no GPU, so a GL producer on it would
 // render through llvmpipe and never yield a real acquire fence — not the target
 // of this test. Any real atomic-KMS card (vc4, amdgpu, i915, …) is a candidate;
-// GlScanoutProducer::create() self-fails where EGL can't come up.
+// GlScanoutProducer::create() self-fails where EGL can't come up. Render-only
+// GPU nodes that expose no CRTC (i.MX galcore, PowerVR pvrsrvkm) are skipped —
+// on those split-GPU boards the display controller is a later cardN.
 [[nodiscard]] std::optional<std::string> find_gpu_kms_node() noexcept {
   for (int idx = 0; idx < 8; ++idx) {
     std::string path = "/dev/dri/card" + std::to_string(idx);
@@ -54,9 +57,16 @@ namespace {
     drmVersionPtr ver = drmGetVersion(fd);
     const bool is_vkms = (ver != nullptr) && (ver->name != nullptr) &&
                          std::string(ver->name, ver->name_len) == "vkms";
-    const bool usable = (ver != nullptr);
+    bool usable = (ver != nullptr);
     if (ver != nullptr) {
       drmFreeVersion(ver);
+    }
+    if (usable) {
+      drmModeRes* res = drmModeGetResources(fd);
+      usable = (res != nullptr) && res->count_crtcs > 0;
+      if (res != nullptr) {
+        drmModeFreeResources(res);
+      }
     }
     ::close(fd);
     if (usable && !is_vkms) {

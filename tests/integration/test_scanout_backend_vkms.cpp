@@ -210,10 +210,25 @@ TEST(ScanoutBackendVkms, SavedCrtcRestoresCrtcOnTeardown) {
     if (conn == nullptr) {
       continue;
     }
-    if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0 && res->count_crtcs > 0) {
-      connector_id = conn->connector_id;
-      crtc_id = res->crtcs[0];
-      mode = conn->modes[0];
+    if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0) {
+      // Pick a CRTC the connector's encoders can drive — not blindly crtcs[0]:
+      // multi-CRTC controllers (i.MX8MP LCDIFv3 ×3) wire HDMI to one CRTC only,
+      // and a legacy SetCrtc on another returns EINVAL.
+      std::uint32_t possible = 0;
+      for (int e = 0; e < conn->count_encoders; ++e) {
+        if (drmModeEncoder* enc = drmModeGetEncoder(fd, conn->encoders[e]); enc != nullptr) {
+          possible |= enc->possible_crtcs;
+          drmModeFreeEncoder(enc);
+        }
+      }
+      for (int c = 0; c < res->count_crtcs && c < 32; ++c) {
+        if ((possible & (1U << static_cast<unsigned>(c))) != 0U) {
+          connector_id = conn->connector_id;
+          crtc_id = res->crtcs[c];
+          mode = conn->modes[0];
+          break;
+        }
+      }
     }
     drmModeFreeConnector(conn);
   }
