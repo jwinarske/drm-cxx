@@ -4,7 +4,8 @@
 #
 # build_imx8mp.sh — cross-build drm-cxx (library + every example + tests +
 # benchmarks) for NXP i.MX8M Plus boards running the NXP i.MX Yocto BSP
-# (quad Cortex-A53, aarch64, Vivante GC7000UL + LCDIFv3, kernel 6.6).
+# (quad Cortex-A53, aarch64, Vivante GC7000UL + LCDIFv3, kernel 6.6). Validated on
+# the PANZER-PLUS Edge AIoT Computer.
 #
 # How: the build runs on the x86_64 host against a sysroot mirrored from the
 # board itself, so the binaries link exactly the BSP's glibc, libstdc++, NXP GBM
@@ -21,7 +22,7 @@
 # compiles against it and runs against the board's own GStreamer. GST_VERSION
 # must match the board (`gst-inspect-1.0 --version`).
 #
-# Pitfalls this script handles (see docs/hardware.md § i.MX8M Plus):
+# Pitfalls this script handles (see docs/hardware.md § PANZER-PLUS Edge AIoT Computer):
 #   - no -static-libgcc: a private unwinder in libdrm-cxx.so aborts every throw;
 #   - pkg-config: drop the sysroot's own -I/usr/include / -L/usr/lib, which
 #     pkgconf no longer treats as system dirs once sysroot-prefixed;
