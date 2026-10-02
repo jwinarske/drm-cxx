@@ -654,9 +654,12 @@ when run from an identical path.
   **60.7 fps at 1080p** (600 frames in 9.9 s, vblank-bound, ~9 % of one core;
   the GL draw is ~5 ms on the GPU) and `vk_out_fence` gets OUT_FENCE on 60/60.
   The CPU-copy tier it replaces ran ~50 ms/frame (~42 ms CPU), since the only
-  host-visible memory type is uncached (~200 MB/s reads). `vulkan_scene`,
-  `vulkan_offload_scanout` and `cluster_sim_vulkan` export by hand and still
-  fail; `vulkan_display` enumerates the display.
+  host-visible memory type is uncached (~200 MB/s reads). The Vulkan examples
+  draw through the same producer (`VkScanoutProducer::render`), so they take the
+  same path: `vulkan_offload_scanout` lands on the plane, `vulkan_scene` runs
+  ~30 fps (two full-screen layers, composited by the GPU) and
+  `cluster_sim_vulkan` ~20 fps (bound by the GPU's 1080p fragment work).
+  `vulkan_display` enumerates the display.
 - **Vivante leaves Vulkan clears in tile status.** A clear
   (`vkCmdClearColorImage` or a render-pass `LOAD_OP_CLEAR`) on an exported image
   stays in fast-clear metadata and is never resolved into memory, even across a
@@ -665,6 +668,13 @@ when run from an identical path.
   copied pixels land. Any transfer read of the image resolves the whole surface,
   so on this vendor (`VK_VENDOR_ID_VSI`) `VkScanoutProducer` appends a 1-pixel
   image-to-buffer copy after each render, before the release barrier.
+- **Vivante lays out "LINEAR" modifier images tiled.** An image created with
+  `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT` and `DRM_FORMAT_MOD_LINEAR` (the
+  driver reports 0x0 back) is tiled in memory, so every consumer that trusts the
+  modifier — GL, the display, the CPU — reads scrambled pixels. Uniform content
+  (clears, solid fills) hides it; any real drawing shows it. A
+  `VK_IMAGE_TILING_LINEAR` image is laid out linearly and renders correctly, so
+  on this vendor `VkScanoutProducer` allocates LINEAR that way.
 - **Vivante GBM modifier surfaces have two buffers.**
   `gbm_surface_create_with_modifiers{,2}` builds a two-buffer surface (the
   plain `gbm_surface_create` gets three), and `LayerScene` keeps two in flight,
@@ -785,8 +795,8 @@ non-scaling PRIMARY physically cannot host (see above).
 |--------|----------|
 | Works | `driver_caps`, `plane_caps`, `minimal_kms_probe`, `multi_crtc_probe` (`--scene-test`), `stream_probe`, `scene_formats`, `vulkan_display`, `xcursor_smoke`, `atomic_modeset`, `software_present`, `damage_present`, `ring_present`, `idle_present`, `vrr_sweep`, `compressed_scanout`, `layered_demo`, `video_grid`, `overlay_planes`, `scene_warm_start`, `scene_priority`, `test_patterns`, `signage_player`, `hdr_demo`, `cluster_sim`, `thorvg_janitor`, `hotplug_monitor`, `cursor_scene`, `keyboard`, `capture_demo`, `csd_smoke`, `mdi_demo`, `egl_scene`, `gl_present`, `egl_offload_scanout`, `gbm_surface_scanout`, `shadertoy_egl`, `plane_stress`, `allocator_torture`, `tone_mapper_bench` |
 | Works with cameras / video | `camera_record` (C270 + MX Brio → Hantro H.264, incl. both at once), `cluster_sim` UVC rear-view (libyuv; choppy), `video_player` (videotestsrc, `--file`, and the hardware `vpudec`/`v4l2src` → `imxvideoconvert_g2d` pipelines) |
-| Works (CPU copy, ~20 fps @1080p) | `vk_present`, `vk_out_fence` (`VkScanoutProducer` copy tier) |
-| Platform limit | `vulkan_scene`, `vulkan_offload_scanout`, `cluster_sim_vulkan` (export by hand; Vulkan export not contiguous, imports not aliased); `v4l2_decode`, `v4l2_camera_demo` (no YUV scanout); `mouse_cursor`, `cursor_rotate` (no cursor plane → `Renderer::create` `ENODEV`) |
+| Works (GPU copy) | `vk_present`, `vk_out_fence` (60 fps), `vulkan_offload_scanout`, `vulkan_scene` (~30 fps, composited), `cluster_sim_vulkan` (~20 fps) — all through `VkScanoutProducer` |
+| Platform limit | `v4l2_decode`, `v4l2_camera_demo` (no YUV scanout); `mouse_cursor`, `cursor_rotate` (no cursor plane → `Renderer::create` `ENODEV`) |
 | Not applicable | `dual_display`, `video_wall_multi` (one connected output); `stream_demo` (no EGL Streams) |
 | Not built | `camera` (libcamera) |
 
