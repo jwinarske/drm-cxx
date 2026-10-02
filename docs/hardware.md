@@ -667,7 +667,13 @@ when run from an identical path.
   cleared reads back as stale memory to the display, GL or the CPU; drawn and
   copied pixels land. Any transfer read of the image resolves the whole surface,
   so on this vendor (`VK_VENDOR_ID_VSI`) `VkScanoutProducer` appends a 1-pixel
-  image-to-buffer copy after each render, before the release barrier.
+  image-to-buffer copy after each render — the app's own `render()` frames
+  included — before the release barrier. Only tiled images have tile status:
+  this was found on a DRM-modifier "LINEAR" image, which Vivante tiles (next
+  item). A `VK_IMAGE_TILING_LINEAR` image's clears land in memory directly
+  (render-pass and `vkCmdClearColorImage` clears both checked without the
+  resolve), so on the i.MX8M Plus path the resolve is now a safeguard for the
+  tiled modifiers rather than a fix.
 - **Vivante lays out "LINEAR" modifier images tiled.** An image created with
   `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT` and `DRM_FORMAT_MOD_LINEAR` (the
   driver reports 0x0 back) is tiled in memory, so every consumer that trusts the
