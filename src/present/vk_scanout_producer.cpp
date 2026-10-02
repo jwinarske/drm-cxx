@@ -234,12 +234,15 @@ struct VkScanoutProducer::Impl {
       std::make_shared<std::array<std::atomic<bool>, 2>>()};
   std::size_t copy_next{0};
 
-  // VeriSilicon/Vivante keeps cleared pixels in tile-status (fast-clear)
-  // metadata and does not resolve them into memory on a release to an
-  // external/foreign queue family: whatever was only cleared (not drawn or
-  // copied) reads back as stale memory to the display, GL or the CPU. Any
+  // VeriSilicon/Vivante keeps cleared pixels of a tiled image in tile-status
+  // (fast-clear) metadata and does not resolve them into memory on a release
+  // to an external/foreign queue family: whatever was only cleared (not drawn
+  // or copied) reads back as stale memory to the display, GL or the CPU. Any
   // transfer read of the image resolves the whole surface, so after each
-  // render a one-pixel copy into kick_buffer forces it out.
+  // render a one-pixel copy into kick_buffer forces it out. A
+  // VK_IMAGE_TILING_LINEAR image (what LINEAR is allocated as here, see
+  // linear_via_linear_tiling) has no tile status and does not need it; the
+  // tiled modifiers do.
   bool resolve_kick{false};
   // VeriSilicon/Vivante also lays out a VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
   // image tiled even when the chosen modifier is DRM_FORMAT_MOD_LINEAR (and
