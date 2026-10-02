@@ -48,6 +48,7 @@
 #include "capture/snapshot.hpp"
 #endif
 #include "common/open_output.hpp"
+#include "common/quit_signal.hpp"
 
 #include <drm-cxx/detail/format.hpp>
 #include <drm-cxx/gbm/device.hpp>
@@ -67,9 +68,9 @@
 #if SHADERTOY_EGL_CAPTURE
 #include <array>  // make_capture_path
 #endif
+#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -96,10 +97,11 @@
 namespace {
 
 // ── Quit on SIGINT/SIGTERM ─────────────────────────────────────
+// Set from the signal-wait thread (see common/quit_signal.hpp).
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_stop = 0;
-extern "C" void on_signal(int /*sig*/) {
-  g_stop = 1;
+std::atomic<bool> g_stop{false};
+void on_signal(int /*sig*/) {
+  g_stop = true;
 }
 
 struct Args {
@@ -245,9 +247,10 @@ struct MouseState {
 }  // namespace
 
 int main(int argc, char* argv[]) try {
+  // Before anything starts a thread or brings EGL up (which may install its
+  // own SIGINT/SIGTERM handlers).
+  drm::examples::route_quit_signals(on_signal);
   const auto args = parse_args(argc, argv);
-  std::signal(SIGINT, on_signal);
-  std::signal(SIGTERM, on_signal);
 
   auto out = drm::examples::open_and_pick_output(argc, argv);
   if (!out) {
@@ -479,7 +482,7 @@ int main(int argc, char* argv[]) try {
         if (ke->pressed) {
           switch (ke->key) {
             case KEY_ESC:
-              g_stop = 1;
+              g_stop = true;
               break;
             case KEY_SPACE:
             case KEY_RIGHT:
@@ -602,7 +605,7 @@ int main(int argc, char* argv[]) try {
   };
 #endif
 
-  while (g_stop == 0) {
+  while (!g_stop) {
     // Drain pending input (non-blocking); commit() below paces to vblank.
     if (input_fd >= 0) {
       pollfd pfd{input_fd, POLLIN, 0};

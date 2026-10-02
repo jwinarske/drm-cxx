@@ -50,11 +50,13 @@ foreach(_i RANGE 0 ${_csv_last} 2)
 endforeach()
 
 add_executable(cluster_sim_vulkan main.cpp ${_csv_spv_headers})
-# The Vulkan loader is dlopen'd (vulkan.hpp dynamic dispatch); before glibc
-# 2.34 the dl* symbols live in libdl.
+# The Vulkan loader is dlopen'd (vulkan.hpp dynamic dispatch) and
+# common/quit_signal.hpp starts a thread; before glibc 2.34 the dl* and
+# pthread_* symbols live in libdl / libpthread.
 target_link_libraries(cluster_sim_vulkan PRIVATE
   drm-cxx::drm-cxx
   blend2d::blend2d
+  Threads::Threads
   ${CMAKE_DL_LIBS})
 target_include_directories(cluster_sim_vulkan PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/..

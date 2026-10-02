@@ -369,8 +369,10 @@ if egl_scene_egl_dep.found() and egl_scene_gles_dep.found()
     # (capture is built on top of blend2d).
     executable('shadertoy_egl',
       'advanced/shadertoy_egl/main.cpp',
+      # threads: common/quit_signal.hpp's signal-wait thread (libpthread is
+      # separate from libc before glibc 2.34).
       dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep,
-                      shadertoy_dep],
+                      shadertoy_dep, dependency('threads')],
       cpp_args : has_blend2d ? ['-DSHADERTOY_EGL_CAPTURE=1'] : [],
     )
   endif
