@@ -289,6 +289,7 @@ if(TARGET PkgConfig::egl_scene_egl AND TARGET PkgConfig::egl_scene_gles)
     add_executable(shadertoy_egl advanced/shadertoy_egl/main.cpp)
     target_link_libraries(shadertoy_egl PRIVATE
       drm-cxx::drm-cxx
+      Threads::Threads
       shadertoy-cxx::shadertoy
       PkgConfig::egl_scene_egl
       PkgConfig::egl_scene_gles)

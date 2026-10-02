@@ -37,6 +37,7 @@
 // `#include` below).
 
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 
 #include <drm-cxx/core/resources.hpp>
 #include <drm-cxx/detail/format.hpp>
@@ -106,7 +107,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -552,8 +552,9 @@ struct TexArrayPushConstants {
 
 // NOLINTNEXTLINE(readability-function-size) — demo main, kept inline for readability.
 int main(int argc, char* argv[]) try {
-  std::signal(SIGINT, on_sigint);
-  std::signal(SIGTERM, on_sigint);
+  // Before anything starts a thread or brings EGL up (the GPU-copy path does,
+  // and some EGL stacks install their own SIGINT/SIGTERM handlers).
+  drm::examples::route_quit_signals(on_sigint);
 
   const Args args = parse_args(argc, argv);
 
