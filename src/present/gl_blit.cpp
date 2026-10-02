@@ -233,6 +233,9 @@ bool GlBlit::draw() {
   // producer rewrote instead of sampling a cached copy.
   gles.egl_image_target_texture_2d(g::k_texture_2d, s.image);
   gles.draw_arrays(g::k_triangle_strip, 0, 4);
+  // The producer re-renders the same buffer next frame; let the draw finish
+  // reading it first.
+  gles.finish();
   return gles.get_error() == g::k_no_error;
 }
 

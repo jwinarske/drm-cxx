@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <unistd.h>
 #include <utility>
@@ -35,10 +36,9 @@ namespace drm::present {
 
 namespace {
 
-// Forwards the scene's acquire/release/format calls to a LayerBufferSource the
-// producer owns. The scene holds this proxy; the producer owns the real
-// GbmSurfaceSource and the EGL state, so the producer (destroyed after the
-// scene it feeds) tears EGL down before the gbm_surface the proxy referenced.
+// Forwards every LayerBufferSource call to a source the producer owns. The scene holds this proxy;
+// the producer owns the real GbmSurfaceSource and the EGL state, so the producer (destroyed after
+// the scene it feeds) tears EGL down before the gbm_surface the proxy referenced.
 class ProxyBufferSource : public scene::LayerBufferSource {
  public:
   explicit ProxyBufferSource(scene::LayerBufferSource* inner) noexcept : inner_(inner) {}
@@ -57,6 +57,30 @@ class ProxyBufferSource : public scene::LayerBufferSource {
       drm::MapAccess access) override {
     return inner_->map(access);
   }
+  // Without this a composited GL layer (one the planes cannot host) has no
+  // pixels the compositor can reach and is dropped.
+  [[nodiscard]] drm::expected<scene::DmaBufDesc, std::error_code> export_dma_buf() override {
+    return inner_->export_dma_buf();
+  }
+  void release_with_fence(scene::AcquiredBuffer acquired,
+                          std::optional<drm::sync::SyncFence> release_fence) noexcept override {
+    inner_->release_with_fence(std::move(acquired), std::move(release_fence));
+  }
+  [[nodiscard]] bool wants_release_fence() const noexcept override {
+    return inner_->wants_release_fence();
+  }
+  [[nodiscard]] bool has_fresh_content() const noexcept override {
+    return inner_->has_fresh_content();
+  }
+  void on_retired() noexcept override { inner_->on_retired(); }
+  drm::expected<void, std::error_code> bind_to_plane(std::uint32_t plane_id) override {
+    return inner_->bind_to_plane(plane_id);
+  }
+  void unbind_from_plane(std::uint32_t plane_id) noexcept override {
+    inner_->unbind_from_plane(plane_id);
+  }
+  // Session pause/resume is NOT forwarded: GbmSurfaceSource would rebuild its
+  // gbm_surface under the producer's live EGL window surface.
 
  private:
   scene::LayerBufferSource* inner_;
