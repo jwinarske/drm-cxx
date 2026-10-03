@@ -121,7 +121,7 @@ if(NOT DRM_CXX_BUILD_CAMERA STREQUAL "OFF")
         "camera: libva / libva-drm not found, MJPEG falls back to CPU libyuv decode")
     endif()
     add_executable(camera ${camera_sources})
-    target_link_libraries(camera PRIVATE drm-cxx::drm-cxx PkgConfig::libcamera drm_cxx_libyuv)
+    target_link_libraries(camera PRIVATE drm-cxx::drm-cxx Threads::Threads PkgConfig::libcamera drm_cxx_libyuv)
     target_include_directories(camera PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     if(TARGET PkgConfig::libva AND TARGET PkgConfig::libva_drm)
       target_link_libraries(camera PRIVATE PkgConfig::libva PkgConfig::libva_drm)
@@ -169,7 +169,7 @@ endif()
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
 add_executable(mouse_cursor basics/mouse_cursor/main.cpp)
-target_link_libraries(mouse_cursor PRIVATE drm-cxx::drm-cxx)
+target_link_libraries(mouse_cursor PRIVATE drm-cxx::drm-cxx Threads::Threads)
 target_include_directories(mouse_cursor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(xcursor_smoke basics/mouse_cursor/xcursor_smoke.cpp)
@@ -178,7 +178,7 @@ target_include_directories(xcursor_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # cursor_rotate — V2 hardware-validation harness for drm::cursor.
 add_executable(cursor_rotate advanced/cursor_rotate/main.cpp)
-target_link_libraries(cursor_rotate PRIVATE drm-cxx::drm-cxx)
+target_link_libraries(cursor_rotate PRIVATE drm-cxx::drm-cxx Threads::Threads)
 target_include_directories(cursor_rotate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # damage_present — FB_DAMAGE_CLIPS validation harness.
@@ -239,7 +239,7 @@ target_include_directories(stream_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # (cluster_sim's passenger display, dual_display, video_wall_multi).
 # `--hotplug` re-runs the probe on each udev event.
 add_executable(multi_crtc_probe advanced/multi_crtc_probe/main.cpp)
-target_link_libraries(multi_crtc_probe PRIVATE drm-cxx::drm-cxx)
+target_link_libraries(multi_crtc_probe PRIVATE drm-cxx::drm-cxx Threads::Threads)
 target_include_directories(multi_crtc_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # stream_demo — end-to-end EGL Streams demo: a stream-source layer
@@ -320,7 +320,7 @@ target_include_directories(vk_out_fence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # Only built when Blend2D is on (same gate as the library module it exercises).
 if(DRM_CXX_HAS_BLEND2D)
   add_executable(capture_demo advanced/capture_demo/main.cpp)
-  target_link_libraries(capture_demo PRIVATE drm-cxx::drm-cxx)
+  target_link_libraries(capture_demo PRIVATE drm-cxx::drm-cxx Threads::Threads)
   target_include_directories(capture_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   if(DRM_CXX_HAS_LIBJPEG)
     target_compile_definitions(capture_demo PRIVATE CAPTURE_DEMO_HAS_JPG=1)

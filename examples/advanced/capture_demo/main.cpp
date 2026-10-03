@@ -44,6 +44,7 @@
 //     via libseat when available, which gives the same access without
 //     root.
 
+#include "../../common/quit_signal.hpp"
 #include "../../common/select_device.hpp"
 #include "../../common/vt_switch.hpp"
 #include "capture/png.hpp"
@@ -60,10 +61,10 @@
 #include <xf86drmMode.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -81,10 +82,10 @@
 namespace {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_quit = 0;
+std::atomic<bool> g_quit{false};
 
 void signal_handler(int /*sig*/) {
-  g_quit = 1;
+  g_quit = true;
 }
 
 struct ActiveCrtc {
@@ -176,6 +177,9 @@ bool parse_uint(const char* s, int max_val, int& out) {
 
 // NOLINTNEXTLINE(bugprone-exception-escape) — a throw here just aborts the demo
 int main(int argc, char* argv[]) {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(signal_handler);
   // ---------------------------------------------------------------------------
   // CLI parse. --out and --crtc strip from argv before handing to select_device.
   // ---------------------------------------------------------------------------
@@ -343,7 +347,7 @@ int main(int argc, char* argv[]) {
       return;
     }
     if (vt_chord.is_quit_key(*ke)) {
-      g_quit = 1;
+      g_quit = true;
       return;
     }
     if (!ke->pressed) {
@@ -381,9 +385,6 @@ int main(int argc, char* argv[]) {
 
   drm::println("Press C or SPACE to capture, R for a state dump, Escape or Q to quit.");
 
-  std::signal(SIGINT, signal_handler);
-  std::signal(SIGTERM, signal_handler);
-
   // ---------------------------------------------------------------------------
   // Main loop. poll the input fd (and seat fd when available) and
   // dispatch on each wake.
@@ -394,7 +395,7 @@ int main(int argc, char* argv[]) {
   pfds[1].fd = seat ? seat->poll_fd() : -1;
   pfds[1].events = POLLIN;
 
-  while (g_quit == 0) {
+  while (!g_quit) {
     if (const int ret = poll(pfds.data(), pfds.size(), 100); ret < 0) {
       if (errno == EINTR) {
         continue;

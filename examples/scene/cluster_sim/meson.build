@@ -34,7 +34,7 @@ cluster_sim_args += has_nvbufsurface \
 
 executable('cluster_sim',
   'main.cpp',
-  dependencies : cluster_sim_deps,
+  dependencies : cluster_sim_deps + [example_threads_dep],
   cpp_args : cluster_sim_args,
   include_directories : include_directories('..'),
 )

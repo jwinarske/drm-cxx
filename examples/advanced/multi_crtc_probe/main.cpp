@@ -23,6 +23,7 @@
 //       property cache).
 
 #include "../../common/multi_crtc_probe.hpp"
+#include "../../common/quit_signal.hpp"
 
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/format.hpp>
@@ -38,8 +39,8 @@
 #include <drm_fourcc.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -48,7 +49,6 @@
 #include <string>
 #include <string_view>
 #include <sys/poll.h>
-#include <sys/types.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -56,15 +56,10 @@
 namespace {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_sigint_received = 0;
+std::atomic<bool> g_sigint_received{false};
 
 void sigint_handler(int /*sig*/) {
-  g_sigint_received = 1;
-}
-
-void install_sigint_handler() {
-  std::signal(SIGINT, sigint_handler);
-  std::signal(SIGTERM, sigint_handler);
+  g_sigint_received = true;
 }
 
 struct Args {
@@ -255,6 +250,9 @@ void run_scene_test(drm::Device& dev,
 }  // namespace
 
 int main(int argc, char* argv[]) try {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(sigint_handler);
   const auto args = parse_args(argc, argv);
 
   auto dev_r = drm::Device::open(args.device_path);
@@ -304,15 +302,17 @@ int main(int argc, char* argv[]) try {
     }
   });
 
-  install_sigint_handler();
   drm::println("");
   drm::println("watching for hotplug events; press ctrl-c or 'q'+enter to exit");
 
-  std::array<pollfd, 2> fds{
+  // fds[2] wakes the poll once a quit signal has been handled (signals are
+  // routed to a thread, so they no longer interrupt it).
+  std::array<pollfd, 3> fds{
       pollfd{.fd = monitor.fd(), .events = POLLIN, .revents = 0},
       pollfd{.fd = STDIN_FILENO, .events = POLLIN, .revents = 0},
+      pollfd{.fd = drm::examples::quit_wake_fd(), .events = POLLIN, .revents = 0},
   };
-  while (g_sigint_received == 0) {
+  while (!g_sigint_received) {
     const int n = ::poll(fds.data(), fds.size(), -1);
     if (n < 0) {
       if (errno == EINTR) {
@@ -328,7 +328,7 @@ int main(int argc, char* argv[]) try {
     }
     if ((fds[1].revents & POLLIN) != 0) {
       char buf[64];
-      const ssize_t n_read = ::read(STDIN_FILENO, buf, sizeof(buf));
+      const auto n_read = ::read(STDIN_FILENO, buf, sizeof(buf));
       if (n_read > 0 && (buf[0] == 'q' || buf[0] == 'Q')) {
         break;
       }

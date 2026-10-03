@@ -19,6 +19,7 @@
 // several overlays.
 
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 #include "../../common/vt_switch.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -36,8 +37,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
-#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -52,10 +53,10 @@
 
 namespace {
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_quit = 0;
+std::atomic<bool> g_quit{false};
 
 void signal_handler(int /*sig*/) {
-  g_quit = 1;
+  g_quit = true;
 }
 
 // Shapes that middle-click cycles through and digit keys 1..9 jump to.
@@ -99,6 +100,9 @@ bool parse_uint(const char* s, const int max, int& out) {
 }  // namespace
 
 int main(int argc, char* argv[]) try {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(signal_handler);
   // ---------------------------------------------------------------------------
   // CLI parse. Pre-strip our flags so select_device only sees the
   // optional device path.
@@ -320,7 +324,7 @@ int main(int argc, char* argv[]) try {
     }
     if (const auto* ke = std::get_if<drm::input::KeyboardEvent>(&event)) {
       if (vt_chord.is_quit_key(*ke)) {
-        g_quit = 1;
+        g_quit = true;
       } else if (ke->pressed && ke->key >= KEY_1 && ke->key <= KEY_9) {
         const auto digit = static_cast<std::size_t>(ke->key - KEY_1);
         load_and_apply(std::min(digit, k_cycle.size() - 1));
@@ -363,9 +367,6 @@ int main(int argc, char* argv[]) try {
   drm::println("Cursor active ({}x{}) — move mouse, middle-click or 1-9 to cycle, Escape to quit",
                mode_w, mode_h);
 
-  std::signal(SIGINT, signal_handler);
-  std::signal(SIGTERM, signal_handler);
-
   // ---------------------------------------------------------------------------
   // Main loop.
   // ---------------------------------------------------------------------------
@@ -375,7 +376,7 @@ int main(int argc, char* argv[]) try {
   pfds[1].fd = seat ? seat->poll_fd() : -1;
   pfds[1].events = POLLIN;
 
-  while (g_quit == 0) {
+  while (!g_quit) {
     // Animated cursors need a shorter poll so tick() can step frames
     // at roughly refresh cadence. Idle (static) cadence stays coarse
     // to minimize wake-ups.

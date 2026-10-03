@@ -41,6 +41,7 @@
 //      cycle still works, and blit_frame does the work on the CPU.
 
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 #include "../../common/vt_switch.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -54,10 +55,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
-#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -74,10 +75,10 @@
 namespace {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_quit = 0;
+std::atomic<bool> g_quit{false};
 
 void signal_handler(int /*sig*/) {
-  g_quit = 1;
+  g_quit = true;
 }
 
 const char* path_name(drm::cursor::PlanePath p) {
@@ -161,6 +162,9 @@ bool parse_uint(const char* s, int max_val, int& out) {
 }  // namespace
 
 int main(int argc, char* argv[]) try {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(signal_handler);
   // ---------------------------------------------------------------------------
   // CLI parse. Strip our own flags before handing argv to select_device.
   // ---------------------------------------------------------------------------
@@ -317,8 +321,6 @@ int main(int argc, char* argv[]) try {
   // a libinput keyboard and quit on Esc/q. The same input source carries
   // Ctrl+Alt+F<n> for VT switching (routed through VtChordTracker).
   // ---------------------------------------------------------------------------
-  std::signal(SIGINT, signal_handler);
-  std::signal(SIGTERM, signal_handler);
 
   drm::input::InputDeviceOpener libinput_opener;
   if (ctx->seat) {
@@ -338,7 +340,7 @@ int main(int argc, char* argv[]) try {
         return;
       }
       if (vt_chord.is_quit_key(*ke)) {
-        g_quit = 1;
+        g_quit = true;
       }
     });
   } else {
@@ -387,15 +389,19 @@ int main(int argc, char* argv[]) try {
   drm::println("[item 4] cycling rotation every {} ms ({} to exit)...", cli_period,
                input_seat ? "Esc/q or Ctrl-C" : "Ctrl-C");
 
-  std::array<pollfd, 2> pfds{};
+  // pfds[2] wakes a paused (indefinite) wait once a quit signal has been
+  // handled (signals are routed to a thread, so they no longer interrupt it).
+  std::array<pollfd, 3> pfds{};
   pfds[0].fd = input_seat ? input_seat->fd() : -1;
   pfds[0].events = POLLIN;
   pfds[1].fd = ctx->seat ? ctx->seat->poll_fd() : -1;
   pfds[1].events = POLLIN;
+  pfds[2].fd = drm::examples::quit_wake_fd();
+  pfds[2].events = POLLIN;
 
   std::size_t idx = 0;
   auto next_change = std::chrono::steady_clock::now();
-  while (g_quit == 0) {
+  while (!g_quit) {
     if (pending_resume_fd != -1) {
       const int new_fd = pending_resume_fd;
       pending_resume_fd = -1;

@@ -27,6 +27,7 @@
 
 #include "../../common/event_loop.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 #include "../../common/session_pump.hpp"
 #include "../../common/vt_switch.hpp"
 
@@ -49,7 +50,6 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <fcntl.h>
@@ -78,11 +78,6 @@ std::atomic<bool> g_quit{false};
 
 extern "C" void on_sigint(int /*sig*/) {
   g_quit.store(true, std::memory_order_relaxed);
-}
-
-void install_signal_handler() {
-  std::signal(SIGINT, on_sigint);
-  std::signal(SIGTERM, on_sigint);
 }
 
 struct Args {
@@ -314,12 +309,14 @@ const char* mode_name(drm::scene::V4l2CameraBufferMode m) noexcept {
 }  // namespace
 
 int main(int argc, char* argv[]) try {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(on_sigint);
   const Args args = parse_args(argc, argv);
   if (args.show_help) {
     print_help();
     return EXIT_SUCCESS;
   }
-  install_signal_handler();
 
   auto output_opt = drm::examples::open_and_pick_output(argc, argv);
   if (!output_opt) {
@@ -516,6 +513,10 @@ int main(int argc, char* argv[]) try {
   });
 
   bool error_exit = false;
+  // Wakes the idle wait below once a quit signal has been handled (signals are
+  // routed to a thread, so they no longer interrupt the poll).
+  (void)loop.add_slot(drm::examples::quit_wake_fd(), {});
+
   while (!quit && !g_quit.load(std::memory_order_relaxed)) {
     // Default: block until a slot fires (camera frame, input event,
     // page-flip event, session change). Busy-spinning at timeout=0

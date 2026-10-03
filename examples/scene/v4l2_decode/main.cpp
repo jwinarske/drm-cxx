@@ -25,6 +25,7 @@
 // holds the last frame.
 
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/span.hpp>
@@ -53,7 +54,6 @@
 #endif
 
 #include <atomic>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -66,9 +66,9 @@
 namespace {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_quit = 0;
+std::atomic<bool> g_quit{false};
 void on_quit(int /*unused*/) {
-  g_quit = 1;
+  g_quit = true;
 }
 
 // Scan /dev/video0..63 for a V4L2 M2M device whose OUTPUT advertises H.264.
@@ -124,6 +124,9 @@ const char* arg_value(int argc, char** argv, const char* flag) {
 }  // namespace
 
 int main(int argc, char** argv) try {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(on_quit);
   // The DRM device is argv[1] (the drm-cxx example convention that
   // open_and_pick_output / select_device follow); the clip and everything else
   // are named flags so they never collide with that positional.
@@ -134,9 +137,6 @@ int main(int argc, char** argv) try {
                  "[--codec /dev/videoN] [--modifier linear|sand] [--size WxH]\n");
     return 2;
   }
-
-  std::signal(SIGINT, on_quit);
-  std::signal(SIGTERM, on_quit);
 
   // 1. DRM output (connected connector + CRTC + preferred mode).
   auto out = drm::examples::open_and_pick_output(argc, argv);
@@ -229,13 +229,13 @@ int main(int argc, char** argv) try {
     std::ifstream file(clip, std::ios::binary);
     if (!file) {
       std::fprintf(stderr, "cannot open %s\n", clip);
-      g_quit = 1;
+      g_quit = true;
       return;
     }
     std::vector<std::uint8_t> chunk;
     bool have_chunk = false;
     unsigned loops = 0;
-    while (g_quit == 0) {
+    while (!g_quit) {
       {
         const std::lock_guard<std::mutex> lock(src_mtx);
         // Feed one coded chunk; hold it across EAGAIN (OUTPUT queue full). At end
@@ -261,7 +261,7 @@ int main(int argc, char** argv) try {
                            "no frames decoded after feeding the clip 5 times -- the V4L2 decoder "
                            "does not support this stream (e.g. an H.264 profile beyond the "
                            "hardware's capability, such as High 4:4:4)\n");
-              g_quit = 1;
+              g_quit = true;
               return;
             }
             continue;
@@ -286,7 +286,7 @@ int main(int argc, char** argv) try {
           } else {
             std::fprintf(stderr, "drive: %s\n", dr.error().message().c_str());
           }
-          g_quit = 1;
+          g_quit = true;
           return;
         }
       }
@@ -308,7 +308,7 @@ int main(int argc, char** argv) try {
   });
 
   std::fprintf(stderr, "playing %s — Ctrl-C to quit\n", clip);
-  while (g_quit == 0) {
+  while (!g_quit) {
     pollfd p{dev.fd(), POLLIN, 0};
     const int pr = ::poll(&p, 1, flip_pending ? 100 : 4);
     if ((p.revents & POLLIN) != 0) {
@@ -336,7 +336,7 @@ int main(int argc, char** argv) try {
     }
   }
 
-  g_quit = 1;
+  g_quit = true;
   pump.join();
   std::fprintf(stderr, "stopping\n");
   return 0;
