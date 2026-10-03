@@ -808,20 +808,35 @@ non-scaling PRIMARY physically cannot host (see above).
 
 #### Present-path profiling (decision guide)
 
-All numbers at **1920×1080**, CPU governor `performance` (1.6 GHz), one A53
-thread. CPU/frame is `user+sys` over 600 frames; **load@60** is the share of one
-core needed for 60 fps (the board has 4).
+All numbers at **1920×1080**, CPU governor `performance` (1.6 GHz), weston
+stopped. CPU/frame is `user+sys` over 600 frames; for the `--seconds`-driven
+examples it is the difference between a 13 s and a 3 s run, which leaves out
+setup (shader builds, texture uploads). **load@60** is the share of one core
+needed for 60 fps (the board has 4). Re-measured on `main` after the GPU-copy and
+GPU-import changes.
 
-| Workload (`software_present` unless noted) | render scope       | CPU/frame | load@60 (1 core) | takeaway |
-|--------------------------------------------|--------------------|-----------|------------------|----------|
-| XRGB8888, full redraw, `--vsync`            | full 1080p         | 6.56 ms   | ~39 %            | baseline; holds 60 fps vsync-locked |
-| XRGB8888, `--no-damage`                     | full 1080p         | 6.54 ms   | ~39 %            | damage hint is a **no-op** (`fb_damage_clips=false`) |
-| RGB565 (`--rgb565`)                         | full 1080p         | 4.73 ms   | ~28 %            | ~28 % cheaper (half the bytes) |
-| `ring_present`                              | buffer-age repaint | 6.58 ms   | ~39 %            | no gain over full redraw at this size |
-| `damage_present`                            | partial (box only) | 2.93 ms   | ~18 %            | **incremental rendering ~2.2× cheaper** |
-| `idle_present` (change every 30th frame)    | skip unchanged     | 0.15 ms   | ~1 %             | **idle-skip is the biggest lever** (96 % of flips avoided) |
-| `plane_stress` (4 composited layers)        | GPU composition    | —         | —                | ~50 ms/frame, upload-bound (see above) |
-| `tone_mapper_bench` HLG→BT.709              | CPU tone map       | 668 ms    | —                | CPU tone mapping is not real-time here |
+| Workload (`software_present` unless noted) | render scope       | CPU/frame | load@60 (1 core) | fps | takeaway |
+|--------------------------------------------|--------------------|-----------|------------------|-----|----------|
+| XRGB8888, full redraw, `--vsync`            | full 1080p         | 6.55 ms   | ~39 %            | 60  | baseline; holds 60 fps vsync-locked |
+| XRGB8888, `--no-damage`                     | full 1080p         | 6.53 ms   | ~39 %            | 60  | damage hint is a **no-op** (`fb_damage_clips=false`) |
+| RGB565 (`--rgb565`)                         | full 1080p         | 4.75 ms   | ~29 %            | 60  | ~27 % cheaper (half the bytes) |
+| `ring_present`                              | buffer-age repaint | 6.57 ms   | ~39 %            | 29¹ | no gain over full redraw at this size |
+| `damage_present`                            | partial (box only) | 2.92 ms   | ~18 %            | 29¹ | **incremental rendering ~2.2× cheaper** |
+| `idle_present` (change every 30th frame)    | skip unchanged     | 0.15 ms   | ~1 %             | 60  | **idle-skip is the biggest CPU lever** (96 % of flips avoided) |
+| `gl_present` (GLES → KMS)                   | Vivante GPU        | 0.85 ms   | ~5 %             | 60  | **render on the GPU: ~8× less CPU** than a CPU full redraw |
+| `vk_present` (Vulkan → GL copy → KMS)       | Vivante GPU        | 2.17 ms   | ~13 %            | 60  | Vulkan holds 60 fps through the GPU copy |
+| `plane_stress` (4 composited 256² layers, `--churn reshade`) | GPU composition | 2.57 ms | ~15 % | 60 | layers sampled in place (was ~50 ms/frame uploading them) |
+| `egl_scene` (GL + dumb, two full-screen layers) | GPU composition | 1.9 ms   | ~12 %            | 30  | GPU-bound: two LINEAR 1080p layers sampled per frame |
+| `vulkan_scene` (Vulkan + dumb, two full-screen layers) | GPU copy + composition | 4.5 ms | ~27 % | 30 | same composition cost plus the copy |
+| `cluster_sim_vulkan`                        | Vulkan render + GPU copy | 13.6 ms | ~81 %²      | 20  | GPU-bound on its 1080p fragment work |
+| `tone_mapper_bench` HLG→BT.709              | CPU tone map       | 679 ms    | —                | —   | CPU tone mapping is not real-time here (PQ→BT.709 Reinhard 498 ms, Hable 689 ms) |
+| `allocator_torture --frames 600`            | allocator          | —         | —                | —   | 4 PASS (format cascade, rapid churn, slow drift, burst-then-calm); 2 SKIP (need ≥2 planes) |
+
+¹ These two commit without `--vsync`; the synchronous commit blocks for about
+half a vblank, so the wall rate sits near 29 fps with CPU to spare.
+² Mostly the example's own loop: it polls `PageFlip::dispatch(0)` without
+blocking while a flip is pending, which shows up as sys time. The GPU work is
+what holds it at 20 fps.
 
 Guidance for UIs on this device:
 
@@ -837,8 +852,9 @@ Guidance for UIs on this device:
 - **Pacing:** 60 Hz is clean (≤0.1 ms jitter); 30 Hz works; 40/48 Hz beat
   against the fixed vblank (~7–8 ms jitter) and VRR does not help.
 - **Video and Vulkan need a bridge:** decode to NV12 and convert to RGB (G2D via
-  GStreamer) before scanout; Vulkan scans out only through `VkScanoutProducer`'s
-  CPU copy (~20 fps at 1080p), so render with GLES where throughput matters.
+  GStreamer) before scanout; Vulkan reaches the display only through
+  `VkScanoutProducer`'s GPU copy (60 fps at 1080p, ~13 % of a core) — GLES
+  straight into a GBM surface is still the cheapest path (~5 %).
 
 ### Raspberry Pi 5 (vc4 + v3d)
 
