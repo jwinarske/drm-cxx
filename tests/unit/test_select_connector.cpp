@@ -123,3 +123,32 @@ TEST(RankPick, CallerProvidedCustomRankWorks) {
   ASSERT_TRUE(idx.has_value());
   EXPECT_EQ(*idx, 1U);
 }
+
+TEST(RankPick, MainRankFallsBackToVirtualConnector) {
+  // vkms / virtio-gpu: the only output is a VIRTUAL connector (vkms also
+  // exposes a writeback connector, which must never be picked).
+  constexpr std::array<std::uint32_t, 2> types = {DRM_MODE_CONNECTOR_WRITEBACK,
+                                                  DRM_MODE_CONNECTOR_VIRTUAL};
+  const auto idx =
+      rank_pick(drm::span<const std::uint32_t>(types), drm::span<const std::uint32_t>(k_main_rank));
+  ASSERT_TRUE(idx.has_value());
+  EXPECT_EQ(*idx, 1U);
+}
+
+TEST(RankPick, MainRankPrefersPhysicalOverVirtualAndUsb) {
+  // A physical output beats a virtual or USB display enumerated before it.
+  constexpr std::array<std::uint32_t, 3> types = {DRM_MODE_CONNECTOR_VIRTUAL,
+                                                  DRM_MODE_CONNECTOR_USB, DRM_MODE_CONNECTOR_VGA};
+  const auto idx =
+      rank_pick(drm::span<const std::uint32_t>(types), drm::span<const std::uint32_t>(k_main_rank));
+  ASSERT_TRUE(idx.has_value());
+  EXPECT_EQ(*idx, 2U);
+}
+
+TEST(RankPick, ExternalRankIgnoresVirtualConnector) {
+  // The strict policies keep their meaning: no cable-out connector, no pick.
+  constexpr std::array<std::uint32_t, 1> types = {DRM_MODE_CONNECTOR_VIRTUAL};
+  const auto idx = rank_pick(drm::span<const std::uint32_t>(types),
+                             drm::span<const std::uint32_t>(k_external_rank));
+  EXPECT_FALSE(idx.has_value());
+}
