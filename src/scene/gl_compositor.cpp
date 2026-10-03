@@ -315,12 +315,18 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
 
   EGLDisplay display =
       egl.get_platform_display_core(EGL_PLATFORM_GBM_KHR, source_->native_device(), nullptr);
-  if ((display == EGL_NO_DISPLAY) || (egl.initialize(display, nullptr, nullptr) != EGL_TRUE)) {
+  if (display == EGL_NO_DISPLAY) {
+    return drm::unexpected<std::error_code>(err(std::errc::io_error));
+  }
+  const bool initialized = egl.initialize(display, nullptr, nullptr) == EGL_TRUE;
+  // Vivante's libEGL owns the device's teardown from eglGetPlatformDisplay on,
+  // initialized or not (see gbm::retain_for_egl).
+  drm::gbm::retain_for_egl(source_->native_device(),
+                           initialized ? egl.query_string(display, EGL_VENDOR) : nullptr);
+  if (!initialized) {
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }
   display_ = display;
-  // Vivante's libEGL now owns this device's teardown (see gbm::retain_for_egl).
-  drm::gbm::retain_for_egl(source_->native_device(), egl.query_string(display, EGL_VENDOR));
   if (egl.bind_api(EGL_OPENGL_ES_API) != EGL_TRUE) {
     teardown_egl();
     return drm::unexpected<std::error_code>(err(std::errc::io_error));

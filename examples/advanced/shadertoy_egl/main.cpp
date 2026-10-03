@@ -306,10 +306,15 @@ int main(int argc, char* argv[]) try {
   }
   EGLDisplay probe_display = get_platform_display(EGL_PLATFORM_GBM_KHR, probe_gbm->raw(), nullptr);
   std::uint64_t modifier = DRM_FORMAT_MOD_INVALID;
-  if (probe_display != EGL_NO_DISPLAY &&
-      eglInitialize(probe_display, nullptr, nullptr) == EGL_TRUE) {
-    // Some EGL stacks (Vivante) take over the gbm_device; see gbm::retain_for_egl.
-    drm::gbm::retain_for_egl(probe_gbm->raw(), eglQueryString(probe_display, EGL_VENDOR));
+  const bool probe_initialized =
+      probe_display != EGL_NO_DISPLAY && eglInitialize(probe_display, nullptr, nullptr) == EGL_TRUE;
+  if (probe_display != EGL_NO_DISPLAY) {
+    // Some EGL stacks (Vivante) take over the gbm_device from here on,
+    // initialized or not; see gbm::retain_for_egl.
+    drm::gbm::retain_for_egl(
+        probe_gbm->raw(), probe_initialized ? eglQueryString(probe_display, EGL_VENDOR) : nullptr);
+  }
+  if (probe_initialized) {
     modifier = pick_modifier(probe_display, scene_mods, DRM_FORMAT_ARGB8888);
     eglTerminate(probe_display);
   }
@@ -330,11 +335,16 @@ int main(int argc, char* argv[]) try {
 
   EGLDisplay display =
       get_platform_display(EGL_PLATFORM_GBM_KHR, src_ptr->native_device(), nullptr);
-  if (display == EGL_NO_DISPLAY || eglInitialize(display, nullptr, nullptr) != EGL_TRUE) {
+  const bool initialized =
+      display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr) == EGL_TRUE;
+  if (display != EGL_NO_DISPLAY) {
+    drm::gbm::retain_for_egl(src_ptr->native_device(),
+                             initialized ? eglQueryString(display, EGL_VENDOR) : nullptr);
+  }
+  if (!initialized) {
     drm::println(stderr, "shadertoy_egl: eglInitialize failed: {}", gl_strerror(eglGetError()));
     return EXIT_FAILURE;
   }
-  drm::gbm::retain_for_egl(src_ptr->native_device(), eglQueryString(display, EGL_VENDOR));
   if (eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE) {
     drm::println(stderr, "shadertoy_egl: eglBindAPI: {}", gl_strerror(eglGetError()));
     eglTerminate(display);
