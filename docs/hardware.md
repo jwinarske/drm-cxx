@@ -828,15 +828,12 @@ GPU-import changes.
 | `plane_stress` (4 composited 256² layers, `--churn reshade`) | GPU composition | 2.57 ms | ~15 % | 60 | layers sampled in place (was ~50 ms/frame uploading them) |
 | `egl_scene` (GL + dumb, two full-screen layers) | GPU composition | 1.9 ms   | ~12 %            | 30  | GPU-bound: two LINEAR 1080p layers sampled per frame |
 | `vulkan_scene` (Vulkan + dumb, two full-screen layers) | GPU copy + composition | 4.5 ms | ~27 % | 30 | same composition cost plus the copy |
-| `cluster_sim_vulkan`                        | Vulkan render + GPU copy | 13.6 ms | ~81 %²      | 20  | GPU-bound on its 1080p fragment work |
+| `cluster_sim_vulkan`                        | Vulkan render + GPU copy | 1.55 ms | ~9 %        | 20  | GPU-bound on its 1080p fragment work |
 | `tone_mapper_bench` HLG→BT.709              | CPU tone map       | 679 ms    | —                | —   | CPU tone mapping is not real-time here (PQ→BT.709 Reinhard 498 ms, Hable 689 ms) |
 | `allocator_torture --frames 600`            | allocator          | —         | —                | —   | 4 PASS (format cascade, rapid churn, slow drift, burst-then-calm); 2 SKIP (need ≥2 planes) |
 
 ¹ These two commit without `--vsync`; the synchronous commit blocks for about
 half a vblank, so the wall rate sits near 29 fps with CPU to spare.
-² Mostly the example's own loop: it polls `PageFlip::dispatch(0)` without
-blocking while a flip is pending, which shows up as sys time. The GPU work is
-what holds it at 20 fps.
 
 Guidance for UIs on this device:
 
