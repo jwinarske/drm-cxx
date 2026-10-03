@@ -20,6 +20,7 @@
 
 #include "../../common/format_probe.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 #include "../../common/vt_switch.hpp"
 #include "core/device.hpp"
 #include "core/resources.hpp"
@@ -42,8 +43,8 @@
 #include <drm_fourcc.h>
 #include <xf86drmMode.h>
 
+#include <atomic>
 #include <cerrno>
-#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -58,10 +59,10 @@
 namespace {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_quit = 0;
+std::atomic<bool> g_quit{false};
 
 void signal_handler(int /*sig*/) {
-  g_quit = 1;
+  g_quit = true;
 }
 
 // Pick the first connected connector with at least one mode and a
@@ -188,6 +189,9 @@ void print_active(const ActiveConfig& cfg) {
 // acceptable failure mode for a sample program (not a library API).
 // NOLINTNEXTLINE(bugprone-exception-escape)
 int main(const int argc, char* argv[]) {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(signal_handler);
   // Connector-to-CRTC routing here uses `find_active_config` (above),
   // which walks `conn->encoders` + `possible_crtcs` rather than just
   // `conn->encoder_id`. That's the right shape for hotplug-time
@@ -282,9 +286,6 @@ int main(const int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  std::signal(SIGINT, signal_handler);
-  std::signal(SIGTERM, signal_handler);
-
   // libinput keyboard: Esc/q quits and Ctrl+Alt+F<n> switches VT. The
   // signal handlers above are only effective when stdin is still a
   // line-discipline TTY — once libseat puts the seat into KD_GRAPHICS
@@ -308,7 +309,7 @@ int main(const int argc, char* argv[]) {
         return;
       }
       if (vt_chord.is_quit_key(*ke)) {
-        g_quit = 1;
+        g_quit = true;
       }
     });
     drm::println("Monitoring hotplug events  (Esc/q or Ctrl-C to quit)");
@@ -409,20 +410,24 @@ int main(const int argc, char* argv[]) {
     on_hotplug();
   });
 
-  pollfd pfds[3]{};
+  // pfds[3] wakes a paused (indefinite) wait once a quit signal has been
+  // handled (signals are routed to a thread, so they no longer interrupt it).
+  pollfd pfds[4]{};
   pfds[0].fd = monitor.fd();
   pfds[0].events = POLLIN;
   pfds[1].fd = seat ? seat->poll_fd() : -1;
   pfds[1].events = POLLIN;
   pfds[2].fd = input_seat ? input_seat->fd() : -1;
   pfds[2].events = POLLIN;
+  pfds[3].fd = drm::examples::quit_wake_fd();
+  pfds[3].events = POLLIN;
 
   std::uint32_t hue_step = 1;
-  while (g_quit == 0) {
+  while (!g_quit) {
     // Block while paused so the badge timer doesn't spin a free-running
     // loop — wake on monitor / seat / input fds only.
     const int timeout_ms = session_paused ? -1 : 1000;
-    if (const int ret = poll(pfds, 3, timeout_ms); ret < 0) {
+    if (const int ret = poll(pfds, 4, timeout_ms); ret < 0) {
       if (errno == EINTR) {
         continue;
       }

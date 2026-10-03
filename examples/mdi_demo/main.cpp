@@ -35,6 +35,7 @@
 
 #include "../common/cursor_size.hpp"
 #include "../common/open_output.hpp"
+#include "../common/quit_signal.hpp"
 #include "../common/vt_switch.hpp"
 #include "core/device.hpp"
 #include "csd/overlay_reservation.hpp"
@@ -71,9 +72,9 @@
 #include <xf86drmMode.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -94,10 +95,10 @@
 namespace {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-volatile std::sig_atomic_t g_quit = 0;
+std::atomic<bool> g_quit{false};
 
 void signal_handler(int /*sig*/) {
-  g_quit = 1;
+  g_quit = true;
 }
 
 enum class PresenterMode : std::uint8_t { Auto, Plane, Composite, Fb };
@@ -418,8 +419,6 @@ int run_fb(const Args& args, int argc, char* argv[]) {
     }
   });
 
-  std::signal(SIGINT, signal_handler);
-  std::signal(SIGTERM, signal_handler);
   drm::println("mdi_demo: ready (fb). Drag title bars; Ctrl+N new; Ctrl+W close; Esc quits.");
 
   // The fb presenter ignores the AtomicRequest (fbdev has no atomic commit),
@@ -429,7 +428,7 @@ int run_fb(const Args& args, int argc, char* argv[]) {
   pfd.fd = input_seat.fd();
   pfd.events = POLLIN;
   auto last_tick = std::chrono::steady_clock::now();
-  while (g_quit == 0 && !shell.quit_requested()) {
+  while (!g_quit && !shell.quit_requested()) {
     if (const int ret = poll(&pfd, 1, 16); ret < 0) {
       if (errno == EINTR) {
         continue;
@@ -473,6 +472,9 @@ int run_fb(const Args& args, int argc, char* argv[]) {
 
 // NOLINTNEXTLINE(bugprone-exception-escape)
 int main(int argc, char* argv[]) {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(signal_handler);
   const Args args = parse_args(argc, argv);
 
   if (args.presenter == PresenterMode::Fb) {
@@ -863,9 +865,6 @@ int main(int argc, char* argv[]) {
     });
   }
 
-  std::signal(SIGINT, signal_handler);
-  std::signal(SIGTERM, signal_handler);
-
   drm::println(
       "mdi_demo: ready. Drag title bars to move; click close to remove; "
       "Ctrl+Tab cycles focus; Esc to quit.");
@@ -878,7 +877,7 @@ int main(int argc, char* argv[]) {
   pfds[1].events = POLLIN;
 
   auto last_tick = std::chrono::steady_clock::now();
-  while (g_quit == 0 && !shell.quit_requested()) {
+  while (!g_quit && !shell.quit_requested()) {
     // Wake roughly every ~16 ms even when idle: lets us spot quit
     // signals and snapshot requests promptly without spinning, and
     // gives the animator a steady tick cadence.

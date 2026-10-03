@@ -5,6 +5,6 @@
 
 executable('v4l2_camera_demo',
   'main.cpp',
-  dependencies : [drm_cxx_dep],
+  dependencies : [drm_cxx_dep, example_threads_dep],
   include_directories : include_directories('..'),
 )

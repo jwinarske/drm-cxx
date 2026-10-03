@@ -16,6 +16,7 @@ endif()
 add_executable(cluster_sim main.cpp)
 target_link_libraries(cluster_sim PRIVATE
   drm-cxx::drm-cxx
+  Threads::Threads
   blend2d::blend2d)
 target_include_directories(cluster_sim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 

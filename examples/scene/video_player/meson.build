@@ -10,6 +10,6 @@ endif
 
 executable('video_player',
   'main.cpp',
-  dependencies : [drm_cxx_dep, gst_dep, gst_app_dep],
+  dependencies : [drm_cxx_dep, gst_dep, gst_app_dep, example_threads_dep],
   include_directories : include_directories('..'),
 )

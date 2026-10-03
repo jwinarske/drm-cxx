@@ -30,6 +30,7 @@
 
 #include "../../common/format_probe.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 #include "../../common/session_pump.hpp"
 #include "../../common/vt_switch.hpp"
 #include "convert.hpp"
@@ -77,7 +78,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -2443,9 +2443,6 @@ int run_streaming(drm::Device& dev, std::uint32_t crtc_id, std::uint32_t connect
     page_pending.store(false, std::memory_order_relaxed);
   };
 
-  std::signal(SIGINT, on_sigint);
-  std::signal(SIGTERM, on_sigint);
-
   std::vector<std::unique_ptr<CameraSlot>> slots;
 
   // Count distinct OVERLAY planes on the CRTC. Used as the VAAPI plane
@@ -2840,6 +2837,9 @@ int run_show(int argc, char* argv[]) {
 // acceptable failure mode for a sample program (not a library API).
 // NOLINTNEXTLINE(bugprone-exception-escape)
 int main(int argc, char* argv[]) {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(on_sigint);
   // Pull `--probe` / `--show` off argv so the device-path positional
   // arg lands at argv[1] for select_device(). The two modes are
   // mutually exclusive; specifying both is a usage error until there

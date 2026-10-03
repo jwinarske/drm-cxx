@@ -41,6 +41,7 @@
 
 #include "../../common/event_loop.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 #include "../../common/session_pump.hpp"
 #include "../../common/vt_switch.hpp"
 
@@ -58,7 +59,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <gst/gst.h>  // gst_init only
@@ -85,11 +85,6 @@ std::atomic<bool> g_quit{false};
 
 extern "C" void on_sigint(int /*sig*/) {
   g_quit.store(true, std::memory_order_relaxed);
-}
-
-void install_signal_handler() {
-  std::signal(SIGINT, on_sigint);
-  std::signal(SIGTERM, on_sigint);
 }
 
 struct Args {
@@ -142,13 +137,15 @@ std::string build_pipeline_string(const Args& args, std::uint32_t width, std::ui
 }  // namespace
 
 int main(int argc, char* argv[]) try {
+  // First, before anything starts a thread or brings EGL up (which may install
+  // its own SIGINT/SIGTERM handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(on_sigint);
   const Args args = parse_args(argc, argv);
   if (args.show_help) {
     print_help();
     return EXIT_SUCCESS;
   }
 
-  install_signal_handler();
   gst_init(&argc, &argv);
 
   auto output_opt = drm::examples::open_and_pick_output(argc, argv);
@@ -372,6 +369,10 @@ int main(int argc, char* argv[]) try {
   // failure). Stays false for the clean exits (user quit, EOS, signal),
   // so the process returns the right code to systemd / shell scripts.
   bool error_exit = false;
+  // Wakes the idle wait below once a quit signal has been handled (signals are
+  // routed to a thread, so they no longer interrupt the poll).
+  (void)loop.add_slot(drm::examples::quit_wake_fd(), {});
+
   while (!quit && !g_quit.load(std::memory_order_relaxed)) {
     // Drive bus first so EOS / errors surface before the next commit
     // wastes a vblank. Skipped while paused — the pipeline is in

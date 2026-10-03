@@ -11,6 +11,10 @@
 # Common helpers (open_output, format_probe, vt_switch, select_*) live under
 # examples/common/ and are pulled in by sources via "../../common/foo.hpp".
 
+# common/quit_signal.hpp runs a signal-wait thread; before glibc 2.34
+# pthread_* lives in libpthread, so examples using it link this.
+example_threads_dep = dependency('threads')
+
 #
 # basics/
 #
@@ -22,14 +26,14 @@ executable('atomic_modeset',
 
 executable('hotplug_monitor',
   'basics/hotplug_monitor/main.cpp',
-  dependencies : [drm_cxx_dep],
+  dependencies : [drm_cxx_dep, example_threads_dep],
 )
 
 # mouse_cursor + xcursor_smoke both exercise the library's drm::cursor
 # module — no direct libxcursor dep needed here, the library owns that.
 executable('mouse_cursor',
   'basics/mouse_cursor/main.cpp',
-  dependencies : [drm_cxx_dep],
+  dependencies : [drm_cxx_dep, example_threads_dep],
 )
 
 executable('xcursor_smoke',
@@ -152,7 +156,7 @@ if not camera_feature.disabled()
     endif
     executable('camera',
       camera_sources,
-      dependencies : camera_deps,
+      dependencies : camera_deps + [example_threads_dep],
       cpp_args : camera_args,
     )
   else
@@ -243,7 +247,7 @@ executable('scene_formats',
 # rotation. Pure library consumer — no direct libxcursor dep.
 executable('cursor_rotate',
   'advanced/cursor_rotate/main.cpp',
-  dependencies : [drm_cxx_dep],
+  dependencies : [drm_cxx_dep, example_threads_dep],
 )
 
 # damage_present — FB_DAMAGE_CLIPS validation: a moving box reports only its
@@ -314,7 +318,7 @@ executable('stream_probe',
 # tracks topology changes.
 executable('multi_crtc_probe',
   'advanced/multi_crtc_probe/main.cpp',
-  dependencies : [drm_cxx_dep],
+  dependencies : [drm_cxx_dep, example_threads_dep],
 )
 
 # stream_demo — end-to-end EGL Streams demo. Gated on the streams
@@ -372,7 +376,7 @@ if egl_scene_egl_dep.found() and egl_scene_gles_dep.found()
       # threads: common/quit_signal.hpp's signal-wait thread (libpthread is
       # separate from libc before glibc 2.34).
       dependencies : [drm_cxx_dep, egl_scene_egl_dep, egl_scene_gles_dep,
-                      shadertoy_dep, dependency('threads')],
+                      shadertoy_dep, example_threads_dep],
       cpp_args : has_blend2d ? ['-DSHADERTOY_EGL_CAPTURE=1'] : [],
     )
   endif
@@ -401,7 +405,7 @@ if has_blend2d
   executable('capture_demo',
     'advanced/capture_demo/main.cpp',
     cpp_args : has_libjpeg ? ['-DCAPTURE_DEMO_HAS_JPG=1'] : ['-DCAPTURE_DEMO_HAS_JPG=0'],
-    dependencies : [drm_cxx_dep],
+    dependencies : [drm_cxx_dep, example_threads_dep],
   )
 
   # csd_smoke — throwaway hardware-validation harness for drm::csd.

@@ -95,7 +95,7 @@ executable('cluster_sim_vulkan',
   dial_fx_frag_spv,
   # threads: common/quit_signal.hpp's signal-wait thread (libpthread is
   # separate from libc before glibc 2.34).
-  dependencies : [drm_cxx_dep, vk_headers_dep, blend2d_dep, dependency('threads')],
+  dependencies : [drm_cxx_dep, vk_headers_dep, blend2d_dep, example_threads_dep],
   include_directories : [include_directories('..'),
                          include_directories('.')],
 )

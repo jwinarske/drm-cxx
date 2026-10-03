@@ -59,6 +59,7 @@
 
 #include "../../common/event_loop.hpp"
 #include "../../common/open_output.hpp"
+#include "../../common/quit_signal.hpp"
 #include "../../common/session_pump.hpp"
 #include "../../common/uvc_capture.hpp"
 #include "../../common/vt_switch.hpp"
@@ -121,7 +122,6 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1314,9 +1314,10 @@ int main(int argc, char** argv) try {
   // Graceful exit on SIGINT/SIGTERM so the main loop can drain its
   // last commit + run the jitter-summary block at the bottom. Without
   // this, `timeout`'s SIGTERM kills the process between repaint and
-  // shutdown and any end-of-run telemetry is lost.
-  std::signal(SIGINT, on_sigint);
-  std::signal(SIGTERM, on_sigint);
+  // shutdown and any end-of-run telemetry is lost. Routed first, before
+  // anything starts a thread or brings EGL up (which may install its own
+  // handlers); see common/quit_signal.hpp.
+  drm::examples::route_quit_signals(on_sigint);
 
   // Parse --mode WxH[@Hz] and STRIP the flag + its value from argv so
   // select_device (which uses argv[1] verbatim) sees the device path
@@ -2006,6 +2007,10 @@ int main(int argc, char** argv) try {
 #if CLUSTER_SIM_HAS_LIBYUV
   int const uvc_slot = loop.add_slot(-1, [&] { drive_rearview_uvc(rear_view); });
 #endif
+
+  // Wakes the idle wait below once a quit signal has been handled (signals are
+  // routed to a thread, so they no longer interrupt the poll).
+  (void)loop.add_slot(drm::examples::quit_wake_fd(), {});
 
   while (!quit && !g_quit.load(std::memory_order_relaxed)) {
 #if CLUSTER_SIM_HAS_LIBYUV

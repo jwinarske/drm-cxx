@@ -12,6 +12,7 @@ endif()
 add_executable(video_player main.cpp)
 target_link_libraries(video_player PRIVATE
   drm-cxx::drm-cxx
+  Threads::Threads
   PkgConfig::gstreamer
   PkgConfig::gstreamer_app)
 target_include_directories(video_player PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
