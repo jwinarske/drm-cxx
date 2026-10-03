@@ -1793,12 +1793,14 @@ int main(int argc, char* argv[]) try {
   double sum_dt_us = 0.0;
   std::uint64_t jitter_samples = 0;
 
+  constexpr int k_flip_wait_ms = 100;
   const BgPushConstants bg_pc{static_cast<float>(fb_w), static_cast<float>(fb_h)};
 
   while (clk::now() < deadline && !g_quit.load(std::memory_order_relaxed)) {
-    // Wait for previous flip.
+    // Wait for the previous flip, asleep in the dispatcher's epoll rather than
+    // polling it. The timeout bounds how long a quit request goes unnoticed.
     while (flip_pending && !g_quit.load(std::memory_order_relaxed)) {
-      (void)page_flip.dispatch(0);
+      (void)page_flip.dispatch(k_flip_wait_ms);
     }
     if (g_quit.load(std::memory_order_relaxed)) {
       break;
@@ -2044,7 +2046,7 @@ int main(int argc, char* argv[]) try {
 
   // Wait for any pending flip before tearing down.
   while (flip_pending) {
-    (void)page_flip.dispatch(0);
+    (void)page_flip.dispatch(k_flip_wait_ms);
   }
 
   scene.reset();
