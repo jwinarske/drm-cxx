@@ -136,11 +136,17 @@ std::vector<std::uint64_t> GlScanoutProducer::exportable_modifiers(std::uint32_t
     return {};
   }
   EGLDisplay display = egl.get_platform_display_core(EGL_PLATFORM_GBM_KHR, (*gbm).raw(), nullptr);
-  if ((display == EGL_NO_DISPLAY) || (egl.initialize(display, nullptr, nullptr) != EGL_TRUE)) {
+  if (display == EGL_NO_DISPLAY) {
     return {};
   }
-  // Vivante's libEGL now owns this device's teardown (see gbm::retain_for_egl).
-  drm::gbm::retain_for_egl((*gbm).raw(), egl.query_string(display, EGL_VENDOR));
+  const bool initialized = egl.initialize(display, nullptr, nullptr) == EGL_TRUE;
+  // Vivante's libEGL owns the device's teardown from eglGetPlatformDisplay on,
+  // initialized or not (see gbm::retain_for_egl).
+  drm::gbm::retain_for_egl((*gbm).raw(),
+                           initialized ? egl.query_string(display, EGL_VENDOR) : nullptr);
+  if (!initialized) {
+    return {};
+  }
 
   std::vector<std::uint64_t> out;
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -188,12 +194,20 @@ GlScanoutProducer::create_buffer(std::uint32_t width, std::uint32_t height, std:
 
   EGLDisplay display =
       egl.get_platform_display_core(EGL_PLATFORM_GBM_KHR, source_->native_device(), nullptr);
-  if ((display == EGL_NO_DISPLAY) || (egl.initialize(display, nullptr, nullptr) != EGL_TRUE)) {
+  if (display == EGL_NO_DISPLAY) {
+    source_.reset();
+    return drm::unexpected<std::error_code>(err(std::errc::io_error));
+  }
+  const bool initialized = egl.initialize(display, nullptr, nullptr) == EGL_TRUE;
+  // Vivante's libEGL owns the device's teardown from eglGetPlatformDisplay on,
+  // initialized or not (see gbm::retain_for_egl).
+  drm::gbm::retain_for_egl(source_->native_device(),
+                           initialized ? egl.query_string(display, EGL_VENDOR) : nullptr);
+  if (!initialized) {
     source_.reset();
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }
   display_ = display;
-  drm::gbm::retain_for_egl(source_->native_device(), egl.query_string(display, EGL_VENDOR));
   if (egl.bind_api(EGL_OPENGL_ES_API) != EGL_TRUE) {
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }

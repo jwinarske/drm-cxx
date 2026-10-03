@@ -162,12 +162,18 @@ int main(int argc, char** argv) {
   }
 
   EGLDisplay dpy = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm, nullptr);
-  if (dpy == EGL_NO_DISPLAY || (eglInitialize(dpy, nullptr, nullptr) == 0U)) {
+  if (dpy == EGL_NO_DISPLAY) {
+    std::fprintf(stderr, "eglGetPlatformDisplay failed\n");
+    return 1;
+  }
+  const bool initialized = eglInitialize(dpy, nullptr, nullptr) != 0U;
+  // Some EGL stacks (Vivante) take over the gbm_device from here on, initialized
+  // or not; see gbm::retain_for_egl.
+  drm::gbm::retain_for_egl(gbm, initialized ? eglQueryString(dpy, EGL_VENDOR) : nullptr);
+  if (!initialized) {
     std::fprintf(stderr, "eglInitialize failed\n");
     return 1;
   }
-  // Some EGL stacks (Vivante) take over the gbm_device; see gbm::retain_for_egl.
-  drm::gbm::retain_for_egl(gbm, eglQueryString(dpy, EGL_VENDOR));
   eglBindAPI(EGL_OPENGL_ES_API);
   EGLConfig cfg = choose_config(dpy, fourcc);
 

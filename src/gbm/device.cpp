@@ -31,7 +31,15 @@ Retained& retained() {
 }  // namespace
 
 bool retain_for_egl(struct gbm_device* dev, const char* egl_vendor) noexcept {
-  if (dev == nullptr || egl_vendor == nullptr || std::strstr(egl_vendor, "Vivante") == nullptr) {
+  if (dev == nullptr) {
+    return false;
+  }
+  // Vivante's libEGL pairs with its own gbm backend ("viv"), which identifies
+  // the stack even when eglInitialize failed and there is no vendor string.
+  const char* const backend = gbm_device_get_backend_name(dev);
+  const bool vivante = (egl_vendor != nullptr && std::strstr(egl_vendor, "Vivante") != nullptr) ||
+                       (backend != nullptr && std::strcmp(backend, "viv") == 0);
+  if (!vivante) {
     return false;
   }
   try {
