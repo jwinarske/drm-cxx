@@ -45,7 +45,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `imx-drm`    | i.MX8M Mini LCDIF (Nitrogen8M Mini, NXP BSP) | 6.1.22 (Yocto) | `drm::fmt`: **no-`IN_FORMATS` fallback** — `FormatTable::from_plane` returns `ENOENT`, caller assumes LINEAR-only (legacy fourccs, no modifier surface). |
 | `imx-drm`    | i.MX93 LCDIFv3 (FRDM-IMX93, NXP BSP) | 6.18.2 (Yocto) | Software/dumb-buffer scanout @ 720p60 (`software_present`, `damage_present`, `ring_present`, `idle_present`, `atomic_modeset`), single-plane CPU composition (`minimal_kms_probe`, `scene_*`, `layered_demo`), present-path profiling matrix. No GPU. |
 | `imx-drm` + `galcore` | LCDIFv3 ×3 + Vivante GC7000UL (PANZER-PLUS Edge AIoT Computer, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS at 60 fps via `VkScanoutProducer`'s GPU-blit tier (no zero-copy path on this driver); VPU output via G2D GStreamer (see quirks). |
-| `vc4` + `v3d` | VideoCore VII (Raspberry Pi 5, 8 GB) | 6.18.33-rpt (trixie) | Full example + test matrix on HDMI 1280×1440: every present/scene/allocator/cursor/Blend2D-CSD example, **GL and Vulkan scanout at 60 fps** (`egl_scene`, `vulkan_scene`, `vk_present`, `vk_out_fence`, offload demos), multi-plane native placement (`scene_priority` 8/8 assigned). 100/100 test binaries against `card0`. |
+| `vc4` + `v3d` | VideoCore VII (Raspberry Pi 5, 8 GB) | 6.18.33-rpt (trixie) | Full example + test matrix on HDMI 1280×1440: every present/scene/allocator/cursor/Blend2D-CSD example, **GL and Vulkan scanout at 60 fps** (`egl_scene`, `vulkan_scene`, `vk_present`, `vk_out_fence`, offload demos), multi-plane native placement (`scene_priority` 8/8 assigned), `allocator_torture` 6/6. 101/101 test binaries against `card0`. |
 | `msm_drm` (downstream SDE) | SA8155P (Adreno 640) | 5.4 vendor | KMS on a shared-display node: present spine, **GL and Vulkan scanout at 60 fps**, Vulkan OUT_FENCE, native multi-plane placement with **multirect virtual-plane pairing**, GPU composition, Blend2D text. 83/84 test binaries. See quirks for the controller's plane rules. |
 
 What's **not** validated:
@@ -899,8 +899,9 @@ non-root user in `video`/`render`/`input` is DRM master as the first opener.
   and signaled an OUT_FENCE on 60/60 frames; Vulkan- and GL-rendered LINEAR buffers
   scan out (`vulkan_offload_scanout`, `egl_offload_scanout`). vc4 has enough planes
   that multi-layer scenes place natively (`scene_priority` 8/8, `scene_formats`
-  4/4, `minimal_kms_probe` 3 assigned).
-- **Tests:** 100/100 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card0`.
+  4/4, `minimal_kms_probe` 3 assigned); `allocator_torture` 6/6 (N+1: 15 native
+  + 3 composited).
+- **Tests:** 101/101 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card0`.
 - **Not applicable here:** `dual_display`/`video_wall_multi` (one connected
   output on `card0`), `stream_demo` (no EGL Streams), `v4l2_decode` (the Pi 5's
   hardware decoder is HEVC-only — no H.264), `v4l2_camera_demo`/`camera_record`
