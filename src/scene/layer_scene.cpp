@@ -1809,6 +1809,13 @@ class LayerScene::Impl {
     out.insert(out.end(), primaries.begin(), primaries.end());
   }
 
+  [[nodiscard]] bool is_multirect_virtual(std::uint32_t plane_id) const {
+    const auto all = registry_.all();
+    return std::any_of(all.begin(), all.end(), [plane_id](const auto& p) {
+      return p.id == plane_id && p.multirect_parent.has_value();
+    });
+  }
+
   // Arm the canvas on the first candidate the kernel accepts. A candidate is
   // TESTed once — the whole frame request with the canvas armed on it — and
   // the verdict cached per plane until the next resume/rebind, so a settled
@@ -3747,7 +3754,10 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // path and arm_stream_layer_planes respectively.
   scratch_reserved_planes_.clear();
   scratch_reserved_planes_.reserve(1 + acquisitions.size() + external_reserved_planes_.size());
-  if (last_canvas_plane_id_.has_value()) {
+  // Not a multirect virtual plane: it is only valid while its parent is armed,
+  // and the allocator may give the parent away, leaving the reserved canvas
+  // orphaned in every TEST. Unreserved, the canvas is re-picked each frame.
+  if (last_canvas_plane_id_.has_value() && !is_multirect_virtual(*last_canvas_plane_id_)) {
     scratch_reserved_planes_.push_back(*last_canvas_plane_id_);
   }
   for (const auto& acq : acquisitions) {
