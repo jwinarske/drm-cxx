@@ -48,7 +48,7 @@ Outputs land in the repo at:
 ### Deploy + run on the Deck
 
 ```bash
-scp deck-build/src/libdrm-cxx.so deck-build/vrr_sweep deck@<deck-host>:~/cs/
+scp deck-build/src/libdrm-cxx.so.3 deck-build/vrr_sweep deck@<deck-host>:~/cs/
 ssh deck@<deck-host> 'LD_LIBRARY_PATH=~/cs ~/cs/vrr_sweep /dev/dri/card0'
 ```
 

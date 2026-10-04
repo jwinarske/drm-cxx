@@ -179,7 +179,8 @@ if [ -z "${IN_VF2_CONTAINER:-}" ]; then
     DEST="$MP/$DESTREL"
     sudo install -d "$DEST"
     # Shared libs (preserve SONAME symlinks): drm-cxx + the tomlplusplus subproject.
-    sudo cp -a "$BUILD_DIR/src/libdrm-cxx.so" "$DEST/"
+    sudo cp -a "$BUILD_DIR"/src/libdrm-cxx.so "$BUILD_DIR"/src/libdrm-cxx.so.[0-9] \
+      "$BUILD_DIR"/src/libdrm-cxx.so.[0-9].[0-9].[0-9] "$DEST/"
     sudo cp -a "$BUILD_DIR"/subprojects/tomlplusplus/src/libtomlplusplus.so.* "$DEST/" 2>/dev/null || true
     # Trixie runtime libs the build step stashed (Ubuntu 24.04 lacks these SONAMEs).
     sudo cp -a "$BUILD_DIR"/libfmt.so.10 "$BUILD_DIR"/libdisplay-info.so.2 \
