@@ -173,6 +173,42 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   };
   const ResetReserved reset_reserved{this};
 
+  // A "new" layer is one in the scene this frame that wasn't placed by
+  // the previous frame — i.e., not represented as a value in
+  // previous_allocation_. apply_previous_allocation is structurally
+  // unable to place such a layer: it iterates previous_allocation_ to
+  // emit property writes, then dumps everything else through
+  // needs_composition_. That's correct when no layer was added (the
+  // composition path is genuine fallback) but it's a trap when a fresh
+  // layer arrives in steady state — warm-start succeeds with the old
+  // set, the new layer is force-composited, and previous_allocation_
+  // never grows so the same fate hits every subsequent frame. Detect
+  // it here and force full_search so the new layer gets a real shot at
+  // a plane.
+  bool has_new_layer = false;
+  if (previous_allocation_valid_) {
+    // Build the previous-allocation membership set once, then probe
+    // it per current layer. Replaces an O(current × previous) scan
+    // with one O(previous) build + O(current) probes.
+    std::unordered_set<const Layer*> prev_set;
+    prev_set.reserve(previous_allocation_.size());
+    for (const auto& [plane_id, prev_layer] : previous_allocation_) {
+      prev_set.insert(prev_layer);
+    }
+    for (const auto* layer : output.layers()) {
+      if (layer->is_composition_layer() || layer->is_externally_bound() || layer->is_pinned()) {
+        continue;
+      }
+      // Composited last frame (the flag still holds that verdict here) is
+      // not new: warm-start composites it again. Counting it as new forced a
+      // full search every frame whenever composition was active.
+      if (prev_set.count(layer) == 0 && !layer->needs_composition_) {
+        has_new_layer = true;
+        break;
+      }
+    }
+  }
+
   // Reset layer assignment state. Same pass populates the per-apply
   // current-layers set used by has_new_layer / apply_previous_allocation
   // below — O(1) membership instead of two O(N×M) nested-loop scans.
@@ -227,39 +263,6 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
     cached_crtc_index_id_ = target_crtc;
   }
   const uint32_t crtc_index = *cached_crtc_index_;
-
-  // A "new" layer is one in the scene this frame that wasn't placed by
-  // the previous frame — i.e., not represented as a value in
-  // previous_allocation_. apply_previous_allocation is structurally
-  // unable to place such a layer: it iterates previous_allocation_ to
-  // emit property writes, then dumps everything else through
-  // needs_composition_. That's correct when no layer was added (the
-  // composition path is genuine fallback) but it's a trap when a fresh
-  // layer arrives in steady state — warm-start succeeds with the old
-  // set, the new layer is force-composited, and previous_allocation_
-  // never grows so the same fate hits every subsequent frame. Detect
-  // it here and force full_search so the new layer gets a real shot at
-  // a plane.
-  bool has_new_layer = false;
-  if (previous_allocation_valid_) {
-    // Build the previous-allocation membership set once, then probe
-    // it per current layer. Replaces an O(current × previous) scan
-    // with one O(previous) build + O(current) probes.
-    std::unordered_set<const Layer*> prev_set;
-    prev_set.reserve(previous_allocation_.size());
-    for (const auto& [plane_id, prev_layer] : previous_allocation_) {
-      prev_set.insert(prev_layer);
-    }
-    for (const auto* layer : output.layers()) {
-      if (layer->is_composition_layer() || layer->is_externally_bound() || layer->is_pinned()) {
-        continue;
-      }
-      if (prev_set.count(layer) == 0) {
-        has_new_layer = true;
-        break;
-      }
-    }
-  }
 
   // FB-only fast path: only content (FB_ID / damage / fence) changed on already-
   // placed layers — geometry, format, and modifier are byte-identical to what
