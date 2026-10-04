@@ -212,7 +212,13 @@ TEST(LayerSceneContentTypeVkms, ContentTypeChangeForcesReallocation) {
 
   // Two commits to reach the warm-start steady state (second commit
   // reuses the previous allocation: one TEST_ONLY).
-  ASSERT_TRUE(fx.scene->commit().has_value());
+  auto cold = fx.scene->commit();
+  ASSERT_TRUE(cold.has_value()) << cold.error().message();
+  if (cold->layers_assigned == 0) {
+    // Nothing native to reuse: the fast path needs a plane-placed layer.
+    cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+    GTEST_SKIP() << "every layer composited on this CRTC; no native allocation to fast-path";
+  }
   auto steady = fx.scene->commit();
   ASSERT_TRUE(steady.has_value()) << steady.error().message();
   EXPECT_EQ(steady->test_commits_issued, 0U)

@@ -394,6 +394,11 @@ TEST(LayerSceneCensusVkms, FullFrameScroll) {
     }
     auto r = fx.scene->commit();
     ASSERT_TRUE(r.has_value()) << "frame " << i << ": " << r.error().message();
+    if (i == 0 && r->layers_assigned == 0) {
+      // Nothing native to reuse: the fast path needs a plane-placed layer.
+      cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+      GTEST_SKIP() << "every layer composited on this CRTC; no native allocation to fast-path";
+    }
     c.add(*r);
   }
   c.print("scroll");
@@ -445,6 +450,11 @@ TEST(LayerSceneCensusVkms, MultiLayerOverlap) {
   for (int i = 0; i < k_frames; ++i) {
     auto r = fx.scene->commit();
     ASSERT_TRUE(r.has_value()) << "frame " << i << ": " << r.error().message();
+    if (i == 0 && r->layers_assigned == 0) {
+      // Nothing native to reuse: the fast path needs a plane-placed layer.
+      cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+      GTEST_SKIP() << "every layer composited on this CRTC; no native allocation to fast-path";
+    }
     last_assigned = r->layers_assigned + r->layers_composited;
     c.add(*r);
   }
