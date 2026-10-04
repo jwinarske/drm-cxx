@@ -361,18 +361,25 @@ class Allocator {
   [[nodiscard]] std::uint64_t clamp_to_plane(uint32_t plane_id, std::string_view name,
                                              std::uint64_t value) const;
 
-  drm::expected<void, std::error_code> apply_layer_to_plane(const Layer& layer, uint32_t plane_id,
-                                                            AtomicRequest& req) const;
+  drm::expected<void, std::error_code> apply_layer_to_plane(
+      const Layer& layer, uint32_t plane_id, AtomicRequest& req,
+      std::optional<uint64_t> zpos = std::nullopt) const;
 
   // Real-commit variant: writes only properties whose value differs
   // from the previous frame's snapshot for this plane (or every
   // property when the plane is freshly assigned, the layer pointer
   // changed, or `force_full_writes_` is on). Updates the snapshot on
   // success and bumps the apply-time diagnostics counters.
-  drm::expected<void, std::error_code> apply_layer_to_plane_real(const Layer& layer,
-                                                                 uint32_t plane_id,
-                                                                 AtomicRequest& req,
-                                                                 bool test_only);
+  drm::expected<void, std::error_code> apply_layer_to_plane_real(
+      const Layer& layer, uint32_t plane_id, AtomicRequest& req, bool test_only,
+      std::optional<uint64_t> zpos = std::nullopt);
+
+  // The zpos to write per plane for `assignment`: stack_zpos (zpos_order.hpp)
+  // over its planes plus the planes the scene arms itself (pinned layers,
+  // whose assigned plane survives apply()'s reset). Empty when nothing is
+  // renumbered.
+  [[nodiscard]] std::vector<std::pair<uint32_t, uint64_t>> stacked_zpos(
+      const PlaneAssignment& assignment) const;
 
   // Emit FB_ID=0 / CRTC_ID=0 on every CRTC-compatible non-cursor plane
   // that isn't in `keep`. Used both inside try_test_commit (so TESTs
