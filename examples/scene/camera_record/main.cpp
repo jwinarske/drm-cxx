@@ -48,6 +48,11 @@
 
 namespace {
 
+// Not decltype(&std::fclose): glibc's fclose attributes drop from a template arg.
+struct FileCloser {
+  void operator()(FILE* f) const noexcept { (void)std::fclose(f); }
+};
+
 using drm::examples::camera::V4l2H264Encoder;
 #if CAMERA_HAS_VAAPI
 using drm::examples::camera::VaapiH264Encoder;
@@ -208,7 +213,7 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  const std::unique_ptr<FILE, decltype(&std::fclose)> out(std::fopen(a.out, "wb"), &std::fclose);
+  const std::unique_ptr<FILE, FileCloser> out(std::fopen(a.out, "wb"));
   if (!out) {
     drm::println(stderr, "open {}: {}", a.out, std::strerror(errno));
     ::close(fd);
