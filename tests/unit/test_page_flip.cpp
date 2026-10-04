@@ -55,7 +55,9 @@ int g_ready_fd = -1;
 constexpr int k_ready_after_ticks = 20;
 
 void on_sigalrm(int /*signo*/) {
-  const int ticks = ++g_alrm_count;
+  // No ++ on a volatile (deprecated in C++20); sole writer.
+  const int ticks = g_alrm_count + 1;
+  g_alrm_count = ticks;
   if (ticks == k_ready_after_ticks && g_ready_fd >= 0) {
     const std::uint64_t bump = 1;
     const ssize_t written = ::write(g_ready_fd, &bump, sizeof(bump));

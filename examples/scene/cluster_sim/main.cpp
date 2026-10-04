@@ -171,17 +171,7 @@ constexpr std::uint32_t k_dial_face_argb = 0xFF080C18U;
 constexpr std::uint32_t k_dial_tick_argb = 0xFFC0C8D0U;
 constexpr std::uint32_t k_dial_hub_argb = 0xFF1A1F2CU;
 constexpr std::uint32_t k_speedo_needle_argb = 0xFFFF3B30U;  // red
-
-// Approximate bg gradient color at the layer positions. paint_dial /
-// paint_center_info / paint_warning_indicators fill their buffers with
-// these so the XRGB layer (treated opaque by the compositor's fast
-// path) blends seamlessly with the canvas-painted bg gradient below.
-// Dials sit roughly half-radius from center; info + warnings sit near
-// center so they get the brighter center color.
-constexpr std::uint32_t k_dial_bg_fill_argb = 0xFF0A0F1AU;
-constexpr std::uint32_t k_info_bg_fill_argb = k_bg_center_argb;
-constexpr std::uint32_t k_warn_bg_fill_argb = k_bg_center_argb;
-constexpr std::uint32_t k_tach_needle_argb = 0xFFFFB300U;  // amber
+constexpr std::uint32_t k_tach_needle_argb = 0xFFFFB300U;    // amber
 
 // Idle animation periods (seconds). Out of phase so the two dials
 // don't sweep in lockstep -- a real cluster's dials are decorrelated

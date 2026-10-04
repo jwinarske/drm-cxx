@@ -332,9 +332,8 @@ int main(int argc, char** argv) {
 // The NXP BSP ships gcc/g++ + libdrm runtime but no -dev tooling. Carry the
 // drm-cxx tree (or its headers + prebuilt libdrm-cxx.so) onto the board, then:
 //
-//   g++ -std=c++17 -I<drm-cxx>/src main.cpp \
-//       -L<drm-cxx-build> -ldrm-cxx $(pkg-config --cflags --libs libdrm) \
-//       -o minimal_kms_probe
+//   SRC=<drm-cxx>/src BUILD=<drm-cxx-build> LIBDRM=$(pkg-config --cflags --libs libdrm)
+//   g++ -std=c++17 -I$SRC main.cpp -L$BUILD -ldrm-cxx $LIBDRM -o minimal_kms_probe
 //
 // (the -I points at src/ because public headers resolve as <drm-cxx/...> through
 // the build-tree symlink; on an installed SDK use -I<sysroot>/usr/include.)

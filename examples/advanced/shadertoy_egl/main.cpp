@@ -24,7 +24,7 @@
 //
 // CLI:
 //
-//   shadertoy_egl [--cycle N] [--seconds N] [--out DIR] [--shot] [shader ...] \
+//   shadertoy_egl [--cycle N] [--seconds N] [--out DIR] [--shot] [shader ...]
 //                 [/dev/dri/cardN]
 //
 //   shader        One or more Shadertoy exports (.json, multi-pass) or bare

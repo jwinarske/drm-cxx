@@ -327,8 +327,8 @@ class Layer {
         content_type_(content_type),
         update_hint_hz_(update_hint_hz),
         app_priority_(app_priority),
-        identity_tag_(identity_tag),
-        pinned_plane_id_(pinned_plane_id) {}
+        pinned_plane_id_(pinned_plane_id),
+        identity_tag_(identity_tag) {}
 
  private:
   LayerHandle handle_;

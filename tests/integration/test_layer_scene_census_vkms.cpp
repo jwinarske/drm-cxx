@@ -10,8 +10,8 @@
 // clips fails here.
 //
 // Scenarios: static (FB-only steady state), widget-scale damage, full-frame
-// scroll (translate), and a multi-layer overlap. Each prints:
-//   CENSUS scenario=<name> frames=N commits=C test_commits=T props=P fbs=F \
+// scroll (translate), and a multi-layer overlap. Each prints one line:
+//   CENSUS scenario=<name> frames=N commits=C test_commits=T props=P fbs=F
 //          damage_clips=D fast_path=X idle=I
 // so a HIL run on a real driver (vc4/VOP2) produces the same parseable census
 // the vkms gate asserts on.
