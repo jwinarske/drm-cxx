@@ -32,7 +32,7 @@
 // The pure ranking step is in `rank_pick(types, ranks) -> optional<size_t>`
 // so unit tests don't need a real DRM fd. The IO wrapper
 // `pick_connector(fd, ids, ranks)` filters connectors to eligible
-// (CONNECTED + has modes + has encoder) and dispatches to rank_pick.
+// (CONNECTED + has modes) and dispatches to rank_pick.
 
 #pragma once
 
@@ -54,10 +54,13 @@
 
 namespace drm::examples {
 
-/// Default rank: internal panels first, then cable-out, VGA last.
-/// Right for single-output kiosks and most laptops; matches the
-/// behavior consumers usually want from "give me a display."
-inline constexpr std::array<std::uint32_t, 12> k_main_rank = {
+/// Default rank: internal panels first, then cable-out, VGA, and finally
+/// virtual and USB displays. Right for single-output kiosks and most
+/// laptops; matches the behavior consumers usually want from "give me a
+/// display." The last two keep machines whose only output is a virtual one
+/// (vkms, virtio-gpu in a VM) or a USB display (gud) usable, while any
+/// physical display still wins. Writeback connectors are never ranked.
+inline constexpr std::array<std::uint32_t, 14> k_main_rank = {
     DRM_MODE_CONNECTOR_eDP,          // 14 — modern laptop panel
     DRM_MODE_CONNECTOR_LVDS,         // 7  — older laptop panel
     DRM_MODE_CONNECTOR_DSI,          // 16 — embedded MIPI panel
@@ -69,7 +72,9 @@ inline constexpr std::array<std::uint32_t, 12> k_main_rank = {
     DRM_MODE_CONNECTOR_DVID,         // 3  — digital DVI
     DRM_MODE_CONNECTOR_DVII,         // 2  — combined DVI
     DRM_MODE_CONNECTOR_DVIA,         // 4  — analog DVI
-    DRM_MODE_CONNECTOR_VGA,          // 1  — last resort
+    DRM_MODE_CONNECTOR_VGA,          // 1  — legacy analog
+    DRM_MODE_CONNECTOR_VIRTUAL,      // 15 — vkms, virtio-gpu
+    DRM_MODE_CONNECTOR_USB,          // 20 — USB displays (gud)
 };
 
 /// Internal panels only — for embedded apps that must ignore any
@@ -133,7 +138,7 @@ inline constexpr std::array<std::uint32_t, 7> k_external_rank = {
 }
 
 /// IO wrapper: read each connector in `connector_ids`, keep those that
-/// are CONNECTED with at least one mode and an attached encoder, and
+/// are CONNECTED with at least one mode, and
 /// pick the highest-ranking by `ranks`. Returns the loaded
 /// `drm::Connector` (an owning unique_ptr); a default-constructed /
 /// null connector means "no eligible connector matched any rank."
