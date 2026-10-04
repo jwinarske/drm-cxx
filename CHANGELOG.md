@@ -1,5 +1,48 @@
 # Changelog
 
+## v3.1.0 — 2026-10-04: zpos over armed planes, pin TEST, warm-start with composition
+
+ABI-compatible with 3.0.0 (soname `libdrm-cxx.so.3`); one API addition.
+
+### API
+
+- `planes::Layer::set_needs_composition()`: route a layer through composition
+  this frame. (#300)
+
+### `drm::planes`
+
+- **zpos numbered over the armed planes.** The allocator writes zpos densely,
+  in requested order, from each plane's minimum, over the planes it arms
+  (placed + pinned); fixed slots keep their value; no dense fit → requested
+  values. Composited layers no longer use up the range, so the canvas fits
+  above the stack. Fixes controllers that advertise more zpos than they accept
+  (SA8155P: `[0, 10]`, 9 and 10 refused). (#299, #301)
+- **Warm-start with composited layers.** A layer composited last frame counted
+  as new, forcing a full search every frame while composition was active.
+  Steady state now takes 0 TESTs. (#299)
+- **Planes left by replaced layers are disabled.** The disable-unused pass was
+  skipped whenever warm-start was invalid, not just on the first commit; stale
+  planes kept their zpos and collided. An empty scene still keeps its planes.
+  (#301)
+
+### `drm::scene`
+
+- **Pinned planes are TESTed** once per (layer, plane, geometry), verdict
+  cached; a refused pin is rolled back, the layer composited that frame,
+  `pins_failed` counted, normal allocation from the next frame. (#300)
+- Pinned layer's alpha rescaled to the plane's range (`0xFFFF` failed the whole
+  commit on `[0, 255]` planes). (#300)
+- Canvas no longer reserved on a multirect virtual plane (orphaned when the
+  allocator gave its parent away). (#299)
+- Canvas zpos: above the armed stack and a fixed-slot PRIMARY. (#301)
+
+### Tests / docs
+
+- Fast-path assertions skip when every layer is composited (i.MX8M Plus). (#298)
+- Pin test honors `DRM_CXX_CONNECTOR`. (#300)
+- Validated: SA8155P 98/98 + `allocator_torture` 6/6, i.MX8M Plus 100/100,
+  Raspberry Pi 5 101/101 + `allocator_torture` 6/6. (#299–#302)
+
 ## v3.0.0 — 2026-10-04: Vulkan/GL reach on IOMMU-less displays, GPU-import composition, plane-rule fixes
 
 Major bump: two source breaks (below). Every consumer must recompile.
