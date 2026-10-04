@@ -936,8 +936,9 @@ display consumer, and only the consumer actually presenting is lit.
     left/right split pair and rejected unless adjacent (`invalid coordinates,
     stage:N`).
   - **zpos 9 and 10 are rejected**, even on a lone plane, although every plane
-    advertises `[0, 10]`. LayerScene lowers zpos densely (same order, from the
-    lowest value), which also keeps values distinct and the canvas low.
+    advertises `[0, 10]`. The allocator writes zpos densely over the armed
+    planes (same order, from each plane's minimum), which also keeps values
+    distinct and the canvas low.
 - **Build — clang against a glibc-2.31 (bullseye-class) sysroot.** The Arm GNU
   toolchains' own libstdc++ needs newer glibc, so C++ links with **clang +
   the sysroot's GCC 10 libstdc++** (`--gcc-toolchain=<sysroot>/usr
@@ -962,11 +963,10 @@ display consumer, and only the consumer actually presenting is lit.
 - **Native multi-plane works:** `scene_formats` 4/4 assigned, `scene_warm_start`
   3/3, `plane_stress` 4 layers native at one commit per vblank.
 - **Tests:** 98/98 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card1`.
-- **Known limitation — 9+ layers with composition.** Dense lowering also numbers
-  the layers that end up composited, so with more layers than usable zpos values
-  the native planes reach the top of the usable range and the canvas has no slot
-  (`allocator_torture`). `scene_priority` (8 layers) places 7 natively plus the
-  canvas.
+- **More layers than planes:** the allocator numbers zpos over the armed planes
+  only, so composited layers don't consume the range and the canvas lands above
+  the stack. `allocator_torture` 6/6 (N+1: 6 native + 9 composited on one
+  canvas); `scene_priority` 7 native + canvas.
 - `mouse_cursor`/`cursor_rotate` expect an already-active CRTC and exit when none
   is (no cursor plane exists either); `cursor_scene` works.
 

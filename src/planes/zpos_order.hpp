@@ -19,8 +19,12 @@
 
 #include "plane_registry.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <tuple>
+#include <vector>
 
 namespace drm::planes::detail {
 
@@ -63,6 +67,76 @@ namespace drm::planes::detail {
     return false;
   }
   return (*za < *zb) == (*ea < *eb);
+}
+
+/// One armed plane in a frame's stack: the plane, the zpos its layer requests,
+/// and the zpos to write (filled by stack_zpos).
+struct StackEntry {
+  const PlaneCapabilities* plane{nullptr};
+  std::optional<std::uint64_t> requested;
+  std::optional<std::uint64_t> written;
+};
+
+/// Number the armed planes' zpos densely, in requested order, from each plane's
+/// own minimum: a mutable plane gets max(previous + 1, zpos_min), a fixed-slot
+/// plane keeps its slot. Only the planes actually armed take values, so layers
+/// that end up composited don't use up the range, and the stack stays clear of
+/// the top of it, which some controllers advertise but reject. Order is
+/// preserved, so stacking_consistent() rulings stand. Greedy-lowest is optimal:
+/// when it overflows a plane's zpos_max (or meets a fixed slot at or below the
+/// previous value) no dense numbering exists; then `written` is left equal to
+/// `requested` and false is returned. Entries without a requested zpos or a
+/// zpos range are not numbered.
+[[nodiscard]] inline bool stack_zpos(std::vector<StackEntry>& entries) {
+  struct Rankable {
+    std::size_t index;
+    std::uint64_t requested;
+    std::uint32_t plane_id;
+    std::uint64_t zmin;
+    std::uint64_t zmax;
+    bool fixed;
+  };
+  std::vector<Rankable> order;
+  order.reserve(entries.size());
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    auto& e = entries[i];
+    e.written = e.requested;
+    if (e.plane == nullptr) {
+      continue;
+    }
+    const auto req = e.requested;
+    const auto zmin = e.plane->zpos_min;
+    const auto zmax = e.plane->zpos_max;
+    if (req.has_value() && zmin.has_value() && zmax.has_value()) {
+      order.push_back({i, *req, e.plane->id, *zmin, *zmax, *zmin == *zmax});
+    }
+  }
+  std::stable_sort(order.begin(), order.end(), [](const Rankable& a, const Rankable& b) {
+    return std::tie(a.requested, a.plane_id) < std::tie(b.requested, b.plane_id);
+  });
+  std::vector<std::uint64_t> values(order.size());
+  std::optional<std::uint64_t> prev;
+  for (std::size_t k = 0; k < order.size(); ++k) {
+    const auto& r = order[k];
+    std::uint64_t v = r.zmin;
+    if (prev.has_value()) {
+      if (r.fixed && v <= *prev) {
+        return false;
+      }
+      if (!r.fixed) {
+        v = std::max(*prev + 1, r.zmin);
+      }
+    }
+    if (v > r.zmax) {
+      return false;
+    }
+    values[k] = v;
+    prev = v;
+  }
+  for (std::size_t k = 0; k < order.size(); ++k) {
+    entries[order[k].index].written = values[k];
+  }
+  return true;
 }
 
 }  // namespace drm::planes::detail

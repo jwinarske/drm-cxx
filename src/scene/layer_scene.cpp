@@ -1877,18 +1877,16 @@ class LayerScene::Impl {
     return arm_composition_canvas(req, *first, zpos, report) ? first : nullptr;
   }
 
-  // Lower the frame's zpos values densely: same order, consecutive values from
-  // the CRTC's lowest mutable zpos. KMS defines only relative order, so this is
-  // equivalent on every driver, and it keeps the stack (and the canvas above
-  // it) clear of the top of the advertised range, which some controllers
-  // advertise but reject (SA8155P: [0, 10], 9 and 10 refused). Values are also
-  // distinct: some controllers read two planes on one stage as a source-split
-  // pair. The PRIMARY-hint anchor keeps its pinned slot (amdgpu: 2); layers
-  // below it pack below it, layers above pack above. When the dense values do
-  // not fit, only ties are bumped; when even that overflows the range, nothing
-  // changes. Fills scratch_zpos_overrides_ with only the layers whose value
-  // changes.
-  void compact_zpos(const std::vector<AcquisitionSlot>& acquisitions, const Layer* hint_target) {
+  // Give every layer that lowers a zpos a distinct one. DRM allows equal zpos
+  // (the kernel orders ties by plane id), but some display controllers read
+  // two planes on one stage as a source-split left/right pair and reject them
+  // unless they sit side by side. Already-distinct values are left alone; ties
+  // are broken in scene order (the PRIMARY-hint target first, so it keeps the
+  // pinned slot) by bumping later layers to strictly increasing values. When
+  // that would push past the CRTC planes' largest zpos (tight ranges, e.g.
+  // [0, 3]) nothing is changed, so such drivers lower exactly what they did.
+  // Fills scratch_zpos_overrides_ with only the layers whose value changes.
+  void uniquify_zpos(const std::vector<AcquisitionSlot>& acquisitions, const Layer* hint_target) {
     scratch_zpos_overrides_.clear();
     struct Entry {
       const Layer* layer;
@@ -1909,69 +1907,20 @@ class LayerScene::Impl {
     std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
       return std::tie(a.z, a.rank, a.order) < std::tie(b.z, b.rank, b.order);
     });
-    if (entries.empty()) {
-      return;
-    }
-    std::optional<std::int64_t> cap;
-    std::optional<std::int64_t> floor;
-    if (const auto crtc_index = resolve_crtc_index(); crtc_index.has_value()) {
-      for (const auto* p : registry_.for_crtc(*crtc_index)) {
-        if (p->type == drm::planes::DRMPlaneType::CURSOR) {
-          continue;
-        }
-        if (p->zpos_max.has_value()) {
-          cap = std::max(cap.value_or(0), static_cast<std::int64_t>(*p->zpos_max));
-        }
-        if (p->zpos_min.has_value() && !drm::planes::detail::zpos_fixed(*p)) {
-          floor = std::min(floor.value_or(std::numeric_limits<std::int64_t>::max()),
-                           static_cast<std::int64_t>(*p->zpos_min));
-        }
-      }
-    }
-
-    // Dense pass. The anchor is the first entry at the pinned slot (the hint
-    // target sorts first among ties there).
-    std::optional<std::size_t> anchor;
-    if (primary_zpos_hint_.has_value()) {
-      for (std::size_t i = 0; i < entries.size() && !anchor.has_value(); ++i) {
-        if (entries[i].z == static_cast<std::int64_t>(*primary_zpos_hint_)) {
-          anchor = i;
-        }
-      }
-    }
-    const std::int64_t lo = floor.value_or(0);
-    std::vector<std::int64_t> dense(entries.size());
-    bool fits = true;
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-      const auto k = static_cast<std::int64_t>(i);
-      if (!anchor.has_value()) {
-        dense[i] = lo + k;
-      } else {
-        const auto a = static_cast<std::int64_t>(*anchor);
-        const auto pin = entries[*anchor].z;
-        dense[i] = (k < a) ? lo + k : pin + (k - a);
-        fits = fits && (k >= a || dense[i] < pin);
-      }
-      fits = fits && dense[i] >= 0 && (!cap.has_value() || dense[i] <= *cap);
-    }
-    if (fits) {
-      std::vector<std::pair<const Layer*, std::uint64_t>> moved;
-      for (std::size_t i = 0; i < entries.size(); ++i) {
-        if (dense[i] != entries[i].z) {
-          moved.emplace_back(entries[i].layer, static_cast<std::uint64_t>(dense[i]));
-        }
-      }
-      scratch_zpos_overrides_ = std::move(moved);
-      return;
-    }
-
-    // Fallback: bump ties only.
     bool any_tie = false;
     for (std::size_t i = 1; i < entries.size(); ++i) {
       any_tie = any_tie || entries[i].z == entries[i - 1].z;
     }
     if (!any_tie) {
       return;
+    }
+    std::optional<std::int64_t> cap;
+    if (const auto crtc_index = resolve_crtc_index(); crtc_index.has_value()) {
+      for (const auto* p : registry_.for_crtc(*crtc_index)) {
+        if (p->type != drm::planes::DRMPlaneType::CURSOR && p->zpos_max.has_value()) {
+          cap = std::max(cap.value_or(0), static_cast<std::int64_t>(*p->zpos_max));
+        }
+      }
     }
     std::int64_t prev = std::numeric_limits<std::int64_t>::min();
     std::vector<std::pair<const Layer*, std::uint64_t>> bumped;
@@ -1989,54 +1938,62 @@ class LayerScene::Impl {
     scratch_zpos_overrides_ = std::move(bumped);
   }
 
-  // The zpos a layer was lowered with this frame (compact_zpos override, else
-  // its own), for placing the canvas above it.
-  std::optional<std::int64_t> lowered_zpos(const Layer* l) const {
-    for (const auto& [layer, z] : scratch_zpos_overrides_) {
-      if (layer == l) {
-        return static_cast<std::int64_t>(z);
+  // The zpos stack the allocator wrote this frame: stack_zpos over every armed
+  // plane (placed and pinned layers), the same inputs and function the
+  // allocator used, so pinned planes and the canvas line up with it.
+  void compute_stack(const std::vector<AcquisitionSlot>& acquisitions, std::uint32_t crtc_index) {
+    scratch_stack_.clear();
+    std::vector<drm::planes::detail::StackEntry> entries;
+    std::vector<std::uint32_t> ids;
+    entries.reserve(acquisitions.size());
+    ids.reserve(acquisitions.size());
+    for (const auto& acq : acquisitions) {
+      if (acq.planes_layer == nullptr) {
+        continue;
+      }
+      const auto pid = acq.planes_layer->assigned_plane_id();
+      if (!pid.has_value()) {
+        continue;
+      }
+      entries.push_back(
+          {plane_caps_for(crtc_index, *pid), acq.planes_layer->property("zpos"), std::nullopt});
+      ids.push_back(*pid);
+    }
+    (void)drm::planes::detail::stack_zpos(entries);  // on overflow written == requested
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      if (const std::optional<std::uint64_t> w = entries[i].written; w.has_value()) {
+        scratch_stack_.emplace_back(ids[i], *w);
       }
     }
-    if (const auto z = l->display().zpos; z.has_value()) {
-      return *z;
+  }
+
+  [[nodiscard]] std::optional<std::uint64_t> stacked_zpos_of(std::uint32_t plane_id) const {
+    for (const auto& [id, z] : scratch_stack_) {
+      if (id == plane_id) {
+        return z;
+      }
     }
     return std::nullopt;
   }
 
-  // Pick a zpos for the canvas plane that puts composited content
-  // above every hardware-assigned layer AND above any explicit zpos
-  // the composited layers carry. Returns 0 when no signal exists,
-  // which is the conservative "let the kernel pick" sentinel.
-  std::int32_t choose_canvas_zpos(const std::vector<AcquisitionSlot>& acquisitions,
-                                  const std::vector<AcquisitionSlot*>& composited) const {
-    std::int32_t max_explicit = 0;
-    bool have_signal = false;
-    for (const auto& acq : acquisitions) {
-      if (!acq.planes_layer->assigned_plane_id().has_value()) {
-        continue;  // unassigned layers feed the composited list, not the floor
-      }
-      if (auto z = lowered_zpos(acq.scene_layer); z.has_value()) {
-        max_explicit = std::max(max_explicit, static_cast<std::int32_t>(*z));
-        have_signal = true;
-      }
+  // The canvas's zpos: above every armed plane's written zpos, and above a
+  // fixed-slot PRIMARY (amdgpu: 2), which stays armed even when no layer is
+  // placed on it. Composited layers don't count: the canvas carries them.
+  // 0 when nothing is armed (the canvas is alone; the write clamps to the
+  // plane's minimum).
+  [[nodiscard]] std::int32_t choose_canvas_zpos() const {
+    std::optional<std::uint64_t> top;
+    for (const auto& [id, z] : scratch_stack_) {
+      top = std::max(top.value_or(0), z);
     }
-    for (const auto* acq : composited) {
-      if (auto z = lowered_zpos(acq->scene_layer); z.has_value()) {
-        max_explicit = std::max(max_explicit, static_cast<std::int32_t>(*z));
-        have_signal = true;
-      }
+    if (primary_zpos_hint_.has_value()) {
+      top = std::max(top.value_or(0), static_cast<std::uint64_t>(*primary_zpos_hint_));
     }
-    if (!have_signal) {
+    if (!top.has_value()) {
       return 0;
     }
-    // +1 so the canvas sits strictly above the highest layer's natural
-    // slot. If max_explicit is INT32_MAX (an absurd configuration the
-    // kernel would already have rejected upstream) the saturating add
-    // here keeps us at INT32_MAX rather than wrapping negative.
-    if (max_explicit == std::numeric_limits<std::int32_t>::max()) {
-      return max_explicit;
-    }
-    return max_explicit + 1;
+    constexpr auto k_max = static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max());
+    return static_cast<std::int32_t>(std::min(*top + 1, k_max));
   }
 
   // Emit a per-frame warn line when the only thing keeping the layer
@@ -2329,7 +2286,7 @@ class LayerScene::Impl {
       return;
     }
 
-    const std::int32_t canvas_zpos = choose_canvas_zpos(acquisitions, scratch_composited_);
+    const std::int32_t canvas_zpos = choose_canvas_zpos();
     const auto* armed =
         arm_canvas_tested(req, scratch_canvas_candidates_, canvas_zpos, report, test_flags);
     if (armed == nullptr) {
@@ -2981,6 +2938,10 @@ class LayerScene::Impl {
         if (name == "alpha" && caps != nullptr) {
           value = drm::planes::rescale_alpha(value, caps->alpha_max);
         }
+        // zpos as the allocator numbered the stack (stack_zpos).
+        if (name == "zpos") {
+          value = stacked_zpos_of(plane_id).value_or(value);
+        }
         if (auto r = req.add_property(plane_id, *id, value); !r) {
           return r;
         }
@@ -3005,6 +2966,7 @@ class LayerScene::Impl {
           remember_pin(handle_id, plane_id, hash, PinVerdict::Rejected);
           ++report.pins_failed;
           acq.planes_layer->set_pinned(false);
+          acq.planes_layer->set_assigned_plane(std::nullopt);
           acq.planes_layer->set_needs_composition(true);
           // The layer is unplaced now; warm-start would keep compositing it.
           // NOLINTNEXTLINE(bugprone-unchecked-optional-access) allocator_ is set at create().
@@ -3144,10 +3106,9 @@ class LayerScene::Impl {
       }
     }
     // Clamp the requested canvas zpos into the plane's advertised range.
-    // choose_canvas_zpos() returns (max assigned/composited zpos + 1), which
-    // can exceed the plane's zpos_max on controllers with a tight range — TI
-    // tidss advertises zpos [0,3], yet a scene using app-level zpos like
-    // layered_demo's 3..10 asks for a canvas zpos of 11. Writing an
+    // choose_canvas_zpos() returns (top of the armed stack + 1), which can
+    // exceed the plane's zpos_max on controllers with a tight range — TI
+    // tidss advertises zpos [0,3], and four armed planes fill it. Writing an
     // out-of-range value to a range property is rejected by the kernel with
     // EINVAL at property-set time, *before* atomic_check, so the whole commit
     // fails silently (no driver log). The canvas only needs to sit above the
@@ -3495,7 +3456,9 @@ class LayerScene::Impl {
   };
   std::vector<PinVerdictEntry> pin_verdicts_;
   std::vector<const drm::planes::PlaneCapabilities*> scratch_canvas_candidates_;
-  // Per-frame zpos overrides from compact_zpos (layers whose value changed).
+  // The zpos stack written this frame (compute_stack): plane id -> zpos.
+  std::vector<std::pair<std::uint32_t, std::uint64_t>> scratch_stack_;
+  // Per-frame zpos overrides from uniquify_zpos (layers whose value changed).
   std::vector<std::pair<const Layer*, std::uint64_t>> scratch_zpos_overrides_;
   bool canvas_testing_{true};
 
@@ -3765,7 +3728,7 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
       hint_target = bottom_slot_layer(acquired, *primary_zpos_hint_);
     }
   }
-  compact_zpos(acquisitions, hint_target);
+  uniquify_zpos(acquisitions, hint_target);
   for (const auto& acq : acquisitions) {
     // acquire_all only pushes slots whose scene_layer + planes_layer
     // are both non-null (the slot.alive guard plus add_layer always
@@ -3882,6 +3845,7 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
       continue;
     }
     acq.planes_layer->set_pinned(true);
+    acq.planes_layer->set_assigned_plane(pin);  // in the allocator's zpos stack
     scratch_reserved_planes_.push_back(*pin);
   }
   const auto reserved_span = scratch_reserved_planes_.empty()
@@ -3955,6 +3919,12 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // allowance, but never PAGE_FLIP_EVENT (TEST_ONLY with an event is EINVAL).
   const std::uint32_t verify_test_flags =
       DRM_MODE_ATOMIC_TEST_ONLY | (first_commit_ ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0U);
+
+  // The stack the allocator just wrote, for pinned planes and the canvas.
+  scratch_stack_.clear();
+  if (const auto stack_crtc = resolve_crtc_index(); stack_crtc.has_value()) {
+    compute_stack(acquisitions, *stack_crtc);
+  }
 
   // Write pinned layers' plane state to their reserved planes. Must run
   // before compose_unassigned: it sets assigned_plane_ so the canvas

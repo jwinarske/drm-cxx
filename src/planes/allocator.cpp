@@ -68,6 +68,21 @@ const char* plane_type_name(drm::planes::DRMPlaneType t) {
 }  // namespace
 
 namespace drm::planes {
+
+namespace {
+
+// The stacked zpos for `plane_id`, if stacked_zpos() renumbered it.
+std::optional<uint64_t> zpos_in(const std::vector<std::pair<uint32_t, uint64_t>>& stack,
+                                const uint32_t plane_id) {
+  for (const auto& [id, z] : stack) {
+    if (id == plane_id) {
+      return z;
+    }
+  }
+  return std::nullopt;
+}
+
+}  // namespace
 // ── TestCache ──────────────────────────────────────────────────
 
 std::optional<bool> TestCache::lookup(uint32_t plane_id, std::size_t prop_hash) const {
@@ -215,7 +230,11 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   scratch_current_set_.clear();
   for (auto* layer : output.layers()) {
     layer->needs_composition_ = false;
-    layer->assigned_plane_ = std::nullopt;
+    // A pinned layer's plane is set by the scene before apply(); it is part of
+    // the stack stacked_zpos() numbers.
+    if (!layer->is_pinned()) {
+      layer->assigned_plane_ = std::nullopt;
+    }
     scratch_current_set_.insert(layer);
   }
 
@@ -413,8 +432,11 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   // unchanged properties skip the wire entirely.
   disable_unused_planes(req, crtc_index, previous_allocation_, /*track_state=*/true, test_only);
   std::size_t assigned = 0;
+  const auto stack = stacked_zpos(previous_allocation_);
   for (auto& [plane_id, layer] : previous_allocation_) {
-    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req, test_only); !r) {
+    if (auto r =
+            apply_layer_to_plane_real(*layer, plane_id, req, test_only, zpos_in(stack, plane_id));
+        !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
     layer->assigned_plane_ = plane_id;
@@ -439,6 +461,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
                                                                    const uint32_t flags,
                                                                    const uint32_t crtc_index,
                                                                    const bool test_only) {
+  // Sampled before this frame's writes record anything (see the disable pass).
+  const bool committed_before = !last_committed_.empty();
   output.sort_layers_by_zpos();
 
   // Externally-bound layers (e.g. EGL stream sources whose plane is
@@ -548,10 +572,13 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // variant; the per-plane snapshot detects layer reassignment versus
   // last frame and forces a full write when it happened, otherwise
   // skips properties whose value is unchanged.
+  const auto stack = stacked_zpos(best_assignment);
   for (auto& [plane_id, layer] : best_assignment) {
     layer->assigned_plane_ = plane_id;
     layer->needs_composition_ = false;
-    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req, test_only); !r) {
+    if (auto r =
+            apply_layer_to_plane_real(*layer, plane_id, req, test_only, zpos_in(stack, plane_id));
+        !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
   }
@@ -603,8 +630,16 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // on amdgpu (kernel delivers the commit but no event arrives,
   // wedging the caller's flip_pending). 5bcc2b9a's hand-rolled path
   // never touched idle overlays on the first commit and didn't see
-  // this; match that shape here.
-  if (previous_allocation_valid_) {
+  // this; match that shape here. "First" is nothing committed yet, not a
+  // missing warm-start: after the scene's layers are replaced (or the
+  // allocation is invalidated) the planes they left armed still need the
+  // disable, or they keep their zpos and collide with the new stack. An empty
+  // scene keeps its planes: disabling an active CRTC's only PRIMARY is refused
+  // (i.MX LCDIF), and the last frame stays up as before.
+  const bool has_scene_layers =
+      std::any_of(output.layers().begin(), output.layers().end(),
+                  [](const Layer* l) { return !l->is_composition_layer(); });
+  if (committed_before && has_scene_layers) {
     disable_unused_planes(req, crtc_index, planes_in_use, /*track_state=*/true, test_only);
   }
 
@@ -1216,8 +1251,10 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
                         /*test_only=*/true);
 
   // Apply each assigned layer's properties
+  const auto stack = stacked_zpos(assignment);
   for (const auto& [plane_id, layer] : assignment) {
-    if (auto result = apply_layer_to_plane(*layer, plane_id, test_req); !result.has_value()) {
+    if (auto result = apply_layer_to_plane(*layer, plane_id, test_req, zpos_in(stack, plane_id));
+        !result.has_value()) {
       alloc_log("[alloc] apply_layer_to_plane FAIL plane={} layer={}: {} (errno={})", plane_id,
                 static_cast<const void*>(layer), result.error().message(), result.error().value());
       return result.error();
@@ -1423,10 +1460,43 @@ std::uint64_t Allocator::clamp_to_plane(const uint32_t plane_id, const std::stri
   return value;
 }
 
-drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer& layer,
-                                                                     const uint32_t plane_id,
-                                                                     AtomicRequest& req) const {
+std::vector<std::pair<uint32_t, uint64_t>> Allocator::stacked_zpos(
+    const PlaneAssignment& assignment) const {
+  std::vector<detail::StackEntry> entries;
+  std::vector<uint32_t> ids;
+  entries.reserve(assignment.size() + 1);
+  ids.reserve(assignment.size() + 1);
+  for (const auto& [plane_id, layer] : assignment) {
+    entries.push_back({caps_of(plane_id), layer->property("zpos"), std::nullopt});
+    ids.push_back(plane_id);
+  }
+  for (const auto* layer : scratch_current_set_) {
+    if (layer->is_pinned() && layer->assigned_plane_.has_value() &&
+        assignment.count(*layer->assigned_plane_) == 0) {
+      entries.push_back({caps_of(*layer->assigned_plane_), layer->property("zpos"), std::nullopt});
+      ids.push_back(*layer->assigned_plane_);
+    }
+  }
+  std::vector<std::pair<uint32_t, uint64_t>> out;
+  if (!detail::stack_zpos(entries)) {
+    return out;
+  }
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    const std::optional<uint64_t> w = entries[i].written;
+    if (w.has_value() && w != entries[i].requested) {
+      out.emplace_back(ids[i], *w);
+    }
+  }
+  return out;
+}
+
+drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(
+    const Layer& layer, const uint32_t plane_id, AtomicRequest& req,
+    const std::optional<uint64_t> zpos) const {
   for (auto [name, value] : layer.properties()) {
+    if (name == "zpos" && zpos.has_value()) {
+      value = *zpos;
+    }
     auto prop_id = prop_store_.property_id(plane_id, name);
     if (!prop_id.has_value()) {
       // Property not advertised on this plane — not all layers set
@@ -1461,10 +1531,9 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(const Layer
   return {};
 }
 
-drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const Layer& layer,
-                                                                          const uint32_t plane_id,
-                                                                          AtomicRequest& req,
-                                                                          const bool test_only) {
+drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(
+    const Layer& layer, const uint32_t plane_id, AtomicRequest& req, const bool test_only,
+    const std::optional<uint64_t> zpos) {
   // Decide whether this is a full re-emit (every property written
   // unconditionally) or a per-property diff against last frame's
   // snapshot. Full-write triggers:
@@ -1487,7 +1556,7 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
     }
     const auto tag = static_cast<PropTag>(i);
     const auto name = prop_name(tag);
-    const auto value = layer.values_.at(i);
+    const auto value = (tag == PropTag::Zpos && zpos.has_value()) ? *zpos : layer.values_.at(i);
     auto prop_id = prop_store_.property_id(plane_id, name);
     if (!prop_id.has_value()) {
       continue;
@@ -1557,7 +1626,13 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(const 
   // CRTC_ID + dest rect + src rect under MODESET, where the kernel
   // rejects the partial commit with EINVAL).
   if (!test_only) {
-    last_committed_[plane_id] = LastCommitted{&layer, layer.snapshot(), layer.property_hash()};
+    // Record the zpos written (the stacked value), so the next frame diffs
+    // against what the kernel has.
+    auto snap = layer.snapshot();
+    if (zpos.has_value() && snap.set_mask.test(static_cast<std::size_t>(PropTag::Zpos))) {
+      snap.values.at(static_cast<std::size_t>(PropTag::Zpos)) = *zpos;
+    }
+    last_committed_[plane_id] = LastCommitted{&layer, snap, layer.property_hash()};
   }
   return {};
 }
