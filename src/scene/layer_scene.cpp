@@ -2964,6 +2964,10 @@ class LayerScene::Impl {
         if (name == "zpos" && zpos_fixed) {
           continue;
         }
+        // Alpha into the plane's advertised range, as the allocator does.
+        if (name == "alpha" && caps != nullptr) {
+          value = drm::planes::rescale_alpha(value, caps->alpha_max);
+        }
         if (auto r = req.add_property(plane_id, *id, value); !r) {
           return r;
         }
