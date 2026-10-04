@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 project('drm-cxx', ['c', 'cpp'],
-  version : '1.0.0',
+  version : '3.0.0',
   meson_version : '>=1.3.0',
   license : 'MIT',
   default_options : [
@@ -333,7 +333,7 @@ endif
 
 #── Configuration ─────────────────────────────────────────────
 conf = configuration_data()
-conf.set('DRM_CXX_VERSION', meson.project_version())
+conf.set_quoted('DRM_CXX_VERSION', meson.project_version())
 conf.set('DRM_CXX_VERSION_MAJOR', meson.project_version().split('.')[0].to_int())
 conf.set('DRM_CXX_VERSION_MINOR', meson.project_version().split('.')[1].to_int())
 conf.set('DRM_CXX_VERSION_PATCH', meson.project_version().split('.')[2].to_int())

@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 project(drm-cxx
-  VERSION 1.0.0
+  VERSION 3.0.0
   DESCRIPTION "C++17 DRM/KMS library"
   # C is for the vendored X11-free .xcursor loader (third_party/xcursor-mini).
   LANGUAGES C CXX)
