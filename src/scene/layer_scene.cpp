@@ -38,6 +38,7 @@
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/planes/output.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
+#include <drm-cxx/planes/zpos_order.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
 #include <drm.h>
@@ -1808,6 +1809,13 @@ class LayerScene::Impl {
     out.insert(out.end(), primaries.begin(), primaries.end());
   }
 
+  [[nodiscard]] bool is_multirect_virtual(std::uint32_t plane_id) const {
+    const auto all = registry_.all();
+    return std::any_of(all.begin(), all.end(), [plane_id](const auto& p) {
+      return p.id == plane_id && p.multirect_parent.has_value();
+    });
+  }
+
   // Arm the canvas on the first candidate the kernel accepts. A candidate is
   // TESTed once — the whole frame request with the canvas armed on it — and
   // the verdict cached per plane until the next resume/rebind, so a settled
@@ -1867,20 +1875,18 @@ class LayerScene::Impl {
     return arm_composition_canvas(req, *first, zpos, report) ? first : nullptr;
   }
 
-  // Pick a zpos for the canvas plane that puts composited content
-  // above every hardware-assigned layer AND above any explicit zpos
-  // the composited layers carry. Returns 0 when no signal exists,
-  // which is the conservative "let the kernel pick" sentinel.
-  // Give every layer that lowers a zpos a distinct one. DRM allows equal zpos
-  // (the kernel orders ties by plane id), but some display controllers read
-  // two planes on one stage as a source-split left/right pair and reject them
-  // unless they sit side by side. Already-distinct values are left alone; ties
-  // are broken in scene order (the PRIMARY-hint target first, so it keeps the
-  // pinned slot) by bumping later layers to strictly increasing values. When
-  // that would push past the CRTC planes' largest zpos (tight ranges, e.g.
-  // [0, 3]) nothing is changed, so such drivers lower exactly what they did.
-  // Fills scratch_zpos_overrides_ with only the layers whose value changes.
-  void uniquify_zpos(const std::vector<AcquisitionSlot>& acquisitions, const Layer* hint_target) {
+  // Lower the frame's zpos values densely: same order, consecutive values from
+  // the CRTC's lowest mutable zpos. KMS defines only relative order, so this is
+  // equivalent on every driver, and it keeps the stack (and the canvas above
+  // it) clear of the top of the advertised range, which some controllers
+  // advertise but reject (SA8155P: [0, 10], 9 and 10 refused). Values are also
+  // distinct: some controllers read two planes on one stage as a source-split
+  // pair. The PRIMARY-hint anchor keeps its pinned slot (amdgpu: 2); layers
+  // below it pack below it, layers above pack above. When the dense values do
+  // not fit, only ties are bumped; when even that overflows the range, nothing
+  // changes. Fills scratch_zpos_overrides_ with only the layers whose value
+  // changes.
+  void compact_zpos(const std::vector<AcquisitionSlot>& acquisitions, const Layer* hint_target) {
     scratch_zpos_overrides_.clear();
     struct Entry {
       const Layer* layer;
@@ -1901,20 +1907,69 @@ class LayerScene::Impl {
     std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
       return std::tie(a.z, a.rank, a.order) < std::tie(b.z, b.rank, b.order);
     });
+    if (entries.empty()) {
+      return;
+    }
+    std::optional<std::int64_t> cap;
+    std::optional<std::int64_t> floor;
+    if (const auto crtc_index = resolve_crtc_index(); crtc_index.has_value()) {
+      for (const auto* p : registry_.for_crtc(*crtc_index)) {
+        if (p->type == drm::planes::DRMPlaneType::CURSOR) {
+          continue;
+        }
+        if (p->zpos_max.has_value()) {
+          cap = std::max(cap.value_or(0), static_cast<std::int64_t>(*p->zpos_max));
+        }
+        if (p->zpos_min.has_value() && !drm::planes::detail::zpos_fixed(*p)) {
+          floor = std::min(floor.value_or(std::numeric_limits<std::int64_t>::max()),
+                           static_cast<std::int64_t>(*p->zpos_min));
+        }
+      }
+    }
+
+    // Dense pass. The anchor is the first entry at the pinned slot (the hint
+    // target sorts first among ties there).
+    std::optional<std::size_t> anchor;
+    if (primary_zpos_hint_.has_value()) {
+      for (std::size_t i = 0; i < entries.size() && !anchor.has_value(); ++i) {
+        if (entries[i].z == static_cast<std::int64_t>(*primary_zpos_hint_)) {
+          anchor = i;
+        }
+      }
+    }
+    const std::int64_t lo = floor.value_or(0);
+    std::vector<std::int64_t> dense(entries.size());
+    bool fits = true;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      const auto k = static_cast<std::int64_t>(i);
+      if (!anchor.has_value()) {
+        dense[i] = lo + k;
+      } else {
+        const auto a = static_cast<std::int64_t>(*anchor);
+        const auto pin = entries[*anchor].z;
+        dense[i] = (k < a) ? lo + k : pin + (k - a);
+        fits = fits && (k >= a || dense[i] < pin);
+      }
+      fits = fits && dense[i] >= 0 && (!cap.has_value() || dense[i] <= *cap);
+    }
+    if (fits) {
+      std::vector<std::pair<const Layer*, std::uint64_t>> moved;
+      for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (dense[i] != entries[i].z) {
+          moved.emplace_back(entries[i].layer, static_cast<std::uint64_t>(dense[i]));
+        }
+      }
+      scratch_zpos_overrides_ = std::move(moved);
+      return;
+    }
+
+    // Fallback: bump ties only.
     bool any_tie = false;
     for (std::size_t i = 1; i < entries.size(); ++i) {
       any_tie = any_tie || entries[i].z == entries[i - 1].z;
     }
     if (!any_tie) {
       return;
-    }
-    std::optional<std::int64_t> cap;
-    if (const auto crtc_index = resolve_crtc_index(); crtc_index.has_value()) {
-      for (const auto* p : registry_.for_crtc(*crtc_index)) {
-        if (p->type != drm::planes::DRMPlaneType::CURSOR && p->zpos_max.has_value()) {
-          cap = std::max(cap.value_or(0), static_cast<std::int64_t>(*p->zpos_max));
-        }
-      }
     }
     std::int64_t prev = std::numeric_limits<std::int64_t>::min();
     std::vector<std::pair<const Layer*, std::uint64_t>> bumped;
@@ -1932,7 +1987,7 @@ class LayerScene::Impl {
     scratch_zpos_overrides_ = std::move(bumped);
   }
 
-  // The zpos a layer was lowered with this frame (uniquify_zpos override, else
+  // The zpos a layer was lowered with this frame (compact_zpos override, else
   // its own), for placing the canvas above it.
   std::optional<std::int64_t> lowered_zpos(const Layer* l) const {
     for (const auto& [layer, z] : scratch_zpos_overrides_) {
@@ -1946,6 +2001,10 @@ class LayerScene::Impl {
     return std::nullopt;
   }
 
+  // Pick a zpos for the canvas plane that puts composited content
+  // above every hardware-assigned layer AND above any explicit zpos
+  // the composited layers carry. Returns 0 when no signal exists,
+  // which is the conservative "let the kernel pick" sentinel.
   std::int32_t choose_canvas_zpos(const std::vector<AcquisitionSlot>& acquisitions,
                                   const std::vector<AcquisitionSlot*>& composited) const {
     std::int32_t max_explicit = 0;
@@ -3353,7 +3412,7 @@ class LayerScene::Impl {
   std::vector<std::uint32_t> canvas_proven_planes_;
   std::vector<std::uint32_t> canvas_rejected_planes_;
   std::vector<const drm::planes::PlaneCapabilities*> scratch_canvas_candidates_;
-  // Per-frame zpos overrides from uniquify_zpos (layers whose value changed).
+  // Per-frame zpos overrides from compact_zpos (layers whose value changed).
   std::vector<std::pair<const Layer*, std::uint64_t>> scratch_zpos_overrides_;
   bool canvas_testing_{true};
 
@@ -3623,7 +3682,7 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
       hint_target = bottom_slot_layer(acquired, *primary_zpos_hint_);
     }
   }
-  uniquify_zpos(acquisitions, hint_target);
+  compact_zpos(acquisitions, hint_target);
   for (const auto& acq : acquisitions) {
     // acquire_all only pushes slots whose scene_layer + planes_layer
     // are both non-null (the slot.alive guard plus add_layer always
@@ -3695,7 +3754,10 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // path and arm_stream_layer_planes respectively.
   scratch_reserved_planes_.clear();
   scratch_reserved_planes_.reserve(1 + acquisitions.size() + external_reserved_planes_.size());
-  if (last_canvas_plane_id_.has_value()) {
+  // Not a multirect virtual plane: it is only valid while its parent is armed,
+  // and the allocator may give the parent away, leaving the reserved canvas
+  // orphaned in every TEST. Unreserved, the canvas is re-picked each frame.
+  if (last_canvas_plane_id_.has_value() && !is_multirect_virtual(*last_canvas_plane_id_)) {
     scratch_reserved_planes_.push_back(*last_canvas_plane_id_);
   }
   for (const auto& acq : acquisitions) {

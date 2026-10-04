@@ -934,7 +934,10 @@ display consumer, and only the consumer actually presenting is lit.
     lands on one whose parent is armed.
   - **Equal `zpos` = source split.** Two planes on the same stage are read as a
     left/right split pair and rejected unless adjacent (`invalid coordinates,
-    stage:N`). LayerScene now lowers distinct `zpos` values when layers tie.
+    stage:N`).
+  - **zpos 9 and 10 are rejected**, even on a lone plane, although every plane
+    advertises `[0, 10]`. LayerScene lowers zpos densely (same order, from the
+    lowest value), which also keeps values distinct and the canvas low.
 - **Build — clang against a glibc-2.31 (bullseye-class) sysroot.** The Arm GNU
   toolchains' own libstdc++ needs newer glibc, so C++ links with **clang +
   the sysroot's GCC 10 libstdc++** (`--gcc-toolchain=<sysroot>/usr
@@ -958,14 +961,13 @@ display consumer, and only the consumer actually presenting is lit.
   (`eglCreateImage` on the display node's bo) fail on this stack.
 - **Native multi-plane works:** `scene_formats` 4/4 assigned, `scene_warm_start`
   3/3, `plane_stress` 4 layers native at one commit per vblank.
-- **Tests:** 83/84 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card1`.
-- **Known limitation — canvas stage budget.** When a scene needs both many native
-  planes and the composition canvas (`scene_priority` with 8 layers,
-  `allocator_torture`, the pin test), the allocator's native assignment passes
-  TEST alone but adding the canvas exceeds the layer mixer's stages and the commit
-  is rejected without a driver log. The canvas-plane TEST/fallback cannot fix this
-  (every candidate fails); it needs canvas-aware allocation (test the canvas with
-  the assignment, demote a native layer when it does not fit).
+- **Tests:** 97/98 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card1`;
+  the pin test's fixture drives a CRTC that refuses the pinned plane.
+- **Known limitation — 9+ layers with composition.** Dense lowering also numbers
+  the layers that end up composited, so with more layers than usable zpos values
+  the native planes reach the top of the usable range and the canvas has no slot
+  (`allocator_torture`). `scene_priority` (8 layers) places 7 natively plus the
+  canvas.
 - `mouse_cursor`/`cursor_rotate` expect an already-active CRTC and exit when none
   is (no cursor plane exists either); `cursor_scene` works.
 
