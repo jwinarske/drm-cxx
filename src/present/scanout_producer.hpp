@@ -40,7 +40,10 @@ class ScanoutProducer {
   // Allocate one renderable buffer for `fourcc` at width x height against
   // `allowed` (the negotiated, ranked modifier set, most-preferred first). The
   // returned source feeds the scene; the producer owns making each acquired
-  // buffer safe to scan out. The atomic TEST_ONLY commit remains the arbiter of
+  // buffer safe to scan out. The buffer's modifier must come from `allowed`;
+  // a producer that can make none of them fails (not_supported) rather than
+  // allocating outside the set. Empty `allowed` means no constraint, not
+  // nothing acceptable. The atomic TEST_ONLY commit remains the arbiter of
   // whatever modifier from `allowed` the producer actually picks.
   [[nodiscard]] virtual drm::expected<std::unique_ptr<scene::LayerBufferSource>, std::error_code>
   create_buffer(std::uint32_t width, std::uint32_t height, std::uint32_t fourcc,
