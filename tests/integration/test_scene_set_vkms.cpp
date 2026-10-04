@@ -211,7 +211,7 @@ TEST(SceneSetVkms, MirroredLayerAcceptsAcrossMultiCrtc) {
     display.src_rect = drm::scene::Rect{0, 0, mirror_side, mirror_side};
     display.dst_rect = drm::scene::Rect{static_cast<std::int32_t>(cx),
                                         static_cast<std::int32_t>(cy), mirror_side, mirror_side};
-    spec.targets.push_back({.scene_index = i, .display = display, .force_composited = false});
+    spec.targets.push_back({/*scene_index=*/i, /*display=*/display, /*force_composited=*/false});
   }
 
   auto handle = (*set_r)->add_layer(spec);
@@ -302,7 +302,7 @@ TEST(SceneSetVkms, AddRemoveSceneRoundTrip) {
 
     drm::scene::SceneSetLayerSpec spec;
     spec.source = src;
-    spec.targets.push_back({.scene_index = 0, .display = {}, .force_composited = false});
+    spec.targets.push_back({/*scene_index=*/0, /*display=*/{}, /*force_composited=*/false});
     auto h = (*set_r)->add_layer(spec);
     ASSERT_FALSE(h.has_value());
     EXPECT_EQ(h.error(), std::make_error_code(std::errc::invalid_argument));

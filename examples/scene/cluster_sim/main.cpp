@@ -257,8 +257,10 @@ constexpr std::uint32_t k_rear_output_buffer_size = 512U * 1024U;  // ample for 
 // dma_buf->ops aren't amdgpu_dmabuf_ops (a provenance check that
 // rejects ALL foreign V4L2 dmabufs regardless of backing storage,
 // in place since kernel commit 3e339465a836 in 2017).
+#if CLUSTER_SIM_HAS_LIBYUV
 constexpr std::uint32_t k_uvc_capture_fourcc = 0x56595559U;  // V4L2_PIX_FMT_YUYV
 constexpr std::uint32_t k_uvc_buffer_count = 4U;
+#endif
 
 // Synthetic rear-view tier. Used when neither a UVC camera nor a
 // viable vicodec V4l2DecoderSource path is available -- specifically,

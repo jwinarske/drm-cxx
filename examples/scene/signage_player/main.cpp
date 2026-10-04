@@ -390,7 +390,7 @@ int main(int argc, char** argv) try {
                connector_id, crtc_id);
 
   drm::examples::warn_compat(drm::examples::probe_output(dev, crtc_id),
-                             {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
+                             {/*wants_alpha_overlays=*/true, /*wants_explicit_zpos=*/true});
 
   drm::examples::SessionPumpState session_state;
 

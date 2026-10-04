@@ -128,7 +128,7 @@ int main(int argc, char* argv[]) try {
 
   drm::examples::warn_compat(
       drm::examples::probe_output(dev, output->crtc_id),
-      {.wants_alpha_overlays = true, .wants_explicit_zpos = true, .wants_overlay_count = 3U});
+      {/*wants_alpha_overlays=*/true, /*wants_explicit_zpos=*/true, /*wants_overlay_count=*/3U});
 
   // ── The eight layers ──────────────────────────────────────────────
   // Two of each priority class so eviction has unambiguous tiebreakers.

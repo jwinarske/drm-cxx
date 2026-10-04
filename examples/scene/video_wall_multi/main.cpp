@@ -152,10 +152,10 @@ std::vector<OutputStrip> build_strips(
   strips.reserve(outputs.size());
   std::int32_t cursor = 0;
   for (std::size_t i = 0; i < outputs.size(); ++i) {
-    strips.push_back({.scene_index = i,
-                      .x_start = cursor,
-                      .hdisplay = outputs[i].mode.hdisplay,
-                      .vdisplay = outputs[i].mode.vdisplay});
+    strips.push_back({/*scene_index=*/i,
+                      /*x_start=*/cursor,
+                      /*hdisplay=*/outputs[i].mode.hdisplay,
+                      /*vdisplay=*/outputs[i].mode.vdisplay});
     cursor += static_cast<std::int32_t>(outputs[i].mode.hdisplay);
   }
   return strips;
@@ -319,7 +319,7 @@ drm::expected<std::vector<Cell>, std::error_code> build_cells(
         // unstably.
         disp.zpos = 3 + static_cast<int>(idx);
         spec.targets.push_back(
-            {.scene_index = strip.scene_index, .display = disp, .force_composited = false});
+            {/*scene_index=*/strip.scene_index, /*display=*/disp, /*force_composited=*/false});
       }
 
       if (spec.targets.empty()) {
@@ -332,12 +332,12 @@ drm::expected<std::vector<Cell>, std::error_code> build_cells(
       if (!h) {
         return drm::unexpected<std::error_code>(h.error());
       }
-      cells.push_back(Cell{.src = src_ptr,
-                           .shared = shared,
-                           .handle = *h,
-                           .base_argb = k_palette.at(idx % k_palette.size()),
-                           .width = cell_w,
-                           .height = cell_h});
+      cells.push_back(Cell{/*src=*/src_ptr,
+                           /*shared=*/shared,
+                           /*handle=*/*h,
+                           /*base_argb=*/k_palette.at(idx % k_palette.size()),
+                           /*width=*/cell_w,
+                           /*height=*/cell_h});
     }
   }
   return cells;

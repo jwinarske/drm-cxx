@@ -124,7 +124,7 @@ TEST(SceneSetLayerSpec, AddLayerRejectsNullSource) {
 
   drm::scene::SceneSetLayerSpec spec;
   spec.source = nullptr;
-  spec.targets.push_back({.scene_index = 0, .display = {}, .force_composited = false});
+  spec.targets.push_back({/*scene_index=*/0, /*display=*/{}, /*force_composited=*/false});
 
   auto h = (*set)->add_layer(spec);
   ASSERT_FALSE(h.has_value());
@@ -157,7 +157,7 @@ TEST(SceneSetLayerSpec, AddLayerRejectsOutOfRangeSceneIndex) {
   drm::scene::SceneSetLayerSpec spec;
   spec.source = std::make_shared<FakeSource>();
   // Index 0 is out of range against an empty scene list.
-  spec.targets.push_back({.scene_index = 0, .display = {}, .force_composited = false});
+  spec.targets.push_back({/*scene_index=*/0, /*display=*/{}, /*force_composited=*/false});
 
   auto h = (*set)->add_layer(spec);
   ASSERT_FALSE(h.has_value());
@@ -224,10 +224,10 @@ namespace {
 using SlotVec = std::vector<drm::scene::detail::SceneSlotState>;
 
 drm::scene::detail::SceneSlotState slot_engaged(bool wants_modeset) noexcept {
-  return {.is_hole = false, .wants_modeset = wants_modeset};
+  return {/*is_hole=*/false, /*wants_modeset=*/wants_modeset};
 }
 drm::scene::detail::SceneSlotState slot_hole() noexcept {
-  return {.is_hole = true, .wants_modeset = false};
+  return {/*is_hole=*/true, /*wants_modeset=*/false};
 }
 
 }  // namespace
@@ -323,6 +323,6 @@ TEST(SceneSetRemoveLayer, StaleHandleIsNoOp) {
   (*set)->remove_layer(stale);
 
   // Non-default-but-never-issued handle — also a no-op.
-  const drm::scene::SetLayerHandle never_issued{.id = 99, .generation = 1};
+  const drm::scene::SetLayerHandle never_issued{/*id=*/99, /*generation=*/1};
   (*set)->remove_layer(never_issued);
 }

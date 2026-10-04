@@ -271,7 +271,8 @@ int main(int argc, char** argv) try {
     // Sit above the background regardless of driver. amdgpu pins
     // PRIMARY at zpos=2, so 5 stays clear of that.
     disp.zpos = 5;
-    mirror_spec.targets.push_back({.scene_index = i, .display = disp, .force_composited = false});
+    mirror_spec.targets.push_back(
+        {/*scene_index=*/i, /*display=*/disp, /*force_composited=*/false});
   }
   auto mirror_handle_r = scene_set.add_layer(mirror_spec);
   if (!mirror_handle_r) {
