@@ -892,6 +892,7 @@ class LayerScene::Impl {
     canvas_proven_planes_.clear();
     canvas_rejected_planes_.clear();
     canvas_testing_ = true;
+    pin_verdicts_.clear();
     cached_crtc_index_.reset();
     // Empirical mixing result is tied to the prior fd's kernel state;
     // re-probe under the fresh fd if the caller wants the upgrade.
@@ -1012,6 +1013,7 @@ class LayerScene::Impl {
     canvas_proven_planes_.clear();
     canvas_rejected_planes_.clear();
     canvas_testing_ = true;
+    pin_verdicts_.clear();
     cached_crtc_index_.reset();
     // The mixing probe's last verdict was for the previous CRTC; on
     // the new one the driver may behave differently. Re-probe on
@@ -2939,10 +2941,18 @@ class LayerScene::Impl {
   // advertise, immutable ones, and a fixed-slot zpos. Sets assigned_plane_
   // so the report shows the layer AssignedToPlane and compose_unassigned's
   // canvas search treats the plane as in-use — must run before it.
+  //
+  // A pin the static checks accept can still be refused by the driver (a
+  // plane it will not drive on this CRTC). Each (layer, plane, geometry) is
+  // TESTed once with the frame's request and the verdict cached. A rejected
+  // pin is rolled back and its plane disabled; the layer is composited this
+  // frame, counted in pins_failed, and from the next frame takes normal
+  // allocation.
   drm::expected<void, std::error_code> arm_pinned_layers(std::vector<AcquisitionSlot>& acquisitions,
                                                          std::uint32_t crtc_index,
                                                          drm::AtomicRequest& req,
-                                                         CommitReport& report) {
+                                                         CommitReport& report,
+                                                         std::uint32_t test_flags) {
     for (auto& acq : acquisitions) {
       if (acq.planes_layer == nullptr || acq.scene_layer == nullptr ||
           !acq.planes_layer->is_pinned()) {
@@ -2956,6 +2966,9 @@ class LayerScene::Impl {
       const auto* caps = plane_caps_for(crtc_index, plane_id);
       const bool zpos_fixed = caps != nullptr && caps->zpos_min.has_value() &&
                               caps->zpos_max.has_value() && *caps->zpos_min == *caps->zpos_max;
+      const int cursor = req.cursor();
+      const auto props_before = report.properties_written;
+      const auto fbs_before = report.fbs_attached;
       for (auto [name, value] : acq.planes_layer->properties()) {
         auto id = props_.property_id(plane_id, name);
         if (!id.has_value() || props_.is_immutable(plane_id, name).value_or(false)) {
@@ -2976,9 +2989,66 @@ class LayerScene::Impl {
           ++report.fbs_attached;
         }
       }
+      const auto handle_id = acq.scene_layer->handle().id;
+      const auto hash = acq.planes_layer->property_hash();
+      if (req.valid() && pin_verdict(handle_id, plane_id, hash) == PinVerdict::Unknown) {
+        const auto verdict = req.test(test_flags);
+        if (!verdict && verdict.error() != std::errc::permission_denied) {
+          drm::log_warn(
+              "scene::LayerScene: driver rejected pin of layer {} to plane {} ({}); "
+              "compositing it, normal allocation from the next frame",
+              handle_id, plane_id, verdict.error().message());
+          req.rollback(cursor);
+          report.properties_written = props_before;
+          report.fbs_attached = fbs_before;
+          disable_plane(req, plane_id);
+          remember_pin(handle_id, plane_id, hash, PinVerdict::Rejected);
+          ++report.pins_failed;
+          acq.planes_layer->set_pinned(false);
+          acq.planes_layer->set_needs_composition(true);
+          // The layer is unplaced now; warm-start would keep compositing it.
+          // NOLINTNEXTLINE(bugprone-unchecked-optional-access) allocator_ is set at create().
+          allocator_->invalidate_allocation();
+          continue;
+        }
+        if (verdict) {
+          remember_pin(handle_id, plane_id, hash, PinVerdict::Proven);
+        }
+      }
       acq.planes_layer->set_assigned_plane(plane_id);
     }
     return {};
+  }
+
+  enum class PinVerdict : std::uint8_t { Unknown, Proven, Rejected };
+
+  [[nodiscard]] PinVerdict pin_verdict(std::uint32_t handle_id, std::uint32_t plane_id,
+                                       std::size_t hash) const {
+    for (const auto& v : pin_verdicts_) {
+      if (v.handle_id == handle_id && v.plane_id == plane_id && v.hash == hash) {
+        return v.verdict;
+      }
+    }
+    return PinVerdict::Unknown;
+  }
+
+  void remember_pin(std::uint32_t handle_id, std::uint32_t plane_id, std::size_t hash,
+                    PinVerdict verdict) {
+    // Bounded: a pinned layer whose geometry keeps changing adds one entry
+    // per geometry.
+    constexpr std::size_t k_max_pin_verdicts = 64;
+    if (pin_verdicts_.size() >= k_max_pin_verdicts) {
+      pin_verdicts_.clear();
+    }
+    pin_verdicts_.push_back({handle_id, plane_id, hash, verdict});
+  }
+
+  void disable_plane(drm::AtomicRequest& req, std::uint32_t plane_id) {
+    for (const auto* name : {"FB_ID", "CRTC_ID"}) {
+      if (auto id = props_.property_id(plane_id, name); id.has_value()) {
+        (void)req.add_property(plane_id, *id, 0);
+      }
+    }
   }
 
   // Write the canvas's plane properties directly to `req`. Mirrors
@@ -3415,6 +3485,15 @@ class LayerScene::Impl {
   // candidate has failed, restoring the untested pick.
   std::vector<std::uint32_t> canvas_proven_planes_;
   std::vector<std::uint32_t> canvas_rejected_planes_;
+  // Pin TEST verdicts (arm_pinned_layers), keyed by layer handle, plane and
+  // property hash; cleared with the canvas verdicts on resume/rebind.
+  struct PinVerdictEntry {
+    std::uint32_t handle_id;
+    std::uint32_t plane_id;
+    std::size_t hash;
+    PinVerdict verdict;
+  };
+  std::vector<PinVerdictEntry> pin_verdicts_;
   std::vector<const drm::planes::PlaneCapabilities*> scratch_canvas_candidates_;
   // Per-frame zpos overrides from compact_zpos (layers whose value changed).
   std::vector<std::pair<const Layer*, std::uint64_t>> scratch_zpos_overrides_;
@@ -3792,7 +3871,9 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
       continue;
     }
     if (!pin_crtc_index.has_value() ||
-        !pin_is_honorable(*pin_crtc_index, *pin, *acq.scene_layer, scratch_reserved_planes_)) {
+        !pin_is_honorable(*pin_crtc_index, *pin, *acq.scene_layer, scratch_reserved_planes_) ||
+        pin_verdict(acq.scene_layer->handle().id, *pin, acq.planes_layer->property_hash()) ==
+            PinVerdict::Rejected) {
       ++report.pins_failed;
       drm::log_warn(
           "scene::LayerScene: cannot honor pin of layer {} to plane {}; falling back to "
@@ -3870,11 +3951,17 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
     return drm::unexpected<std::error_code>(r.error());
   }
 
+  // TEST flags for the pin and canvas-plane checks: the frame's modeset
+  // allowance, but never PAGE_FLIP_EVENT (TEST_ONLY with an event is EINVAL).
+  const std::uint32_t verify_test_flags =
+      DRM_MODE_ATOMIC_TEST_ONLY | (first_commit_ ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0U);
+
   // Write pinned layers' plane state to their reserved planes. Must run
   // before compose_unassigned: it sets assigned_plane_ so the canvas
   // search sees those planes as in-use and never lands the canvas on one.
   if (pin_crtc_index.has_value()) {
-    if (auto r = arm_pinned_layers(acquisitions, *pin_crtc_index, req, report); !r) {
+    if (auto r = arm_pinned_layers(acquisitions, *pin_crtc_index, req, report, verify_test_flags);
+        !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
   }
@@ -3884,11 +3971,7 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // report.layers_composited and report.composition_buckets; the
   // dropped tally below is the residual that wasn't rescued
   // (no CPU mapping, no free plane, canvas alloc failed).
-  // TEST flags for the canvas-plane check: the frame's modeset allowance, but
-  // never PAGE_FLIP_EVENT (TEST_ONLY together with an event is EINVAL).
-  const std::uint32_t canvas_test_flags =
-      DRM_MODE_ATOMIC_TEST_ONLY | (first_commit_ ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0U);
-  compose_unassigned(acquisitions, req, report, canvas_test_flags);
+  compose_unassigned(acquisitions, req, report, verify_test_flags);
 
   // Subtract skipped layers from the residual: they're flow-controlled
   // (no new frame this vblank), not dropped, and the warning below
