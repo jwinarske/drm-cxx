@@ -61,15 +61,17 @@
 // Producer-binding precondition
 // -----------------------------
 //
-// Mesa populates the gbm_surface's `lock_front_buffer` vtable only
-// once an EGL or Vulkan producer has bound the surface (and on at
-// least amdgpu, only after the producer has actually rendered + swapped
-// at least one frame). The scene's commit must NOT call `acquire()`
-// before that — bare mesa dispatches through a NULL function pointer
-// and segfaults. In practice this means: construct the source, hand
+// A gbm_surface is an EGL native window: Mesa dispatches
+// `lock_front_buffer` / `has_free_buffers` / `release_buffer` into the
+// window surface EGL (or Vulkan) creates on it. Until that window exists
+// those calls segfault -- on every Mesa device, not a particular driver;
+// an initialized EGL display alone is not enough. Destroying the source
+// is safe either way. So the scene's commit must NOT call `acquire()`
+// before the producer has bound the surface: construct the source, hand
 // `native_surface()` to EGL/Vulkan, render one frame, *then* add the
-// layer to the scene (or rely on EAGAIN from a sibling source to
-// keep the scene from issuing the first commit until you're ready).
+// layer to the scene (or rely on EAGAIN from a sibling source to keep the
+// scene from issuing the first commit until you're ready). Before the
+// first swap, `acquire()` returns EAGAIN.
 //
 // Session pause/resume
 // --------------------
