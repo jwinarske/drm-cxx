@@ -248,7 +248,7 @@ int main(int argc, char** argv) try {
                connector_id, crtc_id);
 
   drm::examples::warn_compat(drm::examples::probe_output(dev, crtc_id),
-                             {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
+                             {/*wants_alpha_overlays=*/true, /*wants_explicit_zpos=*/true});
 
   auto bg_src = drm::scene::DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_XRGB8888);
   if (!bg_src) {

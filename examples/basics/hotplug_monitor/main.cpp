@@ -213,7 +213,7 @@ int main(const int argc, char* argv[]) {
   print_active(*active);
 
   drm::examples::warn_compat(drm::examples::probe_output(dev, active->crtc_id),
-                             {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
+                             {/*wants_alpha_overlays=*/true, /*wants_explicit_zpos=*/true});
 
   // Build the scene against the initial configuration.
   drm::scene::LayerScene::Config cfg;

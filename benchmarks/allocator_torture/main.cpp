@@ -790,7 +790,7 @@ int main(int argc, char** argv) {
   // Surface capability gaps that affect the torture shape (alpha
   // routing through composition, missing zpos defeating layer order).
   drm::examples::warn_compat(drm::examples::probe_output(dev, output->crtc_id),
-                             {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
+                             {/*wants_alpha_overlays=*/true, /*wants_explicit_zpos=*/true});
 
   const drm::scene::LayerScene::Config cfg{output->crtc_id, output->connector_id, mode};
   auto scene_r = drm::scene::LayerScene::create(dev, cfg);

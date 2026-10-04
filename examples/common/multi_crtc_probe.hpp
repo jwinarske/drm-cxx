@@ -213,12 +213,12 @@ inline std::vector<ConnectedOutput> enumerate_connected_outputs(const drm::Devic
     }
 
     out.push_back(ConnectedOutput{
-        .connector_id = c->connector_id,
-        .crtc_id = crtc_id,
-        .crtc_index = crtc_index,
-        .primary_plane_id = primary_plane_id,
-        .mode = c->modes[0],  // preferred mode is index 0 by KMS contract
-        .connector_name = detail::connector_type_name(c->connector_type, c->connector_type_id),
+        /*connector_id=*/c->connector_id,
+        /*crtc_id=*/crtc_id,
+        /*crtc_index=*/crtc_index,
+        /*primary_plane_id=*/primary_plane_id,
+        /*mode=*/c->modes[0],  // preferred mode is index 0 by KMS contract
+        /*connector_name=*/detail::connector_type_name(c->connector_type, c->connector_type_id),
     });
     drmModeFreeConnector(c);
   }
@@ -255,11 +255,11 @@ inline ProbeReport probe_combined_atomic(const drm::Device& dev,
   scratch_fbs.reserve(outputs.size());
   for (std::size_t i = 0; i < outputs.size(); ++i) {
     auto buf_r =
-        drm::dumb::Buffer::create(dev, drm::dumb::Config{.width = outputs[i].mode.hdisplay,
-                                                         .height = outputs[i].mode.vdisplay,
-                                                         .drm_format = DRM_FORMAT_XRGB8888,
-                                                         .bpp = 32,
-                                                         .add_fb = true});
+        drm::dumb::Buffer::create(dev, drm::dumb::Config{/*width=*/outputs[i].mode.hdisplay,
+                                                         /*height=*/outputs[i].mode.vdisplay,
+                                                         /*drm_format=*/DRM_FORMAT_XRGB8888,
+                                                         /*bpp=*/32,
+                                                         /*add_fb=*/true});
     if (!buf_r) {
       report.verdict = CombinedAtomicVerdict::Rejected;
       report.error = buf_r.error();

@@ -42,10 +42,10 @@ drm::scene::StreamCapability make_usable_capability() {
 }
 
 drm::scene::SourceFormat valid_format() {
-  return drm::scene::SourceFormat{.drm_fourcc = 0x34325241U,  // ARGB8888
-                                  .modifier = 0,
-                                  .width = 16,
-                                  .height = 16};
+  return drm::scene::SourceFormat{/*drm_fourcc=*/0x34325241U,  // ARGB8888
+                                  /*modifier=*/0,
+                                  /*width=*/16,
+                                  /*height=*/16};
 }
 
 // Non-null sentinel handles for the Config tests. The factory's

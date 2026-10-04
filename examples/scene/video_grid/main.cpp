@@ -178,10 +178,10 @@ int main(int argc, char** argv) try {
                connector_id, crtc_id);
 
   drm::examples::warn_compat(drm::examples::probe_output(dev, crtc_id),
-                             {.wants_alpha_overlays = true,
-                              .wants_explicit_zpos = true,
-                              .wants_overlay_count = 3U,
-                              .wants_alpha_blending = true});
+                             {/*wants_alpha_overlays=*/true,
+                              /*wants_explicit_zpos=*/true,
+                              /*wants_overlay_count=*/3U,
+                              /*wants_alpha_blending=*/true});
 
   drm::scene::LayerScene::Config cfg;
   cfg.crtc_id = crtc_id;

@@ -219,7 +219,7 @@ void run_scene_test(drm::Device& dev,
       display.src_rect = drm::scene::Rect{0, 0, mirror_side, mirror_side};
       display.dst_rect = drm::scene::Rect{static_cast<std::int32_t>(cx),
                                           static_cast<std::int32_t>(cy), mirror_side, mirror_side};
-      spec.targets.push_back({.scene_index = i, .display = display, .force_composited = false});
+      spec.targets.push_back({/*scene_index=*/i, /*display=*/display, /*force_composited=*/false});
     }
 
     auto h = (*set_r)->add_layer(spec);
@@ -308,9 +308,9 @@ int main(int argc, char* argv[]) try {
   // fds[2] wakes the poll once a quit signal has been handled (signals are
   // routed to a thread, so they no longer interrupt it).
   std::array<pollfd, 3> fds{
-      pollfd{.fd = monitor.fd(), .events = POLLIN, .revents = 0},
-      pollfd{.fd = STDIN_FILENO, .events = POLLIN, .revents = 0},
-      pollfd{.fd = drm::examples::quit_wake_fd(), .events = POLLIN, .revents = 0},
+      pollfd{/*fd=*/monitor.fd(), /*events=*/POLLIN, /*revents=*/0},
+      pollfd{/*fd=*/STDIN_FILENO, /*events=*/POLLIN, /*revents=*/0},
+      pollfd{/*fd=*/drm::examples::quit_wake_fd(), /*events=*/POLLIN, /*revents=*/0},
   };
   while (!g_sigint_received) {
     const int n = ::poll(fds.data(), fds.size(), -1);

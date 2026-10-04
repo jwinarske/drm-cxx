@@ -200,7 +200,7 @@ int main(int argc, char* argv[]) try {
                output->connector_id, output->crtc_id);
 
   drm::examples::warn_compat(drm::examples::probe_output(dev, output->crtc_id),
-                             {.wants_alpha_overlays = true, .wants_explicit_zpos = true});
+                             {/*wants_alpha_overlays=*/true, /*wants_explicit_zpos=*/true});
 
   // Layer table, ordered most-distinctive-first so any plane-budget
   // truncation drops the least pedagogically interesting layers last.

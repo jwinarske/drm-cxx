@@ -233,9 +233,9 @@ drm::expected<EglStreamBuilder::Result, std::error_code> EglStreamBuilder::build
   }
 
   const EglStreamSource::Config src_cfg{
-      .display = result.display,
-      .egl_config = result.egl_config,
-      .format = req.format,
+      /*display=*/result.display,
+      /*egl_config=*/result.egl_config,
+      /*format=*/req.format,
   };
   auto src = EglStreamSource::create(req.capability, src_cfg);
   if (!src) {
