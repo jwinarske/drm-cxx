@@ -30,6 +30,11 @@ bool PlaneCapabilities::supports_format(const uint32_t fmt) const {
 }
 
 bool PlaneCapabilities::compatible_with_crtc(const uint32_t crtc_index) const {
+  // possible_crtcs is a 32-bit mask; a larger index has no bit (and shifting
+  // by it is undefined).
+  if (crtc_index >= 32U) {
+    return false;
+  }
   return (possible_crtcs & (1U << crtc_index)) != 0;
 }
 

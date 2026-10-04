@@ -114,6 +114,16 @@ TEST(PlaneCapabilitiesTest, CrtcCompatibility) {
   EXPECT_FALSE(caps.compatible_with_crtc(3));
 }
 
+// Index 32 and up has no bit in the 32-bit mask: false, not bit (index % 32).
+TEST(PlaneCapabilitiesTest, CrtcIndexBeyondMaskIsIncompatible) {
+  drm::planes::PlaneCapabilities caps;
+  caps.possible_crtcs = 0xFFFFFFFFU;
+  EXPECT_TRUE(caps.compatible_with_crtc(31));
+  EXPECT_FALSE(caps.compatible_with_crtc(32));
+  EXPECT_FALSE(caps.compatible_with_crtc(33));
+  EXPECT_FALSE(caps.compatible_with_crtc(0xFFFFFFFFU));
+}
+
 TEST(PlaneCapabilitiesTest, DefaultValues) {
   drm::planes::PlaneCapabilities const caps;
 
