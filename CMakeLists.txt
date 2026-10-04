@@ -370,9 +370,18 @@ endif()
 # No FetchContent, no compiled fmt library.
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -std=c++${CMAKE_CXX_STANDARD}")
+# Mirrors detail/format.hpp's gate exactly (the feature macros, not whether
+# std::println merely compiles): libc++ 18 ships a usable <print> but withholds
+# __cpp_lib_format, so the header takes the {fmt} path there.
 check_cxx_source_compiles([=[
-  #include <print>
-  int main() { std::println("{}", 1); return 0; }
+  #include <version>
+  #if !defined(__cpp_lib_print) || __cpp_lib_print < 202207L
+  #error std::print feature macro not set
+  #endif
+  #if !defined(__cpp_lib_format) || __cpp_lib_format < 201907L
+  #error std::format feature macro not set
+  #endif
+  int main() { return 0; }
 ]=] DRM_CXX_HAS_STD_PRINT)
 unset(CMAKE_REQUIRED_FLAGS)
 if(NOT DRM_CXX_HAS_STD_PRINT)

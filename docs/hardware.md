@@ -531,7 +531,7 @@ at **1920×1080@60** (plus 1280×1024@75): the NXP DW-HDMI path filters the
 high-refresh modes out. Every run here therefore scanned out at 60 Hz.
 
 **Build — cross from an x86_64 host against the board's own sysroot:**
-`scripts/build_imx8mp.sh <ssh-target> [--deploy]` does all of the below
+`scripts/build_imx8mp.sh <ssh-target> [--clang] [--deploy]` does all of the below
 (toolchain fetch + checksum, sysroot mirror, dependency cross-builds, drm-cxx,
 rpath scrub, deploy). Pitfalls it handles, each of which was hit:
 
@@ -573,6 +573,32 @@ create the directory with a `usr-local.conf` and run `ldconfig`. Present on the
 image already: libdrm 2.4.116, NXP GBM 21.3.5 (`libgbm_viv`), EGL/GLESv2 (Vivante),
 Vulkan loader 1.3.275, libinput, xkbcommon, libjpeg. Absent and not built:
 libcamera (`camera`), libva.
+
+**Clang + libc++ variant (`--clang`):** the BSP also ships the **LLVM 18 libc++
+runtime** (`/usr/lib/libc++.so.1`, libc++abi merged in; NEEDED only libc and
+`libgcc_s`) but no headers. `--clang` builds with host **clang 18** against the
+same board sysroot: libc++ **18.1.8** headers are generated through libc++'s own
+`runtimes` CMake (`__config_site` is generated; `install-cxx-headers` +
+`install-cxxabi-headers`, `LIBCXXABI_USE_LLVM_UNWINDER=OFF`) into the sysroot
+only, a link-time `libc++.so → libc++.so.1` symlink is added, and the binaries run
+against the board's own libc++ with the unwinder staying `libgcc_s` (via
+`--gcc-install-dir` into the BSP's GCC 13.2). The C++ dependencies are rebuilt
+against libc++ into **`/usr/local/drm-cxx-libcxx`**, reached by rpath only (no
+`ld.so.conf` entry) so they never shadow the GCC build's `/usr/local`.
+Pitfalls:
+
+- **`-stdlib=libc++` at link time only.** With `-nostdinc++` it is an unused
+  compile argument, which Meson's compiler checks turn into an error ("A
+  C++17-capable compiler is required").
+- **libc++ 18 withholds `__cpp_lib_format`,** so C++23 still takes the `{fmt}`
+  path — the build's `std::print` probe checks the same feature macros
+  `detail/format.hpp` gates on, not whether `std::println` compiles.
+- **Build libyuv with `CAN_COMPILE_SME=OFF`:** clang 18 emits SME kernels that
+  need `__arm_tpidr2_save`, which GCC 13's libgcc lacks.
+
+The test suite and examples (`vk_present`, `gl_present`, `egl_scene`,
+`vulkan_scene`, `cluster_sim`, `cluster_sim_vulkan`, `signage_player`,
+`plane_stress`) behave identically to the GCC build.
 
 **Running:** the BSP starts a desktop compositor service that holds DRM master on
 `card1`; stop it (service + its socket unit) before running KMS examples, start

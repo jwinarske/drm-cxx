@@ -86,9 +86,19 @@ endif
 # vendored header-only git submodule (third_party/fmt) — no fetch, no compiled
 # library. A parent meson project that must supply its own fmt can override the
 # dependency before configuring drm-cxx.
-has_std_print = cpp.compiles(
-  '#include <print>\nint main(){ std::println("{}", 1); }',
-  name : 'std::print / std::println available',
+# The probe mirrors detail/format.hpp's gate exactly (the feature macros, not
+# whether std::println merely compiles): libc++ 18 ships a usable <print> but
+# withholds __cpp_lib_format, so the header takes the {fmt} path there and the
+# build must supply it.
+has_std_print = cpp.compiles('''#include <version>
+#if !defined(__cpp_lib_print) || __cpp_lib_print < 202207L
+#error std::print feature macro not set
+#endif
+#if !defined(__cpp_lib_format) || __cpp_lib_format < 201907L
+#error std::format feature macro not set
+#endif
+int main() { return 0; }''',
+  name : 'std::print / std::format feature macros',
 )
 if has_std_print
   fmt_dep = dependency('', required : false)

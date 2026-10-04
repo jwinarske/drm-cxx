@@ -16,6 +16,15 @@
 # cross-built with the same toolchain into a staging tree, then copied into the
 # sysroot (to build against) and, with --deploy, onto the board's /usr/local.
 #
+# --clang builds with LLVM instead: clang 18 against the same board sysroot, and
+# libc++ in place of libstdc++. The BSP ships the libc++ 18 runtime (libc++abi
+# merged in) but no headers, so libc++ 18.1.8's headers are installed into the
+# sysroot link-only and the binaries run against the board's own libc++. The C++
+# dependencies are rebuilt against libc++, so this variant keeps its own cache,
+# sysroot and build dir, and deploys its dependencies to $PREFIX
+# (/usr/local/drm-cxx-libcxx) — found through an rpath, never ld.so.conf, so they
+# cannot shadow the GCC build's /usr/local libraries.
+#
 # GStreamer is different: the BSP ships the 1.24 runtime (with NXP's VPU / G2D
 # plugins) but no headers. The matching release is cross-built into a separate
 # *link-only* stage copied into the sysroot — never deployed — so video_player
@@ -31,14 +40,15 @@
 #     so nothing deployed references a path on the build machine.
 #
 # Usage:
-#   scripts/build_imx8mp.sh <ssh-target> [--deploy] [--resync-sysroot] [--clean]
+#   scripts/build_imx8mp.sh <ssh-target> [--clang] [--deploy] [--resync-sysroot] [--clean]
 #     e.g. scripts/build_imx8mp.sh root@imx8mp.local --deploy
 #
 #   <ssh-target>       board to mirror the sysroot from (first run, or with
 #                      --resync-sysroot) and to deploy to (--deploy).
+#   --clang            build with clang 18 + libc++ (see above) instead of GCC.
 #   --deploy           copy the deps to the board's /usr/local (+ ld.so.conf.d
-#                      entry + ldconfig) and the build tree + examples/ assets
-#                      to $DEST on the board.
+#                      entry + ldconfig; with --clang, to $PREFIX, no ld.so.conf)
+#                      and the build tree + examples/ assets to $DEST on the board.
 #   --resync-sysroot   re-mirror the board sysroot (after a BSP update).
 #   --clean            wipe the drm-cxx build dir before configuring.
 #
@@ -50,9 +60,14 @@
 #   Always pass /dev/dri/card1: card0 is the render-only Vivante GPU node.
 #
 # Env overrides:
-#   IMX8MP_BUILD_CACHE  cache dir (default: $HOME/.cache/drm-cxx-imx8mp)
-#   BUILD_DIR           drm-cxx build dir (default: <repo>/build-imx8mp)
-#   DEST                deploy dir on the board (default: /root/drm-cxx)
+#   IMX8MP_BUILD_CACHE  cache dir (default: $HOME/.cache/drm-cxx-imx8mp, -clang
+#                       suffixed with --clang)
+#   BUILD_DIR           drm-cxx build dir (default: <repo>/build-imx8mp, or
+#                       <repo>/build-imx8mp-clang)
+#   DEST                deploy dir on the board (default: /root/drm-cxx, or
+#                       /root/drm-cxx-clang)
+#   LLVM_BIN            clang 18 toolchain bin dir for --clang
+#                       (default: /usr/lib64/llvm18/bin)
 #   JOBS                parallel jobs (default: nproc)
 #   KEYBOARD=1          also build the keyboard demo. Off by default: it bakes
 #                       its font's absolute build-dir path into the binary, so
@@ -66,11 +81,13 @@ TARGET=""
 DEPLOY=0
 RESYNC=0
 CLEAN=0
+CLANG=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --deploy)         DEPLOY=1; shift ;;
     --resync-sysroot) RESYNC=1; shift ;;
     --clean)          CLEAN=1; shift ;;
+    --clang)          CLANG=1; shift ;;
     -h|--help)        sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; /^set -euo/d'; exit 0 ;;
     -*)               echo "build_imx8mp: unknown option: $1" >&2; exit 1 ;;
     *)                TARGET="$1"; shift ;;
@@ -78,9 +95,17 @@ while [ $# -gt 0 ]; do
 done
 
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
-CACHE="${IMX8MP_BUILD_CACHE:-$HOME/.cache/drm-cxx-imx8mp}"
-BUILD_DIR="${BUILD_DIR:-$REPO/build-imx8mp}"
-DEST="${DEST:-/root/drm-cxx}"
+if [ "$CLANG" = 1 ]; then
+  CACHE="${IMX8MP_BUILD_CACHE:-$HOME/.cache/drm-cxx-imx8mp-clang}"
+  BUILD_DIR="${BUILD_DIR:-$REPO/build-imx8mp-clang}"
+  DEST="${DEST:-/root/drm-cxx-clang}"
+  PREFIX=/usr/local/drm-cxx-libcxx  # deps on the board, reached by rpath
+else
+  CACHE="${IMX8MP_BUILD_CACHE:-$HOME/.cache/drm-cxx-imx8mp}"
+  BUILD_DIR="${BUILD_DIR:-$REPO/build-imx8mp}"
+  DEST="${DEST:-/root/drm-cxx}"
+  PREFIX=/usr/local
+fi
 JOBS="${JOBS:-$(nproc)}"
 
 LDI_REF="${LDI_REF:-0.2.0}"
@@ -91,6 +116,8 @@ BLEND2D_REF="${BLEND2D_REF:-master}"
 ASMJIT_REF="${ASMJIT_REF:-master}"
 LIBYUV_REF="${LIBYUV_REF:-main}"
 GST_VERSION="${GST_VERSION:-1.24.0}"
+LLVM_BIN="${LLVM_BIN:-/usr/lib64/llvm18/bin}"
+LIBCXX_VER="18.1.8"  # the BSP's libc++ is LLVM 18
 
 TC_VER="13.2.rel1"
 TC_NAME="arm-gnu-toolchain-${TC_VER}-x86_64-aarch64-none-linux-gnu"
@@ -99,7 +126,7 @@ TC_SHA="12fcdf13a7430655229b20438a49e8566e26551ba08759922cdaf4695b0d4e23"
 TRIPLE="aarch64-none-linux-gnu"
 
 SYSROOT="$CACHE/sysroot"
-STAGE="$CACHE/deps-stage"   # DESTDIR for the cross-built deps (prefix /usr/local)
+STAGE="$CACHE/deps-stage"   # DESTDIR for the cross-built deps (prefix $PREFIX)
 GST_STAGE="$CACHE/gst-link-stage"  # GStreamer headers/libs to link against (prefix /usr); never deployed
 SRC="$CACHE/src"
 TC_DIR="$CACHE/toolchain"
@@ -120,7 +147,13 @@ pkg-config --exists hwdata || die "host hwdata (pnp.ids) is required — install
 mkdir -p "$CACHE" "$SRC"
 
 # ── Toolchain ──────────────────────────────────────────────────────────────────
-if [ ! -x "$TC_DIR/bin/${TRIPLE}-g++" ]; then
+if [ "$CLANG" = 1 ]; then
+  for t in clang clang++ ld.lld llvm-ar llvm-ranlib llvm-strip; do
+    [ -x "$LLVM_BIN/$t" ] || die "--clang needs $LLVM_BIN/$t (clang 18; set LLVM_BIN)"
+  done
+  "$LLVM_BIN/clang" --version | grep -q 'clang version 18\.' \
+    || die "--clang needs clang 18 to match the BSP's libc++ 18 (found: $("$LLVM_BIN/clang" --version | head -1))"
+elif [ ! -x "$TC_DIR/bin/${TRIPLE}-g++" ]; then
   log "fetching Arm GNU Toolchain ${TC_VER} (matches the BSP's GCC 13.2)"
   tarball="$CACHE/${TC_NAME}.tar.xz"
   rm -f "$tarball.part"
@@ -162,12 +195,116 @@ cat > "$PKGCONF" <<EOF
 # the sysroot's own system include/lib dirs (pkgconf stops filtering them once
 # sysroot-prefixed, and -isystem <sysroot>/usr/include breaks #include_next).
 export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
-export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig:$SYSROOT/usr/local/lib/pkgconfig:$SYSROOT/usr/local/lib64/pkgconfig"
+export PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig:$SYSROOT$PREFIX/lib/pkgconfig:$SYSROOT$PREFIX/lib64/pkgconfig:$SYSROOT$PREFIX/share/pkgconfig"
 out=\$(pkg-config "\$@") || exit \$?
 printf '%s\n' "\$out" | sed -E 's#(^| )-I$SYSROOT/usr/include( |\$)#\1#g; s#(^| )-L$SYSROOT/usr/lib( |\$)#\1#g'
 EOF
 chmod +x "$PKGCONF"
 
+if [ "$CLANG" = 1 ]; then
+# The BSP's GCC install (crt*.o, libgcc) — clang links through it, so the
+# unwinder stays the board's libgcc_s.
+GCC_DIR=$(dirname "$(find "$SYSROOT/usr/lib" -mindepth 3 -maxdepth 3 -name crtbegin.o -print -quit)")
+[ -f "$GCC_DIR/crtbegin.o" ] || die "no GCC install (crtbegin.o) in the sysroot"
+CLANG_COMMON="--target=aarch64-linux-gnu -mcpu=cortex-a53 --gcc-install-dir=$GCC_DIR"
+# libc++ headers from the sysroot only (-nostdinc++): never the host's.
+# -stdlib=libc++ is a link-time choice here (it picks -lc++); passed at compile
+# time next to -nostdinc++ it is unused, which meson's checks treat as an error.
+CLANG_CXX="-nostdinc++ -isystem $SYSROOT/usr/include/c++/v1"
+CLANG_LINK="-fuse-ld=lld -stdlib=libc++ -Wl,-rpath,$PREFIX/lib -Wl,-rpath,$PREFIX/lib64"
+
+cat > "$CMAKE_TC" <<EOF
+# Generated by build_imx8mp.sh --clang.
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_C_COMPILER "$LLVM_BIN/clang")
+set(CMAKE_CXX_COMPILER "$LLVM_BIN/clang++")
+set(CMAKE_AR "$LLVM_BIN/llvm-ar")
+set(CMAKE_RANLIB "$LLVM_BIN/llvm-ranlib")
+set(CMAKE_C_FLAGS_INIT "$CLANG_COMMON")
+set(CMAKE_CXX_FLAGS_INIT "$CLANG_COMMON $CLANG_CXX")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "$CLANG_LINK -L$SYSROOT$PREFIX/lib")
+set(CMAKE_SHARED_LINKER_FLAGS_INIT "$CLANG_LINK -L$SYSROOT$PREFIX/lib")
+set(CMAKE_MODULE_LINKER_FLAGS_INIT "$CLANG_LINK -L$SYSROOT$PREFIX/lib")
+set(CMAKE_SYSROOT "$SYSROOT")
+set(CMAKE_FIND_ROOT_PATH "$SYSROOT")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+EOF
+
+cat > "$CROSS_FILE" <<EOF
+# Generated by build_imx8mp.sh --clang.
+[constants]
+sysroot = '$SYSROOT'
+common = ['--target=aarch64-linux-gnu', '-mcpu=cortex-a53', '--sysroot=' + sysroot,
+          '--gcc-install-dir=$GCC_DIR', '-idirafter', sysroot + '$PREFIX/include']
+cxx = ['-nostdinc++', '-isystem', sysroot + '/usr/include/c++/v1']
+link_common = common + ['-fuse-ld=lld', '-L' + sysroot + '$PREFIX/lib',
+                        '-Wl,-rpath,$PREFIX/lib', '-Wl,-rpath,$PREFIX/lib64',
+                        '-Wl,-rpath-link,' + sysroot + '/usr/lib',
+                        '-Wl,-rpath-link,' + sysroot + '$PREFIX/lib',
+                        '-Wl,-rpath-link,' + sysroot + '$PREFIX/lib64']
+[binaries]
+c = '$LLVM_BIN/clang'
+cpp = '$LLVM_BIN/clang++'
+ar = '$LLVM_BIN/llvm-ar'
+strip = '$LLVM_BIN/llvm-strip'
+pkg-config = '$PKGCONF'
+cmake = 'cmake'
+[built-in options]
+c_args = common
+cpp_args = common + cxx
+c_link_args = link_common
+cpp_link_args = link_common + ['-stdlib=libc++']
+cmake_prefix_path = [sysroot + '$PREFIX', sysroot + '/usr']
+[properties]
+sys_root = sysroot
+cmake_toolchain_file = '$CMAKE_TC'
+[cmake]
+CMAKE_FIND_ROOT_PATH = '$SYSROOT'
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'cortex-a53'
+endian = 'little'
+EOF
+
+# libc++ headers matching the BSP's runtime, installed into the sysroot only
+# (never deployed): __config_site is generated, so they come from libc++'s own
+# CMake. The board's libc++.so.1 has libc++abi merged in; -lc++ needs only a
+# link-time libc++.so symlink.
+if [ ! -f "$SYSROOT/usr/include/c++/v1/__config_site" ] || [ ! -f "$SYSROOT/usr/include/c++/v1/cxxabi.h" ]; then
+  tarball="$SRC/llvm-project-$LIBCXX_VER.src.tar.xz"
+  if [ ! -s "$tarball" ]; then
+    log "fetching llvm-project $LIBCXX_VER (libc++ headers)"
+    curl --fail --location --retry 3 --retry-all-errors --output "$tarball.part" \
+      "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LIBCXX_VER/llvm-project-$LIBCXX_VER.src.tar.xz"
+    mv "$tarball.part" "$tarball"
+  fi
+  if [ ! -d "$SRC/llvm-project-$LIBCXX_VER.src/runtimes" ]; then
+    tar -xJf "$tarball" -C "$SRC" "llvm-project-$LIBCXX_VER.src/runtimes" \
+      "llvm-project-$LIBCXX_VER.src/libcxx" "llvm-project-$LIBCXX_VER.src/libcxxabi" \
+      "llvm-project-$LIBCXX_VER.src/cmake" "llvm-project-$LIBCXX_VER.src/llvm/cmake" \
+      "llvm-project-$LIBCXX_VER.src/llvm/utils/llvm-lit" "llvm-project-$LIBCXX_VER.src/libc"
+  fi
+  log "installing libc++ $LIBCXX_VER headers into the sysroot"
+  rm -rf "$CACHE/build/libcxx-headers"
+  cmake -G Ninja -S "$SRC/llvm-project-$LIBCXX_VER.src/runtimes" -B "$CACHE/build/libcxx-headers" \
+    -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TC" -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+    -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" -DLIBCXX_CXX_ABI=libcxxabi \
+    -DLIBCXX_INCLUDE_TESTS=OFF -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+    -DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+    -DLIBCXX_ENABLE_SHARED=OFF -DLIBCXX_ENABLE_STATIC=OFF >/dev/null
+  DESTDIR="$SYSROOT" ninja -C "$CACHE/build/libcxx-headers" install-cxx-headers \
+    install-cxxabi-headers >/dev/null
+  [ -f "$SYSROOT/usr/include/c++/v1/__config_site" ] && [ -f "$SYSROOT/usr/include/c++/v1/cxxabi.h" ] \
+    || die "libc++ header install failed"
+fi
+ln -sfn libc++.so.1 "$SYSROOT/usr/lib/libc++.so"
+else
 cat > "$CMAKE_TC" <<EOF
 # Generated by build_imx8mp.sh.
 set(CMAKE_SYSTEM_NAME Linux)
@@ -192,11 +329,11 @@ cat > "$CROSS_FILE" <<EOF
 sysroot = '$SYSROOT'
 # -idirafter / -L: the cross GCC does not search <sysroot>/usr/local, where the
 # staged deps live; -idirafter keeps it behind libc so #include_next still works.
-common = ['-mcpu=cortex-a53', '--sysroot=' + sysroot, '-idirafter', sysroot + '/usr/local/include']
-link_common = common + ['-L' + sysroot + '/usr/local/lib',
+common = ['-mcpu=cortex-a53', '--sysroot=' + sysroot, '-idirafter', sysroot + '$PREFIX/include']
+link_common = common + ['-L' + sysroot + '$PREFIX/lib',
                         '-Wl,-rpath-link,' + sysroot + '/usr/lib',
-                        '-Wl,-rpath-link,' + sysroot + '/usr/local/lib',
-                        '-Wl,-rpath-link,' + sysroot + '/usr/local/lib64']
+                        '-Wl,-rpath-link,' + sysroot + '$PREFIX/lib',
+                        '-Wl,-rpath-link,' + sysroot + '$PREFIX/lib64']
 [binaries]
 c = '$TC-gcc'
 cpp = '$TC-g++'
@@ -209,7 +346,7 @@ c_args = common
 cpp_args = common
 c_link_args = link_common
 cpp_link_args = link_common
-cmake_prefix_path = [sysroot + '/usr/local', sysroot + '/usr']
+cmake_prefix_path = [sysroot + '$PREFIX', sysroot + '/usr']
 [properties]
 sys_root = sysroot
 cmake_toolchain_file = '$CMAKE_TC'
@@ -221,6 +358,7 @@ cpu_family = 'aarch64'
 cpu = 'cortex-a53'
 endian = 'little'
 EOF
+fi
 
 # ── Dependencies the BSP lacks (cross-built into $STAGE, prefix /usr/local) ────
 fetch() {  # fetch <url> <dir> <ref>
@@ -234,7 +372,7 @@ meson_dep() {  # meson_dep <name> <srcdir> [meson options...]
   log "cross-building $name"
   rm -rf "$CACHE/build/$name"
   meson setup "$CACHE/build/$name" "$src" --cross-file "$CROSS_FILE" \
-    --prefix=/usr/local --buildtype=release "$@" >/dev/null
+    --prefix="$PREFIX" --buildtype=release "$@" >/dev/null
   ninja -C "$CACHE/build/$name" -j "$JOBS" >/dev/null
   DESTDIR="$STAGE" meson install -C "$CACHE/build/$name" --no-rebuild >/dev/null
   touch "$STAGE/.done-$name"
@@ -245,7 +383,7 @@ cmake_dep() {  # cmake_dep <name> <srcdir> [cmake -D options...]
   log "cross-building $name"
   rm -rf "$CACHE/build/$name"
   cmake -S "$src" -B "$CACHE/build/$name" -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TC" \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local "$@" >/dev/null
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" "$@" >/dev/null
   cmake --build "$CACHE/build/$name" -j "$JOBS" >/dev/null
   DESTDIR="$STAGE" cmake --install "$CACHE/build/$name" >/dev/null
   touch "$STAGE/.done-$name"
@@ -253,8 +391,8 @@ cmake_dep() {  # cmake_dep <name> <srcdir> [cmake -D options...]
 mkdir -p "$STAGE"
 # Each dep builds against the sysroot plus the deps staged before it.
 sync_stage() {
-  mkdir -p "$SYSROOT/usr/local"
-  cp -a "$STAGE/usr/local/." "$SYSROOT/usr/local/" 2>/dev/null || true
+  mkdir -p "$SYSROOT$PREFIX"
+  cp -a "$STAGE$PREFIX/." "$SYSROOT$PREFIX/" 2>/dev/null || true
   [ -d "$GST_STAGE/usr" ] && cp -a "$GST_STAGE/usr/." "$SYSROOT/usr/"
   return 0
 }
@@ -275,7 +413,9 @@ cmake_dep blend2d "$SRC/blend2d" -DBLEND2D_STATIC=FALSE -DBLEND2D_TEST=FALSE
 # libyuv: cluster_sim's UVC rear-view (YUYV -> XRGB on the CPU) — the route a
 # YUYV/NV12 camera takes onto the RGB-only LCDIFv3 planes.
 fetch https://chromium.googlesource.com/libyuv/libyuv "$SRC/libyuv" "$LIBYUV_REF"
-cmake_dep libyuv "$SRC/libyuv" -DUNIT_TEST=OFF
+# No SME kernels: they need __arm_tpidr2_save, which the BSP's GCC 13 libgcc
+# lacks (clang can compile them; GCC 13 cannot), and the A53 has no SME anyway.
+cmake_dep libyuv "$SRC/libyuv" -DUNIT_TEST=OFF -DCAN_COMPILE_SME=OFF
 
 # GStreamer core + plugins-base (libs only) for video_player / GstAppsinkSource.
 gst_dep() {  # gst_dep <module> [meson options...]
@@ -350,10 +490,16 @@ leaks=$(find "$BUILD_DIR" -type f \( -perm -u+x -o -name '*.so*' \) -exec chrpat
 # ── Deploy ─────────────────────────────────────────────────────────────────────
 if [ "$DEPLOY" = 1 ]; then
   [ -n "$TARGET" ] || die "--deploy needs the board's <ssh-target>"
-  log "deploying deps → $TARGET:/usr/local"
-  tar -C "$STAGE" -cf - usr/local | $SSH "$TARGET" \
-    'tar -C / -xf - && mkdir -p /etc/ld.so.conf.d \
-     && printf "/usr/local/lib\n/usr/local/lib64\n" > /etc/ld.so.conf.d/usr-local.conf && ldconfig'
+  log "deploying deps → $TARGET:$PREFIX"
+  if [ "$CLANG" = 1 ]; then
+    # Reached by the binaries' rpath; no ld.so.conf entry, so these libc++
+    # builds of the deps never shadow the GCC build's /usr/local ones.
+    tar -C "$STAGE" -cf - "${PREFIX#/}" | $SSH "$TARGET" 'tar -C / -xf -'
+  else
+    tar -C "$STAGE" -cf - usr/local | $SSH "$TARGET" \
+      'tar -C / -xf - && mkdir -p /etc/ld.so.conf.d \
+       && printf "/usr/local/lib\n/usr/local/lib64\n" > /etc/ld.so.conf.d/usr-local.conf && ldconfig'
+  fi
   log "deploying build tree + examples/ assets → $TARGET:$DEST"
   $SSH "$TARGET" "mkdir -p '$DEST'"
   tar -C "$(dirname "$BUILD_DIR")" -cf - \
