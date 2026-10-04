@@ -1,5 +1,149 @@
 # Changelog
 
+## v3.0.0 — 2026-10-04: Vulkan/GL reach on IOMMU-less displays, GPU-import composition, plane-rule fixes
+
+Major bump: two source breaks (below). Every consumer must recompile.
+
+### Breaking changes
+
+- **`Device::add_framebuffer`** takes `drm::span<const T, 4>` for handles,
+  strides, offsets and modifiers. `T[4]` and `std::array<T, 4>` convert
+  implicitly; a bare pointer no longer compiles. (#281)
+- **`planes::TestCache::hit_count()` → `failure_count()`.** Counts rejections
+  only; the latest verdict clears it. (#267)
+- **ABI only:**
+  - `ExternalDmaBufPool::submit` returns `drm::expected<void, std::error_code>`
+    (was `void`). (#272)
+  - `LayerBufferSource` gains `on_retired()`. (#274)
+  - `DisplayParams` gains `src_rect_fixed`. (#269)
+  - `ScanoutBackend::Config` gains `connector_id`. (#277)
+  - `cursor::RendererConfig` gains `prefer_legacy`. (#273)
+
+### `drm::present`
+
+- **`VkScanoutProducer` reaches displays that can't import its memory.** On
+  export rejection, falls back in order (#278, #279):
+  - display-side buffer imported into Vulkan, kept only if a GPU write shows
+    through;
+  - GPU blit: export imported as an EGLImage, drawn by GLES into a
+    `GlScanoutProducer` surface;
+  - CPU copy into a dumb-buffer ring.
+- Shared images released to / acquired from `VK_QUEUE_FAMILY_FOREIGN_EXT` each
+  frame. (#278)
+- **`VkScanoutProducer::render(recorder)`**: the app records into the frame's
+  command buffer; the producer adds barriers, copy-out and resolve.
+  `create(dev, Options{buffer_count})` (default 3 rotating images);
+  `vk_instance()`, `vk_physical_device()`, `vk_format()`. (#283)
+- Vivante (`VK_VENDOR_ID_VSI`):
+  - LINEAR allocated as `VK_IMAGE_TILING_LINEAR`; the DRM-modifier LINEAR
+    image is laid out tiled. (#283)
+  - One-pixel tile-status resolve after each render, a safeguard for tiled
+    images. (#279, #284)
+- 1.1-promoted external-memory/semaphore extensions requested only when
+  listed. (#277)
+- `GlScanoutProducer`'s proxy source forwards `export_dma_buf`, release fences,
+  `has_fresh_content`, `on_retired` and plane bind/unbind. (#283)
+
+### `drm::scene`
+
+- **GPU composition samples dma-bufs instead of uploading.** `DumbBufferSource`
+  (single-plane) and `GbmSurfaceSource` implement `export_dma_buf()`;
+  `LayerScene` composites by import when the canvas can. On Vivante: ~221 ms → ~3.5 ms per
+  1080p layer. (#282)
+- `GbmSurfaceSource` LINEAR uses the plain create + `GBM_BO_USE_LINEAR`
+  (Vivante's modifier-list surfaces have two buffers). (#279)
+- A composited layer's acquire fence is CPU-waited before sampling. (#282)
+- `GlCompositor` disables import after a failed RGB import, falling back to CPU
+  upload. (#282)
+- `GlCompositor` restores the caller's EGL context, surfaces and API on every
+  entry point; teardown releases only its own context. (#270)
+- `ExternalDmaBufPool::retire(key)`: tears one import down once no commit holds
+  it. (#269)
+- `DisplayParams::src_rect_fixed` + `Layer::set_src_rect_fixed_if_changed()`:
+  16.16 source rect written to `SRC_*` as given. (#269)
+- `ExternalDmaBufPool::submit` reports a frame it can't take: the import error,
+  `invalid_argument`, or `resource_unavailable_try_again` for a retired key.
+  (#272)
+- `LayerBufferSource::on_retired()`: `replace_source` / `remove_layer` release
+  the ring sources' scanning buffer, which previously never returned to its
+  producer. (#274)
+- `ExternalDmaBufSource::acquire()` dups the acquire fence. The TEST pass
+  consumed it, so the real commit never armed `IN_FENCE_FD`. (#230)
+- Canvas plane is TESTed, falling back through candidates. (#277)
+- `GstAppsinkSource` imports dma-buf samples (NULL `length` to
+  `gst_buffer_find_memory()`). (#277)
+
+### `drm::planes`
+
+- **Fixed zpos slots** (`zpos` min == max) admit any layer zpos; the allocator
+  checks stacking order instead. A lone layer lands natively on a
+  single-PRIMARY controller. (#277)
+- **Multirect** virtual planes placed only with their parent. (#277)
+- Tied zpos lowered as distinct order-preserving values when the range allows.
+  (#277)
+- **Alpha rescaled** into the plane's advertised range (e.g. `[0, 255]`), not
+  passed through as 16-bit. `0xFFFF` failed the whole commit. (#265)
+- Allocator penalizes plane failures, not plane use: a plane the kernel kept
+  accepting decayed like a rejected one. (#267)
+- Broadcom SAND with baked-in column height accepted on a plane advertising the
+  base modifier. (#231)
+- `Output::rebuild_layer_ptrs()` (private, unused) removed. (#238)
+
+### Core
+
+- dma-buf imports through one `add_fb2()` path: legacy AddFB2 for INVALID, and
+  for LINEAR without `DRM_CAP_ADDFB2_MODIFIERS`. (#277)
+- `drm::AtomicRequest::dump()`: properties with names resolved, on a rejected
+  request and the next accepted one. Gated by `DRM_ATOMIC_DEBUG` /
+  `DRM_ALLOC_DEBUG`; records nothing otherwise. (#265, #266)
+- `format_name` contract documented. (#276)
+- V4L2 layout overflow invariant asserted at the ceilings (`static_assert`);
+  dead runtime guards removed. (#275)
+
+### `drm::gbm`
+
+- `retain_for_egl()` / `retained_for_egl()`: on Vivante, a device handed to
+  `eglGetPlatformDisplay` is left to libEGL's exit handler (use-after-free at
+  exit otherwise). Matches by EGL vendor or gbm backend `"viv"`, so it also
+  covers a failed `eglInitialize`. (#280, #289)
+- `GbmSurfaceSource` falls back to `gbm_surface_create_with_modifiers` when v2
+  is absent. (#262)
+
+### `drm::display` / `drm::cursor`
+
+- `ScanoutTarget::discover(dev, connector_id)`. (#277)
+- `connector_type_name(SVIDEO)` spelled as libdrm does. (#268)
+- `RendererConfig::prefer_legacy`: drive the cursor plane through the legacy
+  async ioctls; `Renderer::reserved_plane_id()`. (#273)
+
+### Examples
+
+- SIGINT/SIGTERM routed through `common/quit_signal.hpp` (sigwait thread +
+  `quit_wake_fd()`) in every example that handles them; Vivante libEGL
+  replaces handlers. (#285, #290)
+- `vulkan_scene`, `vulkan_offload_scanout`, `cluster_sim_vulkan` render through
+  `VkScanoutProducer`; `cluster_sim_vulkan` gains a CMake target and blocks on
+  the flip. (#283, #287)
+- Default output pick ranks `Virtual` then `USB` last (vkms, virtio-gpu,
+  `gud`). (#291)
+- `DRM_CXX_CONNECTOR=<name>`, `DRM_CXX_FONT=<path>`. (#277)
+- Build against older libgbm and pre-2.34 glibc. (#263)
+
+### Build / CI
+
+- `std::print` probe matches `detail/format.hpp`'s feature macros (libc++ 18
+  withholds `__cpp_lib_format`). (#292)
+- `scripts/build_imx8mp.sh`: i.MX8M Plus cross-build; `--clang` for clang 18 +
+  the BSP's libc++. (#277, #292)
+- CI: blend2d/asmjit pinned (#264); apt-cache gaps installed directly (#271).
+- `-Wreorder`, `-Wcomment`, `-Wignored-attributes` and clang warnings cleared.
+  (#293)
+
+### Hardware validated
+
+PANZER-PLUS Edge AIoT Computer (i.MX8M Plus), Raspberry Pi 5, SA8155P
+(`docs/hardware.md`). (#277, #278, #279, #286, #288)
+
 ## v2.0.1 — 2026-07-21: allocator warm-start stability
 
 ### Fixes
