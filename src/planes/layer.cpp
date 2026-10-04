@@ -262,6 +262,11 @@ Layer& Layer::set_assigned_plane(std::optional<uint32_t> plane_id) noexcept {
   return *this;
 }
 
+Layer& Layer::set_needs_composition(bool needs) noexcept {
+  needs_composition_ = needs;
+  return *this;
+}
+
 bool Layer::is_dirty() const noexcept {
   return dirty_;
 }

@@ -961,8 +961,7 @@ display consumer, and only the consumer actually presenting is lit.
   (`eglCreateImage` on the display node's bo) fail on this stack.
 - **Native multi-plane works:** `scene_formats` 4/4 assigned, `scene_warm_start`
   3/3, `plane_stress` 4 layers native at one commit per vblank.
-- **Tests:** 97/98 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card1`;
-  the pin test's fixture drives a CRTC that refuses the pinned plane.
+- **Tests:** 98/98 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card1`.
 - **Known limitation — 9+ layers with composition.** Dense lowering also numbers
   the layers that end up composited, so with more layers than usable zpos values
   the native planes reach the top of the usable range and the canvas has no slot

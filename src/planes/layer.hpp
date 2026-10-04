@@ -213,6 +213,11 @@ class Layer {
   /// `AssignedToPlane`.
   Layer& set_assigned_plane(std::optional<uint32_t> plane_id) noexcept;
 
+  /// Route this layer through composition this frame. The allocator sets it
+  /// for layers it cannot place; the scene sets it for a pinned layer whose
+  /// plane the driver rejects. Cleared by the next `Allocator::apply`.
+  Layer& set_needs_composition(bool needs) noexcept;
+
   [[nodiscard]] bool is_dirty() const noexcept;
   [[nodiscard]] ContentType content_type() const noexcept;
   [[nodiscard]] uint32_t update_hz() const noexcept;
