@@ -11,6 +11,9 @@ Major bump: two source breaks (below). Every consumer must recompile.
   implicitly; a bare pointer no longer compiles. (#281)
 - **`planes::TestCache::hit_count()` → `failure_count()`.** Counts rejections
   only; the latest verdict clears it. (#267)
+- **Soname `libdrm-cxx.so.3`.** CMake builds were `.so.1` (project version
+  never bumped past 1.0.0); Meson builds were unversioned and now match.
+  (#296, #297)
 - **ABI only:**
   - `ExternalDmaBufPool::submit` returns `drm::expected<void, std::error_code>`
     (was `void`). (#272)
@@ -138,6 +141,10 @@ Major bump: two source breaks (below). Every consumer must recompile.
 - CI: blend2d/asmjit pinned (#264); apt-cache gaps installed directly (#271).
 - `-Wreorder`, `-Wcomment`, `-Wignored-attributes` and clang warnings cleared.
   (#293)
+- No designated initializers in C++17 code (were GCC extensions,
+  `-Wc++20-extensions`). (#295)
+- `project()` version 3.0.0; Meson `DRM_CXX_VERSION` quoted like CMake's.
+  (#296)
 
 ### Hardware validated
 

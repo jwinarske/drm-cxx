@@ -235,6 +235,9 @@ gbm_cpp_args = has_gbm_bo_create_with_modifiers2 \
 
 drm_cxx_lib = library('drm-cxx',
   drm_cxx_sources,
+  # Same soname as CMake: SOVERSION is the major.
+  version : meson.project_version(),
+  soversion : meson.project_version().split('.')[0],
   dependencies : drm_cxx_deps,
   include_directories : [drm_cxx_inc],
   cpp_args : session_cpp_args + cursor_cpp_args + capture_cpp_args + gbm_cpp_args + gstreamer_cpp_args + streams_cpp_args + vulkan_cpp_args + nvbufsurface_cpp_args,

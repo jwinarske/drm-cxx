@@ -15,7 +15,7 @@
 #
 # Output (in the repo): deck-build/src/libdrm-cxx.so  and  deck-build/<EXAMPLE>
 # Deploy + run on the Deck:
-#     scp deck-build/src/libdrm-cxx.so deck-build/<EXAMPLE> deck@steamdeck:~/cs/
+#     scp deck-build/src/libdrm-cxx.so.3 deck-build/<EXAMPLE> deck@steamdeck:~/cs/
 #     ssh deck@steamdeck 'LD_LIBRARY_PATH=~/cs ~/cs/<EXAMPLE> [args]'
 #
 # Override the container cache dir with DECK_BUILD_CACHE (default
@@ -73,7 +73,7 @@ cd /work
 echo "[deck] drm-cxx lib (fmt via cmake subproject → static; no vulkan/examples/tests)"
 [ -d deck-build ] || meson setup deck-build \
   -Dexamples=false -Dtests=false -Dvulkan=false --default-library=shared
-ninja -C deck-build src/libdrm-cxx.so
+meson compile -C deck-build drm-cxx
 FMTA=$(find deck-build -name libfmt.a | head -1)
 
 SRC=$(find examples -path "*/$EXAMPLE/main.cpp" | head -1)

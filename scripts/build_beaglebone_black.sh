@@ -119,7 +119,8 @@ if [ -z "${IN_BBB_CONTAINER:-}" ]; then
     DEST="$MP/home/$DUT_USER/drm-cxx"
     sudo install -d "$DEST"
     # Shared libs (preserve SONAME symlinks): drm-cxx + the tomlplusplus subproject.
-    sudo cp -a "$BUILD_DIR/src/libdrm-cxx.so" "$DEST/"
+    sudo cp -a "$BUILD_DIR"/src/libdrm-cxx.so "$BUILD_DIR"/src/libdrm-cxx.so.[0-9] \
+      "$BUILD_DIR"/src/libdrm-cxx.so.[0-9].[0-9].[0-9] "$DEST/"
     sudo cp -a "$BUILD_DIR"/subprojects/tomlplusplus/src/libtomlplusplus.so.* "$DEST/" 2>/dev/null || true
     # Only the examples verified to run on this board's tilcdc display. The
     # present demos negotiate RGB565 (tilcdc has no XRGB8888); the rest are
