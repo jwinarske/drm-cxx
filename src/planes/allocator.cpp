@@ -461,6 +461,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
                                                                    const uint32_t flags,
                                                                    const uint32_t crtc_index,
                                                                    const bool test_only) {
+  // Sampled before this frame's writes record anything (see the disable pass).
+  const bool committed_before = !last_committed_.empty();
   output.sort_layers_by_zpos();
 
   // Externally-bound layers (e.g. EGL stream sources whose plane is
@@ -628,8 +630,16 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // on amdgpu (kernel delivers the commit but no event arrives,
   // wedging the caller's flip_pending). 5bcc2b9a's hand-rolled path
   // never touched idle overlays on the first commit and didn't see
-  // this; match that shape here.
-  if (previous_allocation_valid_) {
+  // this; match that shape here. "First" is nothing committed yet, not a
+  // missing warm-start: after the scene's layers are replaced (or the
+  // allocation is invalidated) the planes they left armed still need the
+  // disable, or they keep their zpos and collide with the new stack. An empty
+  // scene keeps its planes: disabling an active CRTC's only PRIMARY is refused
+  // (i.MX LCDIF), and the last frame stays up as before.
+  const bool has_scene_layers =
+      std::any_of(output.layers().begin(), output.layers().end(),
+                  [](const Layer* l) { return !l->is_composition_layer(); });
+  if (committed_before && has_scene_layers) {
     disable_unused_planes(req, crtc_index, planes_in_use, /*track_state=*/true, test_only);
   }
 
