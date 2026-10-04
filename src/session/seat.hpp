@@ -86,6 +86,12 @@ class Seat {
   /// GEM handles) is dead and must be rebuilt on the new fd.
   using ResumeCallback = std::function<void(std::string_view path, int new_fd)>;
 
+  /// Fires on resume for a device Seat could not reopen, instead of the
+  /// resume callback. The old fd is already closed; the device is gone for
+  /// this session (take_device can try again later). Unset, the failure is
+  /// only logged.
+  using ResumeFailedCallback = std::function<void(std::string_view path, std::error_code ec)>;
+
   /// Returns nullopt if no seat backend is available (no logind, no
   /// seatd, no permissions for builtin) or if drm-cxx was built
   /// without libseat support. Callers fall back to opening devices
@@ -101,6 +107,8 @@ class Seat {
   /// Open a device by path. Only succeeds when the seat is currently
   /// active. Stores the (path, fd, device_id) so resume can reopen
   /// transparently (or preserve, per `opts.preserve_fd_across_resume`).
+  /// A path already held returns the existing handle (and keeps its opts):
+  /// one path, one fd, one resume.
   /// See `TakeDeviceOpts` (namespace scope) for the resume-handling knob.
   [[nodiscard]] std::optional<DeviceHandle> take_device(std::string_view path,
                                                         TakeDeviceOpts opts = {});
@@ -111,6 +119,7 @@ class Seat {
 
   void set_pause_callback(PauseCallback fn);
   void set_resume_callback(ResumeCallback fn);
+  void set_resume_failed_callback(ResumeFailedCallback fn);
 
   /// Pollable fd for the libseat connection. Becomes readable when
   /// there's a pending seat event to dispatch. Returns -1 if the

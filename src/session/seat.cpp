@@ -71,6 +71,7 @@ std::optional<Seat::DeviceHandle> Seat::take_device(std::string_view /*path*/,
 void Seat::release_device(std::string_view /*path*/) {}
 void Seat::set_pause_callback(PauseCallback /*fn*/) {}
 void Seat::set_resume_callback(ResumeCallback /*fn*/) {}
+void Seat::set_resume_failed_callback(ResumeFailedCallback /*fn*/) {}
 int Seat::poll_fd() const {
   return -1;
 }
@@ -172,6 +173,7 @@ struct Seat::Impl {
   std::unordered_map<std::string, TrackedDevice> devices;  // key = path
   PauseCallback pause_cb;
   ResumeCallback resume_cb;
+  ResumeFailedCallback resume_failed_cb;
   // True between enable_seat and disable_seat. Gates take_device so it
   // can't race the backend's handshake, and is toggled by every
   // enable/disable pair.
@@ -244,8 +246,12 @@ void Seat::on_enable_trampoline(libseat* seat, void* userdata) {
     int new_fd = -1;
     const int new_id = libseat_open_device(seat, path.c_str(), &new_fd);
     if (new_id < 0) {
-      drm::log_error("Seat: reopen {} on resume failed: {}", path,
-                     std::system_category().message(errno));
+      const std::error_code ec(errno, std::system_category());
+      drm::log_error("Seat: reopen {} on resume failed: {}", path, ec.message());
+      // The caller still holds the fd closed above: tell it the device is gone.
+      if (impl->resume_failed_cb) {
+        impl->resume_failed_cb(path, ec);
+      }
       continue;
     }
     dev.device_id = new_id;
@@ -310,6 +316,13 @@ std::optional<Seat::DeviceHandle> Seat::take_device(const std::string_view path,
     return std::nullopt;
   }
   const std::string key(path);
+  // Already held: hand back the same device. A second open would orphan the
+  // first libseat device (the map keeps one entry), and its holder would never
+  // hear a resume. An entry left dead by a failed resume reopen is replaced.
+  if (const auto it = impl_->devices.find(key);
+      it != impl_->devices.end() && it->second.device_id >= 0) {
+    return DeviceHandle{it->second.fd, it->second.device_id};
+  }
   int fd = -1;
   const int device_id = libseat_open_device(impl_->seat, key.c_str(), &fd);
   if (device_id < 0) {
@@ -339,6 +352,13 @@ void Seat::set_pause_callback(PauseCallback fn) {
   if (impl_) {
     std::lock_guard const lk(impl_->mu);
     impl_->pause_cb = std::move(fn);
+  }
+}
+
+void Seat::set_resume_failed_callback(ResumeFailedCallback fn) {
+  if (impl_) {
+    std::lock_guard const lk(impl_->mu);
+    impl_->resume_failed_cb = std::move(fn);
   }
 }
 

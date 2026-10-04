@@ -221,6 +221,17 @@ test('test_multirect',
   ),
 )
 
+# Seat against a fake libseat defined in the test itself (interposition);
+# libseat is linked for its header and types only.
+if has_libseat
+  test('test_seat',
+    executable('test_seat',
+      'unit/test_seat.cpp',
+      dependencies : test_deps + [libseat_dep],
+    ),
+  )
+endif
+
 test('test_zpos_order',
   executable('test_zpos_order',
     'unit/test_zpos_order.cpp',
