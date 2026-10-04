@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <unistd.h>
 
 namespace {
@@ -51,6 +52,29 @@ namespace {
 }
 
 }  // namespace
+
+// The LINEAR-only GBM producer honors the negotiated set: LINEAR (or no
+// constraint) allocates; a set without LINEAR is refused, not ignored.
+TEST(ScanoutBackendVkms, GbmProducerHonorsAllowedModifiers) {
+  const auto path = find_vkms_node();
+  if (!path.has_value()) {
+    GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
+  }
+  auto dev = drm::Device::open(*path);
+  ASSERT_TRUE(dev.has_value()) << "Device::open: " << dev.error().message();
+
+  drm::present::GbmScanoutProducer producer(*dev);
+  const std::uint64_t linear[] = {DRM_FORMAT_MOD_LINEAR};
+  const std::uint64_t tiled_then_linear[] = {I915_FORMAT_MOD_X_TILED, DRM_FORMAT_MOD_LINEAR};
+  const std::uint64_t tiled_only[] = {I915_FORMAT_MOD_X_TILED};
+
+  EXPECT_TRUE(producer.create_buffer(64, 64, DRM_FORMAT_XRGB8888, {}).has_value());
+  EXPECT_TRUE(producer.create_buffer(64, 64, DRM_FORMAT_XRGB8888, linear).has_value());
+  EXPECT_TRUE(producer.create_buffer(64, 64, DRM_FORMAT_XRGB8888, tiled_then_linear).has_value());
+  auto refused = producer.create_buffer(64, 64, DRM_FORMAT_XRGB8888, tiled_only);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.error(), std::make_error_code(std::errc::not_supported));
+}
 
 TEST(ScanoutBackendVkms, PresentFullScreen) {
   const auto path = find_vkms_node();
