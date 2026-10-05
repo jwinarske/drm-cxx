@@ -47,7 +47,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `imx-drm` + `galcore` | LCDIFv3 ×3 + Vivante GC7000UL (PANZER-PLUS Edge AIoT Computer, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS at 60 fps via `VkScanoutProducer`'s GPU-blit tier (no zero-copy path on this driver); VPU output via G2D GStreamer (see quirks). |
 | `vc4` + `v3d` | VideoCore VII (Raspberry Pi 5, 8 GB) | 6.18.33-rpt (trixie) | Full example + test matrix on HDMI 1280×1440: every present/scene/allocator/cursor/Blend2D-CSD example, **GL and Vulkan scanout at 60 fps** (`egl_scene`, `vulkan_scene`, `vk_present`, `vk_out_fence`, offload demos), multi-plane native placement (`scene_priority` 8/8 assigned), `allocator_torture` 6/6. 103/103 test binaries against `card0`. |
 | `msm_drm` (downstream SDE) | SA8155P (Adreno 640) | 5.4 vendor | KMS on a shared-display node: present spine, **GL and Vulkan scanout at 60 fps**, Vulkan OUT_FENCE, native multi-plane placement with **multirect virtual-plane pairing**, GPU composition, Blend2D text. 83/84 test binaries. See quirks for the controller's plane rules. |
-| `tidss` + `powervr` | TI AM625 + PowerVR AXE-1-16M (BeaglePlay) | 6.18.39-k3 (trixie, PREEMPT_RT) | Software/dumb + llvmpipe GL present @ 1080p60, **Vulkan scanout on PowerVR without `VK_EXT_image_drm_format_modifier`** (`vk_present`, `vk_out_fence` OUT_FENCE 120/120, zero-copy via display-side buffers), LINEAR-only (no compression on either side), `allocator_torture` 6/6, profiling matrix. |
+| `tidss` + `powervr` | TI AM625 + PowerVR AXE-1-16M (BeaglePlay) | 6.18.39-k3 (trixie, PREEMPT_RT) | Software/dumb + llvmpipe GL present @ 1080p60, **Vulkan scanout on PowerVR without `VK_EXT_image_drm_format_modifier`** (`vk_present`, `vk_out_fence` OUT_FENCE 120/120, zero-copy via display-side buffers), LINEAR-only (no compression on either side), `allocator_torture` 6/6, Blend2D text, profiling matrix. |
 
 What's **not** validated:
 
@@ -1054,7 +1054,9 @@ Validation board: **BeaglePlay**, TI AM625 (quad Cortex-A53 @ 1.4 GHz, aarch64,
 kernel **6.18.39-arm64-k3 (PREEMPT_RT)**, Mesa 26.0.8. The display manager is
 inactive, so DRM master is free. Cross-build with
 `scripts/build_beagleplay.sh [<ssh-target> --deploy]` (podman `debian:trixie`
-arm64 multiarch, meson, Vulkan + EGL on).
+arm64 multiarch, meson, Vulkan + EGL on). Debian ships no Blend2D, so the script
+cross-builds it at CI's pinned SHAs and ships `libblend2d.so` beside
+`libdrm-cxx`; the text-drawing examples (`signage_player`, `cluster_sim`) need it.
 
 - **Cards.** `card0` is **tidss** (HDMI-A-1 through an on-board bridge,
   1920x1080@60): one PRIMARY (33) and one OVERLAY (43), no CURSOR plane
