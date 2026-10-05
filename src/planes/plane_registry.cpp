@@ -10,8 +10,10 @@
 #include <drm-cxx/detail/span.hpp>
 #include <drm-cxx/fmt/format_mod.hpp>
 
+#include <drm.h>
 #include <drm_fourcc.h>
 #include <drm_mode.h>
+#include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include <algorithm>
@@ -271,6 +273,17 @@ drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
 
   const auto plane_ids = drm::span<const uint32_t>(plane_res->planes, plane_res->count_planes);
 
+  // Cursor size limits are device-wide caps; they bound CURSOR planes only.
+  // 0 when the driver reports none (the allocator's guard then stays off).
+  std::uint64_t cursor_w = 0;
+  std::uint64_t cursor_h = 0;
+  if (drmGetCap(fd, DRM_CAP_CURSOR_WIDTH, &cursor_w) != 0) {
+    cursor_w = 0;
+  }
+  if (drmGetCap(fd, DRM_CAP_CURSOR_HEIGHT, &cursor_h) != 0) {
+    cursor_h = 0;
+  }
+
   for (uint32_t i = 0; i < plane_res->count_planes; ++i) {
     auto* plane = drmModeGetPlane(fd, plane_ids[i]);
     if (plane == nullptr) {
@@ -282,6 +295,10 @@ drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
     caps.possible_crtcs = plane->possible_crtcs;
     caps.formats.assign(plane->formats, plane->formats + plane->count_formats);
     caps.type = parse_plane_type(fd, plane->plane_id);
+    if (caps.type == DRMPlaneType::CURSOR) {
+      caps.cursor_max_w = static_cast<uint32_t>(cursor_w);
+      caps.cursor_max_h = static_cast<uint32_t>(cursor_h);
+    }
 
     detect_plane_capabilities(fd, plane->plane_id, caps);
     caps.build_format_metadata();

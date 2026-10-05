@@ -468,6 +468,14 @@ target_link_libraries(test_gbm_surface_source_vkms PRIVATE
   GTest::gtest_main)
 gtest_discover_tests(test_gbm_surface_source_vkms)
 
+add_executable(test_plane_registry_vkms
+  integration/test_plane_registry_vkms.cpp)
+target_link_libraries(test_plane_registry_vkms PRIVATE
+  drm-cxx::drm-cxx
+  GTest::gtest
+  GTest::gtest_main)
+gtest_discover_tests(test_plane_registry_vkms)
+
 add_executable(test_scanout_backend_vkms
   integration/test_scanout_backend_vkms.cpp)
 target_link_libraries(test_scanout_backend_vkms PRIVATE
