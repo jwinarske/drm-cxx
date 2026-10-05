@@ -250,6 +250,9 @@ struct VkScanoutProducer::Impl {
   // display, the CPU — reads scrambled pixels. A VK_IMAGE_TILING_LINEAR image
   // is laid out linearly, so LINEAR is allocated that way there.
   bool linear_via_linear_tiling{false};
+  // VK_EXT_image_drm_format_modifier present. Without it (Mesa PowerVR) every
+  // image is VK_IMAGE_TILING_LINEAR and LINEAR is the only layout on offer.
+  bool modifier_ext{true};
   vk::Buffer kick_buffer;
   vk::DeviceMemory kick_memory;
 
@@ -395,6 +398,9 @@ VkScanoutProducer::Impl::export_image(Slot& slot, const std::vector<std::uint64_
       std::find(mods.begin(), mods.end(), DRM_FORMAT_MOD_LINEAR) != mods.end() &&
       static_cast<bool>(physical.getFormatProperties(format).linearTilingFeatures &
                         vk::FormatFeatureFlagBits::eColorAttachment);
+  if (!modifier_ext && !linear_tiling) {
+    return drm::unexpected<std::error_code>(err(std::errc::not_supported));
+  }
   try {
     if (linear_tiling) {
       vk::StructureChain<vk::ImageCreateInfo, vk::ExternalMemoryImageCreateInfo> image_chain{
@@ -500,6 +506,31 @@ VkScanoutProducer::Impl::import_display_buffer(Slot& slot, std::uint32_t fourcc)
   }
   try {
     auto make_image = [&](std::uint32_t pitch) {
+      if (!modifier_ext) {
+        // No explicit-layout create: take a LINEAR-tiled image and use it only
+        // if the driver picked the display buffer's pitch.
+        vk::StructureChain<vk::ImageCreateInfo, vk::ExternalMemoryImageCreateInfo> linear_chain{
+            vk::ImageCreateInfo{}
+                .setImageType(vk::ImageType::e2D)
+                .setFormat(format)
+                .setExtent({extent.width, extent.height, 1})
+                .setMipLevels(1)
+                .setArrayLayers(1)
+                .setSamples(vk::SampleCountFlagBits::e1)
+                .setTiling(vk::ImageTiling::eLinear)
+                .setUsage(k_image_usage)
+                .setSharingMode(vk::SharingMode::eExclusive)
+                .setInitialLayout(vk::ImageLayout::eUndefined),
+            vk::ExternalMemoryImageCreateInfo{vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT}};
+        const vk::Image image = device.createImage(linear_chain.get<vk::ImageCreateInfo>());
+        const vk::SubresourceLayout layout = device.getImageSubresourceLayout(
+            image, vk::ImageSubresource{vk::ImageAspectFlagBits::eColor, 0, 0});
+        if (layout.offset != 0 || layout.rowPitch != pitch) {
+          device.destroyImage(image);
+          throw std::runtime_error("linear image pitch does not match the display buffer");
+        }
+        return image;
+      }
       const vk::SubresourceLayout plane_layout{0, 0, pitch, 0, 0};
       vk::StructureChain<vk::ImageCreateInfo, vk::ExternalMemoryImageCreateInfo,
                          vk::ImageDrmFormatModifierExplicitCreateInfoEXT>
@@ -1023,8 +1054,17 @@ drm::expected<std::unique_ptr<VkScanoutProducer>, std::error_code> VkScanoutProd
     };
     const bool core_1_1 = impl->physical.getProperties().apiVersion >= VK_API_VERSION_1_1;
     std::vector<const char*> dev_exts{"VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf",
-                                      "VK_EXT_image_drm_format_modifier",
                                       "VK_KHR_external_semaphore_fd"};
+    // Without the modifier extension (Mesa PowerVR) images fall back to
+    // VK_IMAGE_TILING_LINEAR, exported as LINEAR.
+    if (is_listed("VK_EXT_image_drm_format_modifier")) {
+      dev_exts.push_back("VK_EXT_image_drm_format_modifier");
+    } else {
+      impl->modifier_ext = false;
+      impl->linear_via_linear_tiling = true;
+      drm::log_info(
+          "VkScanoutProducer: no VK_EXT_image_drm_format_modifier; LINEAR via linear tiling");
+    }
     // VK_EXT_image_drm_format_modifier requires VK_KHR_image_format_list on a
     // 1.1 device (core in 1.2); enable it whenever it is listed.
     if (is_listed("VK_KHR_image_format_list")) {
@@ -1092,6 +1132,14 @@ std::vector<std::uint64_t> VkScanoutProducer::exportable_modifiers(std::uint32_t
   std::vector<std::uint64_t> out;
   const vk::Format format = vk_format_for(fourcc);
   if ((format == vk::Format::eUndefined) || !impl_->physical) {
+    return out;
+  }
+  if (!impl_->modifier_ext) {
+    // LINEAR via linear tiling, when the format renders that way.
+    if (impl_->physical.getFormatProperties(format).linearTilingFeatures &
+        vk::FormatFeatureFlagBits::eColorAttachment) {
+      out.push_back(DRM_FORMAT_MOD_LINEAR);
+    }
     return out;
   }
   try {
