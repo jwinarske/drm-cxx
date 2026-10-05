@@ -279,6 +279,20 @@ void Keyboard::process_key(KeyboardEvent& event) const {
   // xkbcommon uses evdev keycodes + 8
   xkb_keycode_t const keycode = event.key + 8;
 
+  // Resolve before updating (xkbcommon's documented order): the key's own
+  // event must not affect what it reports. A latch (lv(apostrophe): ' then a
+  // -> ā) is spent by the press, so reading after the update loses it.
+  event.sym = xkb_state_key_get_one_sym(const_cast<struct xkb_state*>(state_), keycode);
+  std::memset(event.utf8, 0, sizeof(event.utf8));
+  xkb_state_key_get_utf8(const_cast<struct xkb_state*>(state_), keycode, event.utf8,
+                         sizeof(event.utf8));
+
+  // A synthesized repeat (KeyRepeater) only re-resolves; feeding xkb another
+  // key-down for a key it already holds is state mutation from a read.
+  if (event.repeat) {
+    return;
+  }
+
   // Update state
   auto direction = event.pressed ? XKB_KEY_DOWN : XKB_KEY_UP;
   xkb_state_update_key(const_cast<struct xkb_state*>(state_), keycode, direction);
@@ -294,14 +308,6 @@ void Keyboard::process_key(KeyboardEvent& event) const {
     held_keys_.erase(std::remove(held_keys_.begin(), held_keys_.end(), event.key),
                      held_keys_.end());
   }
-
-  // Get keysym
-  event.sym = xkb_state_key_get_one_sym(const_cast<struct xkb_state*>(state_), keycode);
-
-  // Get UTF-8 representation
-  std::memset(event.utf8, 0, sizeof(event.utf8));
-  xkb_state_key_get_utf8(const_cast<struct xkb_state*>(state_), keycode, event.utf8,
-                         sizeof(event.utf8));
 }
 
 bool Keyboard::should_repeat(uint32_t key) const noexcept {
