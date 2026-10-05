@@ -127,6 +127,18 @@ std::string_view format_name(uint32_t format) {
       return "P012";
     case DRM_FORMAT_P016:
       return "P016";
+    // Packed YUV 4:2:2, 8-bit samples (two pixels per 32-bit macropixel),
+    // and packed 4:4:4 AYUV.
+    case DRM_FORMAT_YUYV:
+      return "YUYV";
+    case DRM_FORMAT_YVYU:
+      return "YVYU";
+    case DRM_FORMAT_UYVY:
+      return "UYVY";
+    case DRM_FORMAT_VYUY:
+      return "VYUY";
+    case DRM_FORMAT_AYUV:
+      return "AYUV";
     // Packed YUV 4:2:2 in u16 samples.
     case DRM_FORMAT_Y210:
       return "Y210";
@@ -210,14 +222,24 @@ uint32_t format_bpp(uint32_t format) {
     case DRM_FORMAT_ARGB16161616F:
     case DRM_FORMAT_ABGR16161616F:
       return 64;
+    // Packed YUV 4:2:2 with 8-bit samples: one 32-bit macropixel (Y0 Cb Y1 Cr
+    // in some order) covers two pixels, so 16 bpp. Single-plane, unlike the
+    // NV* family below, so one image-level value is exact.
+    case DRM_FORMAT_YUYV:
+    case DRM_FORMAT_YVYU:
+    case DRM_FORMAT_UYVY:
+    case DRM_FORMAT_VYUY:
+      return 16;
     // Packed YUV 4:2:2 with u16 samples — each macropixel covers
     // 2 luma pixels in 4 u16 components (Y0 Cb0 Y1 Cr0), giving
     // 64 bits per 2 pixels = 32 bpp regardless of the bit-depth
     // sub-component (10/12/16). The unused bits in Y210 / Y212
     // sit in the low end of each u16 per CTA-861 conventions.
+    // AYUV is packed 4:4:4 with alpha, 8 bits per component: also 32 bpp.
     case DRM_FORMAT_Y210:
     case DRM_FORMAT_Y212:
     case DRM_FORMAT_Y216:
+    case DRM_FORMAT_AYUV:
       return 32;
     // Planar (NV*-family + P010/P012/P016) report 0 here — the
     // per-plane bpp varies (Y plane vs UV plane), so a single

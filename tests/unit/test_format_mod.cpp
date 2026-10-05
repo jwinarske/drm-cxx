@@ -142,6 +142,9 @@ void test_cost() {
         std::uint64_t(1920) * 1080 * 3 / 2);
   CHECK(fmt::scanout_cost_bytes(1920, 1080, DRM_FORMAT_P010, BC::Tiling) ==
         std::uint64_t(1920) * 1080 * 3);
+  // Packed 4:2:2 YUYV is 2 B/px (was costed at the 4 B/px fallback).
+  CHECK(fmt::scanout_cost_bytes(1920, 1080, DRM_FORMAT_YUYV, BC::Linear) ==
+        std::uint64_t(1920) * 1080 * 2);
 }
 
 void test_from_pairs() {

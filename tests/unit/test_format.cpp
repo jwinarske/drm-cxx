@@ -15,6 +15,21 @@ TEST(FormatTest, KnownFormatsReturnCorrectName) {
   EXPECT_EQ(drm::format_name(DRM_FORMAT_ABGR16161616F), "ABGR16161616F");
 }
 
+// Packed 8-bit YUV: single-plane, so they have a name and an exact bpp
+// (4:2:2 at 16, AYUV at 32), not the planar 0.
+TEST(FormatTest, PackedYuvFormatsHaveNameAndBpp) {
+  EXPECT_EQ(drm::format_name(DRM_FORMAT_YUYV), "YUYV");
+  EXPECT_EQ(drm::format_name(DRM_FORMAT_YVYU), "YVYU");
+  EXPECT_EQ(drm::format_name(DRM_FORMAT_UYVY), "UYVY");
+  EXPECT_EQ(drm::format_name(DRM_FORMAT_VYUY), "VYUY");
+  EXPECT_EQ(drm::format_name(DRM_FORMAT_AYUV), "AYUV");
+  EXPECT_EQ(drm::format_bpp(DRM_FORMAT_YUYV), 16U);
+  EXPECT_EQ(drm::format_bpp(DRM_FORMAT_YVYU), 16U);
+  EXPECT_EQ(drm::format_bpp(DRM_FORMAT_UYVY), 16U);
+  EXPECT_EQ(drm::format_bpp(DRM_FORMAT_VYUY), 16U);
+  EXPECT_EQ(drm::format_bpp(DRM_FORMAT_AYUV), 32U);
+}
+
 // HDR-relevant pixel formats: 10/12/16-bit YUV.
 TEST(FormatTest, HighBitDepthYuvFormatsHaveNames) {
   EXPECT_EQ(drm::format_name(DRM_FORMAT_P010), "P010");
