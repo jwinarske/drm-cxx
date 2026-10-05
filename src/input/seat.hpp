@@ -59,7 +59,7 @@ using PointerEvent = std::variant<PointerMotionEvent, PointerButtonEvent, Pointe
 
 struct TouchEvent {
   uint32_t time_ms{};
-  int32_t slot{};  // Multi-touch slot
+  int32_t slot{};  // Multi-touch slot; -1 on Frame (not per-slot)
   double x{};
   double y{};
   enum class Type : uint8_t { Down, Up, Motion, Frame, Cancel } type{};

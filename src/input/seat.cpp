@@ -501,14 +501,28 @@ void Seat::process_events() {
       }
 
       case LIBINPUT_EVENT_TOUCH_FRAME: {
+        auto* tev = libinput_event_get_touch_event(ev);
+        if (tev == nullptr) {
+          break;
+        }
         TouchEvent te;
+        te.time_ms = libinput_event_touch_get_time(tev);
+        te.slot = -1;  // a frame closes a set of slot events; it has none of its own
+        te.device_name = libinput_device_get_name(libinput_event_get_device(ev));
         te.type = TouchEvent::Type::Frame;
         handler_(InputEvent{te});
         break;
       }
 
       case LIBINPUT_EVENT_TOUCH_CANCEL: {
+        auto* tev = libinput_event_get_touch_event(ev);
+        if (tev == nullptr) {
+          break;
+        }
         TouchEvent te;
+        te.time_ms = libinput_event_touch_get_time(tev);
+        te.slot = libinput_event_touch_get_slot(tev);
+        te.device_name = libinput_device_get_name(libinput_event_get_device(ev));
         te.type = TouchEvent::Type::Cancel;
         handler_(InputEvent{te});
         break;
