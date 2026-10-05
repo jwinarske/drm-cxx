@@ -39,7 +39,8 @@ struct Rect {
 /// passed to `set_property(std::string_view, …)` are silently dropped
 /// (a kernel commit would EINVAL on them anyway). Adding a new
 /// property is a single-file change: append before `Count`, extend
-/// the prop_name / parse_prop_tag tables in layer.cpp.
+/// the prop_name / parse_prop_tag tables in layer.cpp, and classify it in
+/// prop_class() below.
 enum class PropTag : uint8_t {
   FbId = 0,
   FbModifier,
@@ -61,6 +62,41 @@ enum class PropTag : uint8_t {
 };
 
 constexpr std::size_t k_num_props = static_cast<std::size_t>(PropTag::Count);
+
+/// Content properties change every frame without moving the layer (a new
+/// buffer, a new fence); placement properties decide which plane fits.
+/// property_hash() leaves content out, and the allocator re-emits content
+/// every commit (INVARIANTS.md §4). Misclassifying a placement property as
+/// content would let a real change skip the TEST.
+enum class PropClass : uint8_t { Content, Placement };
+
+/// Total over PropTag: no default, so a new tag is a -Wswitch diagnostic here
+/// until it is classified.
+[[nodiscard]] constexpr PropClass prop_class(PropTag tag) noexcept {
+  switch (tag) {
+    case PropTag::FbId:
+    case PropTag::InFenceFd:
+      return PropClass::Content;
+    case PropTag::FbModifier:
+    case PropTag::CrtcId:
+    case PropTag::CrtcX:
+    case PropTag::CrtcY:
+    case PropTag::CrtcW:
+    case PropTag::CrtcH:
+    case PropTag::SrcX:
+    case PropTag::SrcY:
+    case PropTag::SrcW:
+    case PropTag::SrcH:
+    case PropTag::Rotation:
+    case PropTag::Alpha:
+    case PropTag::Zpos:
+    case PropTag::PixelFormat:
+      return PropClass::Placement;
+    case PropTag::Count:
+      break;
+  }
+  return PropClass::Placement;  // Count is not a property
+}
 
 /// Canonical KMS property-name string for a tag. The returned span is
 /// a pointer into a `constexpr` string literal — no allocation, stable

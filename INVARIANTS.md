@@ -68,6 +68,8 @@ Corollary consumers depend on: **`property_hash` isolates content from
 placement** — every placement/format property (src/dst rects, rotation, alpha,
 zpos, COLOR_*, pixel format, modifier) moves the hash; FB_ID and IN_FENCE_FD do
 not. A property misclassified as content would let a real change skip the test.
+The split is `planes::prop_class()` (`src/planes/layer.hpp`), a total switch
+over `PropTag`: a new tag is a `-Wswitch` diagnostic until it is classified.
 
 - **Defined:** `src/planes/allocator.cpp` (`is_fb_only_frame`, the fast-path
   branch) and `src/scene/layer_scene.cpp` (the reject-invalidates-cache safety

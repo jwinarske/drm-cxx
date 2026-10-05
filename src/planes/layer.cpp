@@ -297,8 +297,7 @@ std::size_t Layer::property_hash() const {
     if (!set_mask_.test(i)) {
       continue;
     }
-    const auto tag = static_cast<PropTag>(i);
-    if (tag == PropTag::FbId || tag == PropTag::InFenceFd) {
+    if (prop_class(static_cast<PropTag>(i)) == PropClass::Content) {
       continue;
     }
     // boost-style hash_combine, order-dependent (hence the tag-order walk above).
