@@ -34,6 +34,7 @@
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
+#include <drm-cxx/scene/layer.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
 #include <drm-cxx/scene/layer_handle.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -59,6 +60,7 @@
 #include <system_error>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 using drm::Device;
@@ -564,4 +566,196 @@ TEST(LayerSceneCompositionVkms, EmptyColdStartDoesNotPoisonWarmStart) {
   EXPECT_EQ(report2->layers_unassigned, 0U);
 
   drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+}
+
+// More layers than planes, all stacked on one spot. The canvas carries the
+// layers the allocator dropped -- the top of the stack -- so the topmost
+// layer's color must show. On a driver whose planes have no zpos property the
+// plane order is the stacking order, so the canvas must sit on a plane above
+// every plane carrying a layer.
+TEST(LayerSceneCompositionVkms, CanvasStacksAboveAssignedLayers) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+  const std::uint32_t fb_w = active.mode.hdisplay;
+  const std::uint32_t fb_h = active.mode.vdisplay;
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = active.crtc_id;
+  cfg.connector_id = active.connector_id;
+  cfg.mode = active.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  constexpr std::uint32_t k_layers = 16;  // more than vkms has planes
+  constexpr std::uint32_t k_side = 64;
+  const auto x = static_cast<std::int32_t>((fb_w - k_side) / 2U);
+  const auto y = static_cast<std::int32_t>((fb_h - k_side) / 2U);
+  auto color = [](std::uint32_t i) { return 0xFF000000U | ((i * 15U) << 16U) | 0x80U; };
+  for (std::uint32_t i = 0; i < k_layers; ++i) {
+    auto src = DumbBufferSource::create(dev, k_side, k_side, DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    fill_uniform_argb(**src, k_side, k_side, color(i));
+    LayerDesc d;
+    d.source = std::move(*src);
+    d.display.src_rect = drm::scene::Rect{0, 0, k_side, k_side};
+    d.display.dst_rect = drm::scene::Rect{x, y, k_side, k_side};
+    d.display.zpos = static_cast<int>(i) + 3;
+    ASSERT_TRUE(scene.add_layer(std::move(d)).has_value());
+  }
+
+  auto report = scene.commit();
+  ASSERT_TRUE(report.has_value()) << report.error().message();
+  ASSERT_GT(report->layers_composited, 0U) << "the stack should overflow into the canvas";
+  EXPECT_EQ(report->layers_unassigned, 0U);
+
+  auto img_r = snapshot(dev, active.crtc_id);
+  drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  ASSERT_TRUE(img_r.has_value()) << img_r.error().message();
+  const auto cx = static_cast<std::uint32_t>(x) + (k_side / 2U);
+  const auto cy = static_cast<std::uint32_t>(y) + (k_side / 2U);
+  EXPECT_EQ(img_r->pixels()[(cy * img_r->width()) + cx], color(k_layers - 1U))
+      << "the topmost layer, carried by the canvas, must be visible";
+}
+
+// Plane pressure with the low-priority layers mid-stack. Only they may go to
+// the canvas, and the stack must still render top-down: the composited run is
+// contiguous, so the canvas can sit between its neighbors.
+TEST(LayerSceneCompositionVkms, CompositedRunTakesLowPriorityLayers) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = active.crtc_id;
+  cfg.connector_id = active.connector_id;
+  cfg.mode = active.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  constexpr std::uint32_t k_layers = 16;  // more than vkms has planes
+  constexpr std::uint32_t k_side = 64;
+  const auto x = static_cast<std::int32_t>((active.mode.hdisplay - k_side) / 2U);
+  const auto y = static_cast<std::int32_t>((active.mode.vdisplay - k_side) / 2U);
+  auto low = [](std::uint32_t i) { return i >= 4U && i < 12U; };
+  auto color = [](std::uint32_t i) { return 0xFF000000U | ((i * 15U) << 16U) | 0x80U; };
+  std::vector<drm::scene::LayerHandle> handles;
+  for (std::uint32_t i = 0; i < k_layers; ++i) {
+    auto src = DumbBufferSource::create(dev, k_side, k_side, DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    fill_uniform_argb(**src, k_side, k_side, color(i));
+    LayerDesc d;
+    d.source = std::move(*src);
+    d.display.src_rect = drm::scene::Rect{0, 0, k_side, k_side};
+    d.display.dst_rect = drm::scene::Rect{x, y, k_side, k_side};
+    d.display.zpos = static_cast<int>(i) + 3;
+    d.app_priority = low(i) ? 10 : 200;
+    auto h = scene.add_layer(std::move(d));
+    ASSERT_TRUE(h.has_value()) << h.error().message();
+    handles.push_back(*h);
+  }
+
+  auto report = scene.commit();
+  ASSERT_TRUE(report.has_value()) << report.error().message();
+  ASSERT_GT(report->layers_composited, 0U) << "the stack should overflow into the canvas";
+  EXPECT_EQ(report->layers_unassigned, 0U);
+  for (std::uint32_t i = 0; i < k_layers; ++i) {
+    const auto* layer = scene.get_layer(handles[i]);
+    ASSERT_NE(layer, nullptr);
+    if (layer->last_placement() != drm::scene::LayerPlacement::AssignedToPlane) {
+      EXPECT_TRUE(low(i)) << "layer " << i << " (high priority) was composited";
+    }
+  }
+
+  auto img_r = snapshot(dev, active.crtc_id);
+  drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  ASSERT_TRUE(img_r.has_value()) << img_r.error().message();
+  const auto cx = static_cast<std::uint32_t>(x) + (k_side / 2U);
+  const auto cy = static_cast<std::uint32_t>(y) + (k_side / 2U);
+  EXPECT_EQ(img_r->pixels()[(cy * img_r->width()) + cx], color(k_layers - 1U));
+}
+
+// Reversing the zpos of overlapping layers after steady frames must reach the
+// screen. Where planes have no zpos property, the warm start's cached
+// assignment is still valid to the kernel, just stacked in the old order.
+TEST(LayerSceneCompositionVkms, RestackReachesTheScreen) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = active.crtc_id;
+  cfg.connector_id = active.connector_id;
+  cfg.mode = active.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  constexpr std::uint32_t k_side = 64;
+  const auto x = static_cast<std::int32_t>((active.mode.hdisplay - k_side) / 2U);
+  const auto y = static_cast<std::int32_t>((active.mode.vdisplay - k_side) / 2U);
+  const std::array<std::uint32_t, 3> colors{0xFFFF0000U, 0xFF00FF00U, 0xFF0000FFU};
+  std::vector<drm::scene::LayerHandle> handles;
+  for (std::size_t i = 0; i < colors.size(); ++i) {
+    auto src = DumbBufferSource::create(dev, k_side, k_side, DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    fill_uniform_argb(**src, k_side, k_side, colors.at(i));
+    LayerDesc d;
+    d.source = std::move(*src);
+    d.display.src_rect = drm::scene::Rect{0, 0, k_side, k_side};
+    d.display.dst_rect = drm::scene::Rect{x, y, k_side, k_side};
+    d.display.zpos = static_cast<int>(i) + 3;
+    auto h = scene.add_layer(std::move(d));
+    ASSERT_TRUE(h.has_value()) << h.error().message();
+    handles.push_back(*h);
+  }
+  ASSERT_TRUE(scene.commit().has_value());
+  ASSERT_TRUE(scene.commit().has_value());
+
+  for (std::size_t i = 0; i < handles.size(); ++i) {
+    auto* layer = scene.get_layer(handles[i]);
+    ASSERT_NE(layer, nullptr);
+    layer->set_zpos(static_cast<int>(handles.size() - i) + 2);  // reverse
+  }
+  ASSERT_TRUE(scene.commit().has_value());
+
+  auto img_r = snapshot(dev, active.crtc_id);
+  drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  ASSERT_TRUE(img_r.has_value()) << img_r.error().message();
+  const auto cx = static_cast<std::uint32_t>(x) + (k_side / 2U);
+  const auto cy = static_cast<std::uint32_t>(y) + (k_side / 2U);
+  EXPECT_EQ(img_r->pixels()[(cy * img_r->width()) + cx], colors.front())
+      << "the first layer, now topmost, must be visible";
 }

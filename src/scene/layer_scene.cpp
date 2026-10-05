@@ -56,6 +56,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -815,6 +816,9 @@ class LayerScene::Impl {
           }
           return inject_modeset_state(req);
         });
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- engaged, as above
+    allocator_->set_canvas_host_filter(
+        [this](const drm::planes::PlaneCapabilities& p) { return plane_hosts_canvas(p); });
   }
 
   // ── Session hooks ─────────────────────────────────────────────────
@@ -1435,6 +1439,15 @@ class LayerScene::Impl {
     return lowest;
   }
 
+  // True when no plane on the CRTC exposes zpos: the kernel then stacks planes
+  // by plane id, so no zpos write can lift the canvas above another plane.
+  [[nodiscard]] bool planes_stack_by_id(std::uint32_t crtc_index) const {
+    const auto& planes = registry_.for_crtc(crtc_index);
+    return std::none_of(planes.begin(), planes.end(), [](const auto* p) {
+      return p->type != drm::planes::DRMPlaneType::CURSOR && p->zpos_min.has_value();
+    });
+  }
+
   // Decide whether to reserve a canvas plane up front for this
   // commit. Returns the plane id to reserve, or nullopt when neither
   // overflow nor primary-anchor reservation is needed.
@@ -1464,7 +1477,9 @@ class LayerScene::Impl {
   //    cases bypass this trigger.
   std::optional<std::uint32_t> pick_canvas_reservation_if_needed() {
     const auto crtc_index = resolve_crtc_index();
-    if (!crtc_index.has_value()) {
+    // Planes stacked by id: the allocator places the canvas itself
+    // (Allocator::canvas_plane), between the layers it carries.
+    if (!crtc_index.has_value() || planes_stack_by_id(*crtc_index)) {
       return std::nullopt;
     }
     std::vector<const drm::planes::PlaneCapabilities*> eligible;
@@ -1808,9 +1823,16 @@ class LayerScene::Impl {
     // Try to reuse it before falling through to the generic scan —
     // sticky plane choice across frames lets the per-plane property
     // snapshot keep working between commits.
-    if (last_canvas_plane_id_.has_value()) {
+    // Planes stacked by id: the plane the allocator left for the canvas is
+    // the only one that stacks it between its neighbors.
+    const bool by_id = planes_stack_by_id(crtc_index);
+    std::optional<std::uint32_t> preferred_id = last_canvas_plane_id_;
+    if (by_id && allocator_.has_value() && allocator_->canvas_plane().has_value()) {
+      preferred_id = allocator_->canvas_plane();
+    }
+    if (preferred_id.has_value()) {
       for (const auto* p : registry_.for_crtc(crtc_index)) {
-        if (p->id != *last_canvas_plane_id_) {
+        if (p->id != *preferred_id) {
           continue;
         }
         if (is_in_use(p->id) || p->type == drm::planes::DRMPlaneType::CURSOR ||
@@ -1822,6 +1844,7 @@ class LayerScene::Impl {
       }
     }
 
+    const bool preferred = !out.empty();  // the reserved plane leads
     std::vector<const drm::planes::PlaneCapabilities*> primaries;
     for (const auto* p : registry_.for_crtc(crtc_index)) {
       if (p->type == drm::planes::DRMPlaneType::CURSOR) {
@@ -1845,6 +1868,11 @@ class LayerScene::Impl {
       }
     }
     out.insert(out.end(), primaries.begin(), primaries.end());
+    // No zpos property: topmost (highest id) first, past the preferred plane.
+    if (by_id) {
+      const auto first = (preferred ? std::next(out.begin()) : out.begin());
+      std::sort(first, out.end(), [](const auto* a, const auto* b) { return a->id > b->id; });
+    }
   }
 
   [[nodiscard]] bool is_multirect_virtual(std::uint32_t plane_id) const {

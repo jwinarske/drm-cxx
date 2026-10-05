@@ -182,6 +182,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   // span so future refactors that move apply() across thread / suspend
   // boundaries can't see the caller's storage reallocate underneath us.
   external_reserved_.assign(external_reserved.begin(), external_reserved.end());
+  canvas_plane_.reset();
   struct ResetReserved {
     Allocator* self;
     ~ResetReserved() { self->external_reserved_.clear(); }
@@ -402,6 +403,14 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::resource_unavailable_try_again));
   }
+  // Plane-order CRTC: a zpos change can move a layer across the canvas or
+  // another plane, which nothing but this check notices.
+  const bool by_plane_id = stacks_by_plane_id(crtc_index);
+  if (by_plane_id &&
+      !plane_order_consistent(output, previous_allocation_, previous_canvas_plane_)) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
 
   // FB-only fast path bypasses re-validation: the caller proved via
   // is_fb_only_frame() that geometry/format/modifier are unchanged from the
@@ -449,6 +458,9 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
         !layer->is_externally_bound() && !layer->is_pinned()) {
       layer->needs_composition_ = true;
     }
+  }
+  if (by_plane_id) {
+    canvas_plane_ = previous_canvas_plane_;
   }
   output.mark_clean();
   return assigned;
@@ -503,12 +515,30 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
 
   PlaneAssignment best_assignment;
   std::size_t total_assigned = 0;
+  const bool by_plane_id = stacks_by_plane_id(crtc_index);
 
   // Scene-wide plane pool, captured before the per-group loop shrinks
   // available_planes. The partial-fallback retry below needs the
   // unshrunk pool — its whole point is to consider plane assignments
   // the per-group pass couldn't reach.
   const auto all_available_planes = available_planes;
+
+  if (by_plane_id) {
+    // Stacking is fixed by plane id: one ordered pass over the whole scene.
+    // The spatial split does not apply (the canvas spans every group).
+    // Transient-composited layers land on the canvas too, so they count.
+    groups.clear();
+    std::vector<Layer*> ordered;
+    ordered.reserve(output.layers().size());
+    for (auto* l : output.layers()) {
+      if (!l->is_composition_layer() && !l->is_externally_bound() && !l->is_pinned()) {
+        ordered.push_back(l);
+      }
+    }
+    best_assignment = place_in_plane_order(
+        ordered, available_planes, output.composition_layer() != nullptr, flags, crtc_index);
+    total_assigned = best_assignment.size();
+  }
 
   for (auto& group : groups) {
     auto assignment = place_group(group, available_planes, flags, crtc_index);
@@ -538,7 +568,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // compatible planes) on each retry. The dropped layers are routed
   // through composition by the post-loop needs_composition_ pass —
   // exactly the same path a single failed group would have taken.
-  if (total_assigned == 0) {
+  if (total_assigned == 0 && !by_plane_id) {
     std::vector<Layer*> placeable;
     placeable.reserve(output.layers().size());
     for (auto* l : output.layers()) {
@@ -604,7 +634,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // below doesn't turn around and clear a plane we just armed.
   auto planes_in_use = best_assignment;
 
-  if (any_composited && (output.composition_layer() != nullptr)) {
+  // The plane-order path picked the canvas plane itself (canvas_plane_).
+  if (any_composited && (output.composition_layer() != nullptr) && !by_plane_id) {
     // Find primary plane for this crtc
     for (const auto* plane : registry_.for_crtc(crtc_index)) {
       if (plane->type == DRMPlaneType::PRIMARY && best_assignment.count(plane->id) == 0) {
@@ -652,8 +683,12 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // returns EAGAIN, which the fast path propagates straight to the
   // caller (the warm-start path on lines 153-159 falls through to
   // full_search, but the fast path on line 148 does not).
+  if (!any_composited) {
+    canvas_plane_.reset();
+  }
   previous_allocation_ = best_assignment;
   previous_allocation_valid_ = !best_assignment.empty();
+  previous_canvas_plane_ = canvas_plane_;
 
   output.mark_clean();
   return total_assigned;
@@ -865,6 +900,220 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
   }
 
   return assignment;
+}
+
+bool Allocator::stacks_by_plane_id(const uint32_t crtc_index) const {
+  const auto& planes = registry_.for_crtc(crtc_index);
+  return !planes.empty() && std::none_of(planes.begin(), planes.end(), [](const auto* p) {
+    return p->type != DRMPlaneType::CURSOR && p->zpos_min.has_value();
+  });
+}
+
+PlaneAssignment Allocator::place_in_plane_order(const std::vector<Layer*>& layers,
+                                                const std::vector<const PlaneCapabilities*>& planes,
+                                                const bool with_canvas, const uint32_t flags,
+                                                const uint32_t crtc_index) {
+  // Planes in stacking order. Left out rather than modeled: a multirect
+  // virtual plane (needs its parent armed alongside) and a cursor plane (size
+  // and update rules the static check does not see; often the cursor
+  // module's).
+  std::vector<const PlaneCapabilities*> by_id;
+  by_id.reserve(planes.size());
+  for (const auto* p : planes) {
+    if (!p->multirect_parent.has_value() && p->type != DRMPlaneType::CURSOR) {
+      by_id.push_back(p);
+    }
+  }
+  std::sort(by_id.begin(), by_id.end(), [](const auto* a, const auto* b) { return a->id < b->id; });
+  const std::size_t n = layers.size();
+  const std::size_t m = by_id.size();
+  if (n == 0) {
+    return {};
+  }
+
+  auto fits = [&](std::size_t i, std::size_t j) {
+    const auto& plane = *by_id[j];
+    const auto& layer = *layers[i];
+    if (!plane_statically_compatible(plane, layer, crtc_index) ||
+        probe_rejected(crtc_index, plane.id, layer)) {
+      return false;
+    }
+    const auto cached = failure_cache_.lookup(plane.id, layer.property_hash());
+    return !cached.has_value() || *cached;
+  };
+  auto hosts_canvas = [&](std::size_t j) { return !canvas_host_ || canvas_host_(*by_id[j]); };
+
+  // pre[a]: first plane index free above layers [0, a) placed earliest-first
+  // (npos: they don't fit). suf[b]: lowest plane index used by layers [b, n)
+  // placed latest-first (npos: they don't fit). Greedy fit is optimal for each.
+  constexpr auto npos = static_cast<std::size_t>(-1);
+  std::vector<std::size_t> pre(n + 1, npos);
+  std::vector<std::size_t> pre_plane(n, npos);
+  pre[0] = 0;
+  for (std::size_t i = 0; i < n && pre[i] != npos; ++i) {
+    for (std::size_t j = pre[i]; j < m; ++j) {
+      if (fits(i, j)) {
+        pre_plane[i] = j;
+        pre[i + 1] = j + 1;
+        break;
+      }
+    }
+  }
+  std::vector<std::size_t> suf(n + 1, npos);
+  std::vector<std::size_t> suf_plane(n, npos);
+  suf[n] = m;
+  for (std::size_t k = n; k > 0 && suf[k] != npos; --k) {
+    const std::size_t i = k - 1;
+    for (std::size_t j = suf[k]; j > 0; --j) {
+      if (fits(i, j - 1)) {
+        suf_plane[i] = j - 1;
+        suf[i] = j - 1;
+        break;
+      }
+    }
+  }
+
+  // Composited run [a, b): every forced layer must be inside it.
+  std::size_t first_forced = n;
+  std::size_t last_forced = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (layers[i]->force_composited_ || layers[i]->is_transient_composited()) {
+      first_forced = std::min(first_forced, i);
+      last_forced = i;
+    }
+  }
+  const bool any_forced = first_forced < n;
+
+  struct Choice {
+    std::size_t a{0};
+    std::size_t b{0};
+    std::optional<std::size_t> canvas;
+  };
+  // Best run with at most `max_placed` layers on planes: most placed, then the
+  // lowest total keep_priority composited.
+  auto choose = [&](std::size_t max_placed) -> std::optional<Choice> {
+    std::optional<Choice> best;
+    std::size_t best_placed = 0;
+    long long best_cost = 0;
+    for (std::size_t a = 0; a <= n; ++a) {
+      if (pre[a] == npos) {
+        break;
+      }
+      for (std::size_t b = a; b <= n; ++b) {
+        if (suf[b] == npos || (any_forced && (a > first_forced || b <= last_forced))) {
+          continue;
+        }
+        const std::size_t placed = n - (b - a);
+        if (placed > max_placed) {
+          continue;
+        }
+        Choice c{a, b, std::nullopt};
+        if (a == b) {
+          if (pre[a] > suf[b]) {
+            continue;
+          }
+        } else if (with_canvas) {
+          // Topmost free canvas host between the two placed halves.
+          for (std::size_t j = suf[b]; j > pre[a]; --j) {
+            if (hosts_canvas(j - 1)) {
+              c.canvas = j - 1;
+              break;
+            }
+          }
+          if (!c.canvas.has_value()) {
+            continue;
+          }
+        } else if (pre[a] > suf[b]) {
+          continue;
+        }
+        long long cost = 0;
+        for (std::size_t i = a; i < b; ++i) {
+          cost += keep_priority(*layers[i]);
+        }
+        if (!best.has_value() || placed > best_placed ||
+            (placed == best_placed && cost < best_cost)) {
+          best = c;
+          best_placed = placed;
+          best_cost = cost;
+        }
+      }
+    }
+    return best;
+  };
+
+  std::size_t max_placed = n;
+  while (true) {
+    const auto choice = choose(max_placed);
+    if (!choice.has_value()) {
+      return {};
+    }
+    PlaneAssignment assignment;
+    for (std::size_t i = 0; i < choice->a; ++i) {
+      assignment.insert_or_assign(by_id[pre_plane[i]]->id, layers[i]);
+    }
+    for (std::size_t i = choice->b; i < n; ++i) {
+      assignment.insert_or_assign(by_id[suf_plane[i]]->id, layers[i]);
+    }
+    canvas_plane_.reset();
+    if (choice->canvas.has_value()) {
+      canvas_plane_ = by_id[*choice->canvas]->id;
+    }
+    alloc_log("[alloc] plane-order: {} placed, run [{}, {}) composited, canvas plane {}",
+              assignment.size(), choice->a, choice->b, canvas_plane_.value_or(0));
+    if (assignment.empty() || !try_test_commit(assignment, flags, crtc_index)) {
+      return assignment;
+    }
+    if (test_commits_this_frame_ >= max_test_commits_) {
+      // Out of TESTs: composite everything rather than arm an untested stack.
+      const auto all = choose(0);
+      canvas_plane_.reset();
+      if (all.has_value() && all->canvas.has_value()) {
+        canvas_plane_ = by_id[*all->canvas]->id;
+      }
+      return {};
+    }
+    max_placed = assignment.size() - 1;
+  }
+}
+
+bool Allocator::plane_order_consistent(const Output& output, const PlaneAssignment& assignment,
+                                       const std::optional<uint32_t> canvas) {
+  // Each placeable layer's stacking position: its plane, or the canvas plane.
+  std::vector<std::pair<std::uint64_t, std::optional<uint32_t>>> pos;  // (zpos, plane)
+  std::vector<bool> on_canvas;
+  for (const auto* layer : output.layers()) {
+    if (layer->is_composition_layer() || layer->is_externally_bound() || layer->is_pinned()) {
+      continue;
+    }
+    std::optional<uint32_t> plane;
+    for (const auto& [pid, l] : assignment) {
+      if (l == layer) {
+        plane = pid;
+        break;
+      }
+    }
+    on_canvas.push_back(!plane.has_value());
+    if (!plane.has_value()) {
+      plane = canvas;
+    }
+    pos.emplace_back(layer->property("zpos").value_or(0), plane);
+  }
+  for (std::size_t x = 0; x < pos.size(); ++x) {
+    for (std::size_t y = 0; y < pos.size(); ++y) {
+      if (pos[x].first >= pos[y].first) {
+        continue;
+      }
+      const auto px = pos[x].second;
+      const auto py = pos[y].second;
+      if (!px.has_value() || !py.has_value()) {
+        return false;  // composited with no canvas plane to stack it at
+      }
+      if (*px > *py || (*px == *py && !(on_canvas[x] && on_canvas[y]))) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 const Layer* Allocator::pick_most_constrained(const std::vector<Layer*>& layers,

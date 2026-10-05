@@ -333,8 +333,10 @@ drm::expected<Image, std::error_code> snapshot(const drm::Device& device, std::u
         std::make_error_code(std::errc::no_such_device_or_address));
   }
 
-  std::sort(frames.begin(), frames.end(),
-            [](const PlaneFrame& a, const PlaneFrame& b) { return a.zpos < b.zpos; });
+  // Stable: planes arrive in plane-id order, and the kernel breaks zpos ties
+  // (every plane, on a driver without the property) by plane id.
+  std::stable_sort(frames.begin(), frames.end(),
+                   [](const PlaneFrame& a, const PlaneFrame& b) { return a.zpos < b.zpos; });
 
   // ─── Compose ────────────────────────────────────────────
   BLImage out_image;
