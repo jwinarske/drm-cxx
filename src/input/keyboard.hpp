@@ -75,7 +75,9 @@ class Keyboard {
   // scroll_lock field on layouts that don't opt in.
   void set_leds(KeyboardLeds desired) noexcept;
 
-  // Process a key event: fills in sym and utf8 fields.
+  // Process a key event: fills in sym and utf8 (resolved before the event
+  // updates xkb state, so a latch applies to the key that spends it), then
+  // updates the state. A synthesized repeat (`event.repeat`) only resolves.
   void process_key(KeyboardEvent& event) const;
 
   // True if the keymap marks this Linux keycode (KEY_*) as auto-repeating.

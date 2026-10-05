@@ -205,6 +205,33 @@ TEST(KeyboardTest, ModifierStateAfterKeyRelease) {
   EXPECT_FALSE(kb.shift_active());
 }
 
+// A latch applies to the key that spends it: lv(apostrophe) latches level 3
+// with the apostrophe key, so ' then a types ā. Resolving after the update
+// read the state the press had already left and gave "a".
+TEST(KeyboardTest, LatchAppliesToTheKeyThatSpendsIt) {
+  auto kb_result = drm::input::Keyboard::create({{}, {}, "lv", "apostrophe"});
+  if (!kb_result.has_value()) {
+    GTEST_SKIP() << "xkeyboard-config has no lv(apostrophe)";
+  }
+  auto& kb = *kb_result;
+  auto tap = [&kb](std::uint32_t key) {
+    drm::input::KeyboardEvent down;
+    down.key = key;
+    down.pressed = true;
+    kb.process_key(down);
+    drm::input::KeyboardEvent up;
+    up.key = key;
+    up.pressed = false;
+    kb.process_key(up);
+    return down;
+  };
+  (void)tap(40);           // KEY_APOSTROPHE: latch level 3
+  const auto a = tap(30);  // KEY_A
+  EXPECT_STREQ(a.utf8, "\u0101") << "latched level 3 + a must give a-macron";
+  const auto again = tap(30);
+  EXPECT_STREQ(again.utf8, "a") << "the latch is spent after one key";
+}
+
 TEST(KeyboardTest, CapsLockLatchesAndExposesLedState) {
   auto kb_result = drm::input::Keyboard::create({{}, {}, "us"});
   ASSERT_TRUE(kb_result.has_value());
