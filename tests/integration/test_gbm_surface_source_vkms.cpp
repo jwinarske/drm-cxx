@@ -32,6 +32,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <unistd.h>
 #include <utility>
 
@@ -195,4 +196,31 @@ TEST_F(GbmSurfaceSourceVkms, SessionPauseResumeAgainstSameDevice) {
   // one — both are acceptable. The contract is "callers must
   // re-query", not "the pointer changes." Just pin that the source
   // is usable again.
+}
+
+// With require_bind, acquire() before the producer binds the surface returns
+// EAGAIN rather than calling into it (a segfault in Mesa: no window surface
+// exists yet). A resume rebuilds the surface, so the gate closes again.
+TEST_F(GbmSurfaceSourceVkms, RequireBindGatesAcquireUntilBound) {
+  drm::scene::GbmSurfaceConfig cfg;
+  cfg.width = output.mode.hdisplay;
+  cfg.height = output.mode.vdisplay;
+  cfg.drm_format = DRM_FORMAT_XRGB8888;
+  cfg.modifier = DRM_FORMAT_MOD_INVALID;
+  cfg.require_bind = true;
+
+  auto src = drm::scene::GbmSurfaceSource::create(*dev, cfg);
+  ASSERT_TRUE(src.has_value()) << src.error().message();
+
+  const auto eagain = std::make_error_code(std::errc::resource_unavailable_try_again);
+  auto acq = (*src)->acquire();
+  ASSERT_FALSE(acq.has_value());
+  EXPECT_EQ(acq.error(), eagain);
+
+  (*src)->mark_bound();
+  (*src)->on_session_paused();
+  ASSERT_TRUE((*src)->on_session_resumed(*dev).has_value());
+  acq = (*src)->acquire();
+  ASSERT_FALSE(acq.has_value());
+  EXPECT_EQ(acq.error(), eagain);
 }

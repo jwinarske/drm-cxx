@@ -69,9 +69,9 @@
 // is safe either way. So the scene's commit must NOT call `acquire()`
 // before the producer has bound the surface: construct the source, hand
 // `native_surface()` to EGL/Vulkan, render one frame, *then* add the
-// layer to the scene (or rely on EAGAIN from a sibling source to keep the
-// scene from issuing the first commit until you're ready). Before the
-// first swap, `acquire()` returns EAGAIN.
+// layer to the scene. Or set `GbmSurfaceConfig::require_bind` and call
+// `mark_bound()` once the window surface exists: until then `acquire()`
+// returns EAGAIN instead of touching the surface.
 //
 // Session pause/resume
 // --------------------
@@ -126,6 +126,11 @@ struct GbmSurfaceConfig {
   /// a CPU-mappable surface (rare for GPU-rendered scanout) add
   /// `GBM_BO_USE_LINEAR | GBM_BO_USE_WRITE` here.
   std::uint32_t usage{0};
+
+  /// When true, `acquire()` returns EAGAIN until `mark_bound()` is called,
+  /// instead of calling into a surface no producer has bound yet (a segfault
+  /// in Mesa). Cleared again by `on_session_resumed`. Off by default.
+  bool require_bind{false};
 };
 
 /// `LayerBufferSource` over a `gbm_surface` front-buffer queue. See
@@ -170,6 +175,11 @@ class GbmSurfaceSource : public LayerBufferSource {
   /// DRM fd. Identity changes across `on_session_resumed` — callers
   /// must re-query after a resume.
   [[nodiscard]] struct gbm_device* native_device() const noexcept;
+
+  /// The producer has created its window surface on `native_surface()`, so
+  /// `acquire()` may lock front buffers. Gates `acquire()` only with
+  /// `GbmSurfaceConfig::require_bind`; call again after every resume.
+  void mark_bound() noexcept;
 
   // ── LayerBufferSource ────────────────────────────────────────────────
 

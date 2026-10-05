@@ -326,6 +326,8 @@ int main(int argc, char* argv[]) try {
   src_cfg.drm_format = DRM_FORMAT_ARGB8888;
   src_cfg.modifier = modifier;
   src_cfg.usage = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+  // acquire() stays EAGAIN until the EGL window surface exists (mark_bound).
+  src_cfg.require_bind = true;
   auto src_r = drm::scene::GbmSurfaceSource::create(device, src_cfg);
   if (!src_r) {
     drm::println(stderr, "GbmSurfaceSource::create: {}", src_r.error().message());
@@ -419,6 +421,8 @@ int main(int argc, char* argv[]) try {
     eglTerminate(display);
     return EXIT_FAILURE;
   }
+  src_ptr->mark_bound();
+
   if (eglMakeCurrent(display, egl_surface, egl_surface, context) != EGL_TRUE) {
     drm::println(stderr, "shadertoy_egl: eglMakeCurrent: {}", gl_strerror(eglGetError()));
     eglDestroySurface(display, egl_surface);

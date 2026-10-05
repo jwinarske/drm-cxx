@@ -155,6 +155,9 @@ struct GbmSurfaceSource::Impl {
   std::unordered_set<struct gbm_bo*> live_bos;
 
   bool session_paused{false};
+  // Producer created its window surface (mark_bound); gates acquire() when
+  // cfg.require_bind. Reset when the surface is rebuilt.
+  bool bound{false};
 
   // Render-done sync_file stashed by set_acquire_fence(), handed to the scene
   // by the next acquire() as the buffer's acquire fence (GL producer path).
@@ -278,8 +281,15 @@ struct gbm_device* GbmSurfaceSource::native_device() const noexcept {
   return impl_->gbm_dev->raw();
 }
 
+void GbmSurfaceSource::mark_bound() noexcept {
+  if (impl_ && impl_->surf != nullptr) {
+    impl_->bound = true;
+  }
+}
+
 drm::expected<AcquiredBuffer, std::error_code> GbmSurfaceSource::acquire() {
-  if (!impl_ || impl_->session_paused || impl_->surf == nullptr || impl_->drm_fd < 0) {
+  if (!impl_ || impl_->session_paused || impl_->surf == nullptr || impl_->drm_fd < 0 ||
+      (impl_->cfg.require_bind && !impl_->bound)) {
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::resource_unavailable_try_again));
   }
@@ -415,6 +425,7 @@ drm::expected<void, std::error_code> GbmSurfaceSource::on_session_resumed(
   impl_->surf = *surf;
   impl_->drm_fd = new_drm_fd;
   impl_->session_paused = false;
+  impl_->bound = false;  // new surface: the producer must bind it again
   // dimensions / fourcc / requested modifier are preserved. Reset the
   // latched modifier so the first post-resume acquire re-reads it
   // from the BO (the driver may resolve differently on a fresh fd).
