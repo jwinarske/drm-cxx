@@ -177,6 +177,17 @@ if(DRM_CXX_HAS_BLEND2D)
     GTest::gtest
     GTest::gtest_main)
   gtest_discover_tests(test_layer_scene_composition_vkms)
+
+  # The composition canvas against a simulated simultaneous-plane limit
+  # (interposed drmModeAtomicCommit).
+  add_executable(test_layer_scene_plane_limit_vkms
+    integration/test_layer_scene_plane_limit_vkms.cpp)
+  target_link_libraries(test_layer_scene_plane_limit_vkms PRIVATE
+    drm-cxx::drm-cxx
+    GTest::gtest
+    GTest::gtest_main
+    ${CMAKE_DL_LIBS})
+  gtest_discover_tests(test_layer_scene_plane_limit_vkms)
 endif()
 
 # LayerScene property-minimization tests against VKMS. No

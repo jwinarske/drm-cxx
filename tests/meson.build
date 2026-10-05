@@ -491,6 +491,16 @@ if has_blend2d
     ),
     is_parallel : false,
   )
+
+  # The composition canvas against a simulated simultaneous-plane limit
+  # (interposed drmModeAtomicCommit). Pixel readback, so Blend2D-gated too.
+  test('test_layer_scene_plane_limit_vkms',
+    executable('test_layer_scene_plane_limit_vkms',
+      'integration/test_layer_scene_plane_limit_vkms.cpp',
+      dependencies : test_deps,
+    ),
+    is_parallel : false,
+  )
 endif
 
 # LayerScene property-minimization tests against VKMS.
