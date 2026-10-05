@@ -42,8 +42,12 @@
 #define DRM_FORMAT_MOD_ARM_TYPE_AFRC 0x02
 #endif
 #ifndef DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED
-#define DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED fourcc_mod_code(ARM, 1)
+// DRM_FORMAT_MOD_ARM_CODE(DRM_FORMAT_MOD_ARM_TYPE_MISC, 1): the MISC type
+// (bit 52) set. Without it the value is AFBC(16x16).
+#define DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED fourcc_mod_code(ARM, (1ULL << 52) | 1ULL)
 #endif
+static_assert(DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED == 0x0810000000000001ULL,
+              "ARM 16x16 interleaved is type MISC, value 1");
 // StarFive/VeriSilicon DC8200 vendor. Out-of-tree (starfive-tech/linux); not in
 // mainline drm_fourcc.h, whose vendor list stops at ALLWINNER 0x09 / AMLOGIC 0x0a.
 #ifndef DRM_FORMAT_MOD_VENDOR_VS
@@ -322,7 +326,7 @@ inline BandwidthClass classify(Modifier m) noexcept {
   }
   switch (m.vendor()) {
     case DRM_FORMAT_MOD_VENDOR_ARM: {
-      // Legacy 16x16 interleaved (type field 0, value 1) is tiling, not AFBC.
+      // 16x16 interleaved (type MISC, value 1) is tiling, not AFBC.
       if (m.value == DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED) {
         return BandwidthClass::Tiling;
       }
