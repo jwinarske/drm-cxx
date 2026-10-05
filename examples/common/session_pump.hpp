@@ -30,9 +30,13 @@
 #include <drm-cxx/scene/layer_scene.hpp>
 #include <drm-cxx/session/seat.hpp>
 
+#include <csignal>
+#include <cstdio>
 #include <functional>
 #include <string_view>
+#include <sys/types.h>
 #include <system_error>
+#include <unistd.h>
 #include <utility>
 
 namespace drm::examples {
@@ -49,10 +53,15 @@ namespace drm::examples {
 ///                       the fd is revoked.
 /// `pending_resume_fd` — set by resume_cb to the new DRM fd. Cleared by
 ///                       apply_pending_resume after the swap.
+/// `device_lost`       — the DRM card could not be reopened on resume; its
+///                       fd is closed. The pump also asks the process to
+///                       quit (SIGTERM), which every example routes to its
+///                       normal teardown.
 struct SessionPumpState {
   bool paused = false;
   bool flip_pending = false;
   int pending_resume_fd = -1;
+  bool device_lost = false;
 };
 
 /// Wire pause/resume callbacks on `seat` so the standard pause/resume
@@ -90,6 +99,15 @@ inline void wire_session_callbacks(drm::session::Seat& seat, drm::scene::LayerSc
     if (on_pause) {
       on_pause();
     }
+  });
+  seat.set_resume_failed_callback([&state](std::string_view path, std::error_code ec) {
+    if (path.substr(0, 9) != "/dev/dri/") {
+      return;
+    }
+    state.device_lost = true;
+    drm::println(stderr, "session: {} did not come back on resume ({}); quitting", path,
+                 ec.message());
+    (void)::kill(::getpid(), SIGTERM);
   });
   seat.set_resume_callback(
       [&state, input, on_resume = std::move(on_resume_extra)](std::string_view path, int new_fd) {

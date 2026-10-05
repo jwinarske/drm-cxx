@@ -136,6 +136,15 @@ gtest_discover_tests(test_dumb_scanout_sink_vkms)
 
 # CursorSource integration test — plain CHECK harness, needs a dumb-capable card
 # (skips if none) and the cursor feature (CursorSource depends on drm::cursor).
+# Seat against a fake libseat defined in the test itself (interposition);
+# libseat is linked for its header and types only.
+if(DRM_CXX_HAS_LIBSEAT)
+  add_executable(test_seat unit/test_seat.cpp)
+  target_link_libraries(test_seat PRIVATE drm-cxx::drm-cxx GTest::gtest GTest::gtest_main
+                                          PkgConfig::libseat)
+  add_test(NAME test_seat COMMAND test_seat)
+endif()
+
 if(DRM_CXX_HAS_XCURSOR)
   add_executable(test_cursor_source integration/test_cursor_source.cpp)
   target_link_libraries(test_cursor_source PRIVATE drm-cxx::drm-cxx)
