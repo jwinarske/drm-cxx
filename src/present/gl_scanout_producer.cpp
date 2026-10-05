@@ -263,6 +263,7 @@ GlScanoutProducer::create_buffer(std::uint32_t width, std::uint32_t height, std:
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }
   surface_ = surface;
+  source_->mark_bound();
 
   return std::unique_ptr<scene::LayerBufferSource>(new ProxyBufferSource(source_.get()));
 }

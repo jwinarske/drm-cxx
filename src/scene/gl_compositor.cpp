@@ -384,6 +384,7 @@ drm::expected<void, std::error_code> GlCompositor::init_egl() {
     return drm::unexpected<std::error_code>(err(std::errc::io_error));
   }
   surface_ = surface;
+  source_->mark_bound();
 
   if (egl.make_current(display, surface, surface, context) != EGL_TRUE) {
     teardown_egl();
