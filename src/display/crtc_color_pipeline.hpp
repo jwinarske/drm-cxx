@@ -119,6 +119,11 @@ class CrtcColorPipeline {
   std::uint32_t degamma_blob_{0};
   std::uint32_t ctm_blob_{0};
   std::uint32_t gamma_blob_{0};
+  // CRTC property ids for the three stages, resolved once in create() (0 when
+  // the CRTC lacks the property). Valid for as long as fd_ / crtc_id_ are.
+  std::uint32_t degamma_prop_{0};
+  std::uint32_t ctm_prop_{0};
+  std::uint32_t gamma_prop_{0};
 };
 
 }  // namespace drm::display
