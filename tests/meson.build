@@ -239,6 +239,13 @@ test('test_zpos_order',
   ),
 )
 
+test('test_layer_groups',
+  executable('test_layer_groups',
+    'unit/test_layer_groups.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_input',
   executable('test_input',
     'unit/test_input.cpp',

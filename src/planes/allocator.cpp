@@ -7,6 +7,7 @@
 #include "../log.hpp"
 #include "../modeset/atomic.hpp"
 #include "planes/layer.hpp"
+#include "planes/layer_groups.hpp"
 #include "planes/multirect.hpp"
 #include "planes/output.hpp"
 #include "planes/plane_registry.hpp"
@@ -28,7 +29,6 @@
 #include <functional>
 #include <limits>
 #include <memory>
-#include <numeric>
 #include <optional>
 #include <system_error>
 #include <unordered_map>
@@ -1393,58 +1393,14 @@ bool Allocator::layers_intersect(const Layer& a, const Layer& b) {
 }
 
 std::vector<std::vector<Layer*>> Allocator::split_independent_groups(std::vector<Layer*>& layers) {
-  if (layers.size() <= 1) {
-    if (layers.empty()) {
-      return {};
-    }
-    return {layers};
+  if (layers.empty()) {
+    return {};
   }
-
-  // Union-find. `find` was previously a `std::function` even though
-  // it's not actually recursive (the inner loop does iterative path
-  // compression). That cost one heap allocation per split call for
-  // no real reason — `auto` collapses the closure into a stack
-  // object the compiler inlines.
-  std::vector<std::size_t> parent(layers.size());
-  std::iota(parent.begin(), parent.end(), static_cast<std::size_t>(0));
-
-  auto find = [&](std::size_t x) -> std::size_t {
-    while (parent.at(x) != x) {
-      parent.at(x) = parent.at(parent.at(x));
-      x = parent.at(x);
-    }
-    return x;
-  };
-
-  auto unite = [&](std::size_t a, std::size_t b) {
-    a = find(a);
-    b = find(b);
-    if (a != b) {
-      parent.at(a) = b;
-    }
-  };
-
-  // Group overlapping layers
-  for (std::size_t i = 0; i < layers.size(); ++i) {
-    for (std::size_t j = i + 1; j < layers.size(); ++j) {
-      if (layers_intersect(*layers.at(i), *layers.at(j))) {
-        unite(i, j);
-      }
-    }
-  }
-
-  // Collect groups
-  std::unordered_map<std::size_t, std::vector<Layer*>> group_map;
-  for (std::size_t i = 0; i < layers.size(); ++i) {
-    group_map.try_emplace(find(i)).first->second.push_back(layers.at(i));
-  }
-
-  std::vector<std::vector<Layer*>> result;
-  result.reserve(group_map.size());
-  for (auto& [_, group] : group_map) {
-    result.push_back(std::move(group));
-  }
-  return result;
+  // Highest keep_priority group first, so a contested plane goes to the group
+  // that matters most (planes/layer_groups.hpp).
+  return detail::independent_groups(
+      layers, [](const Layer* a, const Layer* b) { return layers_intersect(*a, *b); },
+      [](const Layer* l) { return keep_priority(*l); });
 }
 
 // ── Test commit helpers ───────────────────────────────────────

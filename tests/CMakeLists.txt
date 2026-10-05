@@ -27,6 +27,7 @@ set(DRM_CXX_TESTS
   test_output
   test_plane_allocator
   test_zpos_order
+  test_layer_groups
   test_multirect
   test_plane_alpha
   test_input
