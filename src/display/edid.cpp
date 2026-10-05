@@ -84,7 +84,10 @@ void populate_colorimetry(ConnectorInfo& out, const struct di_info* info) {
 
 void populate_hdr(ConnectorInfo& out, const struct di_info* info) {
   const struct di_hdr_static_metadata* hsm = di_info_get_hdr_static_metadata(info);
-  if (hsm == nullptr) {
+  // libdisplay-info never returns null here: with no HDR static metadata
+  // block it reports only traditional_sdr. HDR is present only when the
+  // display advertises the metadata descriptor or an HDR EOTF.
+  if (hsm == nullptr || !(hsm->type1 || hsm->traditional_hdr || hsm->pq || hsm->hlg)) {
     return;
   }
   HdrStaticMetadata m;
@@ -102,7 +105,9 @@ void populate_hdr(ConnectorInfo& out, const struct di_info* info) {
 void populate_wide_gamut(ConnectorInfo& out, const struct di_info* info) {
   const struct di_supported_signal_colorimetry* sgc =
       di_info_get_supported_signal_colorimetry(info);
-  if (sgc == nullptr) {
+  // Likewise never null: all-false means no wide-gamut encoding is advertised.
+  if (sgc == nullptr ||
+      !(sgc->bt2020_cycc || sgc->bt2020_ycc || sgc->bt2020_rgb || sgc->st2113_rgb || sgc->ictcp)) {
     return;
   }
   SupportedColorimetry w;
