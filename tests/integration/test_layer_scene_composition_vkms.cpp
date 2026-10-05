@@ -280,6 +280,79 @@ TEST(LayerSceneCompositionVkms, ForceCompositedLayerLandsOnCanvas) {
   EXPECT_EQ(at(fb_w - 1U, fb_h - 1U), 0xFFFF0000U) << "bottom-right should be background red";
 }
 
+// When composition stops, the canvas plane must go dark. The allocator only
+// disables planes it armed itself, so without the scene's own disable the old
+// canvas frame stayed on screen after the composited layer was removed.
+TEST(LayerSceneCompositionVkms, CanvasPlaneTurnsOffWhenCompositionStops) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+  const std::uint32_t fb_w = active.mode.hdisplay;
+  const std::uint32_t fb_h = active.mode.vdisplay;
+
+  auto bg_source = DumbBufferSource::create(dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(bg_source.has_value()) << bg_source.error().message();
+  fill_uniform_argb(**bg_source, fb_w, fb_h, 0xFFFF0000U);  // opaque red
+  const std::uint32_t ow = fb_w / 4U;
+  const std::uint32_t oh = fb_h / 4U;
+  const auto ox = static_cast<std::int32_t>(fb_w / 4U);
+  const auto oy = static_cast<std::int32_t>(fb_h / 4U);
+  auto ov_source = DumbBufferSource::create(dev, ow, oh, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(ov_source.has_value()) << ov_source.error().message();
+  fill_uniform_argb(**ov_source, ow, oh, 0xFF00FF00U);  // opaque green
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = active.crtc_id;
+  cfg.connector_id = active.connector_id;
+  cfg.mode = active.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  LayerDesc bg_desc;
+  bg_desc.source = std::move(*bg_source);
+  bg_desc.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  bg_desc.display.zpos = 1;
+  ASSERT_TRUE(scene.add_layer(std::move(bg_desc)).has_value());
+  LayerDesc ov_desc;
+  ov_desc.source = std::move(*ov_source);
+  ov_desc.display.src_rect = drm::scene::Rect{0, 0, ow, oh};
+  ov_desc.display.dst_rect = drm::scene::Rect{ox, oy, ow, oh};
+  ov_desc.display.zpos = 4;
+  ov_desc.force_composited = true;
+  auto ov_handle = scene.add_layer(std::move(ov_desc));
+  ASSERT_TRUE(ov_handle.has_value()) << ov_handle.error().message();
+
+  auto first = scene.commit();
+  ASSERT_TRUE(first.has_value()) << first.error().message();
+  ASSERT_EQ(first->layers_composited, 1U);
+
+  scene.remove_layer(*ov_handle);
+  auto second = scene.commit();
+  ASSERT_TRUE(second.has_value()) << second.error().message();
+  EXPECT_EQ(second->layers_composited, 0U);
+
+  auto img_r = snapshot(dev, active.crtc_id);
+  drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  ASSERT_TRUE(img_r.has_value()) << img_r.error().message();
+  const Image img = std::move(*img_r);
+  const auto cx = static_cast<std::uint32_t>(ox) + (ow / 2U);
+  const auto cy = static_cast<std::uint32_t>(oy) + (oh / 2U);
+  EXPECT_EQ(img.pixels()[(cy * img.width()) + cx], 0xFFFF0000U)
+      << "the removed overlay's area must show the background, not the stale canvas";
+}
+
 // A map()-less source (no CPU pixels) that can export its dma-buf must be
 // rescued by GPU composition — imported as an EGLImage — rather than dropped,
 // when the composition target is a GlCompositor. Self-skips when the scene

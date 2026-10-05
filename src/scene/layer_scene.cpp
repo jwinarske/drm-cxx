@@ -889,6 +889,7 @@ class LayerScene::Impl {
     // fd swap (registry was re-enumerated above); drop the cached
     // values so the next composing frame re-resolves from scratch.
     last_canvas_plane_id_.reset();
+    committed_canvas_plane_.reset();
     canvas_proven_planes_.clear();
     canvas_rejected_planes_.clear();
     canvas_testing_ = true;
@@ -1010,6 +1011,7 @@ class LayerScene::Impl {
     // dirty-rect tracker resets too.
     composition_canvas_.reset();
     last_canvas_plane_id_.reset();
+    committed_canvas_plane_.reset();
     canvas_proven_planes_.clear();
     canvas_rejected_planes_.clear();
     canvas_testing_ = true;
@@ -2081,6 +2083,7 @@ class LayerScene::Impl {
     // them. Stash the mapping inline so the blend pass below doesn't
     // have to call the virtual `map()` a second time, and so the
     // GBM-backed unmap pairs with this scope rather than per-blend.
+    canvas_armed_this_frame_ = false;
     scratch_composited_.clear();
     scratch_composited_.reserve(acquisitions.size());
     for (auto& acq : acquisitions) {
@@ -2296,6 +2299,7 @@ class LayerScene::Impl {
     report.layers_composited += composited;
     report.composition_buckets += 1U;
     last_canvas_plane_id_ = armed->id;
+    canvas_armed_this_frame_ = true;
   }
 
   // Classify every acquired layer as AssignedToPlane / Composited /
@@ -3441,6 +3445,10 @@ class LayerScene::Impl {
   // them moments later. Cleared on session resume (fresh fd) and on
   // any frame where composition didn't run.
   std::optional<std::uint32_t> last_canvas_plane_id_;
+  // Plane the canvas held at the last successful real commit. The allocator
+  // never disables it (it only disables planes it armed), so the scene turns it
+  // off when a later frame leaves it unused.
+  std::optional<std::uint32_t> committed_canvas_plane_;
   // Canvas-plane TEST verdicts (arm_canvas_tested); cleared with the plane
   // registry on resume/rebind. canvas_testing_ drops to false once every
   // candidate has failed, restoring the untested pick.
@@ -3461,6 +3469,8 @@ class LayerScene::Impl {
   // Per-frame zpos overrides from uniquify_zpos (layers whose value changed).
   std::vector<std::pair<const Layer*, std::uint64_t>> scratch_zpos_overrides_;
   bool canvas_testing_{true};
+  // compose_unassigned armed the canvas this frame (on last_canvas_plane_id_).
+  bool canvas_armed_this_frame_{false};
 
   // Per-frame scratch vectors. Keeping them as members avoids the
   // per-frame heap allocation that a fresh local vector would incur
@@ -3618,6 +3628,8 @@ class FrameBuildState {
   std::uint32_t effective_flags{0};
   bool test_only{false};
   bool wants_release_fence{false};  // any source opted into release fences
+  // Plane the canvas is armed on in this frame, if composition ran.
+  std::optional<std::uint32_t> canvas_plane;
   CommitReport report{};
 };
 
@@ -3788,10 +3800,16 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // sticky once a frame uses it (via `last_canvas_plane_id_`), so
   // subsequent frames don't keep flipping which plane the canvas
   // lives on.
-  if (!last_canvas_plane_id_.has_value()) {
-    if (auto resv = pick_canvas_reservation_if_needed(); resv.has_value()) {
-      last_canvas_plane_id_ = resv;
-    }
+  //
+  // Reserved only while a reservation is still needed (overflow, or the
+  // PRIMARY anchor). Once the layers fit the planes again, the previous canvas
+  // plane stays the canvas's preference but goes back to the allocator, so a
+  // reused scene that shrank is not held in composition by its own
+  // reservation.
+  const auto canvas_reservation = pick_canvas_reservation_if_needed();
+  const bool reserve_canvas = canvas_reservation.has_value();
+  if (!last_canvas_plane_id_.has_value() && reserve_canvas) {
+    last_canvas_plane_id_ = canvas_reservation;
   }
   // External reservations: the composition canvas plane (if any)
   // plus every plane pinned to a DriverOwnsBinding source. The
@@ -3803,7 +3821,8 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // Not a multirect virtual plane: it is only valid while its parent is armed,
   // and the allocator may give the parent away, leaving the reserved canvas
   // orphaned in every TEST. Unreserved, the canvas is re-picked each frame.
-  if (last_canvas_plane_id_.has_value() && !is_multirect_virtual(*last_canvas_plane_id_)) {
+  if (reserve_canvas && last_canvas_plane_id_.has_value() &&
+      !is_multirect_virtual(*last_canvas_plane_id_)) {
     scratch_reserved_planes_.push_back(*last_canvas_plane_id_);
   }
   for (const auto& acq : acquisitions) {
@@ -3942,6 +3961,22 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // dropped tally below is the residual that wasn't rescued
   // (no CPU mapping, no free plane, canvas alloc failed).
   compose_unassigned(acquisitions, req, report, verify_test_flags);
+  const std::optional<std::uint32_t> canvas_now =
+      canvas_armed_this_frame_ ? last_canvas_plane_id_ : std::nullopt;
+  if (committed_canvas_plane_.has_value() && committed_canvas_plane_ != canvas_now) {
+    // The canvas left this plane. Unless a layer took it, turn it off: the
+    // allocator never disables a plane it did not arm, so the old canvas
+    // frame would stay on screen.
+    const std::uint32_t old = *committed_canvas_plane_;
+    const bool taken =
+        std::any_of(acquisitions.begin(), acquisitions.end(), [old](const AcquisitionSlot& a) {
+          return (a.planes_layer != nullptr && a.planes_layer->assigned_plane_id() == old) ||
+                 a.stream_pinned_plane_id == old;
+        });
+    if (!taken) {
+      disable_plane(req, old);
+    }
+  }
 
   // Subtract skipped layers from the residual: they're flow-controlled
   // (no new frame this vblank), not dropped, and the warning below
@@ -4062,6 +4097,7 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
       std::any_of(out->acquisitions.begin(), out->acquisitions.end(), [](const auto& a) {
         return a.scene_layer != nullptr && a.scene_layer->source().wants_release_fence();
       });
+  out->canvas_plane = canvas_armed_this_frame_ ? last_canvas_plane_id_ : std::nullopt;
   out->report = std::move(report);
   return out;
 }
@@ -4105,6 +4141,7 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
     hdr_cache_.acknowledge_committed();
     // Only real commits flip the scene past first-commit; tests don't.
     first_commit_ = false;
+    committed_canvas_plane_ = state->canvas_plane;
     // The user's set_output_metadata input (if any) has been
     // resolved by this commit's build pass — the cache caught a
     // same-blob noop or the kernel acknowledged a new blob id. Clear
