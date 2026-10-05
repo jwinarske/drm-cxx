@@ -118,6 +118,8 @@ struct PlaneFrame {
   std::int32_t zpos{0};
 
   FbMapping mapping;
+  // RGB565 planes, widened to XRGB8888 once at load (empty otherwise).
+  std::vector<std::uint32_t> expanded;
 };
 
 // Export GEM handle → DMA-BUF → mmap read-only. Returns an empty
@@ -143,10 +145,37 @@ FbMapping map_plane_fb(int fd, std::uint32_t handle, std::size_t size) {
   return out;
 }
 
-// V1 accepts only the two 32-bit packed RGB formats. Plan item: NV12
-// and tiled variants explicitly skip with a warning.
+// Packed linear RGB the CPU reads directly: the two 32-bit formats, and
+// RGB565 (the console format on much embedded hardware), widened on load.
+// YUV and tiled layouts skip with a warning.
 bool is_supported_format(std::uint32_t fourcc) {
-  return fourcc == DRM_FORMAT_ARGB8888 || fourcc == DRM_FORMAT_XRGB8888;
+  return fourcc == DRM_FORMAT_ARGB8888 || fourcc == DRM_FORMAT_XRGB8888 ||
+         fourcc == DRM_FORMAT_RGB565;
+}
+
+// RGB565 → XRGB8888. Each channel widens by replicating its high bits into
+// the low ones, so full scale lands on 0xFF (a plain shift stops at 0xF8 /
+// 0xFC and darkens every bright pixel).
+std::vector<std::uint32_t> expand_rgb565(const void* data, std::uint32_t pitch, std::uint32_t w,
+                                         std::uint32_t h) {
+  std::vector<std::uint32_t> out(static_cast<std::size_t>(w) * h);
+  const auto* base = static_cast<const std::uint8_t*>(data);
+  for (std::uint32_t y = 0; y < h; ++y) {
+    const auto* row = reinterpret_cast<
+        const std::uint16_t*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+        base + (static_cast<std::size_t>(y) * pitch));
+    for (std::uint32_t x = 0; x < w; ++x) {
+      const std::uint32_t px = row[x];
+      const std::uint32_t r5 = (px >> 11U) & 0x1FU;
+      const std::uint32_t g6 = (px >> 5U) & 0x3FU;
+      const std::uint32_t b5 = px & 0x1FU;
+      const std::uint32_t r = (r5 << 3U) | (r5 >> 2U);
+      const std::uint32_t g = (g6 << 2U) | (g6 >> 4U);
+      const std::uint32_t b = (b5 << 3U) | (b5 >> 2U);
+      out[(static_cast<std::size_t>(y) * w) + x] = 0xFF000000U | (r << 16U) | (g << 8U) | b;
+    }
+  }
+  return out;
 }
 
 // Fill geometry from the plane's cached property values. Returns false
@@ -181,8 +210,9 @@ bool fill_plane_geometry(const drm::PropertyStore& props, std::uint32_t plane_id
 BLFormat bl_format_for(std::uint32_t fourcc) {
   // ARGB8888 scanout is premultiplied by KMS convention — Blend2D's
   // PRGB32 matches that layout byte-for-byte on LE hosts. XRGB8888 has
-  // undefined alpha; treated as XRGB32, so Blend2D ignores it, and the
-  // SRC_OVER blend sees opaque pixels.
+  // undefined alpha and must stay XRGB32 (not PRGB32): Blend2D then ignores
+  // the byte, so a buffer holding 0 there doesn't vanish under SRC_OVER.
+  // RGB565 arrives already widened to XRGB8888.
   return fourcc == DRM_FORMAT_ARGB8888 ? BL_FORMAT_PRGB32 : BL_FORMAT_XRGB32;
 }
 
@@ -287,6 +317,9 @@ drm::expected<Image, std::error_code> snapshot(const drm::Device& device, std::u
       drm::log_warn("capture: skipping plane {} — unable to mmap fb via DMA-BUF", plane_id);
       continue;
     }
+    if (frame.format == DRM_FORMAT_RGB565) {
+      frame.expanded = expand_rgb565(frame.mapping.data, frame.pitch, frame.width, frame.height);
+    }
 
     frames.push_back(std::move(frame));
   }
@@ -294,7 +327,7 @@ drm::expected<Image, std::error_code> snapshot(const drm::Device& device, std::u
   if (frames.empty()) {
     drm::log_warn(
         "capture: crtc {} has {} enumerated planes, {} unbound to this crtc, "
-        "none readable — snapshot aborted",
+        "none readable — snapshot aborted (plane geometry needs DRM_CLIENT_CAP_ATOMIC on the fd)",
         crtc_id, pres->count_planes, unbound_planes);
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::no_such_device_or_address));
@@ -314,12 +347,15 @@ drm::expected<Image, std::error_code> snapshot(const drm::Device& device, std::u
   ctx.clear_all();
   ctx.set_comp_op(BL_COMP_OP_SRC_OVER);
 
-  for (const PlaneFrame& frame : frames) {
+  for (PlaneFrame& frame : frames) {
     BLImage src;
+    const bool widened = !frame.expanded.empty();
+    void* const pixels = widened ? static_cast<void*>(frame.expanded.data()) : frame.mapping.data;
+    const auto stride =
+        widened ? static_cast<intptr_t>(frame.width) * 4 : static_cast<intptr_t>(frame.pitch);
     const BLResult wr = src.create_from_data(
         static_cast<int>(frame.width), static_cast<int>(frame.height), bl_format_for(frame.format),
-        frame.mapping.data, static_cast<intptr_t>(frame.pitch), BL_DATA_ACCESS_READ, nullptr,
-        nullptr);
+        pixels, stride, BL_DATA_ACCESS_READ, nullptr, nullptr);
     if (wr != BL_SUCCESS) {
       drm::log_warn("capture: BLImage::create_from_data failed for plane {}", frame.plane_id);
       continue;

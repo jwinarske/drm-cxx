@@ -83,11 +83,13 @@ std::optional<std::string> find_vkms_node() {
 // reverse order. ok() reports whether construction succeeded.
 class DumbFb {
  public:
-  DumbFb(int fd, std::uint32_t w, std::uint32_t h) : fd_(fd) {
+  DumbFb(int fd, std::uint32_t w, std::uint32_t h, std::uint32_t fourcc = DRM_FORMAT_ARGB8888,
+         std::uint32_t bpp = 32)
+      : fd_(fd) {
     drm_mode_create_dumb cd{};
     cd.width = w;
     cd.height = h;
-    cd.bpp = 32;
+    cd.bpp = bpp;
     if (::ioctl(fd_, DRM_IOCTL_MODE_CREATE_DUMB, &cd) < 0) {
       return;
     }
@@ -98,7 +100,7 @@ class DumbFb {
     std::uint32_t handles[4] = {handle_, 0, 0, 0};
     std::uint32_t pitches[4] = {pitch_, 0, 0, 0};
     std::uint32_t offsets[4] = {0, 0, 0, 0};
-    if (drmModeAddFB2(fd_, w, h, DRM_FORMAT_ARGB8888, handles, pitches, offsets, &fb_id_, 0) != 0) {
+    if (drmModeAddFB2(fd_, w, h, fourcc, handles, pitches, offsets, &fb_id_, 0) != 0) {
       return;
     }
 
@@ -138,6 +140,7 @@ class DumbFb {
   [[nodiscard]] std::uint32_t fb_id() const noexcept { return fb_id_; }
   [[nodiscard]] std::uint32_t pitch() const noexcept { return pitch_; }
   [[nodiscard]] std::uint32_t* pixels() noexcept { return static_cast<std::uint32_t*>(map_); }
+  [[nodiscard]] std::uint16_t* pixels16() noexcept { return static_cast<std::uint16_t*>(map_); }
 
  private:
   int fd_{-1};
@@ -312,4 +315,59 @@ TEST(CaptureVkms, RoundTripPrimaryPlane) {
   EXPECT_EQ(at((3 * w) / 4, h / 4), 0xFF00FF00U) << "top-right should be green";
   EXPECT_EQ(at(w / 4, (3 * h) / 4), 0xFF0000FFU) << "bottom-left should be blue";
   EXPECT_EQ(at((3 * w) / 4, (3 * h) / 4), 0xFFFFFFFFU) << "bottom-right should be white";
+}
+
+// An RGB565 primary (the console format on much embedded hardware) reads back,
+// each channel widened to full 8-bit scale: 0x1F / 0x3F map to 0xFF, not
+// 0xF8 / 0xFC.
+TEST(CaptureVkms, RoundTripRgb565Primary) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+  const std::uint32_t w = active.mode.hdisplay;
+  const std::uint32_t h = active.mode.vdisplay;
+
+  DumbFb fb(dev.fd(), w, h, DRM_FORMAT_RGB565, 16);
+  if (!fb.ok()) {
+    GTEST_SKIP() << "RGB565 framebuffer not accepted on this device";
+  }
+  const std::uint32_t pitch_px = fb.pitch() / 2;
+  for (std::uint32_t y = 0; y < h; ++y) {
+    for (std::uint32_t x = 0; x < w; ++x) {
+      const bool right = x >= w / 2;
+      const bool bottom = y >= h / 2;
+      std::uint16_t px = 0xFFFFU;  // white
+      if (!right && !bottom) {
+        px = 0xF800U;  // red
+      } else if (right && !bottom) {
+        px = 0x07E0U;  // green
+      } else if (!right && bottom) {
+        px = 0x001FU;  // blue
+      }
+      fb.pixels16()[(y * pitch_px) + x] = px;
+    }
+  }
+  std::uint32_t conn_id = active.connector_id;
+  drmModeModeInfo mode = active.mode;
+  if (drmModeSetCrtc(dev.fd(), active.crtc_id, fb.fb_id(), 0, 0, &conn_id, 1, &mode) != 0) {
+    GTEST_SKIP() << "RGB565 scanout not accepted: " << std::strerror(errno);
+  }
+  auto img_r = snapshot(dev, active.crtc_id);
+  drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  ASSERT_TRUE(img_r.has_value()) << img_r.error().message();
+  const Image img = std::move(*img_r);
+  auto at = [&](std::uint32_t x, std::uint32_t y) { return img.pixels()[(y * img.width()) + x]; };
+  EXPECT_EQ(at(w / 4, h / 4), 0xFFFF0000U);
+  EXPECT_EQ(at((3 * w) / 4, h / 4), 0xFF00FF00U);
+  EXPECT_EQ(at(w / 4, (3 * h) / 4), 0xFF0000FFU);
+  EXPECT_EQ(at((3 * w) / 4, (3 * h) / 4), 0xFFFFFFFFU) << "white must be full scale";
 }
