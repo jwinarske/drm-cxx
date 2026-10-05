@@ -51,7 +51,10 @@ CrtcColorPipeline::CrtcColorPipeline(CrtcColorPipeline&& other) noexcept
       caps_(other.caps_),
       degamma_blob_(other.degamma_blob_),
       ctm_blob_(other.ctm_blob_),
-      gamma_blob_(other.gamma_blob_) {
+      gamma_blob_(other.gamma_blob_),
+      degamma_prop_(other.degamma_prop_),
+      ctm_prop_(other.ctm_prop_),
+      gamma_prop_(other.gamma_prop_) {
   other.fd_ = -1;
   other.crtc_id_ = 0;
   other.degamma_blob_ = 0;
@@ -70,6 +73,9 @@ CrtcColorPipeline& CrtcColorPipeline::operator=(CrtcColorPipeline&& other) noexc
     degamma_blob_ = other.degamma_blob_;
     ctm_blob_ = other.ctm_blob_;
     gamma_blob_ = other.gamma_blob_;
+    degamma_prop_ = other.degamma_prop_;
+    ctm_prop_ = other.ctm_prop_;
+    gamma_prop_ = other.gamma_prop_;
     other.fd_ = -1;
     other.crtc_id_ = 0;
     other.degamma_blob_ = 0;
@@ -96,7 +102,17 @@ drm::expected<CrtcColorPipeline, std::error_code> CrtcColorPipeline::create(
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::operation_not_supported));
   }
-  return CrtcColorPipeline(dev.fd(), crtc_id, *caps);
+  CrtcColorPipeline pipeline(dev.fd(), crtc_id, *caps);
+  // Resolve the stage property ids once: they cannot change for the life of
+  // the CRTC, and re-reading the property set cost ~10 ioctls per commit.
+  drm::PropertyStore props;
+  if (auto r = props.cache_properties(dev.fd(), crtc_id, DRM_MODE_OBJECT_CRTC); !r) {
+    return drm::unexpected<std::error_code>(r.error());
+  }
+  pipeline.degamma_prop_ = props.property_id(crtc_id, "DEGAMMA_LUT").value_or(0);
+  pipeline.ctm_prop_ = props.property_id(crtc_id, "CTM").value_or(0);
+  pipeline.gamma_prop_ = props.property_id(crtc_id, "GAMMA_LUT").value_or(0);
+  return pipeline;
 }
 
 drm::expected<void, std::error_code> CrtcColorPipeline::replace_lut_blob(
@@ -231,33 +247,27 @@ drm::expected<void, std::error_code> CrtcColorPipeline::set_custom_ctm(const drm
 // ── Apply / lifecycle ──────────────────────────────────────────────
 
 drm::expected<void, std::error_code> CrtcColorPipeline::apply(drm::AtomicRequest& req) const {
-  // Property-id lookup reuses the existing PropertyStore. Caching
-  // it on the pipeline would tie the pipeline's lifetime to a
-  // specific Device's property cache; cheaper to re-cache here on
-  // demand (the apply path runs once per commit, not per frame).
-  drm::PropertyStore props;
-  if (auto r = props.cache_properties(fd_, crtc_id_, DRM_MODE_OBJECT_CRTC); !r) {
-    return drm::unexpected<std::error_code>(r.error());
-  }
-  auto write = [&](const char* name, std::uint64_t v) -> drm::expected<void, std::error_code> {
-    auto pid = props.property_id(crtc_id_, name);
-    if (!pid) {
-      return drm::unexpected<std::error_code>(pid.error());
+  // A set stage writes through the property id create() resolved; a CRTC that
+  // lacks the property never got a blob for it (the setters check caps_).
+  auto write = [&](std::uint32_t prop, std::uint64_t v) -> drm::expected<void, std::error_code> {
+    if (prop == 0) {
+      return drm::unexpected<std::error_code>(
+          std::make_error_code(std::errc::operation_not_supported));
     }
-    return req.add_property(crtc_id_, *pid, v);
+    return req.add_property(crtc_id_, prop, v);
   };
   if (degamma_blob_ != 0) {
-    if (auto r = write("DEGAMMA_LUT", degamma_blob_); !r) {
+    if (auto r = write(degamma_prop_, degamma_blob_); !r) {
       return r;
     }
   }
   if (ctm_blob_ != 0) {
-    if (auto r = write("CTM", ctm_blob_); !r) {
+    if (auto r = write(ctm_prop_, ctm_blob_); !r) {
       return r;
     }
   }
   if (gamma_blob_ != 0) {
-    if (auto r = write("GAMMA_LUT", gamma_blob_); !r) {
+    if (auto r = write(gamma_prop_, gamma_blob_); !r) {
       return r;
     }
   }
