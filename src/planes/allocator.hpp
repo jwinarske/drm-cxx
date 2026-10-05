@@ -321,7 +321,8 @@ class Allocator {
                                 const std::vector<const PlaneCapabilities*>& available_planes,
                                 uint32_t crtc_index);
 
-  // §13.7 Spatial intersection splitting
+  // §13.7 Spatial intersection splitting. Groups come back highest
+  // keep_priority first, ties in input order (planes/layer_groups.hpp).
   static bool layers_intersect(const Layer& a, const Layer& b);
   static std::vector<std::vector<Layer*>> split_independent_groups(std::vector<Layer*>& layers);
 
