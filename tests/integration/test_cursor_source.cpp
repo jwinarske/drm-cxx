@@ -35,8 +35,10 @@ static int g_fail = 0;
 
 namespace {
 
-constexpr std::uint32_t kW = 4;
-constexpr std::uint32_t kH = 4;
+// 16x16: vkms refuses framebuffers under 10x10 (mode_config.min_width/height),
+// and a 4x4 fixture made the test skip there without saying why.
+constexpr std::uint32_t kW = 16;
+constexpr std::uint32_t kH = 16;
 
 // Distinct opaque value per pixel so a stride/offset bug shows up.
 std::vector<std::uint32_t> make_pattern() {
