@@ -47,6 +47,7 @@ on a physical display, not just `TEST_ONLY` acceptance.
 | `imx-drm` + `galcore` | LCDIFv3 ×3 + Vivante GC7000UL (PANZER-PLUS Edge AIoT Computer, NXP BSP) | 6.6.23 (Yocto) | Software/dumb scanout @ 1080p60 + profiling matrix, **hardware GLES present** (`egl_scene`, `gl_present`, `shadertoy_egl`, `gbm_surface_scanout`, `egl_offload_scanout`), **explicit-sync IN_FENCE from a real GPU fence**, GPU composition (`GlCompositor`) on a single PRIMARY, Blend2D/ThorVG/CSD examples. Vulkan→KMS at 60 fps via `VkScanoutProducer`'s GPU-blit tier (no zero-copy path on this driver); VPU output via G2D GStreamer (see quirks). |
 | `vc4` + `v3d` | VideoCore VII (Raspberry Pi 5, 8 GB) | 6.18.33-rpt (trixie) | Full example + test matrix on HDMI 1280×1440: every present/scene/allocator/cursor/Blend2D-CSD example, **GL and Vulkan scanout at 60 fps** (`egl_scene`, `vulkan_scene`, `vk_present`, `vk_out_fence`, offload demos), multi-plane native placement (`scene_priority` 8/8 assigned), `allocator_torture` 6/6. 101/101 test binaries against `card0`. |
 | `msm_drm` (downstream SDE) | SA8155P (Adreno 640) | 5.4 vendor | KMS on a shared-display node: present spine, **GL and Vulkan scanout at 60 fps**, Vulkan OUT_FENCE, native multi-plane placement with **multirect virtual-plane pairing**, GPU composition, Blend2D text. 83/84 test binaries. See quirks for the controller's plane rules. |
+| `tidss` + `powervr` | TI AM625 + PowerVR AXE-1-16M (BeaglePlay) | 6.18.39-k3 (trixie, PREEMPT_RT) | Software/dumb + llvmpipe GL present @ 1080p60, **Vulkan scanout on PowerVR without `VK_EXT_image_drm_format_modifier`** (`vk_present`, `vk_out_fence` OUT_FENCE 120/120, zero-copy via display-side buffers), LINEAR-only (no compression on either side), `allocator_torture` 6/6, profiling matrix. |
 
 What's **not** validated:
 
@@ -1045,6 +1046,75 @@ census + WARN are expected on the i.MX LCDIF / LCDIFv3 controllers.
   from `IN_FORMATS`), a GPU, multiple CRTCs, a cursor plane, HDR, compression, or
   a camera. Any present example works here only if it calls
   `present::negotiate_scanout_format()` rather than hardcoding XRGB8888.
+
+### TI AM625 (BeaglePlay, tidss + PowerVR)
+
+Validation board: **BeaglePlay**, TI AM625 (quad Cortex-A53 @ 1.4 GHz, aarch64,
+2 GB, CMA 128 MiB), BeagleBoard.org **Debian 13 trixie Xfce image (2026-07-24)**,
+kernel **6.18.39-arm64-k3 (PREEMPT_RT)**, Mesa 26.0.8. The display manager is
+inactive, so DRM master is free. Cross-build with
+`scripts/build_beagleplay.sh [<ssh-target> --deploy]` (podman `debian:trixie`
+arm64 multiarch, meson, Vulkan + EGL on).
+
+- **Cards.** `card0` is **tidss** (HDMI-A-1 through an on-board bridge,
+  1920x1080@60): one PRIMARY (33) and one OVERLAY (43), no CURSOR plane
+  (`driver_caps` warns that its 64x64 cursor cap has no plane behind it).
+  `card1` / `renderD128` is the upstream **powervr** driver (AXE-1-16M),
+  render-only. `driver_caps`: addfb2_modifiers=true, async_page_flip=false,
+  fb_damage_clips=false, vrr_capable=true.
+- **No compression or tiling anywhere.** Both tidss planes accept **LINEAR
+  only**, in all 29 formats (RGB 16/24/32-bit, 10-bit, NV12, YUYV/UYVY).
+  `compressed_scanout` finds LINEAR as its only candidate (no bandwidth saving).
+  On the GPU side Mesa's PowerVR Vulkan driver lacks
+  **`VK_EXT_image_drm_format_modifier`**, so it cannot export any explicit
+  layout either.
+- **Vulkan works without the modifier extension.** `VkScanoutProducer` enables
+  the extension only when listed; without it images are `VK_IMAGE_TILING_LINEAR`
+  and exported as LINEAR. tidss refuses the PowerVR export (`EINVAL` — it scans
+  out contiguous memory), so the producer takes the **import tier**: Vulkan
+  renders into display-side buffers, used only when the LINEAR image's row pitch
+  matches the buffer's. `vk_present` 300 frames, `vk_out_fence` OUT_FENCE on
+  120/120. The PowerVR driver reports itself non-conformant.
+- **GL is llvmpipe.** Mesa ships no PowerVR GL driver; EGL on tidss runs on
+  llvmpipe across the four cores, and GPU composition stays on the CPU canvas
+  (`DRM_CXX_COMPOSITOR_ZINK=1` did not engage zink here).
+- **zpos range [0, 1] on both planes.** Scenes asking zpos 3+ now place on
+  both: the allocator writes its dense numbering (0, 1), not the requested
+  value. Two layers land natively; more than two get one native layer plus the
+  composition canvas (`scene_priority` 1 + 7, `plane_stress` 1 + 3). A layer
+  needing scaling stays composited (`allocator_torture` scaler monopoly 1 + 1).
+  `vulkan_scene` runs at 60 fps with no layer dropped; before, its Vulkan layer
+  was sent to composition, which the CPU canvas cannot do for a dma-buf-only
+  source.
+- **Headless over SSH.** seatd cannot take a VT from an SSH session; `Seat::open`
+  now gives up after 3 s and examples open the device directly. `--no-seat`
+  (after the device path) skips the wait.
+- **Tests:** 87/87 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card0`.
+  The ring-scene test leaked its PRIME fds (~16 MB CMA per case on tidss; vkms
+  hides it) until the eighth case's canvas failed with `ENOMEM`; fixed.
+
+#### Present-path profiling
+
+1920x1080, governor `performance` (1.4 GHz). CPU/frame is `user+sys` over 600
+frames (`egl_scene`: 13 s run minus 3 s run). llvmpipe's figures sum all four
+cores.
+
+| Workload | render scope | CPU/frame | fps | takeaway |
+|---|---|---|---|---|
+| `software_present` XRGB8888, `--vsync` | full 1080p | 38.1 ms | 20 | ~6x the i.MX8M Plus at a similar A53 clock; can't hold 60 |
+| `software_present --no-damage` | full 1080p | 37.7 ms | 20 | damage hint is a no-op (`fb_damage_clips=false`) |
+| `software_present --rgb565` | full 1080p | 33.2 ms | 25 | half the bytes, ~13 % cheaper |
+| `ring_present` | buffer-age repaint | 9.9 ms | 29¹ | ~4x cheaper than a full redraw |
+| `damage_present` | partial (box only) | 4.7 ms | 29¹ | incremental rendering ~8x cheaper |
+| `idle_present` (change every 30th frame) | skip unchanged | 0.3 ms | 56 | 96 % of flips avoided |
+| `gl_present` (llvmpipe) | GL on 4 cores | 34.9 ms | 54 | software GL nearly holds 60 at full 1080p |
+| `egl_scene` (llvmpipe, two layers) | GL scene | 35.3 ms | 60 | holds 60 with llvmpipe on all four cores |
+| `plane_stress` (4 layers) | 1 native + 3 CPU-composited | ~29 ms | 30 | CPU composition costs about two vblanks |
+| `allocator_torture --frames 600` | allocator | — | — | 6/6 PASS on two planes |
+| `tone_mapper_bench` | CPU tone map | >200 s total | — | not real-time here |
+
+¹ Committed without `--vsync`; the synchronous commit blocks for about half a
+vblank, so the wall rate sits near 29 fps with CPU to spare.
 
 ### StarFive JH7110 (VisionFive 2, riscv64)
 

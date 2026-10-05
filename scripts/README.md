@@ -11,6 +11,7 @@ Helper scripts for developing and testing drm-cxx.
 | `build_deck.sh` | Cross-build the library + an example for the Steam Deck (see below). |
 | `build_visionfive2.sh` | Cross-build (riscv64) + optionally flash an SD card for the StarFive VisionFive 2 (see below). |
 | `build_beaglebone_black.sh` | Cross-build (armhf) + optionally flash an SD card for the BeagleBone Black. |
+| `build_beagleplay.sh` | Cross-build (arm64, Vulkan + EGL on) for the BeaglePlay (TI AM625); `<ssh-target> --deploy` copies the tree to `~/drm-cxx-bp`. Run examples with `--no-seat` after the device path when headless. |
 | `build-deps.sh` | Build the third-party deps the CI matrix needs from source. |
 | `build-matrix.sh` | Run the local compiler/build-system matrix. |
 | `format.sh` | clang-format the tree. |
