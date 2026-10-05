@@ -245,6 +245,19 @@ class Allocator {
       std::function<drm::expected<void, std::error_code>(AtomicRequest&, uint32_t flags)>;
   void set_test_preparer(TestPreparer preparer);
 
+  // Plane order instead of zpos: when no non-cursor plane on the CRTC exposes
+  // zpos, the kernel stacks planes by id. The allocator then maps layers in
+  // zpos order onto planes in id order, and the layers it cannot place form
+  // one contiguous zpos run whose canvas plane sits between its neighbors.
+  // canvas_plane() is that plane for the last apply() (nullopt otherwise, or
+  // when nothing is composited); the caller arms the canvas there.
+  [[nodiscard]] std::optional<uint32_t> canvas_plane() const noexcept { return canvas_plane_; }
+  // Which planes can carry the canvas, for the plane-order path. Unset: any
+  // non-cursor plane.
+  void set_canvas_host_filter(std::function<bool(const PlaneCapabilities&)> filter) {
+    canvas_host_ = std::move(filter);
+  }
+
  private:
   // §13.3 Warm-start: try previous frame's allocation. When `skip_test` is set
   // (FB-only fast path), the internal TEST_ONLY re-validation is bypassed and
@@ -326,6 +339,22 @@ class Allocator {
   PlaneAssignment place_group(const std::vector<Layer*>& layers,
                               const std::vector<const PlaneCapabilities*>& planes, uint32_t flags,
                               uint32_t crtc_index);
+
+  // True when no non-cursor plane on the CRTC exposes zpos (see canvas_plane).
+  [[nodiscard]] bool stacks_by_plane_id(uint32_t crtc_index) const;
+
+  // Plane-order placement of zpos-sorted `layers`: placed layers on planes in
+  // id order, the rest one contiguous run on canvas_plane_ (when
+  // `with_canvas`). Maximizes placed layers, then keeps the higher
+  // keep_priority; a failed TEST retries with one placed layer fewer.
+  PlaneAssignment place_in_plane_order(const std::vector<Layer*>& layers,
+                                       const std::vector<const PlaneCapabilities*>& planes,
+                                       bool with_canvas, uint32_t flags, uint32_t crtc_index);
+
+  // `assignment` + `canvas` still stack the layers in zpos order (warm start).
+  [[nodiscard]] static bool plane_order_consistent(const Output& output,
+                                                   const PlaneAssignment& assignment,
+                                                   std::optional<uint32_t> canvas);
 
   // Pick the layer with the fewest statically compatible planes among
   // `planes` (lowest keep_priority breaks ties). Returns the
@@ -437,6 +466,11 @@ class Allocator {
   // §13.3 Previous allocation state
   bool previous_allocation_valid_{false};
   PlaneAssignment previous_allocation_;
+  // Plane-order path's canvas plane: this apply() and the one cached with
+  // previous_allocation_.
+  std::optional<uint32_t> canvas_plane_;
+  std::optional<uint32_t> previous_canvas_plane_;
+  std::function<bool(const PlaneCapabilities&)> canvas_host_;
 
   // §13.4 Test-commit failure cache
   TestCache failure_cache_;
