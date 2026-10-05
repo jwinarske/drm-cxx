@@ -900,8 +900,8 @@ non-root user in `video`/`render`/`input` is DRM master as the first opener.
   and signaled an OUT_FENCE on 60/60 frames; Vulkan- and GL-rendered LINEAR buffers
   scan out (`vulkan_offload_scanout`, `egl_offload_scanout`). vc4 has enough planes
   that multi-layer scenes place natively (`scene_priority` 8/8, `scene_formats`
-  4/4, `minimal_kms_probe` 3 assigned); `allocator_torture` 6/6 (N+1: 15 native
-  + 3 composited).
+  4/4, `minimal_kms_probe` 3 assigned); `allocator_torture` 6/6 (N+1: 16 native
+  + 2 composited).
 - **Tests:** 101/101 test binaries pass with `DRM_CXX_TEST_CARD=/dev/dri/card0`.
 - **Not applicable here:** `dual_display`/`video_wall_multi` (one connected
   output on `card0`), `stream_demo` (no EGL Streams), `v4l2_decode` (the Pi 5's
