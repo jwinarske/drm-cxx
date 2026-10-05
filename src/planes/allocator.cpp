@@ -1099,17 +1099,12 @@ bool Allocator::plane_statically_compatible(const PlaneCapabilities& plane, cons
     return false;
   }
 
-  // A mutable plane gets the layer's zpos written, so it must lie in range. A
-  // fixed-slot plane is never written: it stacks at its slot whatever the layer
-  // asked, and stacking order is checked per assignment (fits_stacking).
-  if (const auto z = layer.property("zpos"); z.has_value() && !detail::zpos_fixed(plane)) {
-    if (plane.zpos_min && *z < *plane.zpos_min) {
-      return false;
-    }
-    if (plane.zpos_max && *z > *plane.zpos_max) {
-      return false;
-    }
-  }
+  // No zpos range check: the requested value is not what gets written. The
+  // allocator writes stack_zpos's dense numbering (zpos_order.hpp), which fits
+  // each plane's range, so a layer asking zpos 3 can sit on a [0, 1] plane
+  // (tidss). When no dense numbering fits, the requested values are written
+  // and the TEST decides. Stacking order is checked per assignment
+  // (fits_stacking).
 
   if (plane.type == DRMPlaneType::CURSOR) {
     if (plane.cursor_max_w > 0 && layer.width() > plane.cursor_max_w) {
