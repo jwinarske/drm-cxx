@@ -4,9 +4,9 @@
 // Private (not installed): the stacking-order rule the allocator applies when a
 // layer's zpos cannot be written to its plane.
 //
-// A mutable-zpos plane takes the layer's zpos (apply_layer_to_plane writes it,
-// and the static gate keeps it inside the plane's range), so it stacks exactly
-// where the layer asked. A fixed-slot plane (zpos_min == zpos_max — immutable,
+// A mutable-zpos plane takes a written zpos (stack_zpos's dense numbering of
+// the armed planes, in requested order), so it stacks where the layer asked
+// relative to the others. A fixed-slot plane (zpos_min == zpos_max — immutable,
 // e.g. i.MX LCDIF / vc4 PRIMARY at 0, amdgpu PRIMARY at 2) is never written: it
 // stacks at its slot whatever the layer asked for. Requiring layer.zpos == slot
 // there is stricter than needed — on a single-plane controller it shuts every
