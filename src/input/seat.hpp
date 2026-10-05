@@ -101,6 +101,10 @@ using LogHandler = std::function<void(LogPriority, std::string_view)>;
 // ── SeatOptions ────────────────────────────────────────────────
 
 struct SeatOptions {
+  /// udev seat to take devices from. An unknown name is not an error:
+  /// libinput finds no devices tagged with it and the seat opens empty, so a
+  /// typo looks exactly like a machine with no input devices — events simply
+  /// never arrive.
   std::string_view seat_name = "seat0";
   std::string_view keymap_path;  // Empty = use RMLVO defaults
 

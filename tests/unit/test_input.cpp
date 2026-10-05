@@ -596,12 +596,17 @@ TEST(SeatLogTest, DefaultOptionsRouteIntoDrmLogAtErrorThreshold) {
 
 // ── Seat tests ────────────────────────────────────────────────
 
-TEST(SeatTest, OpenWithInvalidSeatFails) {
-  // Opening a seat requires root privileges typically.
-  // On CI without input devices, this should fail gracefully.
+// An unknown seat name is not an error: libinput finds no devices tagged
+// with it, so the seat opens empty and never delivers an event. (A typo and a
+// machine with no input devices look the same; documented on seat_name.)
+TEST(SeatTest, UnknownSeatOpensWithNoDevices) {
   auto result = drm::input::Seat::open({"nonexistent_seat_99"});
-  // May succeed or fail depending on environment — just verify no crash.
-  if (result.has_value()) {
-    EXPECT_GE(result->fd(), 0);
+  if (!result.has_value()) {
+    GTEST_SKIP() << "no udev / libinput context here: " << result.error().message();
   }
+  EXPECT_GE(result->fd(), 0);
+  int events = 0;
+  result->set_event_handler([&events](const drm::input::InputEvent&) { ++events; });
+  ASSERT_TRUE(result->dispatch().has_value());
+  EXPECT_EQ(events, 0) << "a seat with no devices must deliver nothing";
 }
