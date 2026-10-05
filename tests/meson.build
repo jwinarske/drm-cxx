@@ -729,6 +729,14 @@ test('test_gbm_surface_source_vkms',
   is_parallel : false,
 )
 
+test('test_plane_registry_vkms',
+  executable('test_plane_registry_vkms',
+    'integration/test_plane_registry_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
 test('test_scanout_backend_vkms',
   executable('test_scanout_backend_vkms',
     'integration/test_scanout_backend_vkms.cpp',
