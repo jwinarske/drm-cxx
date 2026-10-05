@@ -85,6 +85,8 @@ struct ConnectorInfo {
   int height_mm{0};
 
   std::optional<ColorimetryInfo> colorimetry;
+  // Set only when the display advertises at least one HDR EOTF / one
+  // wide-gamut encoding; empty for a display that says nothing.
   std::optional<HdrStaticMetadata> hdr;
   std::optional<SupportedColorimetry> wide_gamut;
   std::optional<VrefreshRange> vrefresh_range;
