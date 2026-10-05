@@ -1591,7 +1591,7 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(
     // IN_FENCE_FD is a per-frame one-shot the kernel consumes on each commit:
     // an fd that the diff happens to see as unchanged (recycled value) must
     // still be re-armed, or the plane scans out before its buffer is ready.
-    if (tag == PropTag::FbId || tag == PropTag::InFenceFd) {
+    if (prop_class(tag) == PropClass::Content) {
       need_write = true;
     }
     if (!need_write) {

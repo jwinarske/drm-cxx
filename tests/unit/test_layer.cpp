@@ -3,6 +3,7 @@
 
 #include "planes/layer.hpp"
 
+#include <cstddef>
 #include <gtest/gtest.h>
 
 TEST(LayerTest, SetPropertyMarksLayerDirty) {
@@ -166,4 +167,18 @@ TEST(LayerTest, PropertyHashIsolatesFbOnlyContentFromPlacement) {
 TEST(LayerTest, AssignedPlaneIdDefaultsToNullopt) {
   drm::planes::Layer const layer;
   EXPECT_FALSE(layer.assigned_plane_id().has_value());
+}
+
+// The content set is exactly FB_ID and IN_FENCE_FD; everything else is
+// placement. Total-ness (-Wswitch) catches a new tag; this catches a tag moved
+// to the wrong side (INVARIANTS.md §4).
+TEST(LayerTest, PropClassContentSetIsExact) {
+  using drm::planes::PropClass;
+  using drm::planes::PropTag;
+  for (std::size_t i = 0; i < drm::planes::k_num_props; ++i) {
+    const auto tag = static_cast<PropTag>(i);
+    const bool content = tag == PropTag::FbId || tag == PropTag::InFenceFd;
+    EXPECT_EQ(drm::planes::prop_class(tag), content ? PropClass::Content : PropClass::Placement)
+        << drm::planes::prop_name(tag);
+  }
 }
