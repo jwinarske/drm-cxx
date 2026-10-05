@@ -178,7 +178,8 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
         drmModeFreePropertyBlob(blob);
       }
     } else if (std::strcmp(prop->name, "SRC_W") == 0) {
-      // If SRC_W exists and is different from CRTC_W range, scaling is supported
+      // Every atomic plane has SRC_W; nothing in KMS says whether it scales.
+      // Assume it can and let the TEST decide (see supports_scaling).
       caps.supports_scaling = true;
     } else if (std::strcmp(prop->name, "IN_FORMATS") == 0) {
       // The property value is a blob id; the blob carries (format,

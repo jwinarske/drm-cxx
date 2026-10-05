@@ -201,9 +201,8 @@ int main(int argc, char** argv) {
         ++n_cursor;
         break;
     }
-    std::printf("  plane %u  type=%-7s  crtcs=0x%x  modifiers=%s  scaling=%s  zpos=[%s..%s]\n",
-                pc.id, plane_type_name(pc.type), pc.possible_crtcs,
-                pc.has_format_modifiers ? "yes" : "NO", pc.supports_scaling ? "yes" : "no",
+    std::printf("  plane %u  type=%-7s  crtcs=0x%x  modifiers=%s  zpos=[%s..%s]\n", pc.id,
+                plane_type_name(pc.type), pc.possible_crtcs, pc.has_format_modifiers ? "yes" : "NO",
                 pc.zpos_min ? std::to_string(*pc.zpos_min).c_str() : "-",
                 pc.zpos_max ? std::to_string(*pc.zpos_max).c_str() : "-");
     std::printf("           formats:");

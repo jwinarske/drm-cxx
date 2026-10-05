@@ -99,6 +99,11 @@ struct PlaneCapabilities {
   /// reflect-only), which is why the allocator gates on these bits.
   uint64_t rotation_bits{0};
   bool supports_rotation{false};
+  /// Not a measured capability: KMS advertises no "can scale" property, and
+  /// every atomic plane has SRC_W, so enumerate sets this on every plane. The
+  /// atomic TEST decides whether a scaled layer fits (and the allocator's
+  /// failure cache then deprioritizes a plane that refused it). false only when
+  /// set explicitly, e.g. a fixture modelling a plane that cannot scale.
   bool supports_scaling{false};
   bool has_format_modifiers{false};
   /// True when the plane exposes the `"pixel blend mode"` enum property.

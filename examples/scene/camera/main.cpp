@@ -218,12 +218,12 @@ std::optional<std::uint32_t> crtc_index_of(const drm::Device& dev, std::uint32_t
 }
 
 void print_plane(const drm::planes::PlaneCapabilities& p, std::vector<DisplayFmt>& out) {
-  drm::println("  plane id={} type={} zpos=[{}..{}] scaling={} rotation={} blend={} alpha_prop={}",
-               p.id, plane_type_label(p.type),
+  drm::println("  plane id={} type={} zpos=[{}..{}] rotation={} blend={} alpha_prop={}", p.id,
+               plane_type_label(p.type),
                p.zpos_min ? drm::format("{}", *p.zpos_min) : std::string{"-"},
                p.zpos_max ? drm::format("{}", *p.zpos_max) : std::string{"-"},
-               p.supports_scaling ? "yes" : "no", p.supports_rotation ? "yes" : "no",
-               p.has_pixel_blend_mode ? "yes" : "no", p.has_per_plane_alpha ? "yes" : "no");
+               p.supports_rotation ? "yes" : "no", p.has_pixel_blend_mode ? "yes" : "no",
+               p.has_per_plane_alpha ? "yes" : "no");
 
   // Cursor planes accept only ARGB8888 at fixed small sizes — they are
   // never candidates for camera scanout, so don't emit DisplayFmt

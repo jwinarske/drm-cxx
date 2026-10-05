@@ -53,9 +53,6 @@ int main(int argc, char* argv[]) try {
     if (plane.supports_rotation) {
       drm::println("    supports rotation");
     }
-    if (plane.supports_scaling) {
-      drm::println("    supports scaling");
-    }
   }
 
   // Create virtual layers
