@@ -9,6 +9,7 @@
 #include <drm-cxx/session/seat.hpp>
 
 #include <cerrno>
+#include <chrono>
 #include <deque>
 #include <gtest/gtest.h>
 extern "C" {
@@ -32,6 +33,8 @@ struct FakeSeat {
   std::map<std::string, int> open_errno;  // path -> errno for the next open
   std::vector<int> closed_ids;
   int opens{0};
+  bool enable_on_open{true};  // false: a backend that never enables the seat
+  bool seat_closed{false};
 };
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
@@ -52,11 +55,14 @@ extern "C" {
 libseat* libseat_open_seat(const libseat_seat_listener* listener, void* userdata) {
   g_fake.listener = listener;
   g_fake.userdata = userdata;
-  g_fake.events.push_back(true);  // the initial enable_seat
+  if (g_fake.enable_on_open) {
+    g_fake.events.push_back(true);  // the initial enable_seat
+  }
   return fake_handle();
 }
 
 int libseat_close_seat(libseat* /*seat*/) {
+  g_fake.seat_closed = true;
   return 0;
 }
 
@@ -176,6 +182,18 @@ TEST_F(SeatTest, DeadEntryIsReopenedByTake) {
   ASSERT_TRUE(again.has_value());
   EXPECT_GE(again->fd, 0);
   EXPECT_EQ(g_fake.opens, opens_before + 1);
+}
+
+// A backend that connects but never enables the seat (seatd over SSH, no VT)
+// gives nullopt within the timeout, and the seat is closed.
+TEST_F(SeatTest, OpenTimesOutWhenSeatNeverEnabled) {
+  g_fake.enable_on_open = false;
+  const auto start = std::chrono::steady_clock::now();
+  auto seat = drm::session::Seat::open(std::chrono::milliseconds{50});
+  const auto took = std::chrono::steady_clock::now() - start;
+  EXPECT_FALSE(seat.has_value());
+  EXPECT_TRUE(g_fake.seat_closed);
+  EXPECT_LT(took, std::chrono::seconds{2});
 }
 
 // NOLINTEND(bugprone-unchecked-optional-access)
