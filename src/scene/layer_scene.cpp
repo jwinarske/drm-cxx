@@ -61,6 +61,7 @@
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <tuple>
 #include <unistd.h>
 #include <unordered_map>
@@ -261,6 +262,9 @@ class LayerScene::Impl {
   }
 
   ~Impl() {
+    // A flip armed by the last commit may still reference buffers released
+    // below; let it land first (bounded, without consuming any event).
+    wait_for_armed_flip();
     // Drain the deferred-release ring first so sources see their
     // buffers returned before they get destroyed via slots_.
     release_pending_acquisitions();
@@ -647,8 +651,38 @@ class LayerScene::Impl {
     if (!test_only) {
       last_real_commit_wanted_event_ =
           kr.has_value() && (kernel_flags & DRM_MODE_PAGE_FLIP_EVENT) != 0;
+      // The flip lands once the CRTC's vblank sequence moves past this.
+      armed_flip_seq_ = 0;
+      if (last_real_commit_wanted_event_) {
+        std::uint64_t seq = 0;
+        if (drmCrtcGetSequence(dev_->fd(), crtc_id_, &seq, nullptr) == 0) {
+          armed_flip_seq_ = seq;
+        }
+      }
     }
     return finalize_frame(std::move(state), kr, release_src);
+  }
+
+  // Teardown guard for callers that did not drain(): most dispatch the flip
+  // event themselves, which the scene cannot see, so it waits for the CRTC's
+  // vblank sequence to pass the one recorded at the commit instead — the flip
+  // has then landed. Never reads the event queue, so a caller's own dispatch
+  // is undisturbed. Bounded: a CRTC that stopped counting cannot hang it.
+  void wait_for_armed_flip() noexcept {
+    if (!last_real_commit_wanted_event_ || armed_flip_seq_ == 0 || suspended_ || dev_ == nullptr ||
+        dev_->fd() < 0) {
+      return;
+    }
+    constexpr auto k_bound = std::chrono::milliseconds(100);
+    constexpr auto k_step = std::chrono::milliseconds(2);
+    const auto deadline = std::chrono::steady_clock::now() + k_bound;
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::uint64_t seq = 0;
+      if (drmCrtcGetSequence(dev_->fd(), crtc_id_, &seq, nullptr) != 0 || seq > armed_flip_seq_) {
+        return;
+      }
+      std::this_thread::sleep_for(k_step);
+    }
   }
 
   drm::expected<void, std::error_code> drain(PageFlip& pf, int timeout_ms) {
@@ -3370,6 +3404,9 @@ class LayerScene::Impl {
   drm::planes::Layer composition_planes_layer_;
   drm::planes::Output output_;
 
+  // CRTC vblank sequence read right after the last commit that wanted a flip
+  // event; 0 when unknown (wait_for_armed_flip).
+  std::uint64_t armed_flip_seq_{0};
   std::vector<Slot> slots_;
   std::vector<std::uint32_t> free_ids_;
 
