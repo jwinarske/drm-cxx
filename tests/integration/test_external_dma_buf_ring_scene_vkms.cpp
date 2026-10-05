@@ -143,9 +143,33 @@ std::optional<std::string> first_render_node() {
 }
 
 // A mode-sized dumb buffer plus its PRIME fd (owned; closed on destruction).
+// The fd keeps the buffer alive after `buf` goes, so it must be closed: on a
+// contiguous-memory driver (tidss) the leak exhausted CMA within one run.
 struct Slot {
   drm::dumb::Buffer buf;
   int fd{-1};
+
+  Slot(drm::dumb::Buffer b, int f) noexcept : buf(std::move(b)), fd(f) {}
+  Slot(Slot&& o) noexcept : buf(std::move(o.buf)), fd(std::exchange(o.fd, -1)) {}
+  Slot& operator=(Slot&& o) noexcept {
+    if (this != &o) {
+      close_fd();
+      buf = std::move(o.buf);
+      fd = std::exchange(o.fd, -1);
+    }
+    return *this;
+  }
+  Slot(const Slot&) = delete;
+  Slot& operator=(const Slot&) = delete;
+  ~Slot() { close_fd(); }
+
+ private:
+  void close_fd() noexcept {
+    if (fd >= 0) {
+      ::close(fd);
+      fd = -1;
+    }
+  }
 };
 
 // Fill a dumb buffer with a solid XRGB8888 color so a real commit shows
@@ -208,7 +232,7 @@ drm::expected<std::unique_ptr<drm::scene::ExternalDmaBufRing>, std::error_code> 
     if (drmPrimeHandleToFD(dev.fd(), buf->handle(), O_CLOEXEC | O_RDWR, &fd) != 0 || fd < 0) {
       return drm::unexpected<std::error_code>(std::make_error_code(std::errc::io_error));
     }
-    b.slots.push_back(Slot{std::move(*buf), fd});
+    b.slots.emplace_back(std::move(*buf), fd);
   }
   for (auto& slot : b.slots) {
     fill_solid(slot.buf, w, h, color);
@@ -265,7 +289,7 @@ TEST(ExternalDmaBufRingSceneVkms, ReleaseFenceDeliveredOnDisplace) {
     int fd = -1;
     ASSERT_EQ(drmPrimeHandleToFD(dev->fd(), buf->handle(), O_CLOEXEC | O_RDWR, &fd), 0);
     ASSERT_GE(fd, 0);
-    slots_storage.push_back(Slot{std::move(*buf), fd});
+    slots_storage.emplace_back(std::move(*buf), fd);
   }
   plane_storage.reserve(slots_storage.size());
   for (auto& s : slots_storage) {
@@ -361,7 +385,7 @@ TEST(ExternalDmaBufRingSceneVkms, IdleHoldsThenReleasesOnResume) {
     int fd = -1;
     ASSERT_EQ(drmPrimeHandleToFD(dev->fd(), buf->handle(), O_CLOEXEC | O_RDWR, &fd), 0);
     ASSERT_GE(fd, 0);
-    slots_storage.push_back(Slot{std::move(*buf), fd});
+    slots_storage.emplace_back(std::move(*buf), fd);
   }
   plane_storage.reserve(slots_storage.size());
   for (auto& s : slots_storage) {
@@ -463,7 +487,7 @@ TEST(ExternalDmaBufRingSceneVkms, ContentChangedGatesAllIdleSkip) {
     int fd = -1;
     ASSERT_EQ(drmPrimeHandleToFD(dev->fd(), buf->handle(), O_CLOEXEC | O_RDWR, &fd), 0);
     ASSERT_GE(fd, 0);
-    slots_storage.push_back(Slot{std::move(*buf), fd});
+    slots_storage.emplace_back(std::move(*buf), fd);
   }
   plane_storage.reserve(slots_storage.size());
   for (auto& s : slots_storage) {
@@ -569,7 +593,7 @@ TEST(ExternalDmaBufRingSceneVkms, MultiLayerReleaseFenceAndRemove) {
     int fd = -1;
     ASSERT_EQ(drmPrimeHandleToFD(dev->fd(), buf->handle(), O_CLOEXEC | O_RDWR, &fd), 0);
     ASSERT_GE(fd, 0);
-    slots_storage.push_back(Slot{std::move(*buf), fd});
+    slots_storage.emplace_back(std::move(*buf), fd);
   }
   plane_storage.reserve(slots_storage.size());
   for (auto& s : slots_storage) {
@@ -699,7 +723,7 @@ TEST(ExternalDmaBufRingSceneVkms, PerFrameDamageCommits) {
     int fd = -1;
     ASSERT_EQ(drmPrimeHandleToFD(dev->fd(), buf->handle(), O_CLOEXEC | O_RDWR, &fd), 0);
     ASSERT_GE(fd, 0);
-    slots_storage.push_back(Slot{std::move(*buf), fd});
+    slots_storage.emplace_back(std::move(*buf), fd);
   }
   plane_storage.reserve(slots_storage.size());
   for (auto& s : slots_storage) {
