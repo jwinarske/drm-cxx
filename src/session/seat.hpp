@@ -24,6 +24,7 @@
 
 #include <drm-cxx/detail/expected.hpp>
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -96,7 +97,17 @@ class Seat {
   /// seatd, no permissions for builtin) or if drm-cxx was built
   /// without libseat support. Callers fall back to opening devices
   /// directly.
+  ///
+  /// Also nullopt when the backend connects but never enables the seat
+  /// within `k_default_enable_timeout` (e.g. seatd over SSH, with no VT to
+  /// take): without a bound that wait never returned.
   [[nodiscard]] static std::optional<Seat> open();
+
+  /// As open(), waiting up to `enable_timeout` for the seat to be enabled;
+  /// a negative timeout waits indefinitely.
+  [[nodiscard]] static std::optional<Seat> open(std::chrono::milliseconds enable_timeout);
+
+  static constexpr std::chrono::milliseconds k_default_enable_timeout{3000};
 
   Seat(Seat&&) noexcept;
   Seat& operator=(Seat&&) noexcept;

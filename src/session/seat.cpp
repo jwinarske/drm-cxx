@@ -23,6 +23,7 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
@@ -61,6 +62,9 @@ Seat& Seat::operator=(Seat&&) noexcept = default;
 Seat::~Seat() = default;
 
 std::optional<Seat> Seat::open() {
+  return std::nullopt;
+}
+std::optional<Seat> Seat::open(std::chrono::milliseconds /*enable_timeout*/) {
   return std::nullopt;
 }
 
@@ -274,6 +278,10 @@ void Seat::on_disable_trampoline(libseat* seat, void* userdata) {
 }
 
 std::optional<Seat> Seat::open() {
+  return open(k_default_enable_timeout);
+}
+
+std::optional<Seat> Seat::open(const std::chrono::milliseconds enable_timeout) {
   // Install the log handler before libseat_open_seat so any
   // backend-selection errors surface with context. Process-global,
   // not per-instance — which is fine because it's idempotent and
@@ -291,11 +299,25 @@ std::optional<Seat> Seat::open() {
     return std::nullopt;
   }
 
-  // Drain until the initial enable_seat fires (or an error surfaces).
-  // libseat_dispatch with -1 blocks until an event; one is guaranteed
-  // on successful open.
+  // Drain until the initial enable_seat fires, an error surfaces, or the
+  // deadline passes. A connected backend that never enables the seat (seatd
+  // with no VT to take, over SSH) would otherwise block here forever.
+  const bool bounded = enable_timeout.count() >= 0;
+  const auto deadline = std::chrono::steady_clock::now() + enable_timeout;
   while (!impl->active) {
-    if (libseat_dispatch(impl->seat, -1) < 0) {
+    int wait_ms = -1;
+    if (bounded) {
+      const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - std::chrono::steady_clock::now());
+      if (left.count() <= 0) {
+        drm::log_warn("Seat: seat not enabled within {} ms; falling back to direct device open",
+                      enable_timeout.count());
+        libseat_close_seat(impl->seat);
+        return std::nullopt;
+      }
+      wait_ms = static_cast<int>(std::min<std::chrono::milliseconds::rep>(left.count(), 100));
+    }
+    if (libseat_dispatch(impl->seat, wait_ms) < 0) {
       drm::log_error("libseat_dispatch (initial) failed: {}",
                      std::system_category().message(errno));
       libseat_close_seat(impl->seat);
