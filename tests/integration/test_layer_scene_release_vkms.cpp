@@ -45,6 +45,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -757,5 +758,80 @@ TEST(LayerSceneReleaseVkms, DrainLandsPendingFlipBeforeTeardown) {
   EXPECT_EQ(flips_seen, 1);
 
   fx.scene.reset();  // safe: the in-flight flip already landed
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+// Records the CRTC's vblank sequence each time the scene hands a buffer back.
+class SeqOnReleaseSource : public TrackingSource {
+ public:
+  SeqOnReleaseSource(std::unique_ptr<DumbBufferSource> inner,
+                     std::vector<TrackingSource::Event>& transcript, int fd, std::uint32_t crtc,
+                     std::shared_ptr<std::vector<std::uint64_t>> seqs)
+      : TrackingSource(std::move(inner), transcript),
+        fd_(fd),
+        crtc_(crtc),
+        seqs_(std::move(seqs)) {}
+
+  void release(AcquiredBuffer acquired) noexcept override {
+    std::uint64_t seq = 0;
+    if (drmCrtcGetSequence(fd_, crtc_, &seq, nullptr) == 0) {
+      seqs_->push_back(seq);
+    }
+    TrackingSource::release(std::move(acquired));
+  }
+
+ private:
+  int fd_;
+  std::uint32_t crtc_;
+  std::shared_ptr<std::vector<std::uint64_t>> seqs_;
+};
+
+// A caller that neither drains nor dispatches the final flip event: the
+// destructor waits (bounded) until the CRTC's vblank sequence passes the
+// commit before handing buffers back, so a producer never gets back a buffer
+// the pending flip still reads. The event itself stays queued for the caller.
+TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+  auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner.has_value()) << inner.error().message();
+  std::vector<TrackingSource::Event> transcript;
+  auto seqs = std::make_shared<std::vector<std::uint64_t>>();
+  LayerDesc layer;
+  layer.source = std::make_unique<SeqOnReleaseSource>(std::move(*inner), transcript, fx.dev->fd(),
+                                                      fx.active.crtc_id, seqs);
+  layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.zpos = 1;
+  ASSERT_TRUE(fx.scene->add_layer(std::move(layer)).has_value());
+
+  drm::PageFlip pf(*fx.dev);
+  int flips_seen = 0;
+  pf.set_handler([&](std::uint32_t, std::uint64_t, std::uint64_t) { ++flips_seen; });
+  ASSERT_TRUE(fx.scene->commit().has_value());
+  ASSERT_TRUE(fx.scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &pf).has_value());
+  std::uint64_t armed = 0;
+  ASSERT_EQ(drmCrtcGetSequence(fx.dev->fd(), fx.active.crtc_id, &armed, nullptr), 0);
+  seqs->clear();
+
+  const auto t0 = std::chrono::steady_clock::now();
+  fx.scene.reset();  // no drain(), no dispatch
+  const auto took = std::chrono::steady_clock::now() - t0;
+
+  ASSERT_FALSE(seqs->empty()) << "teardown should hand the in-flight buffers back";
+  for (const auto seq : *seqs) {
+    EXPECT_GT(seq, armed) << "a buffer went back to its source before the flip landed";
+  }
+  EXPECT_LT(took, std::chrono::milliseconds(150)) << "the wait is bounded";
+  // The event was not consumed: it is still queued for the caller.
+  EXPECT_TRUE(pf.dispatch(0).has_value());
+  EXPECT_EQ(flips_seen, 1);
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }

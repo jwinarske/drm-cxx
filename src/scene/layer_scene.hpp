@@ -110,11 +110,12 @@ class LayerScene {
 
   /// Destroying the scene releases every buffer still held by the
   /// deferred-release ring back to its source and destroys the scene's
-  /// framebuffers. It does NOT wait on the kernel: if the last real commit
-  /// armed DRM_MODE_PAGE_FLIP_EVENT and that event has not been dispatched,
-  /// the flip is still referencing a buffer this destructor tears down. Land
-  /// it first — call `drain()` (or dispatch the event yourself) before the
-  /// scene goes out of scope.
+  /// framebuffers. If the last real commit armed DRM_MODE_PAGE_FLIP_EVENT and
+  /// `drain()` was not called, it first waits (up to 100 ms) for the CRTC's
+  /// vblank sequence to pass that commit, so the flip has landed before its
+  /// buffers go. It never reads the event queue: a caller that dispatches the
+  /// event itself is unaffected, and the event (if undispatched) stays queued
+  /// for the caller. `drain()` remains the way to land it explicitly.
   ~LayerScene();
 
   LayerScene(const LayerScene&) = delete;
