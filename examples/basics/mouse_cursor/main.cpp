@@ -9,7 +9,8 @@
 // Loads a cursor from an installed XCursor theme (Adwaita by default)
 // and tracks the mouse via libinput. The drm::cursor::Renderer picks
 // the best KMS path available on the chosen CRTC (dedicated CURSOR
-// plane → atomic OVERLAY with ARGB8888 → legacy drmModeSetCursor);
+// plane → atomic OVERLAY, each with an alpha format such as ARGB8888
+// or RGBA8888 → legacy drmModeSetCursor);
 // the log line at startup reports which it chose. Press Escape or
 // Ctrl-C to quit. Middle-click or digit keys 1..9 cycle through the
 // shape set.
