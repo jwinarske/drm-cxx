@@ -246,6 +246,13 @@ test('test_layer_groups',
   ),
 )
 
+test('test_cursor_format',
+  executable('test_cursor_format',
+    'unit/test_cursor_format.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_input',
   executable('test_input',
     'unit/test_input.cpp',
