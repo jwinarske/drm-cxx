@@ -13,6 +13,8 @@
 
 namespace drm::display {
 
+/// Parse an EDID blob with libdisplay-info. `errc::function_not_supported` in
+/// builds without libdisplay-info (the AOSP Android.bp build).
 drm::expected<ConnectorInfo, std::error_code> parse_edid(drm::span<const uint8_t> edid_blob);
 
 }  // namespace drm::display

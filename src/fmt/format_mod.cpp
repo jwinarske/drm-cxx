@@ -33,6 +33,11 @@
 
 // Provided by the build (meson + CMake gate). Default off so this also compiles
 // against an older libgbm with no _2 variant.
+// Headers predating RDNA3 (libdrm 2.4.109, AOSP 13).
+#ifndef AMD_FMT_MOD_TILE_VER_GFX11
+#define AMD_FMT_MOD_TILE_VER_GFX11 4
+#endif
+
 #ifndef HAVE_GBM_BO_CREATE_WITH_MODIFIERS2
 #define HAVE_GBM_BO_CREATE_WITH_MODIFIERS2 0
 #endif

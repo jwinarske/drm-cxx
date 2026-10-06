@@ -4,7 +4,7 @@
 
 #include <drm-cxx/present/vk_scanout_producer.hpp>
 
-#if DRM_CXX_HAS_VULKAN
+#if DRM_CXX_HAS_VK_SCANOUT_PRODUCER
 
 // Vulkan-Hpp dynamic dispatch: no prototypes, libvulkan dlopen'd at runtime.
 #define VK_NO_PROTOTYPES
@@ -1439,4 +1439,4 @@ std::uint32_t VkScanoutProducer::queue_family_index() const noexcept {
 
 }  // namespace drm::present
 
-#endif  // DRM_CXX_HAS_VULKAN
+#endif  // DRM_CXX_HAS_VK_SCANOUT_PRODUCER
