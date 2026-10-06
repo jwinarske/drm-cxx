@@ -252,6 +252,13 @@ class Allocator {
   // canvas_plane() is that plane for the last apply() (nullopt otherwise, or
   // when nothing is composited); the caller arms the canvas there.
   [[nodiscard]] std::optional<uint32_t> canvas_plane() const noexcept { return canvas_plane_; }
+
+  // Composite keep/drop ordering: content-class priority dominates,
+  // application priority breaks ties within a class. layer_priority()
+  // (<= 100) is scaled above the uint8_t app_priority range so a higher
+  // content class always outranks any app_priority. Used to order layers
+  // for placement and to choose which layer to drop under plane pressure.
+  [[nodiscard]] static int keep_priority(const Layer& layer);
   // Which planes can carry the canvas, for the plane-order path. Unset: any
   // non-cursor plane.
   void set_canvas_host_filter(std::function<bool(const PlaneCapabilities&)> filter) {
@@ -298,13 +305,6 @@ class Allocator {
 
   // §13.6 Content-type layer priority
   static int layer_priority(const Layer& layer);
-
-  // Composite keep/drop ordering: content-class priority dominates,
-  // application priority breaks ties within a class. layer_priority()
-  // (<= 100) is scaled above the uint8_t app_priority range so a higher
-  // content class always outranks any app_priority. Used to order layers
-  // for placement and to choose which layer to drop under plane pressure.
-  static int keep_priority(const Layer& layer);
 
   // §13.1 Static compatibility check (necessary conditions only)
   static bool plane_statically_compatible(const PlaneCapabilities& plane, const Layer& layer,

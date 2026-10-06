@@ -391,6 +391,7 @@ class LayerScene::Impl {
         handle, std::move(desc.source), desc.display, desc.content_type, desc.update_hint_hz,
         desc.app_priority, desc.identity_tag, desc.pinned_plane_id);
     structure_dirty_ = true;  // a new layer must be committed (content_changed)
+    demoted_.clear();
     return handle;
   }
 
@@ -431,6 +432,7 @@ class LayerScene::Impl {
     // past its last buffer (see finalize_frame).
     retire_src_pending_.push_back(std::move(old_source));
     structure_dirty_ = true;  // the new source's first frame must be committed
+    demoted_.clear();
     return {};
   }
 
@@ -486,6 +488,7 @@ class LayerScene::Impl {
     // Removing a layer changes scanout (its plane must be disabled) even if
     // every remaining layer is idle — force the next commit, don't Skip.
     structure_dirty_ = true;
+    demoted_.clear();
     // If the source's stream consumer is currently bound to a plane,
     // tear that binding down before the source unique_ptr is reset.
     // unbind_from_plane is noexcept; failures are logged inside the
@@ -930,6 +933,8 @@ class LayerScene::Impl {
     committed_canvas_plane_.reset();
     canvas_proven_planes_.clear();
     canvas_rejected_planes_.clear();
+    canvas_verdict_natives_.clear();
+    demoted_.clear();
     canvas_testing_ = true;
     pin_verdicts_.clear();
     cached_crtc_index_.reset();
@@ -1052,6 +1057,8 @@ class LayerScene::Impl {
     committed_canvas_plane_.reset();
     canvas_proven_planes_.clear();
     canvas_rejected_planes_.clear();
+    canvas_verdict_natives_.clear();
+    demoted_.clear();
     canvas_testing_ = true;
     pin_verdicts_.clear();
     cached_crtc_index_.reset();
@@ -2137,6 +2144,129 @@ class LayerScene::Impl {
 
   // Best-effort composition. Updates `report.layers_composited` and
   // `report.composition_buckets` for layers it absorbs.
+  // Create the composition target on first use, in a format `target_plane`
+  // scans out. canvas_plane_candidates only lists canvas-capable planes, so
+  // the format is always set: ARGB8888 on the common path, XBGR8888 / RGB565
+  // on tilcdc-class controllers. A fresh canvas is kernel-zeroed.
+  bool ensure_composition_canvas(const drm::planes::PlaneCapabilities& target_plane) {
+    if (composition_canvas_) {
+      return true;
+    }
+    CompositeCanvasConfig cfg;
+    cfg.canvas_width = mode_.hdisplay;
+    cfg.canvas_height = mode_.vdisplay;
+    cfg.output_fourcc = canvas_format_for_plane(target_plane).value_or(DRM_FORMAT_ARGB8888);
+    auto canvas = make_composition_target(cfg);
+    if (!canvas) {
+      drm::log_warn("scene::LayerScene: composition target create failed: {}",
+                    canvas.error().message());
+      return false;
+    }
+    composition_canvas_ = std::move(*canvas);
+    return true;
+  }
+
+  // Before anything is composed: does a canvas candidate pass TEST beside this
+  // frame's native planes? Each untried candidate is armed with the canvas's
+  // current FB, TESTed and rolled back; verdicts are cached for
+  // arm_canvas_tested and voided when the native plane set changes. True when
+  // nothing is composited or nothing can be tested.
+  bool canvas_plane_feasible(std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
+                             CommitReport& report, std::uint32_t test_flags) {
+    std::vector<std::uint32_t> natives;
+    bool composites = false;
+    for (const auto& acq : acquisitions) {
+      if (acq.planes_layer->needs_composition()) {
+        composites = true;
+      } else if (const auto pid = acq.planes_layer->assigned_plane_id(); pid.has_value()) {
+        natives.push_back(*pid);
+      }
+    }
+    std::sort(natives.begin(), natives.end());
+    if (natives != canvas_verdict_natives_) {
+      canvas_proven_planes_.clear();
+      canvas_rejected_planes_.clear();
+      canvas_verdict_natives_ = std::move(natives);
+      canvas_testing_ = true;
+    }
+    if (!composites || !canvas_testing_ || !req.valid()) {
+      return true;
+    }
+    const auto crtc_index = resolve_crtc_index();
+    if (!crtc_index.has_value()) {
+      return true;
+    }
+    canvas_plane_candidates(*crtc_index, acquisitions, scratch_canvas_candidates_);
+    if (scratch_canvas_candidates_.empty() ||
+        !ensure_composition_canvas(*scratch_canvas_candidates_.front()) ||
+        !composition_canvas_->armable() || composition_canvas_->fb_id() == 0) {
+      return true;
+    }
+    auto listed = [](const std::vector<std::uint32_t>& v, std::uint32_t id) {
+      return std::find(v.begin(), v.end(), id) != v.end();
+    };
+    const std::int32_t zpos = choose_canvas_zpos();
+    for (const auto* p : scratch_canvas_candidates_) {
+      if (listed(canvas_proven_planes_, p->id)) {
+        return true;
+      }
+      if (listed(canvas_rejected_planes_, p->id)) {
+        continue;
+      }
+      const int cursor = req.cursor();
+      const CommitReport saved = report;
+      const bool armed = arm_composition_canvas(req, *p, zpos, report).has_value();
+      const auto verdict =
+          armed ? req.test(test_flags)
+                : drm::expected<void, std::error_code>(drm::unexpected<std::error_code>(
+                      std::make_error_code(std::errc::invalid_argument)));
+      req.rollback(cursor);
+      report = saved;
+      if (verdict) {
+        canvas_proven_planes_.push_back(p->id);
+        return true;
+      }
+      if (verdict.error() == std::errc::permission_denied) {
+        return true;  // lost master: no verdict about the plane
+      }
+      canvas_rejected_planes_.push_back(p->id);
+    }
+    return false;
+  }
+
+  // The native layer to move into the composition when no canvas plane fits
+  // beside the frame's native planes: lowest keep_priority, topmost on a tie
+  // (the canvas stacks on top), and only one the canvas can draw.
+  drm::planes::Layer* pick_demotion(std::vector<AcquisitionSlot>& acquisitions) {
+    std::vector<AcquisitionSlot*> order;
+    for (auto& acq : acquisitions) {
+      const auto* l = acq.planes_layer;
+      if (l == nullptr || l->needs_composition() || !l->assigned_plane_id().has_value() ||
+          l->is_pinned() || l->is_externally_bound() || acq.stream_pinned_plane_id.has_value()) {
+        continue;
+      }
+      order.push_back(&acq);
+    }
+    std::stable_sort(order.begin(), order.end(), [](const auto* a, const auto* b) {
+      const int pa = drm::planes::Allocator::keep_priority(*a->planes_layer);
+      const int pb = drm::planes::Allocator::keep_priority(*b->planes_layer);
+      if (pa != pb) {
+        return pa < pb;
+      }
+      return a->scene_layer->display().zpos.value_or(0) >
+             b->scene_layer->display().zpos.value_or(0);
+    });
+    for (auto* acq : order) {
+      auto& src = acq->scene_layer->source();
+      const bool importable = composition_mode_ != LayerScene::Composition::ForceCpu &&
+                              src.export_dma_buf().has_value();
+      if (importable || src.map(drm::MapAccess::Read).has_value()) {
+        return acq->planes_layer;
+      }
+    }
+    return nullptr;
+  }
+
   void compose_unassigned(std::vector<AcquisitionSlot>& acquisitions, drm::AtomicRequest& req,
                           CommitReport& report, std::uint32_t test_flags) {
     // Collect layers needing composition that also have CPU pixels
@@ -2223,24 +2353,8 @@ class LayerScene::Impl {
       return;
     }
 
-    if (!composition_canvas_) {
-      CompositeCanvasConfig cfg;
-      cfg.canvas_width = mode_.hdisplay;
-      cfg.canvas_height = mode_.vdisplay;
-      // Allocate the canvas in a format `target_plane` actually scans out
-      // — canvas_plane_candidates only lists canvas-capable planes, so
-      // this is always set. On the common path it's ARGB8888 (no
-      // conversion); on tilcdc-class controllers it's XBGR8888 / RGB565.
-      cfg.output_fourcc = canvas_format_for_plane(*target_plane).value_or(DRM_FORMAT_ARGB8888);
-      auto canvas = make_composition_target(cfg);
-      if (!canvas) {
-        drm::log_warn("scene::LayerScene: composition target create failed: {}",
-                      canvas.error().message());
-        return;
-      }
-      composition_canvas_ = std::move(*canvas);
-      // Fresh canvas is kernel-zeroed; nothing left over from a
-      // previous frame to scrub on the first composition.
+    if (!ensure_composition_canvas(*target_plane)) {
+      return;
     }
     if (!composition_canvas_->armable()) {
       drm::log_warn("scene::LayerScene: composition canvas isn't armable (post-resume?)");
@@ -3519,6 +3633,13 @@ class LayerScene::Impl {
   // candidate has failed, restoring the untested pick.
   std::vector<std::uint32_t> canvas_proven_planes_;
   std::vector<std::uint32_t> canvas_rejected_planes_;
+  // The native planes those verdicts were reached with. A canvas plane the
+  // kernel refuses next to three armed planes may pass next to two (a
+  // simultaneous-plane limit), so a different set voids them.
+  std::vector<std::uint32_t> canvas_verdict_natives_;
+  // Layers moved into the composition because no canvas plane passed TEST
+  // beside them (do_commit). Sticky until the layer set changes.
+  std::vector<drm::planes::Layer*> demoted_;
   // Pin TEST verdicts (arm_pinned_layers), keyed by layer handle, plane and
   // property hash; cleared with the canvas verdicts on resume/rebind.
   struct PinVerdictEntry {
@@ -3750,6 +3871,9 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // capability skips the constraint — the allocator can place
   // FB-ID layers natively alongside the stream consumer plane.
   apply_exclusive_mixing_constraint();
+  for (auto* layer : demoted_) {
+    layer->set_transient_composited(true);
+  }
 
   // Acquire every live layer's buffer up front. On any failure the
   // already-acquired buffers are handed back to their sources.
@@ -3936,88 +4060,114 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
                                  ? drm::span<const std::uint32_t>{}
                                  : drm::span<const std::uint32_t>(scratch_reserved_planes_.data(),
                                                                   scratch_reserved_planes_.size());
-  // A content-type / update-hint change alters plane scoring but not the
-  // layer set, so the allocator's warm-start would keep the stale
-  // assignment. Drop it this frame so the layer can move to the plane its
-  // new hint prefers (e.g. Generic -> Video wanting an overlay).
-  for (const auto& slot : slots_) {
-    if (slot.alive && slot.scene_layer != nullptr && slot.scene_layer->hints_dirty()) {
-      // NOLINTNEXTLINE(bugprone-unchecked-optional-access) allocator_ is set at create().
-      allocator_->invalidate_allocation();
-      break;
-    }
-  }
-
-  auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-      allocator_->apply(output_, req, effective_flags, reserved_span, test_only);
-  if (!assigned) {
-    release_all(acquisitions);
-    return drm::unexpected<std::error_code>(assigned.error());
-  }
-  report.layers_assigned = *assigned;
-  // Snapshot the allocator's diagnostics now — compose_unassigned's
-  // direct property writes below don't go through the allocator and
-  // therefore aren't reflected in its counters; we add them in by
-  // hand a few lines down.
-  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-  const auto alloc_diag = allocator_->diagnostics();
-  report.properties_written = alloc_diag.properties_written;
-  report.fbs_attached = alloc_diag.fbs_attached;
-  report.test_commits_issued = alloc_diag.test_commits_issued;
-  report.fb_delta_fast_path = alloc_diag.fb_delta_fast_path;
-
-  // Reset stale `pixel blend mode` on layer planes the allocator
-  // just claimed. layer.properties() carries no entry for it (the
-  // enum integer for "Pre-multiplied" is per-driver, only known
-  // once the layer-to-plane assignment is in hand), so the
-  // allocator's apply_layer_to_plane_real never emits it; without
-  // this pass the plane keeps whatever mode the previous compositor
-  // last wrote — typically "None" or "Coverage" — and a partially-
-  // transparent layer ghosts whatever scans out below it on the
-  // CRTC. Match the canvas's premultiplied output convention so
-  // both natively-assigned and composited cells blend identically.
-  // Stream layers are intentionally untouched in the scene's
-  // atomic commit. Desktop NVIDIA (no EGL_NV_output_drm_atomic
-  // extension) handles plane FB / CRTC binding inside
-  // eglStreamConsumerOutputEXT and subsequent auto-acquire
-  // events; if the scene writes CRTC_*/SRC_* without FB_ID the
-  // kernel rejects the commit (EINVAL on an active plane with
-  // no framebuffer). bookkeeping-only here keeps the dropped-
-  // layers tally honest.
-  count_stream_layers_assigned(acquisitions, report);
-
-  arm_layer_plane_blend_defaults(acquisitions, req, report, test_only);
-  arm_layer_plane_color_props(acquisitions, req, report, test_only);
-  if (auto r = arm_layer_acquire_fences(acquisitions, req, report, test_only); !r) {
-    return drm::unexpected<std::error_code>(r.error());
-  }
-  if (auto r = arm_layer_damage_clips(acquisitions, req, report); !r) {
-    return drm::unexpected<std::error_code>(r.error());
-  }
-
-  if (auto r = arm_layer_amd_plane_color(acquisitions, req, report); !r) {
-    return drm::unexpected<std::error_code>(r.error());
-  }
-
+  // A frame whose canvas fits on no free plane beside the native ones (a
+  // controller that lights fewer planes than it advertises) moves one more
+  // native layer into the composition and is placed again, so the frame
+  // committed is a frame that passed TEST. The demotion sticks until the
+  // layer set changes.
   // TEST flags for the pin and canvas-plane checks: the frame's modeset
   // allowance, but never PAGE_FLIP_EVENT (TEST_ONLY with an event is EINVAL).
   const std::uint32_t verify_test_flags =
       DRM_MODE_ATOMIC_TEST_ONLY | (first_commit_ ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0U);
+  const int frame_cursor = req.cursor();
+  const CommitReport report_before = report;
+  for (;;) {
+    // A content-type / update-hint change alters plane scoring but not the
+    // layer set, so the allocator's warm-start would keep the stale
+    // assignment. Drop it this frame so the layer can move to the plane its
+    // new hint prefers (e.g. Generic -> Video wanting an overlay).
+    for (const auto& slot : slots_) {
+      if (slot.alive && slot.scene_layer != nullptr && slot.scene_layer->hints_dirty()) {
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access) allocator_ is set at create().
+        allocator_->invalidate_allocation();
+        break;
+      }
+    }
 
-  // The stack the allocator just wrote, for pinned planes and the canvas.
-  scratch_stack_.clear();
-  if (const auto stack_crtc = resolve_crtc_index(); stack_crtc.has_value()) {
-    compute_stack(acquisitions, *stack_crtc);
-  }
+    auto assigned =  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        allocator_->apply(output_, req, effective_flags, reserved_span, test_only);
+    if (!assigned) {
+      release_all(acquisitions);
+      return drm::unexpected<std::error_code>(assigned.error());
+    }
+    report.layers_assigned = *assigned;
+    // Snapshot the allocator's diagnostics now — compose_unassigned's
+    // direct property writes below don't go through the allocator and
+    // therefore aren't reflected in its counters; we add them in by
+    // hand a few lines down.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    const auto alloc_diag = allocator_->diagnostics();
+    report.properties_written = alloc_diag.properties_written;
+    report.fbs_attached = alloc_diag.fbs_attached;
+    report.test_commits_issued = alloc_diag.test_commits_issued;
+    report.fb_delta_fast_path = alloc_diag.fb_delta_fast_path;
 
-  // Write pinned layers' plane state to their reserved planes. Must run
-  // before compose_unassigned: it sets assigned_plane_ so the canvas
-  // search sees those planes as in-use and never lands the canvas on one.
-  if (pin_crtc_index.has_value()) {
-    if (auto r = arm_pinned_layers(acquisitions, *pin_crtc_index, req, report, verify_test_flags);
-        !r) {
+    // Reset stale `pixel blend mode` on layer planes the allocator
+    // just claimed. layer.properties() carries no entry for it (the
+    // enum integer for "Pre-multiplied" is per-driver, only known
+    // once the layer-to-plane assignment is in hand), so the
+    // allocator's apply_layer_to_plane_real never emits it; without
+    // this pass the plane keeps whatever mode the previous compositor
+    // last wrote — typically "None" or "Coverage" — and a partially-
+    // transparent layer ghosts whatever scans out below it on the
+    // CRTC. Match the canvas's premultiplied output convention so
+    // both natively-assigned and composited cells blend identically.
+    // Stream layers are intentionally untouched in the scene's
+    // atomic commit. Desktop NVIDIA (no EGL_NV_output_drm_atomic
+    // extension) handles plane FB / CRTC binding inside
+    // eglStreamConsumerOutputEXT and subsequent auto-acquire
+    // events; if the scene writes CRTC_*/SRC_* without FB_ID the
+    // kernel rejects the commit (EINVAL on an active plane with
+    // no framebuffer). bookkeeping-only here keeps the dropped-
+    // layers tally honest.
+    count_stream_layers_assigned(acquisitions, report);
+
+    arm_layer_plane_blend_defaults(acquisitions, req, report, test_only);
+    arm_layer_plane_color_props(acquisitions, req, report, test_only);
+    if (auto r = arm_layer_acquire_fences(acquisitions, req, report, test_only); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
+    if (auto r = arm_layer_damage_clips(acquisitions, req, report); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+
+    if (auto r = arm_layer_amd_plane_color(acquisitions, req, report); !r) {
+      return drm::unexpected<std::error_code>(r.error());
+    }
+
+    // The stack the allocator just wrote, for pinned planes and the canvas.
+    scratch_stack_.clear();
+    if (const auto stack_crtc = resolve_crtc_index(); stack_crtc.has_value()) {
+      compute_stack(acquisitions, *stack_crtc);
+    }
+
+    // Write pinned layers' plane state to their reserved planes. Must run
+    // before compose_unassigned: it sets assigned_plane_ so the canvas
+    // search sees those planes as in-use and never lands the canvas on one.
+    if (pin_crtc_index.has_value()) {
+      if (auto r = arm_pinned_layers(acquisitions, *pin_crtc_index, req, report, verify_test_flags);
+          !r) {
+        return drm::unexpected<std::error_code>(r.error());
+      }
+    }
+
+    if (canvas_plane_feasible(acquisitions, req, report, verify_test_flags)) {
+      break;
+    }
+    auto* victim = pick_demotion(acquisitions);
+    if (victim == nullptr) {
+      break;  // nothing left to demote: compose_unassigned arms its first pick
+    }
+    drm::log_debug(
+        "scene::LayerScene: no canvas plane fits beside {} native layer(s); "
+        "compositing one more",
+        report.layers_assigned);
+    victim->set_transient_composited(true);
+    demoted_.push_back(victim);
+    req.rollback(frame_cursor);
+    report = report_before;
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) allocator_ is set at create().
+    allocator_->invalidate_allocation();
   }
 
   // rescue unassigned layers via CPU composition before
