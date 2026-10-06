@@ -24,7 +24,7 @@ Fn resolve_sym(void* handle, const char* name) noexcept {
 }
 
 template <typename Fn>
-Fn resolve_proc(PFNEGLGETPROCADDRESSPROC gpa, const char* name) noexcept {
+Fn resolve_proc(decltype(&eglGetProcAddress) gpa, const char* name) noexcept {
   return reinterpret_cast<Fn>(gpa(name));
 }
 
@@ -36,7 +36,7 @@ void initialize_runtime(EglLoader& rt) noexcept {
     return;
   }
 
-  rt.get_proc_address = resolve_sym<PFNEGLGETPROCADDRESSPROC>(rt.handle, "eglGetProcAddress");
+  rt.get_proc_address = resolve_sym<decltype(&eglGetProcAddress)>(rt.handle, "eglGetProcAddress");
   rt.query_string = resolve_sym<decltype(rt.query_string)>(rt.handle, "eglQueryString");
   rt.get_display = resolve_sym<decltype(rt.get_display)>(rt.handle, "eglGetDisplay");
   rt.initialize = resolve_sym<decltype(rt.initialize)>(rt.handle, "eglInitialize");

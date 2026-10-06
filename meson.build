@@ -39,10 +39,19 @@ has_gbm_bo_create_with_modifiers2 = cpp.has_function(
   dependencies : gbm_dep,
   prefix : '#include <gbm.h>',
 )
-input_dep   = dependency('libinput',  include_type : 'system', required : true)
-udev_dep    = dependency('libudev',   include_type : 'system', required : true)
-xkb_dep     = dependency('xkbcommon', include_type : 'system', required : true)
-rt_dep      = cpp.find_library('rt',  required : true)
+# drm::input, HotplugMonitor and drm::session. Android has no libinput,
+# libudev or xkbcommon; there the feature resolves off.
+input_feature = get_option('input')
+input_dep   = dependency('libinput',  include_type : 'system',
+                         required : input_feature.enabled(), disabler : true)
+udev_dep    = dependency('libudev',   include_type : 'system',
+                         required : input_feature.enabled(), disabler : true)
+xkb_dep     = dependency('xkbcommon', include_type : 'system',
+                         required : input_feature.enabled(), disabler : true)
+has_input = not input_feature.disabled() and input_dep.found() and udev_dep.found() \
+    and xkb_dep.found()
+# bionic keeps clock_* in libc; there is no librt.
+rt_dep      = cpp.find_library('rt',  required : host_machine.system() != 'android')
 dl_dep      = cpp.find_library('dl',  required : true)
 
 # 0.2.0 added the HDR static metadata, color primaries, and supported-
@@ -348,14 +357,21 @@ config_h = configure_file(
 #── Source ────────────────────────────────────────────────────
 subdir('src')
 
-if get_option('examples')
+# Examples and benchmarks open their outputs through the input/session
+# helpers in examples/common.
+build_examples = get_option('examples') and has_input
+if build_examples
   subdir('examples')
+elif get_option('examples')
+  message('drm-cxx: examples skipped (input=disabled or its deps missing)')
 endif
 
 if get_option('tests')
   subdir('tests')
 endif
 
-if get_option('benchmarks')
+if get_option('benchmarks') and has_input
   subdir('benchmarks')
+elif get_option('benchmarks')
+  message('drm-cxx: benchmarks skipped (input=disabled or its deps missing)')
 endif

@@ -53,7 +53,7 @@ struct EglLoader {
   // added by extension so eglGetProcAddress only resolves them once
   // the client extension chain has been queried (which itself needs
   // eglQueryString). dlsym is the bootstrap.
-  PFNEGLGETPROCADDRESSPROC get_proc_address{nullptr};
+  decltype(&eglGetProcAddress) get_proc_address{nullptr};
   decltype(&eglQueryString) query_string{nullptr};
   decltype(&eglGetDisplay) get_display{nullptr};
   decltype(&eglInitialize) initialize{nullptr};

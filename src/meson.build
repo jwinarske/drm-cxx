@@ -15,11 +15,6 @@ drm_cxx_sources = files(
   'planes/output.cpp',
   'planes/allocator.cpp',
   'planes/matching.cpp',
-  'input/seat.cpp',
-  'input/keyboard.cpp',
-  'input/key_repeater.cpp',
-  'input/pointer.cpp',
-  'input/event_dispatcher.cpp',
   'display/color_pipeline_curves.cpp',
   'display/connector_capabilities.cpp',
   'display/crtc_capabilities.cpp',
@@ -28,11 +23,9 @@ drm_cxx_sources = files(
   'display/hdr_metadata.cpp',
   'display/tone_mapper.cpp',
   'display/hdr_metadata_cache.cpp',
-  'display/hotplug_monitor.cpp',
   'display/scanout_target.cpp',
   'display/driver_profile.cpp',
   'display/mode_list.cpp',
-  'session/seat.cpp',
   'time/clock.cpp',
   'gbm/device.cpp',
   'gbm/surface.cpp',
@@ -79,9 +72,6 @@ drm_cxx_sources = files(
 drm_cxx_deps = [
   drm_dep,
   gbm_dep,
-  input_dep,
-  udev_dep,
-  xkb_dep,
   rt_dep,
   dl_dep,
   di_dep,
@@ -89,6 +79,21 @@ drm_cxx_deps = [
   tcb_span_dep,
   fmt_dep,
 ]
+
+# drm::input, HotplugMonitor and drm::session (whose public header takes an
+# input::InputDeviceOpener). Absent where input=disabled (Android).
+if has_input
+  drm_cxx_sources += files(
+    'input/seat.cpp',
+    'input/keyboard.cpp',
+    'input/key_repeater.cpp',
+    'input/pointer.cpp',
+    'input/event_dispatcher.cpp',
+    'display/hotplug_monitor.cpp',
+    'session/seat.cpp',
+  )
+  drm_cxx_deps += [input_dep, udev_dep, xkb_dep]
+endif
 
 # Public headers live in src/ but are #include'd as <drm-cxx/...>. Expose
 # src/ under a drm-cxx/ prefix by symlinking at configure time inside the
@@ -297,14 +302,16 @@ install_headers(
   subdir : 'drm-cxx/planes',
 )
 
-install_headers(
-  'input/seat.hpp',
-  'input/keyboard.hpp',
-  'input/key_repeater.hpp',
-  'input/pointer.hpp',
-  'input/event_dispatcher.hpp',
-  subdir : 'drm-cxx/input',
-)
+if has_input
+  install_headers(
+    'input/seat.hpp',
+    'input/keyboard.hpp',
+    'input/key_repeater.hpp',
+    'input/pointer.hpp',
+    'input/event_dispatcher.hpp',
+    subdir : 'drm-cxx/input',
+  )
+endif
 
 install_headers(
   'display/color_pipeline_curves.hpp',
@@ -315,7 +322,6 @@ install_headers(
   'display/edid.hpp',
   'display/hdr_metadata.hpp',
   'display/hdr_metadata_cache.hpp',
-  'display/hotplug_monitor.hpp',
   'display/scanout_target.hpp',
   'display/driver_profile.hpp',
   'display/mode_list.hpp',
@@ -323,10 +329,16 @@ install_headers(
   subdir : 'drm-cxx/display',
 )
 
-install_headers(
-  'session/seat.hpp',
-  subdir : 'drm-cxx/session',
-)
+if has_input
+  install_headers(
+    'display/hotplug_monitor.hpp',
+    subdir : 'drm-cxx/display',
+  )
+  install_headers(
+    'session/seat.hpp',
+    subdir : 'drm-cxx/session',
+  )
+endif
 
 install_headers(
   'time/clock.hpp',

@@ -223,7 +223,7 @@ test('test_multirect',
 
 # Seat against a fake libseat defined in the test itself (interposition);
 # libseat is linked for its header and types only.
-if has_libseat
+if has_libseat and has_input
   test('test_seat',
     executable('test_seat',
       'unit/test_seat.cpp',
@@ -253,19 +253,21 @@ test('test_cursor_format',
   ),
 )
 
-test('test_input',
-  executable('test_input',
-    'unit/test_input.cpp',
-    dependencies : test_deps,
-  ),
-)
+if has_input
+  test('test_input',
+    executable('test_input',
+      'unit/test_input.cpp',
+      dependencies : test_deps,
+    ),
+  )
 
-test('test_key_repeater',
-  executable('test_key_repeater',
-    'unit/test_key_repeater.cpp',
-    dependencies : test_deps,
-  ),
-)
+  test('test_key_repeater',
+    executable('test_key_repeater',
+      'unit/test_key_repeater.cpp',
+      dependencies : test_deps,
+    ),
+  )
+endif
 
 test('test_mode',
   executable('test_mode',
@@ -847,8 +849,8 @@ test('test_select_connector',
 )
 
 # signage_player playlist parser. signage_playlist_dep still lives under
-# examples/, so the playlist test only exists when examples are on.
-if get_option('examples')
+# examples/, so the playlist test only exists when examples are built.
+if build_examples
   test('test_playlist',
     executable('test_playlist',
       'unit/test_playlist.cpp',
