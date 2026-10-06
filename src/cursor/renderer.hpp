@@ -16,12 +16,13 @@
 //
 // Plane selection on create():
 //   - Scans drm::planes::PlaneRegistry for the requested CRTC in this
-//     order: DRM_PLANE_TYPE_CURSOR → DRM_PLANE_TYPE_OVERLAY with
-//     ARGB8888+LINEAR support → legacy drmModeSetCursor (if the
-//     config allows it).
+//     order: DRM_PLANE_TYPE_CURSOR → DRM_PLANE_TYPE_OVERLAY, each with
+//     a LINEAR alpha format (ARGB8888 first, else RGBA8888, ABGR8888 or
+//     BGRA8888; pixels are reordered to match) → legacy
+//     drmModeSetCursor, always ARGB8888 (if the config allows it).
 //   - RendererConfig::forced_plane_id bypasses the scan — pass a
-//     specific plane id and create() fails if it can't carry
-//     ARGB8888+LINEAR on this CRTC.
+//     specific plane id and create() fails if it carries none of those
+//     formats on this CRTC.
 //
 // Commit ownership is parameter-driven:
 //   - move_to() and tick() build the atomic request internally and
@@ -151,7 +152,8 @@ struct RendererConfig {
 
   /// Override plane selection. 0 = Renderer picks via PlaneRegistry.
   /// Non-zero = Renderer uses this plane id and fails create() if
-  /// the plane can't carry ARGB8888+LINEAR on this CRTC.
+  /// the plane carries no LINEAR alpha format (ARGB8888, RGBA8888,
+  /// ABGR8888, BGRA8888) on this CRTC.
   std::uint32_t forced_plane_id = 0;
 
   /// Permit falling through to drmModeSetCursor when no atomic-capable

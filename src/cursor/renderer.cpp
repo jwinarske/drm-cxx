@@ -11,6 +11,7 @@
 #include "../planes/plane_registry.hpp"
 #include "../time/clock.hpp"
 #include "cursor.hpp"
+#include "cursor_format.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 
@@ -205,6 +206,8 @@ struct Renderer::Impl {
   std::uint32_t forced_plane_id{0};
   std::uint32_t preferred_size{0};
   PlanePath path{PlanePath::kLegacy};
+  // Buffer pixel format (cursor_format.hpp); ARGB8888 on the legacy path.
+  std::uint32_t fourcc{DRM_FORMAT_ARGB8888};
   Rotation rotation{Rotation::k0};
   bool allow_legacy{true};
   drm::Clock* clock{nullptr};
@@ -398,7 +401,7 @@ drm::expected<void, std::error_code> Renderer::Impl::alloc_buffer(std::uint32_t 
   drm::dumb::Config cfg;
   cfg.width = w;
   cfg.height = h;
-  cfg.drm_format = DRM_FORMAT_ARGB8888;
+  cfg.drm_format = fourcc;
   cfg.bpp = 32;
   cfg.add_fb = (path != PlanePath::kLegacy);
   auto dev = drm::Device::from_fd(drm_fd);
@@ -597,6 +600,15 @@ void Renderer::Impl::blit_frame(const Frame& f) {
             break;
         }
         dst[((dy + y_off) * stride_px) + (dx + x_off)] = f.pixels[(sy * src_w) + sx];
+      }
+    }
+  }
+
+  // The plane takes the same channels in another order (cursor_format.hpp).
+  if (fourcc != DRM_FORMAT_ARGB8888) {
+    for (std::size_t y = y_off; y < y_off + blit_h; ++y) {
+      for (std::size_t x = x_off; x < x_off + blit_w; ++x) {
+        dst[(y * stride_px) + x] = detail::from_argb(dst[(y * stride_px) + x], fourcc);
       }
     }
   }
@@ -915,11 +927,9 @@ struct SelectedPlane {
   // The CRTC cursor plane the legacy ioctls drive, when legacy was preferred
   // over it.
   std::uint32_t legacy_plane_id{0};
+  // Pixel format of the buffers (cursor_format.hpp); ARGB8888 on legacy.
+  std::uint32_t fourcc{DRM_FORMAT_ARGB8888};
 };
-
-bool plane_supports_argb8888(const drm::planes::PlaneCapabilities& cap) {
-  return cap.supports_format(DRM_FORMAT_ARGB8888);
-}
 
 drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& dev,
                                                            std::uint32_t crtc_index,
@@ -931,56 +941,65 @@ drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& de
   }
 
   // forced_plane_id bypasses the scan entirely — validate the plane
-  // exists and carries ARGB8888 on this CRTC, then take it on trust.
+  // exists and carries a cursor format on this CRTC, then take it on trust.
   if (forced_plane_id != 0) {
     for (const auto& cap : registry->all()) {
       if (cap.id != forced_plane_id) {
         continue;
       }
-      if (!cap.compatible_with_crtc(crtc_index) || !plane_supports_argb8888(cap)) {
+      const auto fmt = detail::cursor_format(cap);
+      if (!cap.compatible_with_crtc(crtc_index) || !fmt.has_value()) {
         return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
       }
       const auto path = cap.type == drm::planes::DRMPlaneType::CURSOR ? PlanePath::kAtomicCursor
                                                                       : PlanePath::kAtomicOverlay;
-      return SelectedPlane{cap.id, path, cap.cursor_max_w, cap.cursor_max_h};
+      return SelectedPlane{cap.id, path, cap.cursor_max_w, cap.cursor_max_h, 0, *fmt};
     }
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
 
   const auto candidates = registry->for_crtc(crtc_index);
 
-  // First choice: a CURSOR plane with ARGB8888. These are per-CRTC
-  // hardware scanout units with no z-ordering fuss, so they beat
+  // First choice: a CURSOR plane with a cursor format. These are
+  // per-CRTC hardware scanout units with no z-ordering fuss, so they beat
   // overlay selection every time they exist.
   for (const auto* cap : candidates) {
-    if (cap->type == drm::planes::DRMPlaneType::CURSOR && plane_supports_argb8888(*cap)) {
+    if (cap->type != drm::planes::DRMPlaneType::CURSOR) {
+      continue;
+    }
+    if (const auto fmt = detail::cursor_format(*cap); fmt.has_value()) {
       if (prefer_legacy && allow_legacy) {
         // The legacy ioctls drive this same plane, asynchronously.
         return SelectedPlane{0, PlanePath::kLegacy, 0, 0, cap->id};
       }
-      return SelectedPlane{cap->id, PlanePath::kAtomicCursor, cap->cursor_max_w, cap->cursor_max_h};
+      return SelectedPlane{
+          cap->id, PlanePath::kAtomicCursor, cap->cursor_max_w, cap->cursor_max_h, 0, *fmt};
     }
   }
 
-  // Second choice: an OVERLAY plane with ARGB8888, preferring one not
+  // Second choice: an OVERLAY plane with a cursor format, preferring one not
   // already bound to another CRTC. Some platforms only expose a
   // handful of overlays; grabbing a free one matters when the
   // compositor wants the rest for layers.
   const drm::planes::PlaneCapabilities* chosen_overlay = nullptr;
+  std::uint32_t chosen_fourcc = DRM_FORMAT_ARGB8888;
   for (const auto* cap : candidates) {
-    if (cap->type != drm::planes::DRMPlaneType::OVERLAY || !plane_supports_argb8888(*cap)) {
+    const auto fmt = detail::cursor_format(*cap);
+    if (cap->type != drm::planes::DRMPlaneType::OVERLAY || !fmt.has_value()) {
       continue;
     }
     if (plane_current_crtc(dev.fd(), cap->id) == 0) {
       chosen_overlay = cap;
+      chosen_fourcc = *fmt;
       break;
     }
     if (chosen_overlay == nullptr) {
       chosen_overlay = cap;
+      chosen_fourcc = *fmt;
     }
   }
   if (chosen_overlay != nullptr) {
-    return SelectedPlane{chosen_overlay->id, PlanePath::kAtomicOverlay, 0, 0};
+    return SelectedPlane{chosen_overlay->id, PlanePath::kAtomicOverlay, 0, 0, 0, chosen_fourcc};
   }
 
   if (allow_legacy) {
@@ -1021,6 +1040,7 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
   impl->forced_plane_id = cfg.forced_plane_id;
   impl->preferred_size = cfg.preferred_size;
   impl->path = selected->path;
+  impl->fourcc = selected->fourcc;
   impl->rotation = cfg.rotation;
   impl->allow_legacy = cfg.allow_legacy;
   impl->clock = (cfg.clock != nullptr) ? cfg.clock : &drm::default_clock();
