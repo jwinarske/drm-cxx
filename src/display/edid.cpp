@@ -14,12 +14,23 @@
 #include <memory>
 #include <system_error>
 
+// 0 where libdisplay-info is absent (AOSP before it shipped one): parse_edid
+// then reports function_not_supported.
+#ifndef DRM_CXX_HAS_DISPLAY_INFO
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage) -- tested by #if
+#define DRM_CXX_HAS_DISPLAY_INFO 1
+#endif
+
+#if DRM_CXX_HAS_DISPLAY_INFO
 extern "C" {
 #include <libdisplay-info/edid.h>
 #include <libdisplay-info/info.h>
 }
+#endif
 
 namespace drm::display {
+
+#if DRM_CXX_HAS_DISPLAY_INFO
 
 namespace {
 
@@ -174,5 +185,13 @@ drm::expected<ConnectorInfo, std::error_code> parse_edid(drm::span<const uint8_t
   di_info_destroy(info);
   return result;
 }
+
+#else
+
+drm::expected<ConnectorInfo, std::error_code> parse_edid(drm::span<const uint8_t> /*edid_blob*/) {
+  return drm::unexpected<std::error_code>(std::make_error_code(std::errc::function_not_supported));
+}
+
+#endif  // DRM_CXX_HAS_DISPLAY_INFO
 
 }  // namespace drm::display

@@ -1,0 +1,143 @@
+// SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
+// SPDX-License-Identifier: MIT
+//
+// AOSP build of libdrm-cxx: the library against the platform's libdrm and
+// minigbm (libgbm). Place this tree under the AOSP checkout (e.g.
+// external/drm-cxx) and run `m libdrm-cxx`.
+//
+// Same subset as the NDK build (scripts/build_android.sh): no drm::input,
+// drm::session or HotplugMonitor (Android has no libinput, libudev or
+// xkbcommon). libdisplay-info is not in AOSP before Android 15, so
+// display::parse_edid reports function_not_supported here.
+// <drm-cxx/...> resolves through android/include/drm-cxx -> src.
+
+package {
+    default_applicable_licenses: ["drm_cxx_license"],
+}
+
+license {
+    name: "drm_cxx_license",
+    visibility: [":__subpackages__"],
+    license_kinds: ["SPDX-license-identifier-MIT"],
+    license_text: ["LICENSE"],
+}
+
+cc_library_shared {
+    name: "libdrm-cxx",
+    srcs: [
+        "src/core/device.cpp",
+        "src/core/resources.cpp",
+        "src/core/property_store.cpp",
+        "src/core/format.cpp",
+        "src/modeset/atomic.cpp",
+        "src/modeset/mode.cpp",
+        "src/modeset/modeset.cpp",
+        "src/modeset/page_flip.cpp",
+        "src/planes/plane_registry.cpp",
+        "src/planes/layer.cpp",
+        "src/planes/output.cpp",
+        "src/planes/allocator.cpp",
+        "src/planes/matching.cpp",
+        "src/display/color_pipeline_curves.cpp",
+        "src/display/connector_capabilities.cpp",
+        "src/display/crtc_capabilities.cpp",
+        "src/display/crtc_color_pipeline.cpp",
+        "src/display/edid.cpp",
+        "src/display/hdr_metadata.cpp",
+        "src/display/tone_mapper.cpp",
+        "src/display/hdr_metadata_cache.cpp",
+        "src/display/scanout_target.cpp",
+        "src/display/driver_profile.cpp",
+        "src/display/mode_list.cpp",
+        "src/time/clock.cpp",
+        "src/gbm/device.cpp",
+        "src/gbm/surface.cpp",
+        "src/gbm/buffer.cpp",
+        "src/dumb/buffer.cpp",
+        "src/scene/composite_canvas.cpp",
+        "src/scene/dumb_buffer_source.cpp",
+        "src/core/egl_loader.cpp",
+        "src/core/gles_loader.cpp",
+        "src/scene/gl_compositor.cpp",
+        "src/scene/egl_stream_builder.cpp",
+        "src/scene/egl_stream_source.cpp",
+        "src/scene/detail/dmabuf_slot.cpp",
+        "src/scene/detail/external_ring_core.cpp",
+        "src/scene/external_dma_buf_source.cpp",
+        "src/scene/external_dma_buf_ring.cpp",
+        "src/scene/external_dma_buf_pool.cpp",
+        "src/scene/dma_buf_source_cache.cpp",
+        "src/scene/gbm_buffer_source.cpp",
+        "src/scene/gbm_surface_source.cpp",
+        "src/scene/gst_appsink_source.cpp",
+        "src/scene/layer_scene.cpp",
+        "src/scene/nvbufsurface_source.cpp",
+        "src/scene/output_signaling.cpp",
+        "src/scene/scene_set.cpp",
+        "src/scene/stream_capability.cpp",
+        "src/scene/v4l2_camera_source.cpp",
+        "src/scene/v4l2_decoder_source.cpp",
+        "src/scene/v4l2_plane_layout.cpp",
+        "src/sync/fence.cpp",
+        "src/fmt/format_mod.cpp",
+        "src/present/negotiate.cpp",
+        "src/present/buffer_ring.cpp",
+        "src/present/dumb_ring_source.cpp",
+        "src/present/dumb_scanout_sink.cpp",
+        "src/present/scanout_format.cpp",
+        "src/present/gbm_producer.cpp",
+        "src/present/scanout_backend.cpp",
+        "src/present/gl_blit.cpp",
+        "src/present/gl_scanout_producer.cpp",
+        "src/present/vk_scanout_producer.cpp",
+        "src/vulkan/display.cpp",
+        "src/vulkan/drm_surface.cpp",
+    ],
+    cpp_std: "c++17",
+    // The library uses exceptions (std::function, a few try blocks) and
+    // dynamic_cast; the platform default turns both off.
+    cppflags: ["-fexceptions"],
+    rtti: true,
+    cflags: [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wno-unused-parameter",
+        "-Wno-missing-field-initializers",
+        "-DFMT_HEADER_ONLY",
+        "-DDRM_CXX_HAS_DISPLAY_INFO=0",
+        "-DDRM_CXX_HAS_LIBSEAT=0",
+        "-DDRM_CXX_HAS_GSTREAMER=0",
+        "-DDRM_CXX_HAS_NVBUFSURFACE=0",
+        "-DDRM_CXX_HAS_EGL=1",
+        "-DDRM_CXX_HAS_EGL_STREAMS=0",
+        "-DDRM_CXX_HAS_VULKAN=1",
+    ],
+    local_include_dirs: [
+        "src",
+        "third_party/Vulkan-Headers/include",
+    ],
+    export_include_dirs: [
+        "android/include",
+        "third_party/tl-expected/include",
+        "third_party/tcb-span/include",
+        "third_party/fmt/include",
+    ],
+    header_libs: ["gl_headers"],
+    shared_libs: [
+        "libdrm",
+        "libgbm",
+    ],
+    export_shared_lib_headers: [
+        "libdrm",
+        "libgbm",
+    ],
+}
+
+// For modules that use libdrm-cxx: links it and sets FMT_HEADER_ONLY, which its
+// headers' vendored fmt needs (Soong cannot export a define).
+cc_defaults {
+    name: "libdrm-cxx_client_defaults",
+    cflags: ["-DFMT_HEADER_ONLY"],
+    shared_libs: ["libdrm-cxx"],
+}
