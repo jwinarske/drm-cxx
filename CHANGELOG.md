@@ -1,5 +1,52 @@
 # Changelog
 
+## v4.1.0 — 2026-10-06: Android (NDK and AOSP)
+
+ABI-compatible with 4.0.0 (soname `libdrm-cxx.so.4`, identical exported
+symbols on 64-bit Linux). New build option; no API change.
+
+### Android
+
+- **NDK build.** `scripts/build_android.sh [--abi arm64-v8a|x86_64] [--api N]
+  [--ndk DIR]` cross-builds the library. libdrm 2.4.124, libdisplay-info 0.2.0
+  and minigbm come from pinned sources. minigbm's libcutils includes are
+  shimmed onto NDK APIs, and it is installed as `libgbm.so.1`. Tested with NDK
+  r25, r27 and r28; CI builds both ABIs. (#335)
+- **AOSP build.** Root `Android.bp`: with the tree under an AOSP checkout,
+  `m libdrm-cxx` builds against the platform's libdrm and minigbm. Built on
+  Android 13 for x86_64, x86 and arm. Consumers use
+  `libdrm-cxx_client_defaults`. (#337)
+- **Not on Android:** `drm::input`, `drm::session`, `HotplugMonitor` (no
+  libinput, libudev or xkbcommon), nor the examples and benchmarks that use
+  them. The AOSP build has no libdisplay-info before Android 15:
+  `parse_edid` returns `function_not_supported` there.
+- **Runtime:** needs KMS access (root, or userdebug with SurfaceFlinger
+  stopped). On the Android 14/15 emulator the library opens the card, takes DRM
+  master and commits through atomic KMS. Not yet validated on a visible
+  display. (#146)
+
+### Build
+
+- New `input` option (Meson) / `DRM_CXX_INPUT` (CMake), default auto. Off: the
+  three modules above, their headers, the pkg-config `Requires` and the
+  package-config lookups are left out; examples and benchmarks are skipped.
+  (#335)
+- `librt` is optional on Android; CMake accepts `CMAKE_SYSTEM_NAME` Android.
+  (#335)
+- `egl_loader` takes `eglGetProcAddress`'s type from its declaration (NDK r27's
+  `egl.h` has no `PFNEGLGETPROCADDRESSPROC`). (#335)
+
+### 32-bit ABIs
+
+- `Layer::property_hash` no longer truncates its 64-bit seed into `size_t`.
+- `vulkan::Display` handles non-dispatchable Vulkan handles as `uint64_t` on
+  32-bit ABIs.
+- `VkScanoutProducer` is gated on `DRM_CXX_HAS_VK_SCANOUT_PRODUCER` (Vulkan on,
+  64-bit ABI): it passes `VkImage` through `void*`. The API fix is tracked in
+  #336.
+- `AMD_FMT_MOD_TILE_VER_GFX11` fallback for `drm_fourcc.h` before RDNA3
+  (libdrm 2.4.109). (#337)
+
 ## v4.0.0 — 2026-10-05: stacking without zpos, plane-limit canvas, cursor channel order
 
 Major bump: public class layouts changed (below). Every consumer must
