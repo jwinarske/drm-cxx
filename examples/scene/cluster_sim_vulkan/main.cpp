@@ -323,14 +323,16 @@ void paint_dial_template(std::uint8_t* pixels, std::uint32_t dial_size) noexcept
 // BL_ERROR_FONT_NOT_INITIALIZED when none of the candidates exist on
 // this host (callers fall back to shape-less output).
 [[nodiscard]] BLResult load_default_font_face(BLFontFace& face) noexcept {
-  static constexpr std::array<const char*, 10> k_candidates = {
+  static constexpr std::array<const char*, 12> k_candidates = {
       "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
       "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
       "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
       "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+      "/usr/share/fonts/truetype/DejaVuSans-Bold.ttf",  // Yocto ttf-dejavu
       "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf",
       "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
       "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+      "/usr/share/fonts/ttf/LiberationSans-Bold.ttf",  // Yocto ttf-liberation
       "/usr/share/fonts/google-noto/NotoSans-Bold.ttf",
       "/usr/share/fonts/noto/NotoSans-Bold.ttf",
       "/usr/share/fonts/TTF/Vera.ttf",
