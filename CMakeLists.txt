@@ -8,8 +8,9 @@ project(drm-cxx
   # C is for the vendored X11-free .xcursor loader (third_party/xcursor-mini).
   LANGUAGES C CXX)
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  message(FATAL_ERROR "drm-cxx requires Linux (DRM/KMS/GBM).")
+# Android is a Linux kernel with DRM/KMS; GBM there is minigbm.
+if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android)$")
+  message(FATAL_ERROR "drm-cxx requires Linux or Android (DRM/KMS/GBM).")
 endif()
 
 # Defaults switch on top-level vs subdirectory consumption.
@@ -24,6 +25,9 @@ option(DRM_CXX_INSTALL          "Generate install rules"       ${PROJECT_IS_TOP_
 # disabled (or libseat is missing at configure time), Seat::open() is a
 # runtime no-op that returns nullopt. Auto mode probes; ON hard-fails
 # if libseat is absent; OFF skips the probe entirely.
+set(DRM_CXX_INPUT "AUTO" CACHE STRING
+    "Build drm::input, HotplugMonitor and drm::session (libinput, libudev, xkbcommon): AUTO, ON, or OFF. Android has none of them")
+set_property(CACHE DRM_CXX_INPUT PROPERTY STRINGS AUTO ON OFF)
 set(DRM_CXX_SESSION "AUTO" CACHE STRING
     "Build drm::session::Seat on top of libseat: AUTO, ON, or OFF")
 set_property(CACHE DRM_CXX_SESSION PROPERTY STRINGS AUTO ON OFF)
@@ -140,17 +144,44 @@ check_symbol_exists(gbm_bo_create_with_modifiers2 "gbm.h" HAVE_GBM_BO_CREATE_WIT
 check_symbol_exists(gbm_bo_get_fd_for_plane "gbm.h" HAVE_GBM_BO_GET_FD_FOR_PLANE)
 unset(CMAKE_REQUIRED_INCLUDES)
 unset(CMAKE_REQUIRED_LIBRARIES)
-pkg_check_modules(libinput       REQUIRED IMPORTED_TARGET libinput)
-pkg_check_modules(libudev        REQUIRED IMPORTED_TARGET libudev)
-pkg_check_modules(xkbcommon      REQUIRED IMPORTED_TARGET xkbcommon)
 # Require >=0.2.0 for the HDR static metadata, color primaries, and
 # signal-colorimetry APIs consumed by src/display/edid.cpp.
 pkg_check_modules(libdisplayinfo REQUIRED IMPORTED_TARGET libdisplay-info>=0.2.0)
-foreach(_t drm gbm libinput libudev xkbcommon libdisplayinfo)
+foreach(_t drm gbm libdisplayinfo)
   _drm_cxx_promote_system_includes(PkgConfig::${_t})
 endforeach()
 
-find_library(RT_LIBRARY NAMES rt REQUIRED)
+# drm::input, HotplugMonitor and drm::session, per DRM_CXX_INPUT.
+set(DRM_CXX_HAS_INPUT 0)
+if(NOT DRM_CXX_INPUT STREQUAL "OFF")
+  set(_drm_cxx_input_req)
+  if(DRM_CXX_INPUT STREQUAL "ON")
+    set(_drm_cxx_input_req REQUIRED)
+  endif()
+  pkg_check_modules(libinput  ${_drm_cxx_input_req} IMPORTED_TARGET libinput)
+  pkg_check_modules(libudev   ${_drm_cxx_input_req} IMPORTED_TARGET libudev)
+  pkg_check_modules(xkbcommon ${_drm_cxx_input_req} IMPORTED_TARGET xkbcommon)
+  if(TARGET PkgConfig::libinput AND TARGET PkgConfig::libudev AND TARGET PkgConfig::xkbcommon)
+    set(DRM_CXX_HAS_INPUT 1)
+    foreach(_t libinput libudev xkbcommon)
+      _drm_cxx_promote_system_includes(PkgConfig::${_t})
+    endforeach()
+  endif()
+endif()
+# Examples and benchmarks open their outputs through the input/session
+# helpers in examples/common.
+if(NOT DRM_CXX_HAS_INPUT AND (DRM_CXX_BUILD_EXAMPLES OR DRM_CXX_BUILD_BENCHMARKS))
+  message(STATUS "drm-cxx: examples and benchmarks skipped (DRM_CXX_INPUT=OFF or its deps missing)")
+  set(DRM_CXX_BUILD_EXAMPLES OFF)
+  set(DRM_CXX_BUILD_BENCHMARKS OFF)
+endif()
+
+# bionic keeps clock_* in libc; there is no librt.
+if(ANDROID)
+  find_library(RT_LIBRARY NAMES rt)
+else()
+  find_library(RT_LIBRARY NAMES rt REQUIRED)
+endif()
 find_library(DL_LIBRARY NAMES dl REQUIRED)
 
 if(DRM_CXX_VULKAN)

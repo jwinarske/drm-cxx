@@ -3,6 +3,7 @@ option('examples',       type : 'boolean', value : true,   description : 'Build 
 option('tests',          type : 'boolean', value : true,   description : 'Build unit and integration tests')
 option('benchmarks',     type : 'boolean', value : false,  description : 'Build perf benchmarks (plane_stress, allocator_torture)')
 option('thorvg_janitor', type : 'feature', value : 'auto', description : 'Build the ThorVG Janitor example (needs thorvg)')
+option('input',   type : 'feature', value : 'auto', description : 'Build drm::input (libinput, libudev, xkbcommon), drm::display::HotplugMonitor (libudev) and drm::session. Off on Android, which has none of them; examples and benchmarks need it')
 option('session', type : 'feature', value : 'auto', description : 'Build drm::session::Seat on top of libseat (auto-mux of logind/seatd/builtin)')
 option('cursor',  type : 'feature', value : 'auto', description : 'Build drm::cursor (XCursor theme resolver + KMS cursor renderer, needs libxcursor)')
 option('blend2d', type : 'feature', value : 'auto', description : 'Build drm::capture and drm::csd on top of Blend2D (CMake-config dep, no pkg-config upstream)')

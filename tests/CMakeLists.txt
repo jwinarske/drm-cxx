@@ -31,8 +31,6 @@ set(DRM_CXX_TESTS
   test_cursor_format
   test_multirect
   test_plane_alpha
-  test_input
-  test_key_repeater
   test_mode
   test_display
   test_color_pipeline_curves
@@ -56,6 +54,12 @@ set(DRM_CXX_TESTS
   test_acquire_fence
   test_v4l2_plane_layout
   test_log)
+
+if(DRM_CXX_HAS_INPUT)
+  list(APPEND DRM_CXX_TESTS
+    test_input
+    test_key_repeater)
+endif()
 
 if(DRM_CXX_HAS_XCURSOR)
   list(APPEND DRM_CXX_TESTS
@@ -140,7 +144,7 @@ gtest_discover_tests(test_dumb_scanout_sink_vkms)
 # (skips if none) and the cursor feature (CursorSource depends on drm::cursor).
 # Seat against a fake libseat defined in the test itself (interposition);
 # libseat is linked for its header and types only.
-if(DRM_CXX_HAS_LIBSEAT)
+if(DRM_CXX_HAS_LIBSEAT AND DRM_CXX_HAS_INPUT)
   add_executable(test_seat unit/test_seat.cpp)
   target_link_libraries(test_seat PRIVATE drm-cxx::drm-cxx GTest::gtest GTest::gtest_main
                                           PkgConfig::libseat)

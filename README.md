@@ -90,8 +90,8 @@ through `drm::PageFlip::dispatch()` yourself.
 | CMake | 3.21 |
 | libdrm | 2.4.113 |
 | libgbm | any |
-| libinput | 1.21 |
-| xkbcommon | 1.5 |
+| libinput, libudev | 1.21 (libinput; optional, for `input`) |
+| xkbcommon | 1.5 (optional, for `input`) |
 | libdisplay-info | 0.1.1 (subproject) |
 | libseat | 0.7 (optional, for `DRM_CXX_SESSION`) |
 | libxcursor | any (optional, for `DRM_CXX_CURSOR`) |
@@ -122,6 +122,17 @@ cmake --build build
 ctest --test-dir build
 ```
 
+Android (NDK, library only; `input` is off since Android has no libinput,
+libudev or xkbcommon, and GBM is minigbm):
+
+```sh
+scripts/build_android.sh [--abi arm64-v8a|x86_64] [--api 29] [--ndk DIR]
+```
+
+The script cross-builds libdrm, libdisplay-info and minigbm from pinned
+sources. Using the library needs KMS access: root, or a userdebug build with
+SurfaceFlinger stopped.
+
 ### Options
 
 | Meson | CMake | Default | Description |
@@ -129,6 +140,7 @@ ctest --test-dir build
 | `vulkan` | `DRM_CXX_VULKAN` | on | `VK_KHR_display` support |
 | `examples` | `DRM_CXX_BUILD_EXAMPLES` | on | Example programs |
 | `tests` | `DRM_CXX_BUILD_TESTS` | on | Unit + integration tests |
+| `input` | `DRM_CXX_INPUT` | auto | `drm::input`, `HotplugMonitor`, `drm::session` (libinput, libudev, xkbcommon); examples and benchmarks need it |
 | `session` | `DRM_CXX_SESSION` | auto | `drm::session::Seat` (libseat) |
 | `cursor` | `DRM_CXX_CURSOR` | auto | `drm::cursor` (libxcursor) |
 | `blend2d` | `DRM_CXX_BLEND2D` | auto | `drm::capture` + `drm::csd` (Blend2D) |

@@ -15,11 +15,6 @@ set(DRM_CXX_SOURCES
   planes/output.cpp
   planes/allocator.cpp
   planes/matching.cpp
-  input/seat.cpp
-  input/keyboard.cpp
-  input/key_repeater.cpp
-  input/pointer.cpp
-  input/event_dispatcher.cpp
   display/color_pipeline_curves.cpp
   display/connector_capabilities.cpp
   display/crtc_capabilities.cpp
@@ -28,11 +23,9 @@ set(DRM_CXX_SOURCES
   display/hdr_metadata.cpp
   display/tone_mapper.cpp
   display/hdr_metadata_cache.cpp
-  display/hotplug_monitor.cpp
   display/scanout_target.cpp
   display/driver_profile.cpp
   display/mode_list.cpp
-  session/seat.cpp
   time/clock.cpp
   gbm/device.cpp
   gbm/surface.cpp
@@ -73,6 +66,19 @@ set(DRM_CXX_SOURCES
   present/gl_blit.cpp
   present/gl_scanout_producer.cpp
   present/vk_scanout_producer.cpp)
+
+# drm::input, HotplugMonitor and drm::session (whose public header takes an
+# input::InputDeviceOpener). Absent where DRM_CXX_INPUT is off (Android).
+if(DRM_CXX_HAS_INPUT)
+  list(APPEND DRM_CXX_SOURCES
+    input/seat.cpp
+    input/keyboard.cpp
+    input/key_repeater.cpp
+    input/pointer.cpp
+    input/event_dispatcher.cpp
+    display/hotplug_monitor.cpp
+    session/seat.cpp)
+endif()
 
 if(DRM_CXX_VULKAN)
   list(APPEND DRM_CXX_SOURCES
@@ -149,13 +155,15 @@ target_link_libraries(drm-cxx
   PUBLIC
     PkgConfig::drm
     PkgConfig::gbm
-    PkgConfig::libinput
-    PkgConfig::libudev
-    PkgConfig::xkbcommon
     PkgConfig::libdisplayinfo
   PRIVATE
-    ${RT_LIBRARY}
     ${DL_LIBRARY})
+if(RT_LIBRARY)
+  target_link_libraries(drm-cxx PRIVATE ${RT_LIBRARY})
+endif()
+if(DRM_CXX_HAS_INPUT)
+  target_link_libraries(drm-cxx PUBLIC PkgConfig::libinput PkgConfig::libudev PkgConfig::xkbcommon)
+endif()
 
 if(HAVE_GBM_BO_CREATE_WITH_MODIFIERS2)
   target_compile_definitions(drm-cxx PRIVATE HAVE_GBM_BO_CREATE_WITH_MODIFIERS2=1)
@@ -342,13 +350,21 @@ install(FILES
     planes/composition_layer.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/planes)
 
-install(FILES
-    input/seat.hpp
-    input/keyboard.hpp
-    input/key_repeater.hpp
-    input/pointer.hpp
-    input/event_dispatcher.hpp
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/input)
+if(DRM_CXX_HAS_INPUT)
+  install(FILES
+      input/seat.hpp
+      input/keyboard.hpp
+      input/key_repeater.hpp
+      input/pointer.hpp
+      input/event_dispatcher.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/input)
+  install(FILES
+      display/hotplug_monitor.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/display)
+  install(FILES
+      session/seat.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/session)
+endif()
 
 install(FILES
     display/color_pipeline_curves.hpp
@@ -359,16 +375,12 @@ install(FILES
     display/edid.hpp
     display/hdr_metadata.hpp
     display/hdr_metadata_cache.hpp
-    display/hotplug_monitor.hpp
     display/scanout_target.hpp
     display/driver_profile.hpp
     display/mode_list.hpp
     display/tone_mapper.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/display)
 
-install(FILES
-    session/seat.hpp
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/drm-cxx/session)
 
 install(FILES
     time/clock.hpp
@@ -536,6 +548,11 @@ install(FILES
     "${PROJECT_BINARY_DIR}/drm-cxx-config-version.cmake"
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/drm-cxx)
 
+if(DRM_CXX_HAS_INPUT)
+  set(PC_INPUT_REQUIRES " libinput libudev xkbcommon")
+else()
+  set(PC_INPUT_REQUIRES "")
+endif()
 if(DRM_CXX_VULKAN)
   set(PC_VULKAN_REQUIRES " vulkan")
 else()

@@ -732,3 +732,26 @@ jobs:
               "${inc[@]}" "${poly[@]}" "$src" || { echo "FAILED: $src" >&2; rc=1; }
           done
           exit $rc
+
+  build-android:
+    # libdrm-cxx cross-built with the runner's NDK: input=disabled (no
+    # libinput/libudev/xkbcommon on Android), deps (libdrm, libdisplay-info,
+    # minigbm) from pinned sources. Build-only: no Android device in CI.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    name: android-${{ matrix.abi }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q meson ninja-build pkg-config
+
+      - name: Build
+        run: scripts/build_android.sh --abi ${{ matrix.abi }} --ndk "$ANDROID_NDK_LATEST_HOME"
