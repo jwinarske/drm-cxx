@@ -1,5 +1,104 @@
 # Changelog
 
+## v4.0.0 — 2026-10-05: stacking without zpos, plane-limit canvas, cursor channel order
+
+Major bump: public class layouts changed (below). Every consumer must
+recompile. Soname `libdrm-cxx.so.4`.
+
+### Breaking changes
+
+- **ABI only** (source-compatible; recompile):
+  - `display::CrtcColorPipeline` caches its property ids (three new members).
+    (#324)
+  - `planes::Allocator` gains plane-order state and a canvas-host filter.
+    (#329)
+  - `scene::GbmSurfaceConfig` gains `require_bind`. (#328)
+- **`DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED` fallback** is now
+  `0x0810000000000001` (type MISC). The old `fourcc_mod_code(ARM, 1)` aliased
+  AFBC 16x16. Only builds whose `drm_fourcc.h` lacks the define used it.
+  (#321)
+- **`input::TouchEvent::slot` is -1 on `TOUCH_FRAME`.** Frames close a set of
+  slot events and have no slot of their own. (#322)
+
+### API
+
+- `planes::PropClass` / `prop_class()`: whether a `PropTag` changes content or
+  placement. (#325)
+- `planes::Allocator::canvas_plane()`, `set_canvas_host_filter()`; public
+  `keep_priority()`. (#329, #332)
+- `scene::GbmSurfaceSource::mark_bound()` with
+  `GbmSurfaceConfig::require_bind`: `acquire()` returns EAGAIN until the
+  producer has bound the surface. (#328)
+- `session::Seat::open(enable_timeout)` (default 3 s) and
+  `set_resume_failed_callback()`. (#307, #310)
+
+### `drm::planes`
+
+- **Plane order where planes have no zpos.** The kernel stacks such planes by
+  id. Layers now map onto planes in zpos order. The leftovers form one
+  contiguous run on a canvas plane between that run's neighbors. A zpos
+  restack is no longer dropped by warm start. (#329; fixes #239, #240)
+- **Independent groups** are placed highest `keep_priority` first, ties in
+  input order. Before, the order was unspecified, so a Generic group could
+  take the overlay a Video group needed. (#330)
+- zpos range gate dropped on mutable planes: the written zpos is the dense
+  numbering, not the requested value (tidss `[0, 1]`). (#313)
+- `cursor_max_w/h` filled on cursor planes from `DRM_CAP_CURSOR_*`. (#308)
+- `compatible_with_crtc` bounds the CRTC index. (#304)
+- `supports_scaling` documented as assumed; the TEST decides. (#309)
+- Composition-layer placement documented as a preference. (#323)
+
+### `drm::scene`
+
+- **Canvas against a simultaneous-plane limit.** When no canvas plane passes
+  TEST beside the native planes (RK3566: three eligible, two usable), one
+  more native layer is composited and the frame placed again. Sticky until the
+  layer set changes. (#332; fixes #244)
+- **`~LayerScene` waits for an armed flip** (up to 100 ms, by vblank sequence)
+  before handing buffers back to their sources. (#327)
+- Canvas reservation released once the layers fit; a canvas plane left unused
+  is turned off. (#315)
+- `GbmSurfaceSource`: the binding precondition applies on every Mesa device.
+  (#305)
+
+### `drm::present`
+
+- `GbmScanoutProducer` honors the negotiated modifier set. (#306)
+- `VkScanoutProducer` works without `VK_EXT_image_drm_format_modifier`
+  (Mesa PowerVR): LINEAR images, exported as LINEAR. (#312)
+
+### `drm::cursor`
+
+- **Cursor planes in any alpha channel order.** The renderer takes the first
+  of ARGB8888, RGBA8888, ABGR8888 and BGRA8888 the plane supports, and
+  reorders pixels to match. Tegra's RGBA8888-only cursor plane is no longer
+  skipped. Opaque formats never qualify. (#333; fixes #256)
+
+### Other modules
+
+- `session::Seat`: one device per path; `Seat::open` no longer hangs without a
+  VT. (#307, #310)
+- `input`: a key resolves before xkb state updates (latches apply). Touch
+  frame and cancel carry time and device. An unknown seat opens empty.
+  (#316, #322, #326)
+- `display`: EDID `hdr` / `wide_gamut` only when advertised. (#317)
+- `capture::snapshot` reads RGB565 planes and orders planes without zpos as
+  the kernel does. (#318, #329)
+- `core`: packed 8-bit YUV formats named and sized (YUYV costed 16 bpp, not
+  32). (#319)
+
+### Tests / docs / scripts
+
+- New: `test_layer_groups`, `test_cursor_format`,
+  `test_layer_scene_plane_limit_vkms` (simulated plane limit). (#330, #332,
+  #333)
+- Ring scene test closes its PRIME fds; cursor source fixture at 16x16. (#311,
+  #320)
+- BeaglePlay (TI AM625) support: docs and `scripts/build_beagleplay.sh`,
+  which now builds Blend2D. (#314, #331)
+- Validated: Raspberry Pi 5 104/104 + `allocator_torture` 6/6, BeaglePlay
+  88/88 + 6/6, SA8155P 100/100 + 6/6.
+
 ## v3.1.0 — 2026-10-04: zpos over armed planes, pin TEST, warm-start with composition
 
 ABI-compatible with 3.0.0 (soname `libdrm-cxx.so.3`); one API addition.
