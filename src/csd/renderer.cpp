@@ -44,14 +44,16 @@ drm::unexpected<std::error_code> err(std::errc code) {
 
 // Same well-known font path list the signage_player overlay uses.
 // Trying these in order avoids pulling fontconfig as a hard dep.
-constexpr std::array<const char*, 10> k_font_candidates = {
+constexpr std::array<const char*, 12> k_font_candidates = {
     "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/DejaVuSans.ttf",  // Yocto ttf-dejavu
     "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
     "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/ttf/LiberationSans-Regular.ttf",  // Yocto ttf-liberation
     "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
     "/usr/share/fonts/noto/NotoSans-Regular.ttf",
     "/usr/share/fonts/TTF/Vera.ttf",
