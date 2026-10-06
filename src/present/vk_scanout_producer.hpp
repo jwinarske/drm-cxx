@@ -21,10 +21,23 @@
 // frame is copied — by GL on the GPU, or by the CPU — into a display-side
 // buffer (see create_buffer). render_clear() is the simplest such frame.
 //
-// Gated on DRM_CXX_HAS_VULKAN (Vulkan headers present at build); the class does
-// not exist otherwise. pImpl keeps vulkan.hpp out of this header.
+// Gated on DRM_CXX_HAS_VK_SCANOUT_PRODUCER: Vulkan headers present at build,
+// and a 64-bit ABI. The API passes the VkImage handle as void*, which holds a
+// non-dispatchable handle only where those are pointers; on 32-bit ABIs they
+// are 64-bit integers. The class does not exist otherwise. pImpl keeps
+// vulkan.hpp out of this header.
 
-#if DRM_CXX_HAS_VULKAN
+#include <cstdint>
+
+// NOLINTBEGIN(cppcoreguidelines-macro-usage) -- tested by #if
+#if DRM_CXX_HAS_VULKAN && UINTPTR_MAX == UINT64_MAX
+#define DRM_CXX_HAS_VK_SCANOUT_PRODUCER 1
+#else
+#define DRM_CXX_HAS_VK_SCANOUT_PRODUCER 0
+#endif
+// NOLINTEND(cppcoreguidelines-macro-usage)
+
+#if DRM_CXX_HAS_VK_SCANOUT_PRODUCER
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
@@ -119,4 +132,4 @@ class VkScanoutProducer : public ScanoutProducer {
 
 }  // namespace drm::present
 
-#endif  // DRM_CXX_HAS_VULKAN
+#endif  // DRM_CXX_HAS_VK_SCANOUT_PRODUCER

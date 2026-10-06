@@ -10,10 +10,26 @@
 #include <cstdint>
 #include <dlfcn.h>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace drm::vulkan {
+
+namespace {
+
+// A non-dispatchable handle's bits: a pointer on 64-bit ABIs, a uint64_t on
+// 32-bit ones.
+template <typename Handle>
+[[nodiscard]] std::uint64_t handle_bits(Handle h) noexcept {
+  if constexpr (std::is_pointer_v<Handle>) {
+    return reinterpret_cast<std::uintptr_t>(h);
+  } else {
+    return static_cast<std::uint64_t>(h);
+  }
+}
+
+}  // namespace
 
 Display::~Display() {
   if (instance_ != nullptr) {
@@ -149,7 +165,7 @@ drm::expected<Display, std::error_code> Display::create() {
 
     for (const auto& dp : display_props) {
       DisplayInfo info{};
-      info.display_handle = reinterpret_cast<uint64_t>(dp.display);
+      info.display_handle = handle_bits(dp.display);
       if (dp.displayName != nullptr) {
         info.name = dp.displayName;
       }
@@ -189,8 +205,8 @@ drm::expected<Display, std::error_code> Display::create() {
                                                         supported.data()) != VK_SUCCESS) {
           continue;
         }
-        for (auto* d : supported) {
-          pi.supported_displays.push_back(reinterpret_cast<uint64_t>(d));
+        for (VkDisplayKHR d : supported) {
+          pi.supported_displays.push_back(handle_bits(d));
         }
       }
 

@@ -292,7 +292,8 @@ std::size_t Layer::property_hash() const {
   // skipped — both change every frame (new buffer / new fence fd) and neither
   // affects plane compatibility, so including them would dirty the failure
   // cache uselessly.
-  std::size_t h = 0x9e3779b97f4a7c15ULL;  // Golden ratio seed
+  // 64-bit accumulator on every ABI; narrowed to size_t at the end.
+  std::uint64_t h = 0x9e3779b97f4a7c15ULL;  // Golden ratio seed
   for (std::size_t i = 0; i < k_num_props; ++i) {
     if (!set_mask_.test(i)) {
       continue;
@@ -301,11 +302,14 @@ std::size_t Layer::property_hash() const {
       continue;
     }
     // boost-style hash_combine, order-dependent (hence the tag-order walk above).
-    h ^= std::hash<std::size_t>{}(i) + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
-    h ^= std::hash<uint64_t>{}(values_.at(i)) + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
+    h ^= static_cast<std::uint64_t>(std::hash<std::size_t>{}(i)) + 0x9e3779b97f4a7c15ULL +
+         (h << 6U) + (h >> 2U);
+    h ^= static_cast<std::uint64_t>(std::hash<uint64_t>{}(values_.at(i))) + 0x9e3779b97f4a7c15ULL +
+         (h << 6U) + (h >> 2U);
   }
-  cached_hash_ = h;
-  return h;
+  const auto narrowed = static_cast<std::size_t>(h);
+  cached_hash_ = narrowed;
+  return narrowed;
 }
 
 void Layer::mark_clean() noexcept {
