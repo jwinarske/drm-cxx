@@ -38,7 +38,6 @@
 #include <drm-cxx/planes/layer.hpp>
 #include <drm-cxx/planes/output.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
-#include <drm-cxx/planes/zpos_order.hpp>
 #include <drm-cxx/sync/fence.hpp>
 
 #include <drm.h>
@@ -1375,11 +1374,10 @@ class LayerScene::Impl {
   // the canvas at zpos=0 too and competes with the bg plane (on
   // amdgpu PRIMARY at zpos=2 the canvas would be hidden underneath).
   //
-  // The composited group's zpos collapses to a single value — for
-  // contiguous unassigned z-runs this is correct; for non-contiguous
-  // runs (an assigned layer interleaved between two unassigned ones)
-  // the composited group floats above its lowest member's natural slot.
-  // Documented limitation; multi-canvas v1.1 will resolve it.
+  // The composited group's zpos collapses to a single value. Where a
+  // placed layer overlapping a composited one must cover it, the
+  // allocator leaves a slot under that layer (Allocator::canvas_zpos),
+  // and composites any placed layer that would have to be on both sides.
 
   // Resolve and cache the CRTC index in drmModeRes::crtcs[]. The index
   // never changes for the scene's lifetime on a given fd, so we ioctl
@@ -2015,35 +2013,6 @@ class LayerScene::Impl {
     scratch_zpos_overrides_ = std::move(bumped);
   }
 
-  // The zpos stack the allocator wrote this frame: stack_zpos over every armed
-  // plane (placed and pinned layers), the same inputs and function the
-  // allocator used, so pinned planes and the canvas line up with it.
-  void compute_stack(const std::vector<AcquisitionSlot>& acquisitions, std::uint32_t crtc_index) {
-    scratch_stack_.clear();
-    std::vector<drm::planes::detail::StackEntry> entries;
-    std::vector<std::uint32_t> ids;
-    entries.reserve(acquisitions.size());
-    ids.reserve(acquisitions.size());
-    for (const auto& acq : acquisitions) {
-      if (acq.planes_layer == nullptr) {
-        continue;
-      }
-      const auto pid = acq.planes_layer->assigned_plane_id();
-      if (!pid.has_value()) {
-        continue;
-      }
-      entries.push_back(
-          {plane_caps_for(crtc_index, *pid), acq.planes_layer->property("zpos"), std::nullopt});
-      ids.push_back(*pid);
-    }
-    (void)drm::planes::detail::stack_zpos(entries);  // on overflow written == requested
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-      if (const std::optional<std::uint64_t> w = entries[i].written; w.has_value()) {
-        scratch_stack_.emplace_back(ids[i], *w);
-      }
-    }
-  }
-
   [[nodiscard]] std::optional<std::uint64_t> stacked_zpos_of(std::uint32_t plane_id) const {
     for (const auto& [id, z] : scratch_stack_) {
       if (id == plane_id) {
@@ -2053,12 +2022,18 @@ class LayerScene::Impl {
     return std::nullopt;
   }
 
-  // The canvas's zpos: above every armed plane's written zpos, and above a
+  // The canvas's zpos: the allocator's slot when a placed layer must cover the
+  // canvas; otherwise above every armed plane's written zpos, and above a
   // fixed-slot PRIMARY (amdgpu: 2), which stays armed even when no layer is
   // placed on it. Composited layers don't count: the canvas carries them.
   // 0 when nothing is armed (the canvas is alone; the write clamps to the
   // plane's minimum).
   [[nodiscard]] std::int32_t choose_canvas_zpos() const {
+    constexpr auto k_max = static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max());
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) allocator_ is set at create().
+    if (const auto slot = allocator_->canvas_zpos(); slot.has_value()) {
+      return static_cast<std::int32_t>(std::min(*slot, k_max));
+    }
     std::optional<std::uint64_t> top;
     for (const auto& [id, z] : scratch_stack_) {
       top = std::max(top.value_or(0), z);
@@ -2069,7 +2044,6 @@ class LayerScene::Impl {
     if (!top.has_value()) {
       return 0;
     }
-    constexpr auto k_max = static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max());
     return static_cast<std::int32_t>(std::min(*top + 1, k_max));
   }
 
@@ -3350,9 +3324,14 @@ class LayerScene::Impl {
       canvas_zpos = std::max(canvas_zpos, static_cast<std::int32_t>(*plane.zpos_min));
     }
     // zpos is best-effort — skipped silently when the plane doesn't
-    // expose it or pins it immutable (amdgpu PRIMARY at 2). The canvas
-    // still scans out at whatever the kernel gives us.
-    if (canvas_zpos > 0) {
+    // expose it or pins it immutable (amdgpu PRIMARY at 2), or its slot is
+    // fixed (vc4 PRIMARY at 0: writing it is EINVAL). The canvas still scans
+    // out at whatever the kernel gives us. 0 is written too: the canvas slot
+    // can be the bottom of the stack, and a stale zpos left on the plane can
+    // tie with a placed layer's.
+    const bool zpos_fixed = plane.zpos_min.has_value() && plane.zpos_max.has_value() &&
+                            *plane.zpos_min == *plane.zpos_max;
+    if (!zpos_fixed) {
       if (auto r = write("zpos", static_cast<std::uint64_t>(canvas_zpos)); !r) {
         return r;
       }
@@ -3697,7 +3676,7 @@ class LayerScene::Impl {
   };
   std::vector<PinVerdictEntry> pin_verdicts_;
   std::vector<const drm::planes::PlaneCapabilities*> scratch_canvas_candidates_;
-  // The zpos stack written this frame (compute_stack): plane id -> zpos.
+  // The zpos stack written this frame (Allocator::zpos_stack): plane id -> zpos.
   std::vector<std::pair<std::uint32_t, std::uint64_t>> scratch_stack_;
   // Per-frame zpos overrides from uniquify_zpos (layers whose value changed).
   std::vector<std::pair<const Layer*, std::uint64_t>> scratch_zpos_overrides_;
@@ -4183,10 +4162,8 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
     }
 
     // The stack the allocator just wrote, for pinned planes and the canvas.
-    scratch_stack_.clear();
-    if (const auto stack_crtc = resolve_crtc_index(); stack_crtc.has_value()) {
-      compute_stack(acquisitions, *stack_crtc);
-    }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) allocator_ is set at create().
+    scratch_stack_ = allocator_->zpos_stack();
 
     // Write pinned layers' plane state to their reserved planes. Must run
     // before compose_unassigned: it sets assigned_plane_ so the canvas
