@@ -517,6 +517,13 @@ class Allocator {
     std::size_t hash{0};
   };
   std::unordered_map<uint32_t, LastCommitted> last_committed_;
+  // Planes another client left lit on this CRTC (the fbdev console restores
+  // its framebuffer on last close). Read while nothing is committed; the
+  // disable pass turns off the ones a frame does not use (#342).
+  std::vector<uint32_t> foreign_lit_;
+  void read_foreign_lit(uint32_t crtc_index, uint32_t crtc_id);
+  [[nodiscard]] bool is_foreign_lit(uint32_t plane_id) const;
+  void drop_foreign_lit(uint32_t plane_id) noexcept;
 
   // True to disable per-property minimization. See
   // set_force_full_property_writes.

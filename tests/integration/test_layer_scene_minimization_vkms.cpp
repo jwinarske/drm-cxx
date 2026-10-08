@@ -242,7 +242,11 @@ TEST(LayerSceneMinimizationVkms, ForceFullWritesEmitsEveryProperty) {
 
   auto first = fx.scene->commit();
   ASSERT_TRUE(first.has_value()) << first.error().message();
-  const auto first_writes = first->properties_written;
+  // The first commit also turns off planes another client left lit, each an
+  // FB_ID=0 (counted in fbs_attached) plus CRTC_ID=0. Leave those out of the
+  // layer's baseline.
+  const auto foreign_disables = first->fbs_attached - first->layers_assigned;
+  const auto first_writes = first->properties_written - (2U * foreign_disables);
   ASSERT_GT(first_writes, 0U);
 
   // Second commit with no mutation. Without force-full this would
