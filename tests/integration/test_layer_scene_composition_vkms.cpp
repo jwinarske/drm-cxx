@@ -759,3 +759,80 @@ TEST(LayerSceneCompositionVkms, RestackReachesTheScreen) {
   EXPECT_EQ(img_r->pixels()[(cy * img_r->width()) + cx], colors.front())
       << "the first layer, now topmost, must be visible";
 }
+
+// Removing layers until the rest fit the planes must take the composited ones
+// off the canvas. Where planes have no zpos property, warm start kept them
+// composited: the cached run was still in plane order and the kernel accepted
+// it (#341).
+TEST(LayerSceneCompositionVkms, CompositedLayersReturnToPlanesAfterRemoval) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = active.crtc_id;
+  cfg.connector_id = active.connector_id;
+  cfg.mode = active.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  constexpr std::uint32_t k_layers = 16;  // more than vkms has planes
+  constexpr std::uint32_t k_side = 64;
+  constexpr std::size_t k_overflow = 4;
+  std::vector<drm::scene::LayerHandle> handles;
+  for (std::uint32_t i = 0; i < k_layers; ++i) {
+    auto src = DumbBufferSource::create(dev, k_side, k_side, DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    fill_uniform_argb(**src, k_side, k_side, 0xFF000000U | ((i * 15U) << 16U) | 0x80U);
+    LayerDesc d;
+    d.source = std::move(*src);
+    d.display.src_rect = drm::scene::Rect{0, 0, k_side, k_side};
+    const auto off = static_cast<std::int32_t>(i * 8U);
+    d.display.dst_rect = drm::scene::Rect{off, off, k_side, k_side};
+    d.display.zpos = static_cast<int>(i) + 3;
+    auto h = scene.add_layer(std::move(d));
+    ASSERT_TRUE(h.has_value()) << h.error().message();
+    handles.push_back(*h);
+  }
+  auto first = scene.commit();
+  ASSERT_TRUE(first.has_value()) << first.error().message();
+  ASSERT_GT(first->layers_composited, 0U) << "the stack should overflow into the canvas";
+  const std::size_t planes_for_layers = first->layers_assigned;  // one more holds the canvas
+
+  // Removing placed layers frees their planes. Only k_overflow layers still
+  // need the canvas; warm start kept all of the old run there.
+  auto remove_top = [&](std::size_t keep) {
+    while (handles.size() > keep) {
+      scene.remove_layer(handles.back());
+      handles.pop_back();
+    }
+  };
+  remove_top(planes_for_layers + k_overflow);
+  for (int f = 0; f < 2; ++f) {
+    auto r = scene.commit();
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    EXPECT_EQ(r->layers_composited, k_overflow) << "frame " << f;
+    EXPECT_EQ(r->layers_assigned, planes_for_layers) << "frame " << f;
+  }
+
+  // Drop the top k_overflow: what is left fits one plane per layer.
+  remove_top(planes_for_layers);
+  for (int f = 0; f < 2; ++f) {
+    auto r = scene.commit();
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    EXPECT_EQ(r->layers_composited, 0U) << "frame " << f;
+    EXPECT_EQ(r->layers_assigned, planes_for_layers) << "frame " << f;
+  }
+  drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+}
