@@ -34,6 +34,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -44,8 +45,10 @@
 #include <string>
 #include <sys/types.h>
 #include <system_error>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 using drm::Device;
@@ -351,4 +354,140 @@ TEST(LayerSceneRebindVkms, OffScreenLayerFlaggedInCompatibilityReport) {
   EXPECT_EQ(report->incompatibilities[0].reason, LayerIncompatibility::Reason::DstRectOffScreen);
 
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+namespace {
+
+// Two connected outputs on distinct CRTCs of one vkms device: a configfs
+// instance with a second pipe. Default vkms has one.
+struct TwoPipes {
+  std::string node;
+  ActiveCrtc a;
+  ActiveCrtc b;
+};
+
+std::optional<TwoPipes> find_two_pipe_vkms() {
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
+    const std::string node = entry.path().string();
+    if (entry.path().filename().string().rfind("card", 0) != 0) {
+      continue;
+    }
+    const int fd = ::open(node.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+      continue;
+    }
+    std::vector<ActiveCrtc> outs;
+    drmVersionPtr v = drmGetVersion(fd);
+    const bool is_vkms = v != nullptr && v->name != nullptr && std::strcmp(v->name, "vkms") == 0;
+    drmFreeVersion(v);
+    drmModeResPtr res = is_vkms ? drmModeGetResources(fd) : nullptr;
+    for (int i = 0; res != nullptr && i < res->count_connectors && outs.size() < 2; ++i) {
+      drmModeConnectorPtr conn = drmModeGetConnector(fd, res->connectors[i]);
+      if (conn != nullptr && conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0) {
+        for (int e = 0; e < conn->count_encoders; ++e) {
+          drmModeEncoderPtr enc = drmModeGetEncoder(fd, conn->encoders[e]);
+          bool taken = false;
+          for (int c = 0; enc != nullptr && c < res->count_crtcs && !taken; ++c) {
+            const std::uint32_t crtc = res->crtcs[c];
+            const bool used = !outs.empty() && outs.front().crtc_id == crtc;
+            if ((enc->possible_crtcs & (1U << static_cast<unsigned>(c))) != 0 && !used) {
+              outs.push_back(ActiveCrtc{crtc, conn->connector_id, conn->modes[0]});
+              taken = true;
+            }
+          }
+          drmModeFreeEncoder(enc);
+          if (taken) {
+            break;
+          }
+        }
+      }
+      drmModeFreeConnector(conn);
+    }
+    drmModeFreeResources(res);
+    ::close(fd);
+    if (outs.size() == 2) {
+      return TwoPipes{node, outs[0], outs[1]};
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<std::uint32_t> lit_planes(int fd, std::uint32_t crtc_id) {
+  std::vector<std::uint32_t> out;
+  drmModePlaneResPtr res = drmModeGetPlaneResources(fd);
+  for (std::uint32_t i = 0; res != nullptr && i < res->count_planes; ++i) {
+    drmModePlanePtr p = drmModeGetPlane(fd, res->planes[i]);
+    if (p != nullptr && p->fb_id != 0 && p->crtc_id == crtc_id) {
+      out.push_back(p->plane_id);
+    }
+    drmModeFreePlane(p);
+  }
+  drmModeFreePlaneResources(res);
+  return out;
+}
+
+}  // namespace
+
+// Rebinding to another CRTC must turn off the planes the scene lit on the old
+// one. Left lit, they keep the old frame on screen, and a plane both CRTCs can
+// use fails every TEST that moves it, so the new output composites (#340).
+TEST(LayerSceneRebindVkms, RebindToAnotherCrtcReleasesTheOldPlanes) {
+  const auto pipes = find_two_pipe_vkms();
+  if (!pipes) {
+    GTEST_SKIP() << "needs a vkms device with two connected CRTCs (configfs)";
+  }
+  auto dev_r = Device::open(pipes->node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto& a = pipes->a;
+  const auto& b = pipes->b;
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = a.crtc_id;
+  cfg.connector_id = a.connector_id;
+  cfg.mode = a.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  const std::uint32_t w = std::min(a.mode.hdisplay, b.mode.hdisplay);
+  const std::uint32_t h = std::min(a.mode.vdisplay, b.mode.vdisplay);
+  constexpr std::uint32_t k_side = 64;
+  for (const auto& [rw, rh, z] : {std::tuple{w, h, 3}, std::tuple{k_side, k_side, 4}}) {
+    auto src = DumbBufferSource::create(dev, rw, rh, DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    LayerDesc d;
+    d.source = std::move(*src);
+    d.display.src_rect = drm::scene::Rect{0, 0, rw, rh};
+    d.display.dst_rect = drm::scene::Rect{0, 0, rw, rh};
+    d.display.zpos = z;
+    ASSERT_TRUE(scene.add_layer(std::move(d)).has_value());
+  }
+  const auto before = lit_planes(dev.fd(), a.crtc_id);
+  ASSERT_TRUE(scene.commit().has_value());
+  ASSERT_TRUE(scene.commit().has_value());
+  std::vector<std::uint32_t> scene_lit;
+  for (const auto id : lit_planes(dev.fd(), a.crtc_id)) {
+    if (std::find(before.begin(), before.end(), id) == before.end()) {
+      scene_lit.push_back(id);
+    }
+  }
+  ASSERT_FALSE(scene_lit.empty());
+
+  ASSERT_TRUE(scene.rebind(b.crtc_id, b.connector_id, b.mode).has_value());
+  auto report = scene.commit();
+  ASSERT_TRUE(report.has_value()) << report.error().message();
+  EXPECT_EQ(report->layers_assigned, 2U);
+  EXPECT_EQ(report->layers_composited, 0U) << "the old CRTC's planes were not handed over";
+
+  const auto after = lit_planes(dev.fd(), a.crtc_id);
+  for (const auto id : scene_lit) {
+    EXPECT_TRUE(std::find(after.begin(), after.end(), id) == after.end())
+        << "plane " << id << " still lit on the old CRTC";
+  }
+  cleanup_crtc(dev.fd(), b.crtc_id);
+  cleanup_crtc(dev.fd(), a.crtc_id);
 }
