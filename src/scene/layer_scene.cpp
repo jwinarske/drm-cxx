@@ -958,6 +958,12 @@ class LayerScene::Impl {
   drm::expected<CompatibilityReport, std::error_code> rebind(std::uint32_t new_crtc_id,
                                                              std::uint32_t new_connector_id,
                                                              drmModeModeInfo new_mode) {
+    // Before the old CRTC's state is dropped: nothing else turns its planes
+    // off, and the old buffers are still on screen until it lands.
+    if (new_crtc_id != crtc_id_ && !suspended_) {
+      detach_planes_from(crtc_id_);
+    }
+
     // Drain the deferred-release ring before swapping bindings. The
     // held buffers were committed against the OLD crtc/connector and
     // any in-flight scanout there is now moot; releasing them here
@@ -3183,6 +3189,47 @@ class LayerScene::Impl {
       pin_verdicts_.clear();
     }
     pin_verdicts_.push_back({handle_id, plane_id, hash, verdict});
+  }
+
+  // Turns off every plane lit on `crtc_id` in a commit of its own (#340). The
+  // allocator forgets them with the old CRTC, so they would keep its last
+  // frame on screen, and the kernel will not move a plane shared with the new
+  // CRTC in the commit that arms it there. A primary the driver will not turn
+  // off on an active CRTC (amdgpu, i.MX LCDIF) is retried without; a failure
+  // leaves the allocator to fall back as before. The CRTC itself stays up: the
+  // scene does not own the old output.
+  void detach_planes_from(std::uint32_t crtc_id) {
+    std::vector<const drm::planes::PlaneCapabilities*> lit;
+    for (const auto& plane : registry_.all()) {
+      if (plane.type == drm::planes::DRMPlaneType::CURSOR) {
+        continue;
+      }
+      const std::unique_ptr<drmModePlane, decltype(&drmModeFreePlane)> p(
+          drmModeGetPlane(dev_->fd(), plane.id), drmModeFreePlane);
+      if (p && p->fb_id != 0 && p->crtc_id == crtc_id) {
+        lit.push_back(&plane);
+      }
+    }
+    std::error_code ec;
+    for (const bool with_primary : {true, false}) {
+      drm::AtomicRequest req(*dev_);
+      std::size_t n = 0;
+      for (const auto* plane : lit) {
+        if (with_primary || plane->type != drm::planes::DRMPlaneType::PRIMARY) {
+          disable_plane(req, plane->id);
+          ++n;
+        }
+      }
+      if (n == 0) {
+        return;
+      }
+      auto r = req.commit(0);
+      if (r) {
+        return;
+      }
+      ec = r.error();
+    }
+    drm::log_warn("scene::LayerScene: rebind: planes left on CRTC {}: {}", crtc_id, ec.message());
   }
 
   void disable_plane(drm::AtomicRequest& req, std::uint32_t plane_id) {
