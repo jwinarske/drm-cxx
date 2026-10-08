@@ -19,6 +19,8 @@
 // Self-skips when VKMS isn't loaded (or set DRM_CXX_TEST_CARD to a modeset
 // card to run on real hardware) — same pattern as the other integration files.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -63,35 +65,6 @@ using drm::scene::LayerScene;
 using drm::scene::SourceFormat;
 
 namespace {
-
-std::optional<std::string> find_vkms_node() {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  if (env != nullptr && *env != '\0') {
-    return std::string(env);
-  }
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const auto& p = entry.path();
-    if (p.filename().string().rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms =
-        (v != nullptr) && (v->name != nullptr) && (std::strcmp(v->name, "vkms") == 0);
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
 
 struct ActiveCrtc {
   std::uint32_t crtc_id{0};
@@ -254,7 +227,7 @@ struct Census {
 // commit every frame must take the FB-only fast path (zero TEST_ONLY), emit no
 // damage clips, and never idle-skip (commit() always commits).
 TEST(LayerSceneCensusVkms, StaticSteadyState) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -297,7 +270,7 @@ TEST(LayerSceneCensusVkms, StaticSteadyState) {
 // not placement, so the fast path still engages — and each damaged frame must
 // arm exactly one FB_DAMAGE_CLIPS blob (when the driver exposes the property).
 TEST(LayerSceneCensusVkms, WidgetScaleDamage) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -357,7 +330,7 @@ TEST(LayerSceneCensusVkms, WidgetScaleDamage) {
 // changes CRTC_X, defeats the fast path, and re-validates with one TEST_ONLY;
 // the frames between are back on the fast path.
 TEST(LayerSceneCensusVkms, FullFrameScroll) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -417,7 +390,7 @@ TEST(LayerSceneCensusVkms, FullFrameScroll) {
 // path for the whole set — the census proves the optimization holds beyond one
 // layer.
 TEST(LayerSceneCensusVkms, MultiLayerOverlap) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }

@@ -8,6 +8,8 @@
 // the single-layer scene, and commit one frame. Self-skips when vkms is not
 // loaded (modprobe vkms enable_overlay=1). Not parallel: it modesets.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/present/gbm_producer.hpp>
 #include <drm-cxx/present/scanout_backend.hpp>
@@ -28,35 +30,12 @@
 #include <system_error>
 #include <unistd.h>
 
-namespace {
-
-[[nodiscard]] std::optional<std::string> find_vkms_node() noexcept {
-  for (int idx = 0; idx < 8; ++idx) {
-    std::string path = "/dev/dri/card" + std::to_string(idx);
-    const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr ver = drmGetVersion(fd);
-    const bool is_vkms = (ver != nullptr) && (ver->name != nullptr) &&
-                         std::string(ver->name, ver->name_len) == "vkms";
-    if (ver != nullptr) {
-      drmFreeVersion(ver);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return path;
-    }
-  }
-  return std::nullopt;
-}
-
-}  // namespace
+namespace {}  // namespace
 
 // The LINEAR-only GBM producer honors the negotiated set: LINEAR (or no
 // constraint) allocates; a set without LINEAR is refused, not ignored.
 TEST(ScanoutBackendVkms, GbmProducerHonorsAllowedModifiers) {
-  const auto path = find_vkms_node();
+  const auto path = drm::test::find_vkms_node();
   if (!path.has_value()) {
     GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
   }
@@ -77,7 +56,7 @@ TEST(ScanoutBackendVkms, GbmProducerHonorsAllowedModifiers) {
 }
 
 TEST(ScanoutBackendVkms, PresentFullScreen) {
-  const auto path = find_vkms_node();
+  const auto path = drm::test::find_vkms_node();
   if (!path.has_value()) {
     GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
   }
@@ -100,7 +79,7 @@ TEST(ScanoutBackendVkms, PresentFullScreen) {
 }
 
 TEST(ScanoutBackendVkms, IdleSuppression) {
-  const auto path = find_vkms_node();
+  const auto path = drm::test::find_vkms_node();
   if (!path.has_value()) {
     GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
   }
@@ -142,7 +121,7 @@ TEST(ScanoutBackendVkms, IdleSuppression) {
 // in do_commit: with no internal release-fence consumer (GbmScanoutProducer is a
 // plain source) the captured fence is moved straight into *out_fence.
 TEST(ScanoutBackendVkms, PresentDeliversOutFence) {
-  const auto path = find_vkms_node();
+  const auto path = drm::test::find_vkms_node();
   if (!path.has_value()) {
     GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
   }
@@ -168,7 +147,7 @@ TEST(ScanoutBackendVkms, PresentDeliversOutFence) {
 }
 
 TEST(ScanoutBackendVkms, VrrAutoArmsFromProfileAndCommits) {
-  const auto path = find_vkms_node();
+  const auto path = drm::test::find_vkms_node();
   if (!path.has_value()) {
     GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
   }
@@ -213,8 +192,9 @@ TEST(ScanoutBackendVkms, VrrAutoArmsFromProfileAndCommits) {
 // destroy the backend and confirm SavedCrtc reprogrammed the original.
 TEST(ScanoutBackendVkms, SavedCrtcRestoresCrtcOnTeardown) {
   const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> path =
-      (env != nullptr && *env != '\0') ? std::optional<std::string>(env) : find_vkms_node();
+  const std::optional<std::string> path = (env != nullptr && *env != '\0')
+                                              ? std::optional<std::string>(env)
+                                              : drm::test::find_vkms_node();
   if (!path.has_value()) {
     GTEST_SKIP() << "vkms not loaded (or set DRM_CXX_TEST_CARD to a modeset card).";
   }

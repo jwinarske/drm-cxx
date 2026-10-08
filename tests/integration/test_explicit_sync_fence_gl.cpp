@@ -90,6 +90,10 @@ TEST(ExplicitSyncFenceGl, InFenceArmedFromRealGpuFence) {
 
   auto dev = drm::Device::open(*path);
   ASSERT_TRUE(dev.has_value()) << "Device::open: " << dev.error().message();
+  if (drmIsMaster(dev->fd()) == 0) {
+    GTEST_SKIP() << *path << " is held by another DRM master (a desktop session); "
+                 << "run from a free VT";
+  }
 
   auto producer = drm::present::GlScanoutProducer::create(*dev);
   if (!producer.has_value()) {

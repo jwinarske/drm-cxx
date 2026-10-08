@@ -17,6 +17,7 @@
 // the safe choice on real planes too.
 
 #include "core/device.hpp"
+#include "vkms_node.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/display/scanout_target.hpp>
@@ -65,31 +66,6 @@ using drm::scene::LayerScene;
 
 namespace {
 
-std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const auto& p = entry.path();
-    if (p.filename().string().rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms =
-        (v != nullptr) && (v->name != nullptr) && (std::strcmp(v->name, "vkms") == 0);
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
-
 // Pick a card to drive a real scene commit through the common LayerScene path.
 // Prefer vkms (host/CI: a deterministic, headless virtual output); else the
 // first card whose discover() yields a connected output we can drive on real
@@ -102,7 +78,7 @@ std::optional<std::string> find_scene_card() {
   if (const char* node = std::getenv("DRM_CXX_TEST_CARD"); node != nullptr && *node != '\0') {
     return std::string(node);
   }
-  if (auto vkms = find_vkms_node()) {
+  if (auto vkms = drm::test::find_vkms_node()) {
     return vkms;
   }
   std::error_code ec;

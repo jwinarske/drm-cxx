@@ -18,6 +18,7 @@
 //     device without leaking surfaces or fb_ids.
 
 #include "core/device.hpp"
+#include "vkms_node.hpp"
 
 #include <drm-cxx/scene/gbm_surface_source.hpp>
 #include <drm-cxx/scene/layer_scene.hpp>
@@ -37,30 +38,6 @@
 #include <utility>
 
 namespace {
-
-// Locate the vkms DRM node by driver name. Mirrors find_vkms_node()
-// in the V4l2CameraSource integration test.
-[[nodiscard]] std::optional<std::string> find_vkms_node() noexcept {
-  for (int idx = 0; idx < 8; ++idx) {
-    std::string path = "/dev/dri/card" + std::to_string(idx);
-    int const fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr ver = drmGetVersion(fd);
-    if (ver == nullptr) {
-      ::close(fd);
-      continue;
-    }
-    std::string const name(ver->name, ver->name_len);
-    drmFreeVersion(ver);
-    ::close(fd);
-    if (name == "vkms") {
-      return path;
-    }
-  }
-  return std::nullopt;
-}
 
 // Pick the first connected connector + a CRTC the encoder allows
 // + the first mode. Enough to construct a LayerScene against vkms.
@@ -111,7 +88,7 @@ struct PickedOutput {
 class GbmSurfaceSourceVkms : public ::testing::Test {
  protected:
   void SetUp() override {
-    auto path = find_vkms_node();
+    auto path = drm::test::find_vkms_node();
     if (!path.has_value()) {
       GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
     }

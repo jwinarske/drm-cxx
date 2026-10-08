@@ -9,6 +9,8 @@
 // DRM_CXX_TEST_CARD=/dev/dri/cardN to run against real hardware instead.
 // Requires DRM master.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
@@ -47,36 +49,11 @@ using drm::scene::LayerScene;
 
 namespace {
 
-std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const auto& p = entry.path();
-    if (p.filename().string().rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms =
-        (v != nullptr) && (v->name != nullptr) && (std::strcmp(v->name, "vkms") == 0);
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
-
 std::optional<std::string> find_scene_card() {
   if (const char* node = std::getenv("DRM_CXX_TEST_CARD"); node != nullptr && *node != '\0') {
     return std::string(node);
   }
-  return find_vkms_node();
+  return drm::test::find_vkms_node();
 }
 
 struct ActiveCrtc {

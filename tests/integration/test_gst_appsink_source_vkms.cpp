@@ -37,6 +37,8 @@
 //     doesn't have one, and the sysmem path is the more vulnerable of
 //     the two anyway. Hardware-validated separately.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>  // AcquiredBuffer
@@ -120,40 +122,13 @@ std::optional<ActiveCrtc> pick_crtc(int fd) {
   return found;
 }
 
-// Locate /dev/dri/cardN for the VKMS driver, if present. Same pattern
-// as test_capture_vkms / test_layer_scene_*_vkms.
-std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const auto& p = entry.path();
-    const std::string name = p.filename().string();
-    if (name.rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms = v != nullptr && v->name != nullptr && std::strcmp(v->name, "vkms") == 0;
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
-
 class GstVkmsFixture : public ::testing::Test {
  public:
   static void SetUpTestSuite() { gst_init(nullptr, nullptr); }
 
  protected:
   void SetUp() override {
-    const auto node = find_vkms_node();
+    const auto node = drm::test::find_vkms_node();
     if (!node.has_value()) {
       GTEST_SKIP() << "vkms not loaded — skipping (modprobe vkms enable_overlay=1)";
     }

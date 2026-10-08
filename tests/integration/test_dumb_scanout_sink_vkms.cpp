@@ -9,6 +9,7 @@
 // not parallel.
 
 #include "core/device.hpp"
+#include "vkms_node.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/modeset/page_flip.hpp>
@@ -30,27 +31,6 @@
 #include <vector>
 
 namespace {
-
-std::optional<std::string> find_vkms_node() {
-  for (int idx = 0; idx < 8; ++idx) {
-    std::string path = "/dev/dri/card" + std::to_string(idx);
-    const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr ver = drmGetVersion(fd);
-    const bool is_vkms = (ver != nullptr) && (ver->name != nullptr) &&
-                         std::string(ver->name, ver->name_len) == "vkms";
-    if (ver != nullptr) {
-      drmFreeVersion(ver);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return path;
-    }
-  }
-  return std::nullopt;
-}
 
 struct ActiveCrtc {
   std::uint32_t crtc_id{0};
@@ -93,7 +73,7 @@ std::optional<ActiveCrtc> pick_crtc(int fd) {
 }  // namespace
 
 TEST(DumbScanoutSinkVkms, PresentAndFlip) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node.has_value()) {
     GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
   }

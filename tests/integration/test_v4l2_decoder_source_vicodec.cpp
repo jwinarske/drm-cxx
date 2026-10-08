@@ -43,6 +43,7 @@
 //     produce a frame at a different resolution.
 
 #include "core/device.hpp"
+#include "vkms_node.hpp"
 
 #include <drm-cxx/scene/v4l2_decoder_source.hpp>
 
@@ -146,32 +147,6 @@ constexpr std::uint32_t k_nv12_fourcc = 0x3231564EU;
   return std::nullopt;
 }
 
-[[nodiscard]] std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (auto const& entry : fs::directory_iterator("/dev/dri", ec)) {
-    auto const& p = entry.path();
-    std::string const name = p.filename().string();
-    if (name.rfind("card", 0) != 0) {
-      continue;
-    }
-    int const fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    bool const is_vkms =
-        (v != nullptr) && (v->name != nullptr) && std::strcmp(v->name, "vkms") == 0;
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
-
 drm::scene::V4l2DecoderConfig vicodec_config() noexcept {
   drm::scene::V4l2DecoderConfig cfg;
   cfg.codec_fourcc = k_fwht_fourcc;
@@ -191,7 +166,7 @@ class VicodecFixture : public ::testing::Test {
       GTEST_SKIP() << "vicodec stateful decoder not found "
                       "-- modprobe vicodec to enable";
     }
-    auto const drm_node = find_vkms_node();
+    auto const drm_node = drm::test::find_vkms_node();
     if (!drm_node.has_value()) {
       GTEST_SKIP() << "vkms not loaded -- modprobe vkms enable_overlay=1 to enable";
     }

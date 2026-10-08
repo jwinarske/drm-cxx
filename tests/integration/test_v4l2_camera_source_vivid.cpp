@@ -24,6 +24,7 @@
 // vivid + a real DRM driver (amdgpu, i915) exercises the full path.
 
 #include "core/device.hpp"
+#include "vkms_node.hpp"
 
 #include <drm-cxx/scene/v4l2_camera_source.hpp>
 
@@ -126,30 +127,6 @@ struct ProbedDevice {
   return std::nullopt;
 }
 
-// Locate the vkms DRM node by driver name; matches the convention from
-// the decoder source's vicodec test.
-[[nodiscard]] std::optional<std::string> find_vkms_node() noexcept {
-  for (int idx = 0; idx < 8; ++idx) {
-    std::string path = "/dev/dri/card" + std::to_string(idx);
-    int const fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr ver = drmGetVersion(fd);
-    if (ver == nullptr) {
-      ::close(fd);
-      continue;
-    }
-    std::string const name(ver->name, ver->name_len);
-    drmFreeVersion(ver);
-    ::close(fd);
-    if (name == "vkms") {
-      return path;
-    }
-  }
-  return std::nullopt;
-}
-
 class V4l2CameraSourceIntegration : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -157,7 +134,7 @@ class V4l2CameraSourceIntegration : public ::testing::Test {
     if (!probed.has_value()) {
       GTEST_SKIP() << "No CAPTURE-only V4L2 device advertising NV12 or YUYV found.";
     }
-    auto const drm_node = find_vkms_node();
+    auto const drm_node = drm::test::find_vkms_node();
     if (!drm_node.has_value()) {
       GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
     }

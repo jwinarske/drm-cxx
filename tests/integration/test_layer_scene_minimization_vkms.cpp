@@ -19,6 +19,8 @@
 // Self-skips when VKMS isn't loaded — same pattern as the other
 // tests/integration files.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
@@ -51,32 +53,6 @@ using drm::scene::LayerDesc;
 using drm::scene::LayerScene;
 
 namespace {
-
-std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const auto& p = entry.path();
-    const std::string name = p.filename().string();
-    if (name.rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms =
-        (v != nullptr) && (v->name != nullptr) && (std::strcmp(v->name, "vkms") == 0);
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
 
 struct ActiveCrtc {
   std::uint32_t crtc_id{0};
@@ -168,7 +144,7 @@ void cleanup_crtc(int fd, std::uint32_t crtc_id) {
 }  // namespace
 
 TEST(LayerSceneMinimizationVkms, SteadyStateWritesOnlyFbIdPerAssignedLayer) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -217,7 +193,7 @@ TEST(LayerSceneMinimizationVkms, SteadyStateWritesOnlyFbIdPerAssignedLayer) {
 }
 
 TEST(LayerSceneMinimizationVkms, ForceFullWritesEmitsEveryProperty) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded";
   }
@@ -283,7 +259,7 @@ TEST(LayerSceneMinimizationVkms, ForceFullWritesEmitsEveryProperty) {
 // and falls through to full_search so the new layer gets a real shot
 // at a hardware plane.
 TEST(LayerSceneMinimizationVkms, NewLayerInWarmStateLandsOnHardwarePlane) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -373,7 +349,7 @@ TEST(LayerSceneMinimizationVkms, NewLayerInWarmStateLandsOnHardwarePlane) {
 }
 
 TEST(LayerSceneMinimizationVkms, TranslatingLayerEmitsOnlyOneRectProperty) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded";
   }
@@ -426,7 +402,7 @@ TEST(LayerSceneMinimizationVkms, TranslatingLayerEmitsOnlyOneRectProperty) {
 // a placement change defeats it (the layer is re-validated), and the frame
 // after that — with the new placement cached — is back on the fast path.
 TEST(LayerSceneMinimizationVkms, FbOnlyFastPathReTestsOnPlacementChange) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded";
   }
