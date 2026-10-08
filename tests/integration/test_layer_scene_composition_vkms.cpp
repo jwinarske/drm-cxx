@@ -26,6 +26,8 @@
 // If VKMS is not loaded the test self-skips via GTEST_SKIP() so the
 // suite stays green on developer machines that haven't modprobed it.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/capture/snapshot.hpp>
 #include <drm-cxx/core/device.hpp>
@@ -72,35 +74,6 @@ using drm::scene::LayerScene;
 
 namespace {
 
-// Locate /dev/dri/cardN for the VKMS driver, if present. Mirrors the
-// helper in test_capture_vkms.cpp; a third caller would justify hoisting
-// it into a tests/integration/vkms_helpers.hpp shared header.
-std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const auto& p = entry.path();
-    const std::string name = p.filename().string();
-    if (name.rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms =
-        (v != nullptr) && (v->name != nullptr) && (std::strcmp(v->name, "vkms") == 0);
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
-
 // The DMA-BUF-import rescue test needs a GL-capable card. Honor an explicit
 // DRM_CXX_TEST_CARD override (a real GPU card, e.g. vc4 on a Pi) so the GPU
 // import path can be exercised on hardware; else fall back to vkms.
@@ -108,7 +81,7 @@ std::optional<std::string> find_dmabuf_import_card() {
   if (const char* node = std::getenv("DRM_CXX_TEST_CARD"); node != nullptr && *node != '\0') {
     return std::string(node);
   }
-  return find_vkms_node();
+  return drm::test::find_vkms_node();
 }
 
 struct ActiveCrtc {
@@ -176,7 +149,7 @@ void fill_uniform_argb(DumbBufferSource& source, std::uint32_t width, std::uint3
 }  // namespace
 
 TEST(LayerSceneCompositionVkms, ForceCompositedLayerLandsOnCanvas) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -286,7 +259,7 @@ TEST(LayerSceneCompositionVkms, ForceCompositedLayerLandsOnCanvas) {
 // disables planes it armed itself, so without the scene's own disable the old
 // canvas frame stayed on screen after the composited layer was removed.
 TEST(LayerSceneCompositionVkms, CanvasPlaneTurnsOffWhenCompositionStops) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -486,7 +459,7 @@ TEST(LayerSceneCompositionVkms, DmaBufSourceRescuedByGpuImport) {
 // every (plane, layer) pair. full_search then walks preseed → greedy →
 // backtracking and exits with best_assignment empty.
 TEST(LayerSceneCompositionVkms, EmptyColdStartDoesNotPoisonWarmStart) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -574,7 +547,7 @@ TEST(LayerSceneCompositionVkms, EmptyColdStartDoesNotPoisonWarmStart) {
 // plane order is the stacking order, so the canvas must sit on a plane above
 // every plane carrying a layer.
 TEST(LayerSceneCompositionVkms, CanvasStacksAboveAssignedLayers) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -633,7 +606,7 @@ TEST(LayerSceneCompositionVkms, CanvasStacksAboveAssignedLayers) {
 // the canvas, and the stack must still render top-down: the composited run is
 // contiguous, so the canvas can sit between its neighbors.
 TEST(LayerSceneCompositionVkms, CompositedRunTakesLowPriorityLayers) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -701,7 +674,7 @@ TEST(LayerSceneCompositionVkms, CompositedRunTakesLowPriorityLayers) {
 // screen. Where planes have no zpos property, the warm start's cached
 // assignment is still valid to the kernel, just stacked in the old order.
 TEST(LayerSceneCompositionVkms, RestackReachesTheScreen) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -765,7 +738,7 @@ TEST(LayerSceneCompositionVkms, RestackReachesTheScreen) {
 // composited: the cached run was still in plane order and the kernel accepted
 // it (#341).
 TEST(LayerSceneCompositionVkms, CompositedLayersReturnToPlanesAfterRemoval) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -863,7 +836,7 @@ std::vector<std::uint32_t> lit_planes(int fd, std::uint32_t crtc_id) {
 // on last close) must go off on the first commit when the scene does not use
 // it. Every TEST disabled it; the real commit left it scanning out (#342).
 TEST(LayerSceneCompositionVkms, FirstCommitTurnsOffForeignPlanes) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";

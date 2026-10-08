@@ -15,6 +15,8 @@
 // /dev/dri/cardN to run it against real hardware instead (e.g. vc4 on a
 // Raspberry Pi) — the logic is driver-agnostic. Requires DRM master.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/planes/layer.hpp>
@@ -53,31 +55,6 @@ using drm::scene::LayerScene;
 
 namespace {
 
-std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const auto& p = entry.path();
-    if (p.filename().string().rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms =
-        (v != nullptr) && (v->name != nullptr) && (std::strcmp(v->name, "vkms") == 0);
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
-
 // The KMS node to run against: a DRM_CXX_TEST_CARD override first (so a
 // hardware run on e.g. vc4 is never shadowed by a loaded vkms), else the
 // vkms node. Matches the convention in the ring scene test.
@@ -85,7 +62,7 @@ std::optional<std::string> find_scene_card() {
   if (const char* node = std::getenv("DRM_CXX_TEST_CARD"); node != nullptr && *node != '\0') {
     return std::string(node);
   }
-  return find_vkms_node();
+  return drm::test::find_vkms_node();
 }
 
 struct ActiveCrtc {

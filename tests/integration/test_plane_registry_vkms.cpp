@@ -5,6 +5,8 @@
 // fills from the kernel. Runs on vkms (`modprobe vkms enable_cursor=1`), or on
 // DRM_CXX_TEST_CARD.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
 
@@ -19,38 +21,10 @@
 #include <string>
 #include <unistd.h>
 
-namespace {
-
-std::optional<std::string> find_card() {
-  if (const char* env = std::getenv("DRM_CXX_TEST_CARD"); env != nullptr && *env != '\0') {
-    return std::string(env);
-  }
-  for (int idx = 0; idx < 8; ++idx) {
-    std::string path = "/dev/dri/card" + std::to_string(idx);
-    const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr ver = drmGetVersion(fd);
-    const bool is_vkms = (ver != nullptr) && (ver->name != nullptr) &&
-                         std::string(ver->name, ver->name_len) == "vkms";
-    if (ver != nullptr) {
-      drmFreeVersion(ver);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return path;
-    }
-  }
-  return std::nullopt;
-}
-
-}  // namespace
-
 // Cursor planes carry the device's DRM_CAP_CURSOR_WIDTH/HEIGHT; no other plane
 // type has a cursor limit.
 TEST(PlaneRegistryVkms, CursorPlanesCarryDeviceCursorCaps) {
-  const auto path = find_card();
+  const auto path = drm::test::find_test_card_or_vkms();
   if (!path.has_value()) {
     GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_cursor=1.";
   }

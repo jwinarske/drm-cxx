@@ -14,6 +14,8 @@
 //
 // Skips when vkms isn't loaded — `sudo modprobe vkms enable_overlay=1`.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/core/property_store.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -39,31 +41,6 @@
 namespace fs = std::filesystem;
 
 namespace {
-
-std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const auto& p = entry.path();
-    if (p.filename().string().rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms =
-        (v != nullptr) && (v->name != nullptr) && (std::strcmp(v->name, "vkms") == 0);
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return p.string();
-    }
-  }
-  return std::nullopt;
-}
 
 struct ActiveBinding {
   std::uint32_t crtc_id{0};
@@ -145,7 +122,7 @@ std::optional<ActiveBinding> pick_binding(const drm::Device& dev) {
 }  // namespace
 
 TEST(DumbBufferP010Vkms, CreatePlanarP010ScansOutOnPrimary) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` to enable";
   }

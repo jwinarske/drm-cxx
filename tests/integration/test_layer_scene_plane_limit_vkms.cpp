@@ -13,6 +13,8 @@
 // move another layer into the composition rather than commit a frame the
 // kernel refuses.
 
+#include "vkms_node.hpp"
+
 #include <drm-cxx/buffer_mapping.hpp>
 #include <drm-cxx/capture/snapshot.hpp>
 #include <drm-cxx/core/device.hpp>
@@ -142,30 +144,6 @@ extern "C" int drmModeAtomicCommit(int fd, drmModeAtomicReqPtr req, std::uint32_
 
 namespace {
 
-std::optional<std::string> find_vkms_node() {
-  std::error_code ec;
-  for (const auto& entry : fs::directory_iterator("/dev/dri", ec)) {
-    const std::string name = entry.path().filename().string();
-    if (name.rfind("card", 0) != 0) {
-      continue;
-    }
-    const int fd = ::open(entry.path().c_str(), O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-      continue;
-    }
-    drmVersionPtr v = drmGetVersion(fd);
-    const bool is_vkms = v != nullptr && v->name != nullptr && std::strcmp(v->name, "vkms") == 0;
-    if (v != nullptr) {
-      drmFreeVersion(v);
-    }
-    ::close(fd);
-    if (is_vkms) {
-      return entry.path().string();
-    }
-  }
-  return std::nullopt;
-}
-
 struct ActiveCrtc {
   std::uint32_t crtc_id{0};
   std::uint32_t connector_id{0};
@@ -221,7 +199,7 @@ void fill(DumbBufferSource& source, std::uint32_t w, std::uint32_t h, std::uint3
 // Four layers on a CRTC that lights two planes. The frame must commit, and
 // every layer must reach the screen: the canvas carries what the planes can't.
 TEST(LayerScenePlaneLimitVkms, CanvasCountsAgainstThePlaneLimit) {
-  const auto node = find_vkms_node();
+  const auto node = drm::test::find_vkms_node();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1`";
   }
