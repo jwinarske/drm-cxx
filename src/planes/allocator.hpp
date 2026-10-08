@@ -471,6 +471,8 @@ class Allocator {
   // previous_allocation_.
   std::optional<uint32_t> canvas_plane_;
   std::optional<uint32_t> previous_canvas_plane_;
+  // Layer count at the last real apply(); a drop means planes were freed.
+  std::size_t committed_layer_count_{0};
   std::function<bool(const PlaneCapabilities&)> canvas_host_;
 
   // §13.4 Test-commit failure cache

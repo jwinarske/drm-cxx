@@ -202,6 +202,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   // it here and force full_search so the new layer gets a real shot at
   // a plane.
   bool has_new_layer = false;
+  bool any_composited = false;
   if (previous_allocation_valid_) {
     // Build the previous-allocation membership set once, then probe
     // it per current layer. Replaces an O(current × previous) scan
@@ -222,8 +223,18 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
         has_new_layer = true;
         break;
       }
+      any_composited = any_composited || layer->needs_composition_;
     }
   }
+  // A removal frees planes a composited layer may now fit; warm-start would
+  // keep it on the canvas (#341). Search once after any shrink that leaves
+  // composition running.
+  const std::size_t layer_count = output.layers().size();
+  const bool shrank = layer_count < committed_layer_count_;
+  if (!test_only) {
+    committed_layer_count_ = layer_count;
+  }
+  const bool force_search = has_new_layer || (shrank && any_composited);
 
   // Reset layer assignment state. Same pass populates the per-apply
   // current-layers set used by has_new_layer / apply_previous_allocation
@@ -290,7 +301,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   // and skip the redundant TEST_ONLY; the real commit's atomic_check stays the
   // arbiter, and a rejection invalidates the cache (see finalize_frame). Real
   // commits only — an explicit test() must still probe.
-  if (!test_only && previous_allocation_valid_ && !has_new_layer && is_fb_only_frame()) {
+  if (!test_only && previous_allocation_valid_ && !force_search && is_fb_only_frame()) {
     auto result = apply_previous_allocation(output, req, commit_flags, crtc_index,
                                             /*test_only=*/false, /*skip_test=*/true);
     if (result.has_value()) {
@@ -305,7 +316,7 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   }
 
   // Fast path: nothing changed since last frame
-  if (!output.any_layer_dirty() && previous_allocation_valid_ && !has_new_layer) {
+  if (!output.any_layer_dirty() && previous_allocation_valid_ && !force_search) {
     auto result = apply_previous_allocation(output, req, commit_flags, crtc_index, test_only);
     if (result.has_value() || result.error() == std::errc::permission_denied) {
       // Success or master loss: return directly. EACCES has to short-
@@ -321,8 +332,9 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
   }
 
   // Warm-start: try previous allocation first (one test commit). Skipped
-  // when a new layer is present — see has_new_layer comment above.
-  if (previous_allocation_valid_ && !has_new_layer) {
+  // when a new layer is present or a shrink left composition running — see
+  // above.
+  if (previous_allocation_valid_ && !force_search) {
     auto result = apply_previous_allocation(output, req, commit_flags, crtc_index, test_only);
     if (result.has_value()) {
       output.mark_clean();
