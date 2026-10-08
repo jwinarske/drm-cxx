@@ -294,6 +294,9 @@ drm::expected<std::size_t, std::error_code> Allocator::apply(
     cached_crtc_index_id_ = target_crtc;
   }
   const uint32_t crtc_index = *cached_crtc_index_;
+  if (last_committed_.empty() && !output.layers().empty()) {
+    read_foreign_lit(crtc_index, target_crtc);
+  }
 
   // FB-only fast path: only content (FB_ID / damage / fence) changed on already-
   // placed layers — geometry, format, and modifier are byte-identical to what
@@ -678,11 +681,13 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   // allocation is invalidated) the planes they left armed still need the
   // disable, or they keep their zpos and collide with the new stack. An empty
   // scene keeps its planes: disabling an active CRTC's only PRIMARY is refused
-  // (i.MX LCDIF), and the last frame stays up as before.
+  // (i.MX LCDIF), and the last frame stays up as before. Before anything is
+  // committed, only planes another client left lit are disabled: every TEST
+  // disables them, so the real commit must too.
   const bool has_scene_layers =
       std::any_of(output.layers().begin(), output.layers().end(),
                   [](const Layer* l) { return !l->is_composition_layer(); });
-  if (committed_before && has_scene_layers) {
+  if ((committed_before || !foreign_lit_.empty()) && has_scene_layers) {
     disable_unused_planes(req, crtc_index, planes_in_use, /*track_state=*/true, test_only);
   }
 
@@ -1551,7 +1556,7 @@ void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_in
     // during atomic_check the same way a real commit does.
     if (track_state && !force_full_writes_) {
       const auto it = last_committed_.find(plane->id);
-      const bool already_off = (it == last_committed_.end()) || [&] {
+      const bool already_off = (it == last_committed_.end()) ? !is_foreign_lit(plane->id) : [&] {
         const auto& snap = it->second.properties;
         constexpr auto fb_idx = static_cast<std::size_t>(PropTag::FbId);
         return !snap.set_mask.test(fb_idx) || snap.values.at(fb_idx) == 0U;
@@ -1580,8 +1585,34 @@ void Allocator::disable_unused_planes(AtomicRequest& req, const uint32_t crtc_in
     // apply_layer_to_plane_real test_only guard below — kept symmetric.
     if (track_state && !test_only) {
       last_committed_.erase(plane->id);
+      drop_foreign_lit(plane->id);
     }
   }
+}
+
+void Allocator::read_foreign_lit(const uint32_t crtc_index, const uint32_t crtc_id) {
+  foreign_lit_.clear();
+  for (const auto* plane : registry_.for_crtc(crtc_index)) {
+    if (plane->type == DRMPlaneType::CURSOR) {
+      continue;
+    }
+    // A plane lit on another CRTC is not ours to disable. Unreadable (a
+    // synthetic registry) counts as off, as before.
+    const std::unique_ptr<drmModePlane, decltype(&drmModeFreePlane)> p(
+        drmModeGetPlane(dev_.fd(), plane->id), drmModeFreePlane);
+    if (p && p->fb_id != 0 && p->crtc_id == crtc_id) {
+      foreign_lit_.push_back(plane->id);
+    }
+  }
+}
+
+bool Allocator::is_foreign_lit(const uint32_t plane_id) const {
+  return std::find(foreign_lit_.begin(), foreign_lit_.end(), plane_id) != foreign_lit_.end();
+}
+
+void Allocator::drop_foreign_lit(const uint32_t plane_id) noexcept {
+  foreign_lit_.erase(std::remove(foreign_lit_.begin(), foreign_lit_.end(), plane_id),
+                     foreign_lit_.end());
 }
 
 bool Allocator::zpos_is_fixed(const uint32_t plane_id) const {
@@ -1845,6 +1876,7 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(
       snap.values.at(static_cast<std::size_t>(PropTag::Zpos)) = *zpos;
     }
     last_committed_[plane_id] = LastCommitted{&layer, snap, layer.property_hash()};
+    drop_foreign_lit(plane_id);
   }
   return {};
 }

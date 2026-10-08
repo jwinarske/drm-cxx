@@ -836,3 +836,76 @@ TEST(LayerSceneCompositionVkms, CompositedLayersReturnToPlanesAfterRemoval) {
   }
   drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
 }
+
+namespace {
+
+// Planes holding a framebuffer on `crtc_id`.
+std::vector<std::uint32_t> lit_planes(int fd, std::uint32_t crtc_id) {
+  std::vector<std::uint32_t> out;
+  auto* res = drmModeGetPlaneResources(fd);
+  if (res == nullptr) {
+    return out;
+  }
+  for (std::uint32_t i = 0; i < res->count_planes; ++i) {
+    auto* p = drmModeGetPlane(fd, res->planes[i]);
+    if (p != nullptr && p->fb_id != 0 && p->crtc_id == crtc_id) {
+      out.push_back(p->plane_id);
+    }
+    drmModeFreePlane(p);
+  }
+  drmModeFreePlaneResources(res);
+  return out;
+}
+
+}  // namespace
+
+// A plane another client left lit (the fbdev console restores its framebuffer
+// on last close) must go off on the first commit when the scene does not use
+// it. Every TEST disabled it; the real commit left it scanning out (#342).
+TEST(LayerSceneCompositionVkms, FirstCommitTurnsOffForeignPlanes) {
+  const auto node = find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto dev_r = Device::open(*node);
+  ASSERT_TRUE(dev_r.has_value()) << dev_r.error().message();
+  auto& dev = *dev_r;
+  ASSERT_TRUE(dev.enable_universal_planes().has_value());
+  ASSERT_TRUE(dev.enable_atomic().has_value());
+  const auto active_r = pick_crtc(dev.fd());
+  ASSERT_TRUE(active_r.has_value()) << active_r.error().message();
+  const auto& active = *active_r;
+  if (lit_planes(dev.fd(), active.crtc_id).empty()) {
+    GTEST_SKIP() << "no plane lit on the CRTC before the scene (no fbdev console)";
+  }
+
+  LayerScene::Config cfg;
+  cfg.crtc_id = active.crtc_id;
+  cfg.connector_id = active.connector_id;
+  cfg.mode = active.mode;
+  auto scene_r = LayerScene::create(dev, cfg);
+  ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
+  auto& scene = **scene_r;
+
+  // Topmost zpos: where planes stack by id, the layer lands on the last
+  // plane, not on the one the console holds.
+  constexpr std::uint32_t k_side = 64;
+  auto src = DumbBufferSource::create(dev, k_side, k_side, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(src.has_value()) << src.error().message();
+  fill_uniform_argb(**src, k_side, k_side, 0xFF00FF00U);
+  LayerDesc d;
+  d.source = std::move(*src);
+  d.display.src_rect = drm::scene::Rect{0, 0, k_side, k_side};
+  d.display.dst_rect = drm::scene::Rect{64, 64, k_side, k_side};
+  d.display.zpos = 64;
+  auto h = scene.add_layer(std::move(d));
+  ASSERT_TRUE(h.has_value()) << h.error().message();
+
+  auto report = scene.commit();
+  ASSERT_TRUE(report.has_value()) << report.error().message();
+  ASSERT_EQ(report->layers_assigned, 1U);
+  const auto lit = lit_planes(dev.fd(), active.crtc_id);
+  drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  EXPECT_EQ(lit.size(), 1U) << "a plane the scene does not use is still lit";
+}
