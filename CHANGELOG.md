@@ -1,5 +1,14 @@
 # Changelog
 
+## v4.2.1 — 2026-10-09: README
+
+Drop-in for 4.2.0 (soname `libdrm-cxx.so.4`); no code change.
+
+### Docs
+
+- README names Android in the intro and documents the AOSP build from the
+  root `Android.bp`. (#352)
+
 ## v4.2.0 — 2026-10-09: plane allocation fixes
 
 Soname stays `libdrm-cxx.so.4`. `planes::Allocator` changed layout (below):
