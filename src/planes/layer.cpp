@@ -209,13 +209,9 @@ bool Layer::requires_scaling() const {
     return false;
   }
 
-  // SRC coordinates are in 16.16 fixed point
-  auto const sw = static_cast<uint32_t>(*src_w >> 16U);
-  auto const sh = static_cast<uint32_t>(*src_h >> 16U);
-  auto const cw = static_cast<uint32_t>(*crtc_w);
-  auto const ch = static_cast<uint32_t>(*crtc_h);
-
-  return sw != cw || sh != ch;
+  // SRC is 16.16 fixed point; compare at that precision so a fractional
+  // source (800.25 onto 800) counts as scaling.
+  return *src_w != (*crtc_w << 16U) || *src_h != (*crtc_h << 16U);
 }
 
 uint32_t Layer::width() const {

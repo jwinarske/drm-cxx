@@ -89,6 +89,19 @@ TEST(LayerTest, RequiresScalingDetection) {
   EXPECT_TRUE(layer.requires_scaling());
 }
 
+TEST(LayerTest, RequiresScalingSeesFractionalSource) {
+  drm::planes::Layer layer;
+  layer.set_property("SRC_H", 600U << 16);
+  layer.set_property("CRTC_W", 800);
+  layer.set_property("CRTC_H", 600);
+  layer.set_property("SRC_W", (800U << 16) - 0x8000U);  // 799.5
+  EXPECT_TRUE(layer.requires_scaling());
+  layer.set_property("SRC_W", (800U << 16) + 0x4000U);  // 800.25
+  EXPECT_TRUE(layer.requires_scaling());
+  layer.set_property("SRC_W", 800U << 16);
+  EXPECT_FALSE(layer.requires_scaling());
+}
+
 TEST(LayerTest, ContentTypeAndUpdateHint) {
   drm::planes::Layer layer;
   layer.set_content_type(drm::planes::ContentType::Video);
