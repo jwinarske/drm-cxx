@@ -1,7 +1,7 @@
 ![drm-cxx logo](docs/logo.svg)
 
-C++17 library for Linux DRM/KMS display, input, and hardware plane
-allocation. Adapter headers (`drm::expected`, `drm::span`, `drm::print`)
+C++17 library for DRM/KMS display, input, and hardware plane allocation on
+Linux and Android. Adapter headers (`drm::expected`, `drm::span`, `drm::print`)
 alias the standard types on C++23 toolchains and `tl::expected` /
 `tcb::span` / `fmt::print` on older ones.
 
@@ -132,6 +132,10 @@ scripts/build_android.sh [--abi arm64-v8a|x86_64] [--api 29] [--ndk DIR]
 The script cross-builds libdrm, libdisplay-info and minigbm from pinned
 sources. Using the library needs KMS access: root, or a userdebug build with
 SurfaceFlinger stopped.
+
+AOSP: with the tree under an AOSP checkout, `m libdrm-cxx` builds it from the
+root `Android.bp` against the platform's libdrm and minigbm. Consumers add
+`libdrm-cxx_client_defaults` to their `defaults`.
 
 ### Options
 
