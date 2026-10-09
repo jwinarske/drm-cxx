@@ -70,11 +70,13 @@ namespace drm::planes::detail {
 }
 
 /// One armed plane in a frame's stack: the plane, the zpos its layer requests,
-/// and the zpos to write (filled by stack_zpos).
+/// and the zpos to write (filled by stack_zpos). `below_ties` stacks the entry
+/// under the others requesting the same zpos (the composition canvas slot).
 struct StackEntry {
   const PlaneCapabilities* plane{nullptr};
   std::optional<std::uint64_t> requested;
   std::optional<std::uint64_t> written;
+  bool below_ties{false};
 };
 
 /// Number the armed planes' zpos densely, in requested order, from each plane's
@@ -91,6 +93,7 @@ struct StackEntry {
   struct Rankable {
     std::size_t index;
     std::uint64_t requested;
+    bool after_ties;
     std::uint32_t plane_id;
     std::uint64_t zmin;
     std::uint64_t zmax;
@@ -108,11 +111,12 @@ struct StackEntry {
     const auto zmin = e.plane->zpos_min;
     const auto zmax = e.plane->zpos_max;
     if (req.has_value() && zmin.has_value() && zmax.has_value()) {
-      order.push_back({i, *req, e.plane->id, *zmin, *zmax, *zmin == *zmax});
+      order.push_back({i, *req, !e.below_ties, e.plane->id, *zmin, *zmax, *zmin == *zmax});
     }
   }
   std::stable_sort(order.begin(), order.end(), [](const Rankable& a, const Rankable& b) {
-    return std::tie(a.requested, a.plane_id) < std::tie(b.requested, b.plane_id);
+    return std::tie(a.requested, a.after_ties, a.plane_id) <
+           std::tie(b.requested, b.after_ties, b.plane_id);
   });
   std::vector<std::uint64_t> values(order.size());
   std::optional<std::uint64_t> prev;

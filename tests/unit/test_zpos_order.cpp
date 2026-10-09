@@ -160,3 +160,11 @@ TEST(ZposOrder, StackSkipsUnrankable) {
   EXPECT_FALSE(e[1].written.has_value());
   EXPECT_EQ(e[2].written, std::optional<std::uint64_t>{0});
 }
+
+// The canvas slot stacks under the planes requesting the same zpos, whatever
+// the plane ids.
+TEST(ZposOrder, StackPutsBelowTiesUnderEqualRequests) {
+  std::vector<StackEntry> e{{&k_sde_b, 3, {}}, {&k_sde_a, 7, {}}, {&k_sde_c, 7, {}, true}};
+  EXPECT_TRUE(stack_zpos(e));
+  EXPECT_EQ(written(e), (std::vector<std::uint64_t>{0, 2, 1}));
+}

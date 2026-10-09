@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -427,6 +428,13 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
         std::make_error_code(std::errc::resource_unavailable_try_again));
   }
 
+  // Zpos CRTC: a move or restack can leave a placed layer on the wrong side of
+  // the one canvas; re-search so the conflict is resolved.
+  if (!by_plane_id && !canvas_bounds(previous_allocation_).feasible()) {
+    return drm::unexpected<std::error_code>(
+        std::make_error_code(std::errc::resource_unavailable_try_again));
+  }
+
   // FB-only fast path bypasses re-validation: the caller proved via
   // is_fb_only_frame() that geometry/format/modifier are unchanged from the
   // last accepted commit, so the cached assignment is still valid. The real
@@ -458,8 +466,8 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   std::size_t assigned = 0;
   const auto stack = stacked_zpos(previous_allocation_);
   for (auto& [plane_id, layer] : previous_allocation_) {
-    if (auto r =
-            apply_layer_to_plane_real(*layer, plane_id, req, test_only, zpos_in(stack, plane_id));
+    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req, test_only,
+                                           zpos_in(stack.renumbered, plane_id));
         !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
@@ -477,6 +485,8 @@ drm::expected<std::size_t, std::error_code> Allocator::apply_previous_allocation
   if (by_plane_id) {
     canvas_plane_ = previous_canvas_plane_;
   }
+  record_stack(stack, std::any_of(output.layers().begin(), output.layers().end(),
+                                  [](const Layer* l) { return l->needs_composition(); }));
   output.mark_clean();
   return assigned;
 }
@@ -613,6 +623,26 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     }
   }
 
+  // One canvas stacks at one zpos. When a placed layer would have to sit on
+  // both sides of it, composite one contiguous zpos run instead; failing that,
+  // move the caught layers into the composition and keep the result if the
+  // smaller set passes.
+  if (!by_plane_id && !canvas_bounds(best_assignment).feasible()) {
+    if (auto run = place_around_run(output, best_assignment.size(), all_available_planes, flags,
+                                    crtc_index);
+        run.has_value()) {
+      best_assignment = std::move(*run);
+    } else {
+      auto resolved = best_assignment;
+      if (resolve_canvas_bounds(resolved) &&
+          (resolved.empty() || (test_commits_this_frame_ < max_test_commits_ &&
+                                !try_test_commit(resolved, flags, crtc_index)))) {
+        best_assignment = std::move(resolved);
+      }
+    }
+    total_assigned = best_assignment.size();
+  }
+
   // Apply the best assignment. Real-commit path → minimization-aware
   // variant; the per-plane snapshot detects layer reassignment versus
   // last frame and forces a full write when it happened, otherwise
@@ -621,8 +651,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   for (auto& [plane_id, layer] : best_assignment) {
     layer->assigned_plane_ = plane_id;
     layer->needs_composition_ = false;
-    if (auto r =
-            apply_layer_to_plane_real(*layer, plane_id, req, test_only, zpos_in(stack, plane_id));
+    if (auto r = apply_layer_to_plane_real(*layer, plane_id, req, test_only,
+                                           zpos_in(stack.renumbered, plane_id));
         !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
@@ -703,6 +733,7 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
   if (!any_composited) {
     canvas_plane_.reset();
   }
+  record_stack(stack, any_composited);
   previous_allocation_ = best_assignment;
   previous_allocation_valid_ = !best_assignment.empty();
   previous_canvas_plane_ = canvas_plane_;
@@ -1470,7 +1501,8 @@ std::error_code Allocator::try_test_commit(const PlaneAssignment& assignment, co
   // Apply each assigned layer's properties
   const auto stack = stacked_zpos(assignment);
   for (const auto& [plane_id, layer] : assignment) {
-    if (auto result = apply_layer_to_plane(*layer, plane_id, test_req, zpos_in(stack, plane_id));
+    if (auto result =
+            apply_layer_to_plane(*layer, plane_id, test_req, zpos_in(stack.renumbered, plane_id));
         !result.has_value()) {
       alloc_log("[alloc] apply_layer_to_plane FAIL plane={} layer={}: {} (errno={})", plane_id,
                 static_cast<const void*>(layer), result.error().message(), result.error().value());
@@ -1703,8 +1735,7 @@ std::uint64_t Allocator::clamp_to_plane(const uint32_t plane_id, const std::stri
   return value;
 }
 
-std::vector<std::pair<uint32_t, uint64_t>> Allocator::stacked_zpos(
-    const PlaneAssignment& assignment) const {
+Allocator::ZposStack Allocator::stacked_zpos(const PlaneAssignment& assignment) const {
   std::vector<detail::StackEntry> entries;
   std::vector<uint32_t> ids;
   entries.reserve(assignment.size() + 1);
@@ -1720,17 +1751,198 @@ std::vector<std::pair<uint32_t, uint64_t>> Allocator::stacked_zpos(
       ids.push_back(*layer->assigned_plane_);
     }
   }
-  std::vector<std::pair<uint32_t, uint64_t>> out;
-  if (!detail::stack_zpos(entries)) {
-    return out;
-  }
-  for (std::size_t i = 0; i < entries.size(); ++i) {
-    const std::optional<uint64_t> w = entries[i].written;
-    if (w.has_value() && w != entries[i].requested) {
-      out.emplace_back(ids[i], *w);
+  // The canvas slot, just under the lowest placed layer that must cover the
+  // canvas, numbered over the widest settable range on the CRTC (the canvas
+  // plane is the scene's choice). Dropped again when the stack has no room.
+  PlaneCapabilities slot;
+  if (cached_crtc_index_.has_value()) {
+    for (const auto* p : registry_.for_crtc(*cached_crtc_index_)) {
+      if (p->type == DRMPlaneType::CURSOR || !p->zpos_min.has_value() || !p->zpos_max.has_value() ||
+          *p->zpos_min == *p->zpos_max) {
+        continue;
+      }
+      slot.zpos_min = std::min(slot.zpos_min.value_or(*p->zpos_min), *p->zpos_min);
+      slot.zpos_max = std::max(slot.zpos_max.value_or(*p->zpos_max), *p->zpos_max);
     }
   }
+  bool with_slot = false;
+  if (slot.zpos_min.has_value()) {
+    const auto bounds = canvas_bounds(assignment);
+    with_slot = bounds.above.has_value() && bounds.feasible();
+    if (with_slot) {
+      entries.push_back({&slot, bounds.above, std::nullopt, /*below_ties=*/true});
+    }
+  }
+  bool fits = detail::stack_zpos(entries);
+  if (!fits && with_slot) {
+    entries.pop_back();
+    fits = detail::stack_zpos(entries);
+  }
+  ZposStack out;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    const std::optional<uint64_t> w = entries[i].written;
+    if (!w.has_value()) {
+      continue;
+    }
+    out.written.emplace_back(ids[i], *w);
+    if (fits && w != entries[i].requested) {
+      out.renumbered.emplace_back(ids[i], *w);
+    }
+  }
+  if (fits && entries.size() > ids.size()) {
+    out.canvas = entries.back().written;
+  }
   return out;
+}
+
+void Allocator::record_stack(const ZposStack& stack, const bool any_composited) {
+  zpos_stack_ = stack.written;
+  canvas_zpos_ = any_composited ? stack.canvas : std::nullopt;
+}
+
+Allocator::CanvasBounds Allocator::canvas_bounds(const PlaneAssignment& assignment) const {
+  scratch_bounds_placed_.clear();
+  scratch_bounds_composited_.clear();
+  for (const auto& entry : assignment) {
+    scratch_bounds_placed_.push_back(entry.second);
+  }
+  for (const auto* layer : scratch_current_set_) {
+    if (layer->is_composition_layer() || layer->is_externally_bound()) {
+      continue;
+    }
+    if (layer->is_pinned()) {
+      if (layer->assigned_plane_.has_value() && assignment.count(*layer->assigned_plane_) == 0) {
+        scratch_bounds_placed_.push_back(layer);
+      }
+    } else if (std::none_of(assignment.begin(), assignment.end(),
+                            [layer](const auto& e) { return e.second == layer; })) {
+      scratch_bounds_composited_.push_back(layer);
+    }
+  }
+  CanvasBounds bounds;
+  for (const auto* placed : scratch_bounds_placed_) {
+    const auto zp = placed->property("zpos");
+    if (!zp.has_value()) {
+      continue;
+    }
+    for (const auto* composited : scratch_bounds_composited_) {
+      const auto zc = composited->property("zpos");
+      if (!zc.has_value() || *zc == *zp || !layers_intersect(*placed, *composited)) {
+        continue;
+      }
+      if (*zc < *zp) {
+        bounds.above = std::min(bounds.above.value_or(*zp), *zp);
+      } else {
+        bounds.below = std::max(bounds.below.value_or(*zp), *zp);
+      }
+    }
+  }
+  return bounds;
+}
+
+std::optional<PlaneAssignment> Allocator::place_around_run(
+    const Output& output, const std::size_t placed,
+    const std::vector<const PlaneCapabilities*>& planes, const uint32_t flags,
+    const uint32_t crtc_index) {
+  // Candidates in zpos order (output is sorted); forced layers must be in the run.
+  std::vector<Layer*> layers;
+  for (auto* l : output.layers()) {
+    if (!l->is_composition_layer() && !l->is_externally_bound() && !l->is_pinned()) {
+      layers.push_back(l);
+    }
+  }
+  const std::size_t n = layers.size();
+  std::size_t first_forced = n;
+  std::size_t last_forced = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (layers[i]->force_composited_ || layers[i]->is_transient_composited()) {
+      first_forced = std::min(first_forced, i);
+      last_forced = i;
+    }
+  }
+  // Runs of the composited count and up, the cheapest in keep_priority per size.
+  for (std::size_t w = std::max<std::size_t>(n - std::min(placed, n), 1); w < n; ++w) {
+    if (test_commits_this_frame_ >= max_test_commits_) {
+      break;
+    }
+    std::optional<std::size_t> best;
+    long long best_cost = 0;
+    for (std::size_t a = 0; a + w <= n; ++a) {
+      if (first_forced < n && (a > first_forced || a + w <= last_forced)) {
+        continue;
+      }
+      long long cost = 0;
+      for (std::size_t i = a; i < a + w; ++i) {
+        cost += keep_priority(*layers[i]);
+      }
+      // On a tie the higher run: a run at the top keeps the canvas on top.
+      if (!best.has_value() || cost <= best_cost) {
+        best = a;
+        best_cost = cost;
+      }
+    }
+    if (!best.has_value()) {
+      continue;
+    }
+    std::vector<Layer*> outside;
+    outside.reserve(n - w);
+    for (std::size_t i = 0; i < n; ++i) {
+      if (i < *best || i >= *best + w) {
+        outside.push_back(layers[i]);
+      }
+    }
+    auto assignment = place_group(outside, planes, flags, crtc_index);
+    alloc_log("[alloc] canvas run [{}, {}): {} of {} placed around it", *best, *best + w,
+              assignment.size(), outside.size());
+    if (!assignment.empty() && canvas_bounds(assignment).feasible()) {
+      return assignment;
+    }
+  }
+  return std::nullopt;
+}
+
+bool Allocator::resolve_canvas_bounds(PlaneAssignment& assignment) const {
+  for (auto bounds = canvas_bounds(assignment); !bounds.feasible();
+       bounds = canvas_bounds(assignment)) {
+    if (!bounds.above.has_value() || !bounds.below.has_value()) {
+      return true;  // unreachable: infeasible needs both
+    }
+    const uint64_t above = *bounds.above;
+    const uint64_t below = *bounds.below;
+    // Caught: a placed layer overlapping a composited one, from the lowest
+    // that must cover the canvas to the highest that must stay under it.
+    // canvas_bounds() left the composited layers in its scratch.
+    std::optional<uint32_t> victim;
+    int victim_keep = 0;
+    for (const auto& entry : assignment) {
+      const Layer* layer = entry.second;  // a structured binding can't be captured in C++17
+      const auto z = layer->property("zpos");
+      if (!z.has_value() || *z < above || *z > below ||
+          std::none_of(scratch_bounds_composited_.begin(), scratch_bounds_composited_.end(),
+                       [&](const Layer* c) {
+                         const auto zc = c->property("zpos");
+                         return zc.has_value() && *zc != *z && layers_intersect(*layer, *c);
+                       })) {
+        continue;
+      }
+      const int keep = keep_priority(*layer);
+      if (!victim.has_value() || keep < victim_keep) {
+        victim = entry.first;
+        victim_keep = keep;
+      }
+    }
+    if (!victim.has_value()) {
+      return false;
+    }
+    alloc_log("[alloc] canvas bounds [{}, {}] infeasible: compositing the layer on plane {}", below,
+              above, *victim);
+    assignment.erase(*victim);
+    for (auto it = assignment.begin(); it != assignment.end();) {
+      const auto* c = caps_of(it->first);
+      it = (c != nullptr && c->multirect_parent == *victim) ? assignment.erase(it) : std::next(it);
+    }
+  }
+  return true;
 }
 
 drm::expected<void, std::error_code> Allocator::apply_layer_to_plane(

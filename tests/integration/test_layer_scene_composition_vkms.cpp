@@ -48,6 +48,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdint>
@@ -55,6 +56,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <functional>
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
@@ -128,6 +130,47 @@ drm::expected<ActiveCrtc, std::error_code> pick_crtc(int fd) {
         std::make_error_code(std::errc::no_such_device_or_address));
   }
   return *found;
+}
+
+// Non-cursor planes that can scan out on `crtc_id`.
+std::uint32_t scene_plane_count(int fd, std::uint32_t crtc_id) {
+  auto* res = drmModeGetResources(fd);
+  if (res == nullptr) {
+    return 0;
+  }
+  std::uint32_t crtc_bit = 0;
+  for (int c = 0; c < res->count_crtcs; ++c) {
+    if (res->crtcs[c] == crtc_id) {
+      crtc_bit = 1U << static_cast<unsigned>(c);
+    }
+  }
+  drmModeFreeResources(res);
+  auto* planes = drmModeGetPlaneResources(fd);
+  if (planes == nullptr) {
+    return 0;
+  }
+  std::uint32_t count = 0;
+  for (std::uint32_t i = 0; i < planes->count_planes; ++i) {
+    auto* p = drmModeGetPlane(fd, planes->planes[i]);
+    const bool on_crtc = p != nullptr && (p->possible_crtcs & crtc_bit) != 0;
+    drmModeFreePlane(p);
+    if (!on_crtc) {
+      continue;
+    }
+    auto* props = drmModeObjectGetProperties(fd, planes->planes[i], DRM_MODE_OBJECT_PLANE);
+    bool cursor = false;
+    for (std::uint32_t k = 0; props != nullptr && k < props->count_props; ++k) {
+      auto* prop = drmModeGetProperty(fd, props->props[k]);
+      if (prop != nullptr && std::strcmp(prop->name, "type") == 0) {
+        cursor = props->prop_values[k] == DRM_PLANE_TYPE_CURSOR;
+      }
+      drmModeFreeProperty(prop);
+    }
+    drmModeFreeObjectProperties(props);
+    count += cursor ? 0U : 1U;
+  }
+  drmModeFreePlaneResources(planes);
+  return count;
 }
 
 // Fill `source`'s pixels with a uniform ARGB8888 value, accounting for
@@ -602,11 +645,22 @@ TEST(LayerSceneCompositionVkms, CanvasStacksAboveAssignedLayers) {
       << "the topmost layer, carried by the canvas, must be visible";
 }
 
-// Plane pressure with the low-priority layers mid-stack. Only they may go to
-// the canvas, and the stack must still render top-down: the composited run is
-// contiguous, so the canvas can sit between its neighbors.
-TEST(LayerSceneCompositionVkms, CompositedRunTakesLowPriorityLayers) {
-  const auto node = drm::test::find_vkms_node();
+namespace {
+
+bool is_vkms(int fd) {
+  drmVersionPtr v = drmGetVersion(fd);
+  const bool vkms = v != nullptr && v->name != nullptr && std::strcmp(v->name, "vkms") == 0;
+  drmFreeVersion(v);
+  return vkms;
+}
+
+// Stacks more overlapping layers than the CRTC has planes, `low(k, i)` marking
+// the low-priority ones among k, and checks the composited layers form one
+// zpos run and the top layer is what shows. `only_low` also requires every
+// composited layer to be low priority.
+void check_composited_stack(const std::function<bool(std::uint32_t, std::uint32_t)>& low,
+                            bool only_low) {
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
                     "to enable this test";
@@ -628,12 +682,15 @@ TEST(LayerSceneCompositionVkms, CompositedRunTakesLowPriorityLayers) {
   ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
   auto& scene = **scene_r;
 
-  constexpr std::uint32_t k_layers = 16;  // more than vkms has planes
+  const std::uint32_t planes = scene_plane_count(dev.fd(), active.crtc_id);
+  if (planes < 4U) {
+    GTEST_SKIP() << "the CRTC has " << planes << " plane(s); the stack needs at least 4";
+  }
+  const std::uint32_t k_layers = planes + 4U;
   constexpr std::uint32_t k_side = 64;
   const auto x = static_cast<std::int32_t>((active.mode.hdisplay - k_side) / 2U);
   const auto y = static_cast<std::int32_t>((active.mode.vdisplay - k_side) / 2U);
-  auto low = [](std::uint32_t i) { return i >= 4U && i < 12U; };
-  auto color = [](std::uint32_t i) { return 0xFF000000U | ((i * 15U) << 16U) | 0x80U; };
+  auto color = [](std::uint32_t i) { return 0xFF000000U | ((i * 11U) << 16U) | 0x80U; };
   std::vector<drm::scene::LayerHandle> handles;
   for (std::uint32_t i = 0; i < k_layers; ++i) {
     auto src = DumbBufferSource::create(dev, k_side, k_side, DRM_FORMAT_ARGB8888);
@@ -644,7 +701,7 @@ TEST(LayerSceneCompositionVkms, CompositedRunTakesLowPriorityLayers) {
     d.display.src_rect = drm::scene::Rect{0, 0, k_side, k_side};
     d.display.dst_rect = drm::scene::Rect{x, y, k_side, k_side};
     d.display.zpos = static_cast<int>(i) + 3;
-    d.app_priority = low(i) ? 10 : 200;
+    d.app_priority = low(k_layers, i) ? 10 : 200;
     auto h = scene.add_layer(std::move(d));
     ASSERT_TRUE(h.has_value()) << h.error().message();
     handles.push_back(*h);
@@ -654,20 +711,60 @@ TEST(LayerSceneCompositionVkms, CompositedRunTakesLowPriorityLayers) {
   ASSERT_TRUE(report.has_value()) << report.error().message();
   ASSERT_GT(report->layers_composited, 0U) << "the stack should overflow into the canvas";
   EXPECT_EQ(report->layers_unassigned, 0U);
+  std::optional<std::uint32_t> run_first;
+  std::uint32_t run_last = 0;
   for (std::uint32_t i = 0; i < k_layers; ++i) {
     const auto* layer = scene.get_layer(handles[i]);
     ASSERT_NE(layer, nullptr);
     if (layer->last_placement() != drm::scene::LayerPlacement::AssignedToPlane) {
-      EXPECT_TRUE(low(i)) << "layer " << i << " (high priority) was composited";
+      EXPECT_TRUE(!only_low || low(k_layers, i))
+          << "layer " << i << " (high priority) was composited";
+      run_first = run_first.value_or(i);
+      run_last = i;
     }
   }
+  ASSERT_TRUE(run_first.has_value());
+  EXPECT_EQ(run_last - *run_first + 1U, report->layers_composited)
+      << "the composited layers must be one zpos run, layers " << *run_first << ".." << run_last;
 
   auto img_r = snapshot(dev, active.crtc_id);
   drmModeSetCrtc(dev.fd(), active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  if (!img_r.has_value() && !is_vkms(dev.fd())) {
+    GTEST_SKIP() << "no plane readback on this card: " << img_r.error().message();
+  }
   ASSERT_TRUE(img_r.has_value()) << img_r.error().message();
   const auto cx = static_cast<std::uint32_t>(x) + (k_side / 2U);
   const auto cy = static_cast<std::uint32_t>(y) + (k_side / 2U);
   EXPECT_EQ(img_r->pixels()[(cy * img_r->width()) + cx], color(k_layers - 1U));
+}
+
+}  // namespace
+
+// Plane pressure with the low-priority layers mid-stack. Only they may go to
+// the canvas, and the stack must still render top-down: the composited run is
+// contiguous, so the canvas can sit between its neighbors.
+//
+// Where planes take zpos, the canvas must stack under the placed layers above
+// the run, not on top of them (#343). DRM_CXX_TEST_CARD runs it on such a card.
+TEST(LayerSceneCompositionVkms, CompositedRunTakesLowPriorityLayers) {
+  // The middle half (at least 6) is low priority, so the overflow plus the
+  // canvas plane fits in it.
+  auto low = [](std::uint32_t k, std::uint32_t i) {
+    const std::uint32_t n = std::max(6U, k / 2U);
+    const std::uint32_t first = (k - n) / 2U;
+    return i >= first && i < first + n;
+  };
+  check_composited_stack(low, /*only_low=*/true);
+}
+
+// Low-priority layers at both ends of the stack, three each: compositing the
+// lowest-priority ones would leave placed layers between them, on both sides
+// of the one canvas. One contiguous run goes to the canvas instead.
+TEST(LayerSceneCompositionVkms, SplitLowPriorityLayersCompositeOneRun) {
+  auto low = [](std::uint32_t k, std::uint32_t i) {
+    return (i >= 1U && i <= 3U) || (i >= k - 4U && i <= k - 2U);
+  };
+  check_composited_stack(low, /*only_low=*/false);
 }
 
 // Reversing the zpos of overlapping layers after steady frames must reach the

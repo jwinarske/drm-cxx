@@ -253,6 +253,16 @@ class Allocator {
   // when nothing is composited); the caller arms the canvas there.
   [[nodiscard]] std::optional<uint32_t> canvas_plane() const noexcept { return canvas_plane_; }
 
+  // Where planes take zpos: the zpos the canvas must take for the last apply()
+  // when a placed layer overlapping a composited one has to cover the canvas
+  // (it sits just under the lowest such layer); nullopt when the canvas can
+  // stack on top. zpos_stack() is the zpos written per armed plane, pinned
+  // planes included, with room left for that slot.
+  [[nodiscard]] std::optional<uint64_t> canvas_zpos() const noexcept { return canvas_zpos_; }
+  [[nodiscard]] const std::vector<std::pair<uint32_t, uint64_t>>& zpos_stack() const noexcept {
+    return zpos_stack_;
+  }
+
   // Composite keep/drop ordering: content-class priority dominates,
   // application priority breaks ties within a class. layer_priority()
   // (<= 100) is scaled above the uint8_t app_priority range so a higher
@@ -406,10 +416,40 @@ class Allocator {
 
   // The zpos to write per plane for `assignment`: stack_zpos (zpos_order.hpp)
   // over its planes plus the planes the scene arms itself (pinned layers,
-  // whose assigned plane survives apply()'s reset). Empty when nothing is
-  // renumbered.
-  [[nodiscard]] std::vector<std::pair<uint32_t, uint64_t>> stacked_zpos(
-      const PlaneAssignment& assignment) const;
+  // whose assigned plane survives apply()'s reset), with the canvas slot of
+  // canvas_bounds() when one is needed. `renumbered` holds only the planes
+  // whose zpos changes (empty when the stack does not fit), `written` every
+  // armed plane's zpos.
+  struct ZposStack {
+    std::vector<std::pair<uint32_t, uint64_t>> renumbered;
+    std::vector<std::pair<uint32_t, uint64_t>> written;
+    std::optional<uint64_t> canvas;
+  };
+  [[nodiscard]] ZposStack stacked_zpos(const PlaneAssignment& assignment) const;
+  // Records the stack of the assignment apply() arms (canvas_zpos, zpos_stack).
+  void record_stack(const ZposStack& stack, bool any_composited);
+
+  // One canvas stacks at one zpos, so a placed layer overlapping a composited
+  // one must stay on the side of the canvas its zpos asks for: `below` is the
+  // highest zpos that must stay under the canvas, `above` the lowest that must
+  // cover it. Infeasible when a placed layer would have to be on both sides.
+  struct CanvasBounds {
+    std::optional<uint64_t> below;
+    std::optional<uint64_t> above;
+    [[nodiscard]] bool feasible() const noexcept { return !below || !above || *below < *above; }
+  };
+  [[nodiscard]] CanvasBounds canvas_bounds(const PlaneAssignment& assignment) const;
+  // Places every layer outside one contiguous zpos run of at least the
+  // n - `placed` composited layers, the run with the lowest total keep_priority
+  // for each size (the highest on a tie), smallest first. nullopt when no run
+  // leaves the canvas bounds feasible within the TEST budget.
+  std::optional<PlaneAssignment> place_around_run(
+      const Output& output, std::size_t placed, const std::vector<const PlaneCapabilities*>& planes,
+      uint32_t flags, uint32_t crtc_index);
+  // Moves placed layers into the composition until canvas_bounds() is
+  // feasible: each round the lowest keep_priority layer caught between the
+  // bounds. False when only pinned layers are caught.
+  bool resolve_canvas_bounds(PlaneAssignment& assignment) const;
 
   // Emit FB_ID=0 / CRTC_ID=0 on every CRTC-compatible non-cursor plane
   // that isn't in `keep`. Used both inside try_test_commit (so TESTs
@@ -471,6 +511,9 @@ class Allocator {
   // previous_allocation_.
   std::optional<uint32_t> canvas_plane_;
   std::optional<uint32_t> previous_canvas_plane_;
+  // Zpos path: the canvas slot and the written stack of the last apply().
+  std::optional<uint64_t> canvas_zpos_;
+  std::vector<std::pair<uint32_t, uint64_t>> zpos_stack_;
   // Layer count at the last real apply(); a drop means planes were freed.
   std::size_t committed_layer_count_{0};
   std::function<bool(const PlaneCapabilities&)> canvas_host_;
@@ -545,6 +588,9 @@ class Allocator {
   // checks with O(1) lookups; the set itself is O(N) to build and
   // reuses its bucket array across frames.
   std::unordered_set<const Layer*> scratch_current_set_;
+  // canvas_bounds() scratch.
+  mutable std::vector<const Layer*> scratch_bounds_placed_;
+  mutable std::vector<const Layer*> scratch_bounds_composited_;
 
   // Reset at the top of every apply() and bumped from
   // apply_layer_to_plane_real / the real-commit disable_unused_planes
