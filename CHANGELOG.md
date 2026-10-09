@@ -1,5 +1,58 @@
 # Changelog
 
+## v4.2.0 — 2026-10-09: plane allocation fixes
+
+Soname stays `libdrm-cxx.so.4`. `planes::Allocator` changed layout (below):
+code that constructs or embeds an `Allocator` must recompile. Code that only
+uses `scene::LayerScene` is unaffected.
+
+### Breaking changes
+
+- **ABI only** (source-compatible; recompile if you use it directly):
+  - `planes::Allocator` gains state for the canvas zpos slot, foreign lit
+    planes and the committed layer count. (#344, #345, #349)
+
+### API
+
+- `planes::Allocator::canvas_zpos()` and `zpos_stack()`: the canvas slot and
+  the zpos written per armed plane for the last `apply()`. (#349)
+
+### Planes and scene
+
+- **Canvas under covering layers.** Where planes take zpos, the canvas stacked
+  above every placed layer, so a composited layer from mid-stack covered the
+  placed layers above it. The canvas now sits just under the lowest placed
+  layer that overlaps a composited one. When a placed layer would have to sit
+  on both sides, the allocator composites one contiguous run of the cheapest
+  layers instead. The canvas zpos is written even when it is 0. (#343, #349)
+- **Re-search after removals.** Removing layers while composition ran kept
+  the cached composited run; warm start now re-searches so freed planes take
+  layers back. (#341, #344)
+- **Foreign planes off on the first commit.** Planes another client left lit
+  on the CRTC (the fbdev console) are turned off by the first commit. (#342,
+  #345)
+- **Rebind releases the old CRTC's planes.** `rebind()` to another CRTC turns
+  off the planes lit on the old one first; a plane both CRTCs share no longer
+  fails every TEST. (#340, #346)
+- **`Layer::requires_scaling` at 16.16 precision.** A fractional source just
+  above the destination (800.25 onto 800) now counts as scaling. (#348, #350)
+
+### Examples and CSD
+
+- Font search covers the Yocto layout (`/usr/share/fonts/truetype`,
+  `/usr/share/fonts/ttf`). (#339)
+
+### Tests
+
+- `tests/integration/vkms_node.hpp`: one vkms device finder (fewest CRTCs)
+  replacing 21 copies; `DRM_CXX_TEST_CARD` honored. (#347)
+- Composition tests size the stack to the card's planes and run on hardware
+  via `DRM_CXX_TEST_CARD`. (#349)
+
+### Validated
+
+Host (vkms), Raspberry Pi 5, i.MX8M Plus and SA8155P: full test suites pass.
+
 ## v4.1.0 — 2026-10-06: Android (NDK and AOSP)
 
 ABI-compatible with 4.0.0 (soname `libdrm-cxx.so.4`, identical exported
