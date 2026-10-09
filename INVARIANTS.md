@@ -81,19 +81,24 @@ over `PropTag`: a new tag is a `-Wswitch` diagnostic until it is classified.
   `FbOnlyFastPathReTestsOnPlacementChange`;
   `test_layer_scene_census_vkms.cpp` :: `LayerSceneCensusVkms.StaticSteadyState`.
 
-## 5. Teardown does not wait on the kernel — drain the last flip first
+## 5. Teardown waits, bounded, for the last armed flip
 
-Destroying a `LayerScene` releases its buffers and framebuffers **without
-waiting on the kernel**. If the last real commit armed `DRM_MODE_PAGE_FLIP_EVENT`
-and that event has not been dispatched, the flip still references a buffer the
-destructor tears down (the RmFB-on-in-flight-FB hazard). Land it first: call
-`LayerScene::drain(pf, timeout_ms)` — a no-op when nothing is armed — or dispatch
-the event yourself, before the scene goes out of scope.
+If the last real commit armed `DRM_MODE_PAGE_FLIP_EVENT` and `drain()` was not
+called, destroying a `LayerScene` first waits **up to 100 ms** for the CRTC's
+vblank sequence to pass that commit, so the flip has landed before its buffers
+and framebuffers go (the RmFB-on-in-flight-FB hazard). The wait never reads the
+event queue: a caller that dispatches the event itself is undisturbed, and an
+undispatched event stays queued for the caller. It is skipped while suspended
+or when the CRTC's sequence cannot be read, and gives up at the bound, so a
+CRTC that stopped counting cannot hang teardown. `LayerScene::drain(pf,
+timeout_ms)` — a no-op when nothing is armed — remains the explicit way to
+land the flip and dispatch its event before the scene goes out of scope.
 
 - **Defined:** `src/scene/layer_scene.hpp` (`drain` doc and the `~LayerScene`
-  teardown note).
+  teardown note); `wait_for_armed_flip()` in `src/scene/layer_scene.cpp`.
 - **Pinned by:** `test_layer_scene_release_vkms.cpp` ::
-  `LayerSceneReleaseVkms.DrainLandsPendingFlipBeforeTeardown`.
+  `LayerSceneReleaseVkms.DrainLandsPendingFlipBeforeTeardown`,
+  `LayerSceneReleaseVkms.DestructorWaitsForArmedFlip`.
 
 ## 6. `dumb::Buffer::map` is a zero-cost view of a lifetime mmap
 
