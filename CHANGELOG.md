@@ -1,6 +1,52 @@
 # Changelog
 
+## v5.0.0 — 2026-10-11: 32-bit Vulkan producer; teardown wait on early-flip drivers
+
+Major bump: `VkScanoutProducer`'s image API changed (below). Soname
+`libdrm-cxx.so.5`; every consumer must recompile. Includes the 4.3.0 changes
+below, which were not released on their own.
+
+### Breaking changes
+
+- **`present::VkScanoutProducer` passes the image as its 64-bit value.**
+  `Recorder` is `std::function<void(void* command_buffer, std::uint64_t image)>`
+  and `vk_image()` returns `std::uint64_t` (0 before `create_buffer`).
+  Dispatchable handles stay `void*`. Convert with
+  `drm::present::vk_handle<VkImage>(image)`. (#336, #360)
+- **ABI only:** `scene::CommitReport` gains `commit_seq` (from 4.3.0). (#356)
+
+### API
+
+- `present::vk_handle<Handle>(std::uint64_t)`: a non-dispatchable Vulkan
+  handle from its 64-bit value, a pointer on 64-bit ABIs and a `uint64_t` on
+  32-bit ones. (#360)
+- `VkScanoutProducer` builds on 32-bit ABIs (armv7, x86):
+  `DRM_CXX_HAS_VK_SCANOUT_PRODUCER` follows `DRM_CXX_HAS_VULKAN`. (#360)
+
+### Scene
+
+- **Teardown wait ends on the queued flip event.** A driver that completes the
+  flip inside the commit (SA8155P) counts it before the scene reads the vblank
+  sequence and does not count again until the next commit, so `~LayerScene`
+  always waited its full 100 ms. A queued flip event now also ends the wait;
+  it is polled, never read. `INVARIANTS.md` 5 updated. (#359, #361)
+
+### Tests
+
+- The release tests all run on `DRM_CXX_TEST_CARD`. (#358, #361)
+- The output lookup in the release tests waits up to 3 s for a monitor that
+  drops hot-plug after a CRTC is turned off. (#361)
+- `test_vk_handle`. (#360)
+
+### Validated
+
+Host (vkms), Raspberry Pi 5, i.MX8M Plus and SA8155P: full test suites pass;
+`vk_present`, `vulkan_scene`, `vulkan_offload_scanout` and `vk_out_fence` run
+on all three boards. The producer compiles for armv7 with the NDK.
+
 ## v4.3.0 — 2026-10-11: release a displaced buffer at the flip
+
+Not released on its own; shipped in 5.0.0.
 
 Soname stays `libdrm-cxx.so.4`. `scene::CommitReport` gained a field (below):
 code that embeds a `CommitReport` must recompile. The default release timing
