@@ -688,6 +688,16 @@ class LayerScene::Impl {
     }
   }
 
+  void release_displaced(std::uint64_t commit_seq) noexcept {
+    // Only the most recent real commit's flip makes prev_prev's buffers (the
+    // ones that commit displaced) safe: for an older one, a newer commit has
+    // since rotated buffers still on screen into prev_prev.
+    if (commit_seq == 0 || commit_seq != last_commit_seq_) {
+      return;
+    }
+    release_all(prev_prev_acquisitions_);
+  }
+
   drm::expected<void, std::error_code> drain(PageFlip& pf, int timeout_ms) {
     if (!last_real_commit_wanted_event_) {
       return {};  // nothing armed — no event queued to land
@@ -3584,6 +3594,8 @@ class LayerScene::Impl {
   // threaded: the present loop owns commit, so no synchronization is needed.
   std::vector<std::uint32_t> ephemeral_blobs_;
   bool first_commit_{true};
+  // CommitReport::commit_seq of the most recent real commit; 0 before one.
+  std::uint64_t last_commit_seq_{0};
   bool suspended_{false};
   // True when the most recent successful real commit carried
   // DRM_MODE_PAGE_FLIP_EVENT, i.e. the kernel has an undispatched flip event
@@ -4443,6 +4455,7 @@ drm::expected<CommitReport, std::error_code> LayerScene::Impl::finalize_frame(
     std::swap(prev_prev_acquisitions_, prev_acquisitions_);
     std::swap(prev_acquisitions_, state->acquisitions);
     scratch_acquisitions_ = std::move(state->acquisitions);
+    report.commit_seq = ++last_commit_seq_;
     return report;
   }
 
@@ -4559,6 +4572,10 @@ drm::expected<CommitReport, std::error_code> LayerScene::commit(std::uint32_t fl
 
 drm::expected<void, std::error_code> LayerScene::drain(PageFlip& pf, int timeout_ms) {
   return impl_->drain(pf, timeout_ms);
+}
+
+void LayerScene::release_displaced(std::uint64_t commit_seq) noexcept {
+  impl_->release_displaced(commit_seq);
 }
 
 drm::expected<FrameBuildPtr, std::error_code> LayerScene::build_frame_into(

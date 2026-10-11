@@ -373,6 +373,73 @@ TEST(LayerSceneReleaseVkms, DefersReleaseTwoCommitsDeep) {
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
 }
 
+// release_displaced hands back what the most recent commit's flip took off
+// screen at that flip, not at the next commit -- and only for that commit, so
+// a late or repeated call cannot release a buffer still on screen. The commits
+// here block, so each one's flip has completed when it returns.
+TEST(LayerSceneReleaseVkms, ReleaseDisplacedHandsBackAtTheFlip) {
+  const auto node = drm::test::find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
+                    "to enable this test";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+
+  const auto fb_w = fx.active.mode.hdisplay;
+  const auto fb_h = fx.active.mode.vdisplay;
+  std::vector<TrackingSource::Event> transcript;
+  auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(inner.has_value()) << inner.error().message();
+  LayerDesc layer;
+  layer.source = std::make_unique<TrackingSource>(std::move(*inner), transcript);
+  layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
+  layer.display.zpos = 1;
+  ASSERT_TRUE(fx.scene->add_layer(std::move(layer)).has_value());
+
+  auto c1 = fx.scene->commit();
+  ASSERT_TRUE(c1.has_value()) << c1.error().message();
+  EXPECT_EQ(c1->commit_seq, 1U);
+  fx.scene->release_displaced(c1->commit_seq);
+  EXPECT_TRUE(released_ids(transcript).empty()) << "nothing was on screen before commit 1";
+
+  auto c2 = fx.scene->commit();
+  ASSERT_TRUE(c2.has_value()) << c2.error().message();
+  EXPECT_EQ(c2->commit_seq, 2U);
+  // Commit 1's flip is stale now: commit 2 rotated the buffer it shows into
+  // the slot a release would take.
+  fx.scene->release_displaced(c1->commit_seq);
+  EXPECT_TRUE(released_ids(transcript).empty()) << "a stale flip released a buffer";
+
+  // Commit 2's flip took commit 1's buffer off screen: back now.
+  fx.scene->release_displaced(c2->commit_seq);
+  ASSERT_EQ(released_ids(transcript).size(), 1U);
+  EXPECT_EQ(released_ids(transcript).back(), 0U);
+  fx.scene->release_displaced(c2->commit_seq);
+  EXPECT_EQ(released_ids(transcript).size(), 1U) << "a repeated call released again";
+
+  // The next commit has nothing left to release; its flip hands back commit
+  // 2's buffer.
+  auto c3 = fx.scene->commit();
+  ASSERT_TRUE(c3.has_value()) << c3.error().message();
+  EXPECT_EQ(released_ids(transcript).size(), 1U);
+  fx.scene->release_displaced(c3->commit_seq);
+  ASSERT_EQ(released_ids(transcript).size(), 2U);
+  EXPECT_EQ(released_ids(transcript).back(), 1U);
+
+  // A test commit is not a real commit: it names none.
+  auto t = fx.scene->test();
+  ASSERT_TRUE(t.has_value()) << t.error().message();
+  EXPECT_EQ(t->commit_seq, 0U);
+
+  fx.scene.reset();
+  EXPECT_EQ(released_ids(transcript).size(), count_acquires(transcript))
+      << "scene destruction must still release everything held";
+  cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
 TEST(LayerSceneReleaseVkms, TestCommitsReleaseImmediately) {
   const auto node = drm::test::find_vkms_node();
   if (!node) {

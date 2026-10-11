@@ -313,6 +313,26 @@ class LayerScene {
   /// outstanding, dispatch `pf` yourself instead.
   [[nodiscard]] drm::expected<void, std::error_code> drain(PageFlip& pf, int timeout_ms = -1);
 
+  /// Release now the buffers that the page flip of real commit @p commit_seq
+  /// (its `CommitReport::commit_seq`) took off screen, instead of at the next
+  /// real commit.
+  ///
+  /// A buffer leaves the screen when the flip of the commit after the one that
+  /// showed it completes, and the scene hands it back at the commit after that
+  /// (INVARIANTS.md, 1) -- right for a caller that commits ahead of its flips.
+  /// A caller that waits for each flip before committing again, feeding
+  /// producers that wait for a free buffer before rendering, may never make
+  /// that next commit: its producers then wait for good. Call this once the
+  /// flip completes, from the flip handler or the next frame, to hand those
+  /// buffers back then.
+  ///
+  /// A no-op unless @p commit_seq names the most recent real commit, so a late
+  /// or repeated call cannot release a buffer still on screen. Releases run on
+  /// the calling thread. Not thread-safe, like every other scene call: a
+  /// caller that takes flip events on another thread holds its own lock around
+  /// this and the rest.
+  void release_displaced(std::uint64_t commit_seq) noexcept;
+
   // ── SceneSet integration (advanced) ─────────────────────────────────
   //
   // Two-phase commit primitive. drm::scene::SceneSet uses this to
