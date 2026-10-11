@@ -60,6 +60,7 @@
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <sys/poll.h>
 #include <system_error>
 #include <thread>
 #include <tuple>
@@ -669,8 +670,11 @@ class LayerScene::Impl {
   // Teardown guard for callers that did not drain(): most dispatch the flip
   // event themselves, which the scene cannot see, so it waits for the CRTC's
   // vblank sequence to pass the one recorded at the commit instead — the flip
-  // has then landed. Never reads the event queue, so a caller's own dispatch
-  // is undisturbed. Bounded: a CRTC that stopped counting cannot hang it.
+  // has then landed. A driver that completes the flip inside the commit
+  // (SA8155P) counts it before that recording and not again until the next
+  // commit, so a queued event also ends the wait: the kernel queues it only
+  // once a flip has landed. poll() only; the event stays for the caller.
+  // Bounded: a CRTC that stopped counting cannot hang it.
   void wait_for_armed_flip() noexcept {
     if (!last_real_commit_wanted_event_ || armed_flip_seq_ == 0 || suspended_ || dev_ == nullptr ||
         dev_->fd() < 0) {
@@ -682,6 +686,10 @@ class LayerScene::Impl {
     while (std::chrono::steady_clock::now() < deadline) {
       std::uint64_t seq = 0;
       if (drmCrtcGetSequence(dev_->fd(), crtc_id_, &seq, nullptr) != 0 || seq > armed_flip_seq_) {
+        return;
+      }
+      pollfd pfd{dev_->fd(), POLLIN, 0};
+      if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN) != 0) {
         return;
       }
       std::this_thread::sleep_for(k_step);

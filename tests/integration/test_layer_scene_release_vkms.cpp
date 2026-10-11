@@ -51,18 +51,16 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <filesystem>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
 #include <string>
+#include <sys/poll.h>
 #include <system_error>
-#include <unistd.h>
+#include <thread>
 #include <utility>
 #include <vector>
 
-namespace fs = std::filesystem;
 using drm::Device;
 using drm::scene::AcquiredBuffer;
 using drm::scene::BindingModel;
@@ -227,7 +225,15 @@ drm::expected<SceneFixture, std::error_code> open_vkms_scene(const std::string& 
   if (auto r = dev->enable_atomic(); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
+  // A monitor can drop hot-plug briefly after the previous test turned its
+  // CRTC off (i.MX8M Plus HDMI: disconnected, no modes, back within seconds).
   auto active_r = pick_crtc(dev->fd());
+  for (int tries = 0;
+       !active_r && active_r.error() == std::errc::no_such_device_or_address && tries < 30;
+       ++tries) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    active_r = pick_crtc(dev->fd());
+  }
   if (!active_r) {
     return drm::unexpected<std::error_code>(active_r.error());
   }
@@ -289,10 +295,9 @@ std::size_t outstanding_leases(const std::vector<TrackingSource::Event>& transcr
 }  // namespace
 
 TEST(LayerSceneReleaseVkms, DefersReleaseTwoCommitsDeep) {
-  const auto node = drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
-    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
-                    "to enable this test";
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
   auto fx_r = open_vkms_scene(*node);
   ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
@@ -378,10 +383,9 @@ TEST(LayerSceneReleaseVkms, DefersReleaseTwoCommitsDeep) {
 // a late or repeated call cannot release a buffer still on screen. The commits
 // here block, so each one's flip has completed when it returns.
 TEST(LayerSceneReleaseVkms, ReleaseDisplacedHandsBackAtTheFlip) {
-  const auto node = drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
-    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
-                    "to enable this test";
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
   auto fx_r = open_vkms_scene(*node);
   ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
@@ -441,9 +445,9 @@ TEST(LayerSceneReleaseVkms, ReleaseDisplacedHandsBackAtTheFlip) {
 }
 
 TEST(LayerSceneReleaseVkms, TestCommitsReleaseImmediately) {
-  const auto node = drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
-    GTEST_SKIP() << "VKMS not loaded";
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
   auto fx_r = open_vkms_scene(*node);
   ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
@@ -489,10 +493,7 @@ TEST(LayerSceneReleaseVkms, TestCommitsReleaseImmediately) {
 // source is retired: its buffers drain through the ring with their release
 // fences, and it is destroyed only afterward.
 TEST(LayerSceneReleaseVkms, RemoveLayerDefersSourceRetirement) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -552,10 +553,7 @@ TEST(LayerSceneReleaseVkms, RemoveLayerDefersSourceRetirement) {
 // source. The displaced source's still-in-flight buffers must release to IT (not
 // the replacement), deferred, and it must be destroyed only afterward.
 TEST(LayerSceneReleaseVkms, ReplaceSourceRetiresOldToProducer) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -621,10 +619,7 @@ TEST(LayerSceneReleaseVkms, ReplaceSourceRetiresOldToProducer) {
 }
 
 TEST(LayerSceneReleaseVkms, ReplaceSourceRejectsBadArgs) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -675,10 +670,7 @@ TEST(LayerSceneReleaseVkms, ReplaceSourceRejectsBadArgs) {
 // property writes, then finalize_frame() is handed a simulated kernel error
 // in place of a real req.commit().
 TEST(LayerSceneReleaseVkms, CommitFailureReleasesAcquisitions) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -754,10 +746,7 @@ TEST(LayerSceneReleaseVkms, CommitFailureReleasesAcquisitions) {
 // is about to release (the classic RmFB-on-in-flight-FB hazard). After drain()
 // returns, the flip has been dispatched and the kernel's event queue is empty.
 TEST(LayerSceneReleaseVkms, DrainLandsPendingFlipBeforeTeardown) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -810,20 +799,29 @@ TEST(LayerSceneReleaseVkms, DrainLandsPendingFlipBeforeTeardown) {
 }
 
 // Records the CRTC's vblank sequence each time the scene hands a buffer back.
+// What a release saw: the CRTC's vblank sequence, and whether a flip event was
+// queued on the fd (the kernel queues it once the flip has landed).
+struct ReleaseSeen {
+  std::uint64_t seq{0};
+  bool event_queued{false};
+};
+
 class SeqOnReleaseSource : public TrackingSource {
  public:
   SeqOnReleaseSource(std::unique_ptr<DumbBufferSource> inner,
                      std::vector<TrackingSource::Event>& transcript, int fd, std::uint32_t crtc,
-                     std::shared_ptr<std::vector<std::uint64_t>> seqs)
+                     std::shared_ptr<std::vector<ReleaseSeen>> seen)
       : TrackingSource(std::move(inner), transcript),
         fd_(fd),
         crtc_(crtc),
-        seqs_(std::move(seqs)) {}
+        seen_(std::move(seen)) {}
 
   void release(AcquiredBuffer acquired) noexcept override {
-    std::uint64_t seq = 0;
-    if (drmCrtcGetSequence(fd_, crtc_, &seq, nullptr) == 0) {
-      seqs_->push_back(seq);
+    ReleaseSeen r;
+    if (drmCrtcGetSequence(fd_, crtc_, &r.seq, nullptr) == 0) {
+      pollfd pfd{fd_, POLLIN, 0};
+      r.event_queued = ::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN) != 0;
+      seen_->push_back(r);
     }
     TrackingSource::release(std::move(acquired));
   }
@@ -831,7 +829,7 @@ class SeqOnReleaseSource : public TrackingSource {
  private:
   int fd_;
   std::uint32_t crtc_;
-  std::shared_ptr<std::vector<std::uint64_t>> seqs_;
+  std::shared_ptr<std::vector<ReleaseSeen>> seen_;
 };
 
 // A caller that neither drains nor dispatches the final flip event: the
@@ -839,9 +837,9 @@ class SeqOnReleaseSource : public TrackingSource {
 // commit before handing buffers back, so a producer never gets back a buffer
 // the pending flip still reads. The event itself stays queued for the caller.
 TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
-  const auto node = drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
-    GTEST_SKIP() << "VKMS not loaded";
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
   auto fx_r = open_vkms_scene(*node);
   ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
@@ -851,10 +849,10 @@ TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
   auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
   ASSERT_TRUE(inner.has_value()) << inner.error().message();
   std::vector<TrackingSource::Event> transcript;
-  auto seqs = std::make_shared<std::vector<std::uint64_t>>();
+  auto seen = std::make_shared<std::vector<ReleaseSeen>>();
   LayerDesc layer;
   layer.source = std::make_unique<SeqOnReleaseSource>(std::move(*inner), transcript, fx.dev->fd(),
-                                                      fx.active.crtc_id, seqs);
+                                                      fx.active.crtc_id, seen);
   layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   layer.display.zpos = 1;
@@ -867,17 +865,24 @@ TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
   ASSERT_TRUE(fx.scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &pf).has_value());
   std::uint64_t armed = 0;
   ASSERT_EQ(drmCrtcGetSequence(fx.dev->fd(), fx.active.crtc_id, &armed, nullptr), 0);
-  seqs->clear();
+  seen->clear();
 
   const auto t0 = std::chrono::steady_clock::now();
   fx.scene.reset();  // no drain(), no dispatch
   const auto took = std::chrono::steady_clock::now() - t0;
 
-  ASSERT_FALSE(seqs->empty()) << "teardown should hand the in-flight buffers back";
-  for (const auto seq : *seqs) {
-    EXPECT_GT(seq, armed) << "a buffer went back to its source before the flip landed";
+  ASSERT_FALSE(seen->empty()) << "teardown should hand the in-flight buffers back";
+  // Landed: the sequence moved past the commit, or the flip event is queued (a
+  // driver that completes the flip inside the commit counts it before `armed`).
+  for (const auto& r : *seen) {
+    EXPECT_TRUE(r.seq > armed || r.event_queued)
+        << "a buffer went back to its source before the flip landed (seq " << r.seq << ", armed "
+        << armed << ")";
   }
-  EXPECT_LT(took, std::chrono::milliseconds(150)) << "the wait is bounded";
+  // A landing signal ends the wait well before its 100 ms bound; reaching the
+  // bound means the scene saw neither.
+  const auto took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(took).count();
+  EXPECT_LT(took_ms, 90) << "the wait ran to its bound";
   // The event was not consumed: it is still queued for the caller.
   EXPECT_TRUE(pf.dispatch(0).has_value());
   EXPECT_EQ(flips_seen, 1);
