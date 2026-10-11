@@ -48,6 +48,13 @@ test('test_frame_economy',
   ),
 )
 
+test('test_vk_handle',
+  executable('test_vk_handle',
+    'unit/test_vk_handle.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # Integration: needs a dumb-capable DRM card (any driver; skips if none).
 test('test_dumb_ring_source',
   executable('test_dumb_ring_source',

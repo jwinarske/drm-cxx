@@ -21,16 +21,17 @@
 // frame is copied — by GL on the GPU, or by the CPU — into a display-side
 // buffer (see create_buffer). render_clear() is the simplest such frame.
 //
-// Gated on DRM_CXX_HAS_VK_SCANOUT_PRODUCER: Vulkan headers present at build,
-// and a 64-bit ABI. The API passes the VkImage handle as void*, which holds a
-// non-dispatchable handle only where those are pointers; on 32-bit ABIs they
-// are 64-bit integers. The class does not exist otherwise. pImpl keeps
-// vulkan.hpp out of this header.
+// Gated on DRM_CXX_HAS_VK_SCANOUT_PRODUCER (Vulkan headers present at build).
+// Dispatchable handles (VkInstance, VkDevice, VkQueue, VkCommandBuffer) pass as
+// void*; the VkImage, a non-dispatchable handle, as its 64-bit value, since it
+// is a pointer only on 64-bit ABIs. vk_handle<VkImage>() converts it back.
+// pImpl keeps vulkan.hpp out of this header.
 
 #include <cstdint>
+#include <type_traits>
 
 // NOLINTBEGIN(cppcoreguidelines-macro-usage) -- tested by #if
-#if DRM_CXX_HAS_VULKAN && UINTPTR_MAX == UINT64_MAX
+#if DRM_CXX_HAS_VULKAN
 #define DRM_CXX_HAS_VK_SCANOUT_PRODUCER 1
 #else
 #define DRM_CXX_HAS_VK_SCANOUT_PRODUCER 0
@@ -57,6 +58,18 @@ class Device;
 
 namespace drm::present {
 
+// A non-dispatchable Vulkan handle from its 64-bit value: a pointer on 64-bit
+// ABIs, a uint64_t on 32-bit ones. vk_handle<VkImage>(image).
+template <typename Handle>
+[[nodiscard]] Handle vk_handle(std::uint64_t bits) noexcept {
+  if constexpr (std::is_pointer_v<Handle>) {
+    // NOLINTNEXTLINE(performance-no-int-to-ptr) -- the handle is the pointer
+    return reinterpret_cast<Handle>(static_cast<std::uintptr_t>(bits));
+  } else {
+    return static_cast<Handle>(bits);
+  }
+}
+
 class VkScanoutProducer : public ScanoutProducer {
  public:
   struct Options {
@@ -67,13 +80,12 @@ class VkScanoutProducer : public ScanoutProducer {
   };
 
   // Records one frame. `command_buffer` (VkCommandBuffer) is recording, outside
-  // any render pass; `image` (VkImage, the format of vk_format(), the size given
-  // to create_buffer) is in VK_IMAGE_LAYOUT_GENERAL and must be left there —
-  // e.g. a render pass with initialLayout/finalLayout GENERAL. Draw the whole
-  // frame: the image may be a different one from the previous call, and its
-  // contents are not preserved. The image allows color-attachment and transfer
-  // use. Barriers into and out of the frame are the producer's.
-  using Recorder = std::function<void(void* command_buffer, void* image)>;
+  // any render pass; `image` (VkImage value, see vk_handle; the format of vk_format(), the size
+  // given to create_buffer) is in VK_IMAGE_LAYOUT_GENERAL and must be left there — e.g. a render
+  // pass with initialLayout/finalLayout GENERAL. Draw the whole frame: the image may be a different
+  // one from the previous call, and its contents are not preserved. The image allows
+  // color-attachment and transfer use. Barriers into and out of the frame are the producer's.
+  using Recorder = std::function<void(void* command_buffer, std::uint64_t image)>;
 
   // Borrows `dev`; it must outlive the producer. Builds a VkInstance/VkDevice
   // bound to the same DRM node as `dev`.
@@ -119,9 +131,10 @@ class VkScanoutProducer : public ScanoutProducer {
   [[nodiscard]] std::uint32_t queue_family_index() const noexcept;
   // VkFormat of the scanout images (valid after create_buffer).
   [[nodiscard]] std::uint32_t vk_format() const noexcept;
-  // The image most recently rendered; null before create_buffer. Draw through
-  // render() rather than into this: the frame being scanned out changes.
-  [[nodiscard]] void* vk_image() const noexcept;
+  // The image most recently rendered (VkImage value, see vk_handle); 0 before
+  // create_buffer. Draw through render() rather than into this: the frame being
+  // scanned out changes.
+  [[nodiscard]] std::uint64_t vk_image() const noexcept;
 
  private:
   VkScanoutProducer();
