@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 project('drm-cxx', ['c', 'cpp'],
-  version : '4.2.1',
+  version : '4.3.0',
   meson_version : '>=1.3.0',
   license : 'MIT',
   default_options : [

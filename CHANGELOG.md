@@ -1,5 +1,42 @@
 # Changelog
 
+## v4.3.0 — 2026-10-11: release a displaced buffer at the flip
+
+Soname stays `libdrm-cxx.so.4`. `scene::CommitReport` gained a field (below):
+code that embeds a `CommitReport` must recompile. The default release timing
+is unchanged.
+
+### Breaking changes
+
+- **ABI only** (source-compatible; recompile if you use it directly):
+  - `scene::CommitReport` gains `commit_seq`. (#356)
+
+### API
+
+- `scene::LayerScene::release_displaced(commit_seq)`: hand back the buffers
+  the flip of the most recent real commit took off screen, at that flip,
+  instead of at the next commit. For a caller that waits for each flip before
+  committing, whose producers wait for a free buffer before rendering: without
+  it a producer with two buffers waits for good, and one with three gets each
+  buffer a frame late. A no-op for any but the most recent real commit; not
+  thread-safe, like the rest of the scene. (#356)
+- `scene::CommitReport::commit_seq`: names each real commit, counting from 1;
+  0 for a test commit. (#356)
+
+### Docs
+
+- `INVARIANTS.md` 1 notes the opt-in early release and its pinning test. (#356)
+- `INVARIANTS.md` 5 now says teardown waits, bounded, for the last armed flip,
+  as `~LayerScene` has since #259. (#354, #355)
+
+### Tests
+
+- `LayerSceneReleaseVkms.ReleaseDisplacedHandsBackAtTheFlip`. (#356)
+
+### Validated
+
+Host (vkms): full test suite passes.
+
 ## v4.2.1 — 2026-10-09: README
 
 Drop-in for 4.2.0 (soname `libdrm-cxx.so.4`); no code change.
