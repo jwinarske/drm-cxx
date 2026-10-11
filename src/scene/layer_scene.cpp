@@ -3585,6 +3585,8 @@ class LayerScene::Impl {
   // CRTC vblank sequence read right after the last commit that wanted a flip
   // event; 0 when unknown (wait_for_armed_flip).
   std::uint64_t armed_flip_seq_{0};
+  // CommitReport::commit_seq of the most recent real commit; 0 before one.
+  std::uint64_t last_commit_seq_{0};
   std::vector<Slot> slots_;
   std::vector<std::uint32_t> free_ids_;
 
@@ -3594,8 +3596,6 @@ class LayerScene::Impl {
   // threaded: the present loop owns commit, so no synchronization is needed.
   std::vector<std::uint32_t> ephemeral_blobs_;
   bool first_commit_{true};
-  // CommitReport::commit_seq of the most recent real commit; 0 before one.
-  std::uint64_t last_commit_seq_{0};
   bool suspended_{false};
   // True when the most recent successful real commit carried
   // DRM_MODE_PAGE_FLIP_EVENT, i.e. the kernel has an undispatched flip event
