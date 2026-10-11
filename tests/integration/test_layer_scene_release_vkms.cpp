@@ -57,6 +57,7 @@
 #include <string>
 #include <sys/poll.h>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -224,7 +225,15 @@ drm::expected<SceneFixture, std::error_code> open_vkms_scene(const std::string& 
   if (auto r = dev->enable_atomic(); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
+  // A monitor can drop hot-plug briefly after the previous test turned its
+  // CRTC off (i.MX8M Plus HDMI: disconnected, no modes, back within seconds).
   auto active_r = pick_crtc(dev->fd());
+  for (int tries = 0;
+       !active_r && active_r.error() == std::errc::no_such_device_or_address && tries < 30;
+       ++tries) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    active_r = pick_crtc(dev->fd());
+  }
   if (!active_r) {
     return drm::unexpected<std::error_code>(active_r.error());
   }
