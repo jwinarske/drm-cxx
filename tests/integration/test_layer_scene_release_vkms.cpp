@@ -51,18 +51,14 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <filesystem>
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
 #include <string>
 #include <system_error>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
-namespace fs = std::filesystem;
 using drm::Device;
 using drm::scene::AcquiredBuffer;
 using drm::scene::BindingModel;
@@ -289,10 +285,9 @@ std::size_t outstanding_leases(const std::vector<TrackingSource::Event>& transcr
 }  // namespace
 
 TEST(LayerSceneReleaseVkms, DefersReleaseTwoCommitsDeep) {
-  const auto node = drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
-    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
-                    "to enable this test";
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
   auto fx_r = open_vkms_scene(*node);
   ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
@@ -378,10 +373,9 @@ TEST(LayerSceneReleaseVkms, DefersReleaseTwoCommitsDeep) {
 // a late or repeated call cannot release a buffer still on screen. The commits
 // here block, so each one's flip has completed when it returns.
 TEST(LayerSceneReleaseVkms, ReleaseDisplacedHandsBackAtTheFlip) {
-  const auto node = drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
-    GTEST_SKIP() << "VKMS not loaded — `sudo modprobe vkms enable_overlay=1` "
-                    "to enable this test";
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
   auto fx_r = open_vkms_scene(*node);
   ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
@@ -441,9 +435,9 @@ TEST(LayerSceneReleaseVkms, ReleaseDisplacedHandsBackAtTheFlip) {
 }
 
 TEST(LayerSceneReleaseVkms, TestCommitsReleaseImmediately) {
-  const auto node = drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
-    GTEST_SKIP() << "VKMS not loaded";
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
   auto fx_r = open_vkms_scene(*node);
   ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
@@ -489,10 +483,7 @@ TEST(LayerSceneReleaseVkms, TestCommitsReleaseImmediately) {
 // source is retired: its buffers drain through the ring with their release
 // fences, and it is destroyed only afterward.
 TEST(LayerSceneReleaseVkms, RemoveLayerDefersSourceRetirement) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -552,10 +543,7 @@ TEST(LayerSceneReleaseVkms, RemoveLayerDefersSourceRetirement) {
 // source. The displaced source's still-in-flight buffers must release to IT (not
 // the replacement), deferred, and it must be destroyed only afterward.
 TEST(LayerSceneReleaseVkms, ReplaceSourceRetiresOldToProducer) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -621,10 +609,7 @@ TEST(LayerSceneReleaseVkms, ReplaceSourceRetiresOldToProducer) {
 }
 
 TEST(LayerSceneReleaseVkms, ReplaceSourceRejectsBadArgs) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -675,10 +660,7 @@ TEST(LayerSceneReleaseVkms, ReplaceSourceRejectsBadArgs) {
 // property writes, then finalize_frame() is handed a simulated kernel error
 // in place of a real req.commit().
 TEST(LayerSceneReleaseVkms, CommitFailureReleasesAcquisitions) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -754,10 +736,7 @@ TEST(LayerSceneReleaseVkms, CommitFailureReleasesAcquisitions) {
 // is about to release (the classic RmFB-on-in-flight-FB hazard). After drain()
 // returns, the flip has been dispatched and the kernel's event queue is empty.
 TEST(LayerSceneReleaseVkms, DrainLandsPendingFlipBeforeTeardown) {
-  const char* env = std::getenv("DRM_CXX_TEST_CARD");
-  const std::optional<std::string> node = (env != nullptr && *env != '\0')
-                                              ? std::optional<std::string>(env)
-                                              : drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
     GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
@@ -839,9 +818,9 @@ class SeqOnReleaseSource : public TrackingSource {
 // commit before handing buffers back, so a producer never gets back a buffer
 // the pending flip still reads. The event itself stays queued for the caller.
 TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
-  const auto node = drm::test::find_vkms_node();
+  const auto node = drm::test::find_test_card_or_vkms();
   if (!node) {
-    GTEST_SKIP() << "VKMS not loaded";
+    GTEST_SKIP() << "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)";
   }
   auto fx_r = open_vkms_scene(*node);
   ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
