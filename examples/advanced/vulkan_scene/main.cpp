@@ -197,10 +197,10 @@ int main(int argc, char* argv[]) try {
 
       // The image arrives in GENERAL and must be left there; the producer owns
       // the barriers and the hand-off to the display.
-      auto r = producer->render([&](void* cmd, void* image) {
+      auto r = producer->render([&](void* cmd, std::uint64_t image) {
         vk::CommandBuffer(static_cast<VkCommandBuffer>(cmd))
-            .clearColorImage(vk::Image(static_cast<VkImage>(image)), vk::ImageLayout::eGeneral,
-                             clear, range);
+            .clearColorImage(vk::Image(drm::present::vk_handle<VkImage>(image)),
+                             vk::ImageLayout::eGeneral, clear, range);
       });
       if (!r) {
         drm::println(stderr, "render: {}", r.error().message());

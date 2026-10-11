@@ -217,10 +217,10 @@ int main(int argc, char** argv) try {
   const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
   vk::ClearColorValue color;
   color.float32 = std::array<float, 4>{0.20F, 0.55F, 0.85F, 1.0F};
-  if (auto r = producer->render([&](void* cmd, void* image) {
+  if (auto r = producer->render([&](void* cmd, std::uint64_t image) {
         vk::CommandBuffer(static_cast<VkCommandBuffer>(cmd))
-            .clearColorImage(vk::Image(static_cast<VkImage>(image)), vk::ImageLayout::eGeneral,
-                             color, range);
+            .clearColorImage(vk::Image(drm::present::vk_handle<VkImage>(image)),
+                             vk::ImageLayout::eGeneral, color, range);
       });
       !r) {
     std::fprintf(stderr, "render: %s\n", r.error().message().c_str());

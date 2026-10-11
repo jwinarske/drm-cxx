@@ -46,6 +46,7 @@ set(DRM_CXX_TESTS
   test_negotiate
   test_buffer_ring
   test_frame_economy
+  test_vk_handle
   test_scanout_target
   test_driver_profile
   test_mode_list

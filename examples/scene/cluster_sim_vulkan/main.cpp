@@ -1824,13 +1824,12 @@ int main(int argc, char* argv[]) try {
     // GENERAL (the render pass's finalLayout leaves it there); the producer
     // owns the hand-off to the display — the queue-family release this example
     // used to record, the submit, the fence KMS waits on.
-    auto rendered = producer->render([&](void* cmd_ptr, void* image_ptr) {
+    auto rendered = producer->render([&](void* cmd_ptr, std::uint64_t image_bits) {
       auto* const frame_cmd = static_cast<VkCommandBuffer>(cmd_ptr);
-      auto* const frame_image = static_cast<VkImage>(image_ptr);
       VkRenderPassBeginInfo rpbi{};
       rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
       rpbi.renderPass = render_pass;
-      rpbi.framebuffer = framebuffer_for(frame_image);
+      rpbi.framebuffer = framebuffer_for(drm::present::vk_handle<VkImage>(image_bits));
       rpbi.renderArea.offset = {0, 0};
       rpbi.renderArea.extent = {fb_w, fb_h};
       rpbi.clearValueCount = 0;

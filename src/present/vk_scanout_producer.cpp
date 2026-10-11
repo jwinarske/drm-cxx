@@ -51,6 +51,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <system_error>
+#include <type_traits>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -65,6 +66,21 @@ namespace {
 
 [[nodiscard]] std::error_code err(std::errc code) noexcept {
   return std::make_error_code(code);
+}
+
+// A non-dispatchable handle's 64-bit value, the inverse of vk_handle: a
+// pointer on 64-bit ABIs, a uint64_t on 32-bit ones.
+template <typename Handle>
+[[nodiscard]] std::uint64_t handle_bits(Handle handle) noexcept {
+  if constexpr (std::is_pointer_v<Handle>) {
+    return reinterpret_cast<std::uintptr_t>(handle);
+  } else {
+    return static_cast<std::uint64_t>(handle);
+  }
+}
+
+[[nodiscard]] std::uint64_t image_bits(vk::Image image) noexcept {
+  return handle_bits(static_cast<VkImage>(image));
 }
 
 // Vulkan memory-plane aspects, indexed by DRM plane (multi-plane modifiers).
@@ -639,7 +655,7 @@ void VkScanoutProducer::Impl::record_frame(Slot& slot, const Recorder& record, b
                              slot.image,
                              k_color_range});
 
-  record(static_cast<VkCommandBuffer>(cmd), static_cast<VkImage>(slot.image));
+  record(static_cast<VkCommandBuffer>(cmd), image_bits(slot.image));
 
   const bool kick = shared && resolve_kick;
   if (kick || copy_out) {
@@ -702,10 +718,10 @@ void VkScanoutProducer::Impl::submit_and_wait(Slot& slot, const Recorder& record
 void VkScanoutProducer::Impl::clear_and_wait(Slot& slot, std::array<float, 4> rgba) const {
   submit_and_wait(
       slot,
-      [&rgba](void* cmd, void* image) {
+      [&rgba](void* cmd, std::uint64_t image) {
         vk::CommandBuffer(static_cast<VkCommandBuffer>(cmd))
             .clearColorImage(
-                vk::Image(static_cast<VkImage>(image)), vk::ImageLayout::eGeneral,
+                vk::Image(vk_handle<VkImage>(image)), vk::ImageLayout::eGeneral,
                 vk::ClearColorValue{std::array<float, 4>{rgba[0], rgba[1], rgba[2], rgba[3]}},
                 k_color_range);
       },
@@ -1403,10 +1419,10 @@ drm::expected<void, std::error_code> VkScanoutProducer::render(const Recorder& r
 }
 
 drm::expected<void, std::error_code> VkScanoutProducer::render_clear(std::array<float, 4> rgba) {
-  return render([&rgba](void* cmd, void* image) {
+  return render([&rgba](void* cmd, std::uint64_t image) {
     vk::CommandBuffer(static_cast<VkCommandBuffer>(cmd))
         .clearColorImage(
-            vk::Image(static_cast<VkImage>(image)), vk::ImageLayout::eGeneral,
+            vk::Image(vk_handle<VkImage>(image)), vk::ImageLayout::eGeneral,
             vk::ClearColorValue{std::array<float, 4>{rgba[0], rgba[1], rgba[2], rgba[3]}},
             k_color_range);
   });
@@ -1424,11 +1440,11 @@ void* VkScanoutProducer::vk_device() const noexcept {
 void* VkScanoutProducer::vk_queue() const noexcept {
   return static_cast<VkQueue>(impl_->queue);
 }
-void* VkScanoutProducer::vk_image() const noexcept {
+std::uint64_t VkScanoutProducer::vk_image() const noexcept {
   if (impl_->slots.empty()) {
-    return nullptr;
+    return 0;
   }
-  return static_cast<VkImage>(impl_->slots.at(impl_->last_slot)->image);
+  return image_bits(impl_->slots.at(impl_->last_slot)->image);
 }
 std::uint32_t VkScanoutProducer::vk_format() const noexcept {
   return static_cast<std::uint32_t>(impl_->format);
