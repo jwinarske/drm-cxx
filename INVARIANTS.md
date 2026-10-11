@@ -21,10 +21,17 @@ producer (V4L2 capture, a GBM ring) overwrite a buffer the display engine is
 still scanning out, tearing on hardware whose producer driver attaches no
 reservation fence.
 
+A caller that waits for each flip before its next commit may hand those
+buffers back at the flip instead, with `LayerScene::release_displaced`. It
+releases only what the most recent real commit's flip displaced, so it never
+releases a buffer still on screen.
+
 - **Defined:** `src/scene/buffer_source.hpp` (`release` / `release_with_fence`
-  doc: "The scene calls this after page-flip completion").
+  doc: "The scene calls this after page-flip completion");
+  `src/scene/layer_scene.hpp` (`release_displaced`).
 - **Pinned by:** `test_layer_scene_release_vkms.cpp` ::
-  `LayerSceneReleaseVkms.DefersReleaseTwoCommitsDeep`.
+  `LayerSceneReleaseVkms.DefersReleaseTwoCommitsDeep`,
+  `LayerSceneReleaseVkms.ReleaseDisplacedHandsBackAtTheFlip`.
 
 ## 2. A failed commit releases that frame's acquisitions before returning
 

@@ -152,6 +152,10 @@ struct CommitReport {
   /// paying one atomic commit per frame, not two.
   bool fb_delta_fast_path{false};
 
+  /// Names this real commit for `LayerScene::release_displaced`: real commits
+  /// count from 1. 0 for a test commit.
+  std::uint64_t commit_seq{0};
+
   /// true when the scene's auto-derive built an
   /// `HdrSourceMetadata` from a layer's `source_eotf` but the
   /// connector can't signal HDR (no `HDR_OUTPUT_METADATA` exposed,
