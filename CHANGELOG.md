@@ -35,7 +35,7 @@ is unchanged.
 
 ### Validated
 
-Host (vkms): full test suite passes.
+Host (vkms), Raspberry Pi 5, i.MX8M Plus and SA8155P: full test suites pass.
 
 ## v4.2.1 — 2026-10-09: README
 
