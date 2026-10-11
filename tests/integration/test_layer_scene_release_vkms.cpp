@@ -55,6 +55,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <sys/poll.h>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -789,20 +790,29 @@ TEST(LayerSceneReleaseVkms, DrainLandsPendingFlipBeforeTeardown) {
 }
 
 // Records the CRTC's vblank sequence each time the scene hands a buffer back.
+// What a release saw: the CRTC's vblank sequence, and whether a flip event was
+// queued on the fd (the kernel queues it once the flip has landed).
+struct ReleaseSeen {
+  std::uint64_t seq{0};
+  bool event_queued{false};
+};
+
 class SeqOnReleaseSource : public TrackingSource {
  public:
   SeqOnReleaseSource(std::unique_ptr<DumbBufferSource> inner,
                      std::vector<TrackingSource::Event>& transcript, int fd, std::uint32_t crtc,
-                     std::shared_ptr<std::vector<std::uint64_t>> seqs)
+                     std::shared_ptr<std::vector<ReleaseSeen>> seen)
       : TrackingSource(std::move(inner), transcript),
         fd_(fd),
         crtc_(crtc),
-        seqs_(std::move(seqs)) {}
+        seen_(std::move(seen)) {}
 
   void release(AcquiredBuffer acquired) noexcept override {
-    std::uint64_t seq = 0;
-    if (drmCrtcGetSequence(fd_, crtc_, &seq, nullptr) == 0) {
-      seqs_->push_back(seq);
+    ReleaseSeen r;
+    if (drmCrtcGetSequence(fd_, crtc_, &r.seq, nullptr) == 0) {
+      pollfd pfd{fd_, POLLIN, 0};
+      r.event_queued = ::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN) != 0;
+      seen_->push_back(r);
     }
     TrackingSource::release(std::move(acquired));
   }
@@ -810,7 +820,7 @@ class SeqOnReleaseSource : public TrackingSource {
  private:
   int fd_;
   std::uint32_t crtc_;
-  std::shared_ptr<std::vector<std::uint64_t>> seqs_;
+  std::shared_ptr<std::vector<ReleaseSeen>> seen_;
 };
 
 // A caller that neither drains nor dispatches the final flip event: the
@@ -830,10 +840,10 @@ TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
   auto inner = DumbBufferSource::create(*fx.dev, fb_w, fb_h, DRM_FORMAT_ARGB8888);
   ASSERT_TRUE(inner.has_value()) << inner.error().message();
   std::vector<TrackingSource::Event> transcript;
-  auto seqs = std::make_shared<std::vector<std::uint64_t>>();
+  auto seen = std::make_shared<std::vector<ReleaseSeen>>();
   LayerDesc layer;
   layer.source = std::make_unique<SeqOnReleaseSource>(std::move(*inner), transcript, fx.dev->fd(),
-                                                      fx.active.crtc_id, seqs);
+                                                      fx.active.crtc_id, seen);
   layer.display.src_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   layer.display.dst_rect = drm::scene::Rect{0, 0, fb_w, fb_h};
   layer.display.zpos = 1;
@@ -846,17 +856,24 @@ TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
   ASSERT_TRUE(fx.scene->commit(DRM_MODE_PAGE_FLIP_EVENT, &pf).has_value());
   std::uint64_t armed = 0;
   ASSERT_EQ(drmCrtcGetSequence(fx.dev->fd(), fx.active.crtc_id, &armed, nullptr), 0);
-  seqs->clear();
+  seen->clear();
 
   const auto t0 = std::chrono::steady_clock::now();
   fx.scene.reset();  // no drain(), no dispatch
   const auto took = std::chrono::steady_clock::now() - t0;
 
-  ASSERT_FALSE(seqs->empty()) << "teardown should hand the in-flight buffers back";
-  for (const auto seq : *seqs) {
-    EXPECT_GT(seq, armed) << "a buffer went back to its source before the flip landed";
+  ASSERT_FALSE(seen->empty()) << "teardown should hand the in-flight buffers back";
+  // Landed: the sequence moved past the commit, or the flip event is queued (a
+  // driver that completes the flip inside the commit counts it before `armed`).
+  for (const auto& r : *seen) {
+    EXPECT_TRUE(r.seq > armed || r.event_queued)
+        << "a buffer went back to its source before the flip landed (seq " << r.seq << ", armed "
+        << armed << ")";
   }
-  EXPECT_LT(took, std::chrono::milliseconds(150)) << "the wait is bounded";
+  // A landing signal ends the wait well before its 100 ms bound; reaching the
+  // bound means the scene saw neither.
+  const auto took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(took).count();
+  EXPECT_LT(took_ms, 90) << "the wait ran to its bound";
   // The event was not consumed: it is still queued for the caller.
   EXPECT_TRUE(pf.dispatch(0).has_value());
   EXPECT_EQ(flips_seen, 1);

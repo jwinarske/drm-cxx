@@ -92,9 +92,11 @@ over `PropTag`: a new tag is a `-Wswitch` diagnostic until it is classified.
 
 If the last real commit armed `DRM_MODE_PAGE_FLIP_EVENT` and `drain()` was not
 called, destroying a `LayerScene` first waits **up to 100 ms** for the CRTC's
-vblank sequence to pass that commit, so the flip has landed before its buffers
-and framebuffers go (the RmFB-on-in-flight-FB hazard). The wait never reads the
-event queue: a caller that dispatches the event itself is undisturbed, and an
+vblank sequence to pass that commit, or for the flip event to be queued (a
+driver that completes the flip inside the commit counts it before the scene
+reads the sequence), so the flip has landed before its buffers and framebuffers
+go (the RmFB-on-in-flight-FB hazard). The wait never reads the event queue,
+only polls it: a caller that dispatches the event itself is undisturbed, and an
 undispatched event stays queued for the caller. It is skipped while suspended
 or when the CRTC's sequence cannot be read, and gives up at the bound, so a
 CRTC that stopped counting cannot hang teardown. `LayerScene::drain(pf,
