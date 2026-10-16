@@ -18,12 +18,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <fcntl.h>
 #include <limits>
 #include <optional>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>  // NOLINT(misc-include-cleaner) — canonical home of off_t
 #include <system_error>
+#include <unistd.h>
+#include <utility>
 
 namespace drm::dumb {
 
@@ -32,6 +35,30 @@ namespace {
 std::error_code last_errno() noexcept {
   return {errno, std::system_category()};
 }
+
+// A duplicate of the device descriptor, owned until a Buffer takes it. The
+// buffer tears down through its own duplicate: the device's number can be
+// closed and reused by another open of the card (session loss), and an ioctl
+// through it would then reach that file's handles and framebuffers.
+class OwnedFd {
+ public:
+  explicit OwnedFd(int fd) noexcept : fd_(::fcntl(fd, F_DUPFD_CLOEXEC, 0)) {}
+  ~OwnedFd() {
+    if (fd_ >= 0) {
+      ::close(fd_);
+    }
+  }
+  OwnedFd(const OwnedFd&) = delete;
+  OwnedFd& operator=(const OwnedFd&) = delete;
+  OwnedFd(OwnedFd&&) = delete;
+  OwnedFd& operator=(OwnedFd&&) = delete;
+
+  [[nodiscard]] int get() const noexcept { return fd_; }
+  [[nodiscard]] int release() noexcept { return std::exchange(fd_, -1); }
+
+ private:
+  int fd_;
+};
 
 // Result of CREATE_DUMB + MAP_DUMB + mmap. AddFB2 is the caller's
 // responsibility (different per single- vs multi-plane FB layout).
@@ -200,6 +227,9 @@ void Buffer::destroy() noexcept {
   width_ = 0;
   height_ = 0;
   stride_ = 0;
+  if (fd_ >= 0) {
+    ::close(fd_);
+  }
   fd_ = -1;
 }
 
@@ -209,15 +239,18 @@ void Buffer::forget() noexcept {
     munmap(mapped_, size_bytes_);
     mapped_ = nullptr;
   }
-  // Drop the GEM handle + FB ID without ioctls. The kernel's
-  // per-process table reclaims these when the fd is closed, which by
-  // definition has already happened if the caller is invoking forget().
+  // Drop the GEM handle + FB ID without ioctls and close the buffer's
+  // duplicate of the device descriptor: the kernel reclaims them when the
+  // last descriptor of that file closes.
   gem_handle_ = 0;
   fb_id_ = 0;
   size_bytes_ = 0;
   width_ = 0;
   height_ = 0;
   stride_ = 0;
+  if (fd_ >= 0) {
+    ::close(fd_);
+  }
   fd_ = -1;
 }
 
@@ -237,10 +270,14 @@ drm::expected<Buffer, std::error_code> Buffer::create(const drm::Device& dev, co
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::invalid_argument));
   }
 
-  const int fd = dev.fd();
-  if (fd < 0) {
+  if (dev.fd() < 0) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
+  OwnedFd own(dev.fd());
+  if (own.get() < 0) {
+    return drm::unexpected<std::error_code>(last_errno());
+  }
+  const int fd = own.get();
 
   auto cm = create_and_map_dumb(fd, cfg.width, cfg.height, cfg.bpp);
   if (!cm) {
@@ -263,8 +300,8 @@ drm::expected<Buffer, std::error_code> Buffer::create(const drm::Device& dev, co
     }
   }
 
-  return Buffer{fd,        cm->gem_handle, fb_id,     cm->mapped, cm->size_bytes,
-                cfg.width, cfg.height,     cm->stride};
+  return Buffer{own.release(),  cm->gem_handle, fb_id,      cm->mapped,
+                cm->size_bytes, cfg.width,      cfg.height, cm->stride};
 }
 
 drm::expected<Buffer, std::error_code> Buffer::create_planar(const drm::Device& dev,
@@ -285,10 +322,14 @@ drm::expected<Buffer, std::error_code> Buffer::create_planar(const drm::Device& 
   if (!geom) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::not_supported));
   }
-  const int fd = dev.fd();
-  if (fd < 0) {
+  if (dev.fd() < 0) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
+  OwnedFd own(dev.fd());
+  if (own.get() < 0) {
+    return drm::unexpected<std::error_code>(last_errno());
+  }
+  const int fd = own.get();
 
   // Over-allocate so the UV plane fits in the same linear region.
   // The kernel's CREATE_DUMB sees one tall buffer; AddFB2 below
@@ -351,7 +392,8 @@ drm::expected<Buffer, std::error_code> Buffer::create_planar(const drm::Device& 
   // The Buffer's `width` / `height` track the *image* dimensions,
   // not the over-allocated `total_rows` — consumers reading
   // `height()` see the visible image, matching the AddFB2 framing.
-  return Buffer{fd, cm->gem_handle, fb_id, cm->mapped, cm->size_bytes, width, height, cm->stride};
+  return Buffer{own.release(),  cm->gem_handle, fb_id,  cm->mapped,
+                cm->size_bytes, width,          height, cm->stride};
 }
 
 }  // namespace drm::dumb

@@ -13,10 +13,12 @@
 // `drm::dumb::Buffer` centralizes the four-step allocation ceremony
 // (DRM_IOCTL_MODE_CREATE_DUMB → DRM_IOCTL_MODE_MAP_DUMB → mmap →
 // drmModeAddFB2) behind a move-only value. The destructor unwinds it
-// (drmModeRmFB → munmap → DRM_IOCTL_MODE_DESTROY_DUMB). If the owning
-// DRM fd has been replaced out from under the buffer (e.g. libseat's
-// session-resume cycle), `forget()` drops the handles without issuing
-// ioctls against what is now somebody else's fd.
+// (drmModeRmFB → munmap → DRM_IOCTL_MODE_DESTROY_DUMB) through the
+// buffer's own duplicate of the device descriptor, so the ioctls reach the
+// file the buffer belongs to even after the device's number was closed and
+// reused. The duplicate keeps that file open until the buffer is destroyed
+// or `forget()` drops the handles without ioctls (libseat's session-resume
+// cycle replaced the Device).
 
 #pragma once
 
@@ -117,11 +119,11 @@ class Buffer {
   [[nodiscard]] drm::BufferMapping map(drm::MapAccess access) noexcept;
 
   /// Abandon the GEM handle and FB ID without issuing ioctls. Use when
-  /// the originating DRM fd is known to be dead (libseat session-resume
-  /// replaced the Device). The CPU mapping is still torn down here —
-  /// munmap is fd-independent — so the caller is left with a valid
-  /// empty() buffer. The kernel reclaims the orphaned handles on fd
-  /// close.
+  /// the originating Device is gone (libseat session-resume replaced it).
+  /// The CPU mapping is still torn down here — munmap is fd-independent —
+  /// so the caller is left with a valid empty() buffer. Closes the
+  /// buffer's duplicate of the device descriptor; the kernel reclaims the
+  /// orphaned handles when that file's last descriptor closes.
   void forget() noexcept;
 
  private:
