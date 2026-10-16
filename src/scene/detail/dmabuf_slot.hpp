@@ -70,4 +70,14 @@ void teardown_slot(int fd, DmaBufSlot& slot) noexcept;
 // Close every duped fd and reset plane_count. Terminal cleanup (destructor path).
 void close_slot_fds(DmaBufSlot& slot) noexcept;
 
+// A duplicate of the device descriptor for an import to tear down through. The
+// device's number can be closed and reused by another open of the card (session
+// loss); an ioctl through it would then reach that file's framebuffers and GEM
+// handles. The duplicate reaches the file the import belongs to.
+[[nodiscard]] drm::expected<int, std::error_code> dup_device_fd(int fd) noexcept;
+
+// Close `fd` if open and set it to -1. Closing the last descriptor of a file
+// makes the kernel reclaim the framebuffers and GEM handles left on it.
+void close_device_fd(int& fd) noexcept;
+
 }  // namespace drm::scene::detail

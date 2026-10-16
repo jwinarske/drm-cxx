@@ -62,7 +62,11 @@ drm::expected<std::unique_ptr<ExternalDmaBufPool>, std::error_code> ExternalDmaB
   }
   auto pool = std::unique_ptr<ExternalDmaBufPool>(
       new ExternalDmaBufPool(options.fence_deadline, options.max_pool));
-  pool->fd_ = fd;
+  auto own = detail::dup_device_fd(fd);  // teardown goes through our own duplicate
+  if (!own) {
+    return drm::unexpected<std::error_code>(own.error());
+  }
+  pool->fd_ = *own;
   pool->format_.drm_fourcc = drm_fourcc;
   pool->format_.modifier = modifier;
   pool->format_.width = width;
@@ -85,6 +89,7 @@ ExternalDmaBufPool::~ExternalDmaBufPool() {
     detail::teardown_slot(fd_, slot);
     detail::close_slot_fds(slot);
   }
+  detail::close_device_fd(fd_);
 }
 
 drm::expected<void, std::error_code> ExternalDmaBufPool::submit(
@@ -308,24 +313,31 @@ drm::expected<void, std::error_code> ExternalDmaBufPool::on_session_resumed(
   if (new_fd < 0) {
     return drm::unexpected<std::error_code>(err(std::errc::bad_file_descriptor));
   }
-  fd_ = new_fd;
+  auto own = detail::dup_device_fd(new_fd);
+  if (!own) {
+    return drm::unexpected<std::error_code>(own.error());
+  }
   // Abandon all pending/in-flight/scanning presentation state (the commit that
   // would have consumed it was lost with the old fd).
   presenter_.reset();
 
-  // The old fd is dead: its FB IDs and GEM handles were reclaimed on fd close.
-  // Re-import each cached buffer's duped fds on the new device. A buffer that
-  // fails to re-import is dropped (its fds closed) so it re-imports on its next
-  // submit() rather than lingering with a dead fb_id.
+  // The old device is gone: drop its FB IDs and GEM handles without ioctls and
+  // close our duplicate of its descriptor (the kernel reclaims them when that
+  // file's last descriptor closes). Re-import each cached buffer's duped fds on
+  // a duplicate of the new device's. A buffer that fails to re-import is
+  // dropped (its fds closed) so it re-imports on its next submit() rather than
+  // lingering with a dead fb_id.
   const std::scoped_lock lock(slots_mu_);
+  detail::close_device_fd(fd_);
+  fd_ = *own;
   std::vector<std::uintptr_t> dropped;
   for (auto& [key, slot] : slots_) {
     slot.fb_id = 0;
     for (std::size_t i = 0; i < slot.plane_count; ++i) {
       slot.planes.at(i).gem_handle = 0;
     }
-    if (auto r = detail::import_slot(new_fd, slot, format_); !r) {
-      detail::teardown_slot(new_fd, slot);
+    if (auto r = detail::import_slot(fd_, slot, format_); !r) {
+      detail::teardown_slot(fd_, slot);
       detail::close_slot_fds(slot);
       dropped.push_back(key);
     }
