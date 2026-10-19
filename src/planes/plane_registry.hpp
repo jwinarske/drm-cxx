@@ -227,8 +227,19 @@ class PlaneRegistry {
   /// the same CRTC are O(1) and allocation-free.
   [[nodiscard]] const std::vector<const PlaneCapabilities*>& for_crtc(uint32_t crtc_index) const;
 
+  /// How many planes `crtc_index` can blend at once, when the driver says: one
+  /// per mixer stage, from the CRTC's read-only `capabilities` blob
+  /// (`max_blendstages`, less the base and secure-UI stages; the downstream
+  /// SDE driver). Fewer than the planes it offers on such hardware. nullopt
+  /// when the driver publishes no limit.
+  [[nodiscard]] std::optional<uint32_t> blend_limit(uint32_t crtc_index) const;
+  /// Set it by hand: fixtures, and registries built from_capabilities().
+  void set_blend_limit(uint32_t crtc_index, uint32_t planes);
+
  private:
   std::vector<PlaneCapabilities> planes_;
+  // Per-CRTC blend limits by CRTC index; absent when the driver gives none.
+  std::unordered_map<uint32_t, uint32_t> blend_limits_;
   // Lazy per-CRTC view; mutable so const lookups can populate it.
   // Pointers reference elements in `planes_`, whose addresses are
   // stable for the registry's lifetime (vector is built once in

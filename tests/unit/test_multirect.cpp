@@ -50,3 +50,26 @@ TEST(Multirect, VirtualPlaneNeedsParentInUse) {
   EXPECT_TRUE(multirect_pairing_ok(std::uint32_t{115}, in_use));   // parent armed
   EXPECT_FALSE(multirect_pairing_ok(std::uint32_t{118}, in_use));  // parent free
 }
+
+using drm::planes::detail::parse_blend_limit;
+
+// SA8155P DP-4: stages 0-10, stage 0 the base, stage 10 secure UI: 9 planes.
+TEST(BlendLimit, BaseAndSecureUiStagesAreNotPlanes) {
+  constexpr std::string_view blob =
+      "hw_version=1342177281\nmax_blendstages=11\nhas_src_split=1\nsec_ui_blendstage=10\n"
+      "use_baselayer_for_stage=0\n";
+  EXPECT_EQ(parse_blend_limit(blob), 9U);
+}
+
+TEST(BlendLimit, BaseLayerUsableForAStage) {
+  EXPECT_EQ(parse_blend_limit("max_blendstages=11\nuse_baselayer_for_stage=1\n"), 11U);
+  EXPECT_EQ(parse_blend_limit("max_blendstages=7\n"), 6U);
+}
+
+TEST(BlendLimit, AbsentOrGarbage) {
+  EXPECT_FALSE(parse_blend_limit("has_src_split=1\n").has_value());
+  EXPECT_FALSE(parse_blend_limit("max_blendstages=x\n").has_value());
+  EXPECT_FALSE(parse_blend_limit("max_blendstages=1\n").has_value());
+  // A key that only ends like ours does not count.
+  EXPECT_FALSE(parse_blend_limit("not_max_blendstages=11\n").has_value());
+}

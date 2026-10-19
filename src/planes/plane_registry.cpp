@@ -18,8 +18,10 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -309,7 +311,52 @@ drm::expected<PlaneRegistry, std::error_code> PlaneRegistry::enumerate(const Dev
   }
 
   drmModeFreePlaneResources(plane_res);
+
+  // Per-CRTC blend limits from the CRTC's `capabilities` blob, where the
+  // driver publishes one (downstream SDE). Best-effort: absent means none.
+  if (auto* res = drmModeGetResources(fd); res != nullptr) {
+    const auto crtcs = drm::span<const uint32_t>(res->crtcs, res->count_crtcs);
+    for (std::size_t c = 0; c < crtcs.size(); ++c) {
+      auto* props = drmModeObjectGetProperties(fd, crtcs[c], DRM_MODE_OBJECT_CRTC);
+      if (props == nullptr) {
+        continue;
+      }
+      const auto ids = drm::span<const uint32_t>(props->props, props->count_props);
+      const auto vals = drm::span<const uint64_t>(props->prop_values, props->count_props);
+      for (std::size_t i = 0; i < ids.size(); ++i) {
+        auto* prop = drmModeGetProperty(fd, ids[i]);
+        if (prop == nullptr) {
+          continue;
+        }
+        if (std::strcmp(prop->name, "capabilities") == 0 &&
+            (prop->flags & DRM_MODE_PROP_BLOB) != 0U && vals[i] != 0U) {
+          if (auto* blob = drmModeGetPropertyBlob(fd, static_cast<uint32_t>(vals[i]));
+              blob != nullptr) {
+            if (const auto limit = detail::parse_blend_limit(
+                    std::string_view(static_cast<const char*>(blob->data), blob->length))) {
+              registry.blend_limits_[static_cast<uint32_t>(c)] = *limit;
+            }
+            drmModeFreePropertyBlob(blob);
+          }
+        }
+        drmModeFreeProperty(prop);
+      }
+      drmModeFreeObjectProperties(props);
+    }
+    drmModeFreeResources(res);
+  }
   return registry;
+}
+
+std::optional<uint32_t> PlaneRegistry::blend_limit(uint32_t crtc_index) const {
+  if (const auto it = blend_limits_.find(crtc_index); it != blend_limits_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+void PlaneRegistry::set_blend_limit(uint32_t crtc_index, uint32_t planes) {
+  blend_limits_[crtc_index] = planes;
 }
 
 PlaneRegistry PlaneRegistry::from_capabilities(std::vector<PlaneCapabilities> caps) {

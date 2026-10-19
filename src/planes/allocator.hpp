@@ -353,6 +353,11 @@ class Allocator {
 
   // True when no non-cursor plane on the CRTC exposes zpos (see canvas_plane).
   [[nodiscard]] bool stacks_by_plane_id(uint32_t crtc_index) const;
+  // On a CRTC that blends fewer planes than it offers (PlaneRegistry::
+  // blend_limit), keeps the scratch_placeable_ layers most worth a plane within
+  // the limit, one stage left for the canvas when anything composites, and
+  // moves the rest to scratch_over_limit_ for composition.
+  void cap_to_blend_limit(const Output& output, uint32_t crtc_index);
 
   // Plane-order placement of zpos-sorted `layers`: placed layers on planes in
   // id order, the rest one contiguous run on canvas_plane_ (when
@@ -580,6 +585,8 @@ class Allocator {
   // const-correctness contract.
   mutable BipartiteMatching scratch_matching_;
   std::vector<Layer*> scratch_placeable_;
+  // Layers cap_to_blend_limit() sent to composition this frame.
+  std::vector<Layer*> scratch_over_limit_;
 
   // Set of Layer*s present in the current apply() call's
   // `output.layers()`. Populated at the top of apply(); read by the

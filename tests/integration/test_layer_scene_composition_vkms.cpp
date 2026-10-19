@@ -33,6 +33,8 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/display/mode_list.hpp>
+#include <drm-cxx/planes/plane_registry.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
@@ -97,13 +99,20 @@ drm::expected<ActiveCrtc, std::error_code> pick_crtc(int fd) {
   if (res == nullptr) {
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
+  // DRM_CXX_CONNECTOR=<name> ("DP-4") picks the output, as in the examples:
+  // shared-display controllers report several connected but unlit outputs.
+  const char* want = std::getenv("DRM_CXX_CONNECTOR");
   std::optional<ActiveCrtc> found;
   for (int i = 0; i < res->count_connectors && !found.has_value(); ++i) {
     auto* conn = drmModeGetConnector(fd, res->connectors[i]);
     if (conn == nullptr) {
       continue;
     }
-    if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0) {
+    const bool wanted = want == nullptr || *want == '\0' ||
+                        std::string(drm::display::connector_type_name(conn->connector_type)) + "-" +
+                                std::to_string(conn->connector_type_id) ==
+                            want;
+    if (wanted && conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0) {
       for (int e = 0; e < conn->count_encoders && !found.has_value(); ++e) {
         auto* enc = drmModeGetEncoder(fd, conn->encoders[e]);
         if (enc == nullptr) {
@@ -132,16 +141,20 @@ drm::expected<ActiveCrtc, std::error_code> pick_crtc(int fd) {
   return *found;
 }
 
-// Non-cursor planes that can scan out on `crtc_id`.
-std::uint32_t scene_plane_count(int fd, std::uint32_t crtc_id) {
+// Non-cursor planes that can scan out on `crtc_id`, capped by how many the
+// CRTC can blend at once where the driver says (PlaneRegistry::blend_limit).
+std::uint32_t scene_plane_count(const Device& dev, std::uint32_t crtc_id) {
+  const int fd = dev.fd();
   auto* res = drmModeGetResources(fd);
   if (res == nullptr) {
     return 0;
   }
   std::uint32_t crtc_bit = 0;
+  std::uint32_t crtc_index = 0;
   for (int c = 0; c < res->count_crtcs; ++c) {
     if (res->crtcs[c] == crtc_id) {
       crtc_bit = 1U << static_cast<unsigned>(c);
+      crtc_index = static_cast<std::uint32_t>(c);
     }
   }
   drmModeFreeResources(res);
@@ -170,6 +183,11 @@ std::uint32_t scene_plane_count(int fd, std::uint32_t crtc_id) {
     count += cursor ? 0U : 1U;
   }
   drmModeFreePlaneResources(planes);
+  if (auto registry = drm::planes::PlaneRegistry::enumerate(dev); registry) {
+    if (const auto limit = registry->blend_limit(crtc_index); limit && *limit < count) {
+      count = *limit;
+    }
+  }
   return count;
 }
 
@@ -682,7 +700,7 @@ void check_composited_stack(const std::function<bool(std::uint32_t, std::uint32_
   ASSERT_TRUE(scene_r.has_value()) << scene_r.error().message();
   auto& scene = **scene_r;
 
-  const std::uint32_t planes = scene_plane_count(dev.fd(), active.crtc_id);
+  const std::uint32_t planes = scene_plane_count(dev, active.crtc_id);
   if (planes < 4U) {
     GTEST_SKIP() << "the CRTC has " << planes << " plane(s); the stack needs at least 4";
   }
