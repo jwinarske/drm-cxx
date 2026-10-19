@@ -86,6 +86,10 @@ int main() {
   bool saw_full = false;
   bool saw_partial = false;
   for (int frame = 0; frame < 8; ++frame) {
+    // Each frame changes its own 16x16 cell, so a frame's change is never the
+    // stale region a reused slot owes.
+    const drm::present::Rect changed{frame * 16, 0, 16, 16};
+    bool partial = false;
     auto pr = src->paint([&](drm::BufferMapping& m, const drm::present::Repaint& rp) {
       // Exactly one of {full, non-empty region} holds.
       CHECK(rp.full != !rp.region.empty());
@@ -94,9 +98,9 @@ int main() {
         std::memset(m.pixels().data(), 0, m.pixels().size());
       } else {
         saw_partial = true;
+        partial = true;
       }
-      // Report a fixed dirty rect as this frame's damage.
-      return std::vector<drm::present::Rect>{{0, 0, 32, 32}};
+      return std::vector<drm::present::Rect>{changed};
     });
     CHECK(pr.has_value());
 
@@ -104,6 +108,19 @@ int main() {
     CHECK(acq.has_value());
     if (acq) {
       CHECK(acq->fb_id != 0);
+      // The damage names what differs from the buffer on screen: this frame's
+      // own change, not the stale region just repainted (#367).
+      if (partial) {
+        bool covered = false;
+        for (const auto& d : acq->damage) {
+          covered = covered || (d.x <= changed.x && d.y <= changed.y &&
+                                d.x + static_cast<std::int32_t>(d.w) >=
+                                    changed.x + static_cast<std::int32_t>(changed.width) &&
+                                d.y + static_cast<std::int32_t>(d.h) >=
+                                    changed.y + static_cast<std::int32_t>(changed.height));
+        }
+        CHECK(covered);
+      }
       // Release the PREVIOUS frame's buffer (mirrors the scene retiring it once
       // the next frame is committed) so the ring always has a free slot.
       if (prev) {
@@ -120,6 +137,18 @@ int main() {
   // slots, at least one frame must do a partial (age-driven) repaint.
   CHECK(saw_full);
   CHECK(saw_partial);
+
+  // A resume re-allocates the buffers blank: the first paint after it must be
+  // a full repaint, not the partial one the ring's old history would offer (#369).
+  src->on_session_paused();
+  CHECK(src->on_session_resumed(*dev).has_value());
+  bool full_after_resume = false;
+  CHECK(src->paint([&](drm::BufferMapping&, const drm::present::Repaint& rp) {
+             full_after_resume = rp.full;
+             return std::vector<drm::present::Rect>{};
+           })
+            .has_value());
+  CHECK(full_after_resume);
 
   if (g_fail == 0) {
     std::puts("test_dumb_ring_source: OK");

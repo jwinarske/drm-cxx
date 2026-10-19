@@ -16,8 +16,11 @@
 //     (Repaint: full for a fresh/too-stale slot, else the union of damage since
 //     this slot was last scanned out), and returns what it changed this frame.
 //   * The next LayerScene commit's acquire() scans out the painted slot and
-//     reports the repainted region as the buffer's damage, so FB_DAMAGE_CLIPS
-//     carries exactly what differs from this buffer's previous scanout.
+//     reports the callback's returned region as the buffer's damage, so
+//     FB_DAMAGE_CLIPS carries what differs from the buffer on screen (the
+//     previous frame). A full repaint reports none: a full-frame commit.
+//   * A session resume re-allocates the buffers blank and resets the ring, so
+//     the first paint after it is a full repaint.
 //
 // Single-threaded: drive paint() + the scene commit from one loop.
 

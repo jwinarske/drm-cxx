@@ -81,13 +81,14 @@ drm::expected<void, std::error_code> DumbRingSource::paint(const PaintFn& fn) {
   const std::vector<Rect> frame_damage = fn(mapping, lease->repaint);
   ring_.present(lease->slot, frame_damage);
 
-  // FB_DAMAGE_CLIPS for this buffer == the region that differs from its previous
-  // scanout, i.e. the stale union the app just repainted. A full repaint reports
-  // no damage (the scene then does a full-frame commit).
+  // FB_DAMAGE_CLIPS name what differs from the buffer on screen, which shows the
+  // previous frame: this frame's own change. The stale region the app repainted
+  // now matches the screen, so it is not damage. A full repaint reports none
+  // (the scene then does a full-frame commit).
   pending_damage_.clear();
   if (!lease->repaint.full) {
-    pending_damage_.reserve(lease->repaint.region.size());
-    for (const Rect& r : lease->repaint.region) {
+    pending_damage_.reserve(frame_damage.size());
+    for (const Rect& r : frame_damage) {
       pending_damage_.push_back(scene::DamageRect{r.x, r.y, r.width, r.height});
     }
   }
@@ -126,10 +127,14 @@ void DumbRingSource::on_session_paused() noexcept {}
 drm::expected<void, std::error_code> DumbRingSource::on_session_resumed(
     const drm::Device& new_dev) {
   // Old fd is dead: drop and re-allocate every live slot against the new device,
-  // and abandon the in-flight painted frame (its commit was lost).
+  // and abandon the in-flight painted frame (its commit was lost). The new
+  // buffers are zero-filled, so the ring's age and damage history go too: every
+  // slot is leased fresh and repainted in full. The scene released what it held
+  // when it paused.
   dev_ = &new_dev;
   pending_slot_.reset();
   pending_damage_.clear();
+  ring_ = BufferRing(ring_.max_slots());
   for (auto& slot : buffers_) {
     if (slot.has_value()) {
       slot->forget();
