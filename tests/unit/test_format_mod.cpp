@@ -120,6 +120,18 @@ void test_classify() {
   CHECK(fmt::classify(fmt::Modifier{k_vs | 0x0cU}) == BC::Tiling);
   // TYPE_COMPRESSED (bit 54 set) = DEC400 lossless FB compression.
   CHECK(fmt::classify(fmt::Modifier{k_vs | (std::uint64_t{1} << 54) | 0x02U}) == BC::Compression);
+
+  // Mainline gives 0x0b to MediaTek: tile 16L32S (1), COMPRESS_V1 at bit 8,
+  // 10-bit layout at bits 16-23. Told apart from VS by the body.
+  CHECK(fmt::vendor_0b_is_mtk(fmt::Modifier{k_vs | 0x1U}));
+  CHECK(fmt::vendor_0b_is_mtk(fmt::Modifier{k_vs | 0x101U}));
+  CHECK(fmt::vendor_0b_is_mtk(fmt::Modifier{k_vs | 0x10001U}));
+  CHECK(!fmt::vendor_0b_is_mtk(fmt::Modifier{k_vs | 0x00U}));
+  CHECK(!fmt::vendor_0b_is_mtk(fmt::Modifier{k_vs | 0x02U}));
+  CHECK(!fmt::vendor_0b_is_mtk(fmt::Modifier{k_vs | 0x0cU}));
+  CHECK(!fmt::vendor_0b_is_mtk(fmt::Modifier{k_vs | (std::uint64_t{1} << 54) | 0x02U}));
+  CHECK(fmt::classify(fmt::Modifier{k_vs | 0x1U}) == BC::Tiling);
+  CHECK(fmt::classify(fmt::Modifier{k_vs | 0x101U}) == BC::Compression);
 }
 
 void test_cost() {
@@ -193,6 +205,10 @@ void test_describe() {
 #endif
 
   CHECK(fmt::describe(fmt::Modifier{DRM_FORMAT_MOD_QCOM_COMPRESSED}) == "QCOM_COMPRESSED(UBWC)");
+  // The header's describe() example, verbatim.
+  CHECK(fmt::describe(fmt::Modifier{DRM_FORMAT_MOD_ARM_AFBC(
+            AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 | AFBC_FORMAT_MOD_SPARSE | AFBC_FORMAT_MOD_YTR)}) ==
+        "ARM_AFBC(16x16|YTR|SPARSE)");
 
   // VeriSilicon (DC8200): NORMAL tile modes are named; VS_LINEAR is tile 0; the
   // DEC (compressed) path is decoded structurally.
@@ -206,6 +222,7 @@ void test_describe() {
   CHECK(contains(vs_dec, "VS_DEC"));
   CHECK(contains(vs_dec, "tile=7"));
   CHECK(contains(vs_dec, "align32"));
+  CHECK(fmt::describe(fmt::Modifier{k_vs | 0x101U}) == "MTK(tile=1, compress=1, 10bit=0)");
 
 #ifdef AMD_FMT_MOD
   // Displayable DCC: describe surfaces dcc=1 and classify reports Compression;

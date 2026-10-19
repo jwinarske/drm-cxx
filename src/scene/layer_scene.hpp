@@ -429,10 +429,10 @@ class LayerScene {
   /// Request the CRTC's variable-refresh-rate toggle (VRR_ENABLED). Opt-in;
   /// off until called. The scene arms it on every commit and ORs ALLOW_MODESET
   /// into the flags when the value changes (amdgpu validates the timing
-  /// reconfigure only under modeset). Drivers/CRTCs without VRR_ENABLED (probe
-  /// `DriverProfile::vrr_capable`) silently swallow the call — no state change,
-  /// no error. Pairs with the idle-Skip: VRR matches the flip cadence while
-  /// content updates, Skip stops flips entirely when it's static.
+  /// reconfigure only under modeset). Drivers/CRTCs without VRR_ENABLED
+  /// silently swallow the call — no state change, no error. Whether a connected
+  /// sink can vary its refresh is `DriverProfile::vrr_capable`. Pairs with the idle-Skip: VRR
+  /// matches the flip cadence while content updates, Skip stops flips entirely when it's static.
   void set_vrr_enabled(bool enable);
 
   /// amdgpu output transfer function (`AMD_CRTC_REGAMMA_TF`) — the output stage

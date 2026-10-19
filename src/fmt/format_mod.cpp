@@ -639,6 +639,13 @@ const char* vs_norm_tile(std::uint64_t tile) noexcept {
 // selects NORMAL (tiling) / COMPRESSED (DEC400) / CUSTOM_10BIT; the low bits hold
 // a tile-mode index. NORMAL modes are named; the DEC (compressed) path is decoded
 // structurally -- no available hardware advertises it.
+// MediaTek (mainline vendor 0x0b): tile, compression and 10-bit layout fields.
+std::string mtk_describe(std::uint64_t mod) {
+  return "MTK(tile=" + std::to_string(mod & 0xfULL) +
+         ", compress=" + std::to_string((mod >> 8) & 0xffULL) +
+         ", 10bit=" + std::to_string((mod >> 16) & 0xffULL) + ")";
+}
+
 std::string vs_describe(std::uint64_t mod) {
   switch ((mod >> 54) & 0x3ULL) {
     case 0x0: {                                  // TYPE_NORMAL (tiling); VS_LINEAR is tile 0
@@ -685,7 +692,7 @@ std::string describe(Modifier m) {
     case DRM_FORMAT_MOD_VENDOR_QCOM:
       return "QCOM_COMPRESSED(UBWC)";
     case DRM_FORMAT_MOD_VENDOR_VS:
-      return vs_describe(m.value);
+      return vendor_0b_is_mtk(m) ? mtk_describe(m.value) : vs_describe(m.value);
     case DRM_FORMAT_MOD_VENDOR_NVIDIA:
       return "NVIDIA_BLOCK_LINEAR";
 #ifdef DRM_FORMAT_MOD_BROADCOM_UIF

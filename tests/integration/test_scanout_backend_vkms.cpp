@@ -11,6 +11,7 @@
 #include "vkms_node.hpp"
 
 #include <drm-cxx/core/device.hpp>
+#include <drm-cxx/display/driver_profile.hpp>
 #include <drm-cxx/present/gbm_producer.hpp>
 #include <drm-cxx/present/scanout_backend.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
@@ -18,17 +19,14 @@
 #include <drm-cxx/sync/fence.hpp>
 
 #include <drm_fourcc.h>
-#include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include <cstdint>
 #include <cstdlib>
-#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
 #include <system_error>
-#include <unistd.h>
 
 namespace {}  // namespace
 
@@ -146,7 +144,7 @@ TEST(ScanoutBackendVkms, PresentDeliversOutFence) {
       << "public out_fence must be delivered when the CRTC advertises OUT_FENCE_PTR";
 }
 
-TEST(ScanoutBackendVkms, VrrAutoArmsFromProfileAndCommits) {
+TEST(ScanoutBackendVkms, VrrOnCommitsAndToggles) {
   const auto path = drm::test::find_vkms_node();
   if (!path.has_value()) {
     GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
@@ -155,12 +153,12 @@ TEST(ScanoutBackendVkms, VrrAutoArmsFromProfileAndCommits) {
   auto dev = drm::Device::open(*path);
   ASSERT_TRUE(dev.has_value()) << "Device::open: " << dev.error().message();
 
-  // Auto drives VRR from the driver profile. vkms's CRTC advertises VRR_ENABLED,
-  // so Auto arms it -- and the resulting commit (which the scene tags with
-  // ALLOW_MODESET on the enable transition) must still land.
+  // vkms's CRTC exposes VRR_ENABLED, so On arms it -- and the resulting commit
+  // (which the scene tags with ALLOW_MODESET on the enable transition) must
+  // still land. (Auto would not: no vkms sink reports vrr_capable.)
   drm::present::GbmScanoutProducer producer(*dev);
   drm::present::ScanoutBackend::Config cfg;
-  cfg.vrr = drm::present::ScanoutBackend::VrrPolicy::Auto;
+  cfg.vrr = drm::present::ScanoutBackend::VrrPolicy::On;
   auto backend = drm::present::ScanoutBackend::create(*dev, producer, cfg);
   ASSERT_TRUE(backend.has_value()) << "create: " << backend.error().message();
 
@@ -168,7 +166,7 @@ TEST(ScanoutBackendVkms, VrrAutoArmsFromProfileAndCommits) {
   EXPECT_EQ((*backend)->vrr_capable(), (*backend)->profile().vrr_capable);
 
   auto r1 = (*backend)->present(0);
-  ASSERT_TRUE(r1.has_value()) << "present (vrr Auto): " << r1.error().message();
+  ASSERT_TRUE(r1.has_value()) << "present (vrr On): " << r1.error().message();
 
   // Runtime toggles: disarm then re-arm; each change commits cleanly (the enable
   // transition again ORs ALLOW_MODESET in the scene).
@@ -179,6 +177,21 @@ TEST(ScanoutBackendVkms, VrrAutoArmsFromProfileAndCommits) {
   (*backend)->set_vrr(true);
   auto r3 = (*backend)->present(0);
   ASSERT_TRUE(r3.has_value()) << "present (vrr on): " << r3.error().message();
+}
+
+// VRR_ENABLED is a default property of every atomic CRTC; vkms has it, but no
+// vkms connector reports vrr_capable, so nothing behind it can vary its refresh
+// and the profile must not claim it (#371).
+TEST(ScanoutBackendVkms, VrrCapableNeedsASinkThatReportsIt) {
+  const auto path = drm::test::find_vkms_node();
+  if (!path.has_value()) {
+    GTEST_SKIP() << "vkms not loaded; modprobe vkms enable_overlay=1.";
+  }
+  auto dev = drm::Device::open(*path);
+  ASSERT_TRUE(dev.has_value()) << "Device::open: " << dev.error().message();
+  auto profile = drm::display::DriverProfile::probe(*dev);
+  ASSERT_TRUE(profile.has_value()) << profile.error().message();
+  EXPECT_FALSE(profile->vrr_capable);
 }
 
 // RestorePolicy::SavedCrtc snapshots the CRTC at create() and puts it back when

@@ -91,9 +91,16 @@ class CrtcColorPipeline {
   drm::expected<void, std::error_code> apply(drm::AtomicRequest& req) const;
 
   /// Forget every staged blob without calling
-  /// `drmModeDestroyPropertyBlob`. Use on session loss; the kernel
-  /// reclaims the blobs when the originating fd closes.
+  /// `drmModeDestroyPropertyBlob`, and drop the pipeline's duplicate of
+  /// the device descriptor; the kernel reclaims the blobs when that
+  /// file's last descriptor closes. Every setter then fails with
+  /// `errc::bad_file_descriptor` until `on_session_resumed()`.
   void clear_for_session_loss() noexcept;
+
+  /// Rebind to the resumed device (clearing first if the caller has not).
+  /// Staged stages are gone: set them again before the next `apply()`.
+  /// Property ids are kept; the CRTC is the same object on the new file.
+  drm::expected<void, std::error_code> on_session_resumed(const drm::Device& new_dev);
 
   /// Read the cached capability table.
   [[nodiscard]] const CrtcCapabilities& capabilities() const noexcept { return caps_; }
@@ -108,12 +115,13 @@ class CrtcColorPipeline {
   CrtcColorPipeline(int fd, std::uint32_t crtc_id, CrtcCapabilities caps) noexcept;
 
   void destroy_blob(std::uint32_t& blob_id) const noexcept;
+  void close_fd() noexcept;
   drm::expected<void, std::error_code> replace_lut_blob(std::uint32_t& slot,
                                                         drm::span<const drm_color_lut> lut);
   drm::expected<void, std::error_code> replace_ctm_blob(std::uint32_t& slot,
                                                         const drm_color_ctm& ctm);
 
-  int fd_{-1};
+  int fd_{-1};  // our own duplicate of the device descriptor
   std::uint32_t crtc_id_{0};
   CrtcCapabilities caps_{};
   std::uint32_t degamma_blob_{0};

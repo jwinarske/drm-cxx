@@ -18,7 +18,9 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <fcntl.h>
 #include <system_error>
+#include <unistd.h>
 #include <vector>
 
 namespace drm::display {
@@ -43,6 +45,14 @@ CrtcColorPipeline::~CrtcColorPipeline() {
   destroy_blob(degamma_blob_);
   destroy_blob(ctm_blob_);
   destroy_blob(gamma_blob_);
+  close_fd();
+}
+
+void CrtcColorPipeline::close_fd() noexcept {
+  if (fd_ >= 0) {
+    ::close(fd_);
+  }
+  fd_ = -1;
 }
 
 CrtcColorPipeline::CrtcColorPipeline(CrtcColorPipeline&& other) noexcept
@@ -67,6 +77,7 @@ CrtcColorPipeline& CrtcColorPipeline::operator=(CrtcColorPipeline&& other) noexc
     destroy_blob(degamma_blob_);
     destroy_blob(ctm_blob_);
     destroy_blob(gamma_blob_);
+    close_fd();
     fd_ = other.fd_;
     crtc_id_ = other.crtc_id_;
     caps_ = other.caps_;
@@ -102,7 +113,13 @@ drm::expected<CrtcColorPipeline, std::error_code> CrtcColorPipeline::create(
     return drm::unexpected<std::error_code>(
         std::make_error_code(std::errc::operation_not_supported));
   }
-  CrtcColorPipeline pipeline(dev.fd(), crtc_id, *caps);
+  // Our own duplicate of the device descriptor: blobs are destroyed through it,
+  // so they reach this file even after the device's number is reused.
+  const int fd = ::fcntl(dev.fd(), F_DUPFD_CLOEXEC, 0);
+  if (fd < 0) {
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
+  }
+  CrtcColorPipeline pipeline(fd, crtc_id, *caps);
   // Resolve the stage property ids once: they cannot change for the life of
   // the CRTC, and re-reading the property set cost ~10 ioctls per commit.
   drm::PropertyStore props;
@@ -275,11 +292,25 @@ drm::expected<void, std::error_code> CrtcColorPipeline::apply(drm::AtomicRequest
 }
 
 void CrtcColorPipeline::clear_for_session_loss() noexcept {
-  // Forget without destroy: kernel reclaims blobs on fd close.
-  fd_ = -1;
+  // Forget without destroy and close our duplicate: the kernel reclaims the
+  // blobs when that file's last descriptor closes.
+  close_fd();
   degamma_blob_ = 0;
   ctm_blob_ = 0;
   gamma_blob_ = 0;
+}
+
+drm::expected<void, std::error_code> CrtcColorPipeline::on_session_resumed(
+    const drm::Device& new_dev) {
+  clear_for_session_loss();
+  if (new_dev.fd() < 0) {
+    return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
+  }
+  fd_ = ::fcntl(new_dev.fd(), F_DUPFD_CLOEXEC, 0);
+  if (fd_ < 0) {
+    return drm::unexpected<std::error_code>(std::error_code(errno, std::system_category()));
+  }
+  return {};
 }
 
 }  // namespace drm::display

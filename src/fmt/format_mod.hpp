@@ -48,8 +48,9 @@
 #endif
 static_assert(DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED == 0x0810000000000001ULL,
               "ARM 16x16 interleaved is type MISC, value 1");
-// StarFive/VeriSilicon DC8200 vendor. Out-of-tree (starfive-tech/linux); not in
-// mainline drm_fourcc.h, whose vendor list stops at ALLWINNER 0x09 / AMLOGIC 0x0a.
+// StarFive/VeriSilicon DC8200 vendor, out-of-tree (starfive-tech/linux). Mainline
+// drm_fourcc.h assigns the same byte to MediaTek (DRM_FORMAT_MOD_VENDOR_MTK); both
+// meanings ship, so a 0x0b modifier is told apart by its body (vendor_0b_is_mtk).
 #ifndef DRM_FORMAT_MOD_VENDOR_VS
 // Mirrors the drm_fourcc.h DRM_FORMAT_MOD_VENDOR_* family (all macros); used as a
 // switch case label beside them.
@@ -91,7 +92,20 @@ enum class BandwidthClass : std::uint8_t {
 
 [[nodiscard]] BandwidthClass classify(Modifier m) noexcept;
 
-// Human-readable, e.g. "ARM_AFBC(16x16|SPARSE|YTR)", "QCOM_COMPRESSED(UBWC)".
+// Vendor byte 0x0b is MediaTek in mainline and VeriSilicon (DC8200) out of tree.
+// MediaTek flags live in bits 0-23 (tile 0-3, only 0 or 1; compression 8-15;
+// 10-bit layout 16-23); VeriSilicon uses a type in bits 54-55 and a 5-bit tile
+// mode, of which the DC8200 advertises LINEAR (0) and 2-12. So: a VS type, or
+// none of MediaTek's upper flags and a tile other than 1, reads as VeriSilicon.
+[[nodiscard]] constexpr bool vendor_0b_is_mtk(Modifier m) noexcept {
+  const std::uint64_t body = m.value & 0x00ffffffffffffffULL;
+  if (((body >> 54) & 0x3U) != 0U) {
+    return false;
+  }
+  return (body & 0xffff00ULL) != 0U || body == 0x1U;
+}
+
+// Human-readable, e.g. "ARM_AFBC(16x16|YTR|SPARSE)", "QCOM_COMPRESSED(UBWC)".
 // For logging only.
 [[nodiscard]] std::string describe(Modifier m);
 
@@ -357,6 +371,11 @@ inline BandwidthClass classify(Modifier m) noexcept {
       // mask misses CDE vertical (type 4 = 0b100) and calls it Tiling.
       return (((m.value >> 23) & 0x7) != 0U) ? BandwidthClass::Compression : BandwidthClass::Tiling;
     case DRM_FORMAT_MOD_VENDOR_VS:
+      if (vendor_0b_is_mtk(m)) {
+        // MediaTek: bits 15:8 are the compression type (MTK_FMT_MOD_COMPRESS_*).
+        return (((m.value >> 8) & 0xffU) != 0U) ? BandwidthClass::Compression
+                                                : BandwidthClass::Tiling;
+      }
       // StarFive/VeriSilicon DC8200. VS modifiers pack a 2-bit TYPE at bits 55:54
       // -- NORMAL (tiling) vs COMPRESSED (DEC400 lossless FB compression) -- and
       // VS_LINEAR is the all-zero body. (Layout from starfive-tech/linux uapi
