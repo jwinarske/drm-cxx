@@ -519,6 +519,8 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     scratch_placeable_.push_back(l);
   }
 
+  cap_to_blend_limit(output, crtc_index);
+
   // §13.7 Spatial intersection splitting
   auto groups = split_independent_groups(scratch_placeable_);
 
@@ -598,7 +600,9 @@ drm::expected<std::size_t, std::error_code> Allocator::full_search(Output& outpu
     placeable.reserve(output.layers().size());
     for (auto* l : output.layers()) {
       if (l->force_composited_ || l->is_transient_composited() || l->is_composition_layer() ||
-          l->is_externally_bound() || l->is_pinned()) {
+          l->is_externally_bound() || l->is_pinned() ||
+          std::find(scratch_over_limit_.begin(), scratch_over_limit_.end(), l) !=
+              scratch_over_limit_.end()) {
         continue;
       }
       placeable.push_back(l);
@@ -948,6 +952,51 @@ PlaneAssignment Allocator::place_group(const std::vector<Layer*>& layers,
   }
 
   return assignment;
+}
+
+void Allocator::cap_to_blend_limit(const Output& output, const uint32_t crtc_index) {
+  scratch_over_limit_.clear();
+  const auto limit = registry_.blend_limit(crtc_index);
+  if (!limit.has_value() || stacks_by_plane_id(crtc_index)) {
+    return;
+  }
+  // Pinned and externally bound layers hold planes of their own; composited
+  // ones need the canvas.
+  std::size_t held = 0;
+  bool composites = false;
+  for (const auto* l : output.layers()) {
+    if (l->is_composition_layer()) {
+      continue;
+    }
+    if (l->is_pinned() || l->is_externally_bound()) {
+      ++held;
+    } else if (l->force_composited_ || l->is_transient_composited()) {
+      composites = true;
+    }
+  }
+  if (held + scratch_placeable_.size() > *limit) {
+    composites = true;
+  }
+  const std::size_t stages = *limit > held ? *limit - held : 0;
+  const std::size_t budget = composites && stages > 0 ? stages - 1 : stages;
+  if (scratch_placeable_.size() <= budget) {
+    return;
+  }
+  // Keep the `budget` layers with the highest keep_priority (ties: input order).
+  std::vector<Layer*> ranked = scratch_placeable_;
+  std::stable_sort(ranked.begin(), ranked.end(), [](const Layer* a, const Layer* b) {
+    return keep_priority(*a) > keep_priority(*b);
+  });
+  scratch_over_limit_.assign(ranked.begin() + static_cast<std::ptrdiff_t>(budget), ranked.end());
+  scratch_placeable_.erase(std::remove_if(scratch_placeable_.begin(), scratch_placeable_.end(),
+                                          [this](const Layer* l) {
+                                            return std::find(scratch_over_limit_.begin(),
+                                                             scratch_over_limit_.end(),
+                                                             l) != scratch_over_limit_.end();
+                                          }),
+                           scratch_placeable_.end());
+  alloc_log("[alloc] blend limit {} on crtc {}: {} held, {} placeable, {} to composition", *limit,
+            crtc_index, held, scratch_placeable_.size(), scratch_over_limit_.size());
 }
 
 bool Allocator::stacks_by_plane_id(const uint32_t crtc_index) const {
