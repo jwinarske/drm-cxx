@@ -47,7 +47,8 @@ struct DriverProfile {
 
   // Frame-economy capabilities (per-object, probed by enumeration — not drmGetCap).
   bool fb_damage_clips{false};  // >=1 plane advertises FB_DAMAGE_CLIPS (driver consumes damage)
-  bool vrr_capable{false};      // >=1 CRTC exposes VRR_ENABLED (variable refresh is drivable)
+  bool vrr_capable{false};      // a CRTC exposes VRR_ENABLED and a connected connector's
+                                // vrr_capable is non-zero (a sink can vary its refresh)
   PanelSelfRefresh psr{PanelSelfRefresh::Unknown};  // telemetry only; see frame_economy
 
   [[nodiscard]] static drm::expected<DriverProfile, std::error_code> probe(const drm::Device& dev);

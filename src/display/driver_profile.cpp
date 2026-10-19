@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <system_error>
 
 namespace drm::display {
@@ -43,6 +44,26 @@ namespace {
   return found;
 }
 
+// The value of property `name` on an object, or nullopt when it has none.
+[[nodiscard]] std::optional<std::uint64_t> object_property_value(int fd, std::uint32_t id,
+                                                                 std::uint32_t type,
+                                                                 const char* name) {
+  std::optional<std::uint64_t> value;
+  drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(fd, id, type);
+  if (props != nullptr) {
+    for (std::uint32_t i = 0; i < props->count_props && !value; ++i) {
+      if (drmModePropertyPtr p = drmModeGetProperty(fd, props->props[i])) {
+        if (std::strcmp(p->name, name) == 0) {
+          value = props->prop_values[i];
+        }
+        drmModeFreeProperty(p);
+      }
+    }
+    drmModeFreeObjectProperties(props);
+  }
+  return value;
+}
+
 // Enumerate planes / CRTCs / connectors for the per-object frame-economy caps.
 // Best-effort: any failed query leaves the cap at its conservative default.
 void probe_object_caps(int fd, DriverProfile& profile) {
@@ -64,10 +85,14 @@ void probe_object_caps(int fd, DriverProfile& profile) {
   if (res == nullptr) {
     return;
   }
-  for (int i = 0; i < res->count_crtcs && !profile.vrr_capable; ++i) {
-    profile.vrr_capable = object_has_property(fd, static_cast<std::uint32_t>(res->crtcs[i]),
-                                              DRM_MODE_OBJECT_CRTC, "VRR_ENABLED");
+  // VRR_ENABLED is a default property of every atomic CRTC, not a capability:
+  // the connector's immutable vrr_capable, set from what the sink supports, is.
+  bool crtc_vrr = false;
+  for (int i = 0; i < res->count_crtcs && !crtc_vrr; ++i) {
+    crtc_vrr = object_has_property(fd, static_cast<std::uint32_t>(res->crtcs[i]),
+                                   DRM_MODE_OBJECT_CRTC, "VRR_ENABLED");
   }
+  bool sink_vrr = false;
 
   // PSR telemetry: a connected eDP/DSI panel may self-refresh; external can't.
   bool any_connected = false;
@@ -81,12 +106,16 @@ void probe_object_caps(int fd, DriverProfile& profile) {
     }
     if (conn->connection == DRM_MODE_CONNECTED) {
       any_connected = true;
+      sink_vrr = sink_vrr || object_property_value(fd, conn->connector_id,
+                                                   DRM_MODE_OBJECT_CONNECTOR, "vrr_capable")
+                                     .value_or(0) != 0U;
       if (connector_type_self_refreshes(conn->connector_type)) {
         self_refresh = true;
       }
     }
     drmModeFreeConnector(conn);
   }
+  profile.vrr_capable = crtc_vrr && sink_vrr;
   if (self_refresh) {
     profile.psr = PanelSelfRefresh::Possible;
   } else if (any_connected) {
