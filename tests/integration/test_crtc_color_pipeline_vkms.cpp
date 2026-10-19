@@ -18,22 +18,16 @@
 #include <drm-cxx/dumb/buffer.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
 
-#include <drm/drm_mode.h>
 #include <drm_fourcc.h>
-#include <xf86drm.h>
+#include <drm_mode.h>
 #include <xf86drmMode.h>
 
 #include <cstdint>
 #include <cstring>
-#include <fcntl.h>
-#include <filesystem>
 #include <gtest/gtest.h>
 #include <optional>
-#include <string>
 #include <system_error>
-#include <unistd.h>
-
-namespace fs = std::filesystem;
+#include <utility>
 
 namespace {
 
@@ -255,4 +249,42 @@ TEST(CrtcColorPipelineVkms, RejectsDegammaWhenNotExposed) {
             std::make_error_code(std::errc::operation_not_supported));
   EXPECT_EQ(pipe.set_bt2020_to_bt709().error(),
             std::make_error_code(std::errc::operation_not_supported));
+}
+
+// After session loss the pipeline refuses work until it is rebound; rebound to
+// the reopened device it stages blobs there (#372).
+TEST(CrtcColorPipelineVkms, ResumesOnTheNewDeviceAfterSessionLoss) {
+  const auto node = drm::test::find_vkms_node();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded";
+  }
+  std::optional<drm::Device> before;
+  if (auto d = drm::Device::open(*node); d) {
+    before.emplace(std::move(*d));
+  } else {
+    GTEST_SKIP() << "cannot open " << *node;
+  }
+  ASSERT_TRUE(before->enable_atomic().has_value());
+  const auto active = pick_crtc(*before);
+  if (!active) {
+    GTEST_SKIP() << "vkms loaded but no active CRTC";
+  }
+  auto pipeline = drm::display::CrtcColorPipeline::create(*before, active->crtc_id);
+  ASSERT_TRUE(pipeline.has_value()) << pipeline.error().message();
+  ASSERT_TRUE(pipeline->set_identity().has_value());
+
+  pipeline->clear_for_session_loss();
+  before.reset();  // session loss: the device's descriptor closes
+  const auto refused = pipeline->set_identity();
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_TRUE(refused.error() == std::errc::bad_file_descriptor) << refused.error().message();
+
+  auto after = drm::Device::open(*node);
+  ASSERT_TRUE(after.has_value()) << after.error().message();
+  ASSERT_TRUE(pipeline->on_session_resumed(*after).has_value());
+  ASSERT_TRUE(pipeline->set_identity().has_value());
+  ASSERT_NE(pipeline->gamma_blob_id(), 0U);
+  drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(after->fd(), pipeline->gamma_blob_id());
+  EXPECT_NE(blob, nullptr) << "the staged gamma blob is not on the resumed device";
+  drmModeFreePropertyBlob(blob);
 }
