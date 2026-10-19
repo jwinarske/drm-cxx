@@ -12,11 +12,13 @@
 #include "core/device.hpp"
 
 #include <drm-cxx/dumb/buffer.hpp>
+#include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/dma_buf_source_cache.hpp>
 #include <drm-cxx/scene/external_dma_buf_source.hpp>
 
 #include <drm_fourcc.h>
 #include <xf86drm.h>
+#include <xf86drmMode.h>
 
 #include <array>
 #include <cstdint>
@@ -38,6 +40,7 @@ struct Probe {
   drm::Device dev;
   drm::dumb::Buffer buf;
   int dmabuf_fd;
+  std::string path;
 };
 
 std::optional<Probe> find_usable_card() {
@@ -74,7 +77,7 @@ std::optional<Probe> find_usable_card() {
       ::close(fd);
       continue;
     }
-    return Probe{std::move(*dev), std::move(*buf), fd};
+    return Probe{std::move(*dev), std::move(*buf), fd, path};
   }
   return std::nullopt;
 }
@@ -171,5 +174,47 @@ TEST(DmaBufSourceCacheVkms, ForwardsExplicitModifierThroughAddFb2WithModifiers) 
   EXPECT_NE(no_mod_acq->fb_id, 0U);
   (*no_mod)->release(std::move(*no_mod_acq));
 
+  ::close(probe->dmabuf_fd);
+}
+
+// After session loss the next open of the card takes the closed descriptor's
+// number, and the kernel hands out the freed framebuffer id again. Clearing
+// the cache must not remove the new device's framebuffer (#368).
+TEST(DmaBufSourceCacheVkms, ClearAfterSessionLossSparesTheNewDevice) {
+  auto probe = find_usable_card();
+  if (!probe) {
+    GTEST_SKIP() << "no dumb+modeset card whose PRIME fd imports as a KMS FB";
+  }
+  std::array<drm::scene::ExternalPlaneInfo, 1> planes{plane_of(probe->buf, probe->dmabuf_fd)};
+
+  std::optional<drm::Device> before;
+  if (auto d = drm::Device::open(probe->path); d) {
+    before.emplace(std::move(*d));
+  } else {
+    GTEST_SKIP() << "cannot reopen " << probe->path;
+  }
+  drm::scene::DmaBufSourceCache cache;
+  auto cached =
+      cache.get_or_create(1, *before, k_w, k_h, DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR, planes);
+  ASSERT_TRUE(cached.has_value()) << cached.error().message();
+  ASSERT_TRUE((*cached)->acquire().has_value());
+  const int old_fd = before->fd();
+  before.reset();  // session loss: the device's descriptor closes
+
+  auto after = drm::Device::open(probe->path);
+  ASSERT_TRUE(after.has_value()) << after.error().message();
+  ASSERT_EQ(after->fd(), old_fd) << "the reopen should take the closed number";
+  auto fresh = drm::scene::ExternalDmaBufSource::create(*after, k_w, k_h, DRM_FORMAT_XRGB8888,
+                                                        DRM_FORMAT_MOD_LINEAR, planes);
+  ASSERT_TRUE(fresh.has_value()) << fresh.error().message();
+  auto acq = (*fresh)->acquire();
+  ASSERT_TRUE(acq.has_value());
+  const auto new_fb = acq->fb_id;
+
+  cache.clear();
+
+  drmModeFBPtr fb = drmModeGetFB(after->fd(), new_fb);
+  EXPECT_NE(fb, nullptr) << "the new device's framebuffer was removed through the old number";
+  drmModeFreeFB(fb);
   ::close(probe->dmabuf_fd);
 }

@@ -124,6 +124,23 @@ drm::expected<void, std::error_code> import_slot(int fd, DmaBufSlot& slot,
   return {};
 }
 
+drm::expected<int, std::error_code> dup_device_fd(int fd) noexcept {
+  const int duped = ::fcntl(fd, F_DUPFD_CLOEXEC, 0);
+  if (duped < 0) {
+    const std::error_code ec(errno, std::system_category());
+    debug_step("fcntl F_DUPFD_CLOEXEC (device)", ec.value());
+    return drm::unexpected<std::error_code>(ec);
+  }
+  return duped;
+}
+
+void close_device_fd(int& fd) noexcept {
+  if (fd >= 0) {
+    ::close(fd);
+  }
+  fd = -1;
+}
+
 void teardown_slot(int fd, DmaBufSlot& slot) noexcept {
   if (fd < 0) {
     return;

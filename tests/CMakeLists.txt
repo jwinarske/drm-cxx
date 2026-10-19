@@ -115,6 +115,11 @@ add_test(NAME test_dumb_ring_source COMMAND test_dumb_ring_source)
 
 # DmaBufSourceCache integration test (gtest) — needs a dumb+modeset card; skips
 # if none. Not blend2d-gated.
+add_executable(test_dumb_buffer_vkms integration/test_dumb_buffer_vkms.cpp)
+target_link_libraries(test_dumb_buffer_vkms PRIVATE
+  drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
+gtest_discover_tests(test_dumb_buffer_vkms)
+
 add_executable(test_dma_buf_source_cache_vkms integration/test_dma_buf_source_cache_vkms.cpp)
 target_link_libraries(test_dma_buf_source_cache_vkms PRIVATE
   drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)

@@ -78,7 +78,13 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
   }
 
   auto src = std::unique_ptr<ExternalDmaBufSource>(new ExternalDmaBufSource());
-  src->fd_ = fd;
+  // Our own duplicate of the device descriptor: teardown goes through it, so it
+  // reaches this file's handles even after the device's number is reused.
+  auto own = detail::dup_device_fd(fd);
+  if (!own) {
+    return drm::unexpected<std::error_code>(own.error());
+  }
+  src->fd_ = *own;
   src->format_.drm_fourcc = drm_format;
   src->format_.modifier = modifier;
   src->format_.width = width;
@@ -92,7 +98,7 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
   if (auto r = detail::dup_planes(src->slot_, planes); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
-  if (auto r = detail::import_slot(fd, src->slot_, src->format_); !r) {
+  if (auto r = detail::import_slot(src->fd_, src->slot_, src->format_); !r) {
     return drm::unexpected<std::error_code>(r.error());
   }
 
@@ -101,6 +107,7 @@ drm::expected<std::unique_ptr<ExternalDmaBufSource>, std::error_code> ExternalDm
 
 ExternalDmaBufSource::~ExternalDmaBufSource() {
   teardown_kernel_state();
+  detail::close_device_fd(fd_);
   close_duped_fds();
   fire_on_release_once();
 }
@@ -152,23 +159,26 @@ drm::expected<void, std::error_code> ExternalDmaBufSource::on_session_resumed(
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::bad_file_descriptor));
   }
 
-  // The old fd is dead — its FB ID and GEM handles have been reclaimed
-  // by the kernel on fd close. Drop our cached copies without ioctls;
-  // calling drmModeRmFB / drm_gem_close against the dead fd would at
-  // best be a no-op against a recycled fd, at worst hit somebody else's
-  // resources. Keep the duped dma-buf fds — the buffer is the same,
-  // we just need a fresh import on the new fd.
+  // The old device is gone. Drop the FB ID and GEM handles without ioctls
+  // and close our duplicate of its descriptor: the kernel reclaims them when
+  // that file's last descriptor closes. Keep the duped dma-buf fds — the
+  // buffer is the same, it just needs a fresh import on the new device.
   slot_.fb_id = 0;
   for (std::size_t i = 0; i < slot_.plane_count; ++i) {
     slot_.planes.at(i).gem_handle = 0;
   }
-  fd_ = new_fd;
+  detail::close_device_fd(fd_);
+  auto own = detail::dup_device_fd(new_fd);
+  if (!own) {
+    return drm::unexpected<std::error_code>(own.error());
+  }
+  fd_ = *own;
 
   // Re-import the duped fds into the new device. On any failure roll back every
   // handle imported so far via teardown_kernel_state() — otherwise the source
   // holds GEM refs on new_fd until destruction and returns EAGAIN from every
-  // acquire() (slot_.fb_id == 0). Rollback uses fd_, already pointed at new_fd.
-  if (auto r = detail::import_slot(new_fd, slot_, format_); !r) {
+  // acquire() (slot_.fb_id == 0). Rollback uses fd_, already our duplicate of new_fd.
+  if (auto r = detail::import_slot(fd_, slot_, format_); !r) {
     teardown_kernel_state();
     return drm::unexpected<std::error_code>(r.error());
   }

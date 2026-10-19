@@ -799,11 +799,12 @@ TEST(LayerSceneReleaseVkms, DrainLandsPendingFlipBeforeTeardown) {
 }
 
 // Records the CRTC's vblank sequence each time the scene hands a buffer back.
-// What a release saw: the CRTC's vblank sequence, and whether a flip event was
-// queued on the fd (the kernel queues it once the flip has landed).
+// What a release saw: the CRTC's vblank sequence, whether a flip event was
+// queued on the fd (the kernel queues it once the flip has landed), and when.
 struct ReleaseSeen {
   std::uint64_t seq{0};
   bool event_queued{false};
+  std::chrono::steady_clock::time_point at;
 };
 
 class SeqOnReleaseSource : public TrackingSource {
@@ -818,6 +819,7 @@ class SeqOnReleaseSource : public TrackingSource {
 
   void release(AcquiredBuffer acquired) noexcept override {
     ReleaseSeen r;
+    r.at = std::chrono::steady_clock::now();
     if (drmCrtcGetSequence(fd_, crtc_, &r.seq, nullptr) == 0) {
       pollfd pfd{fd_, POLLIN, 0};
       r.event_queued = ::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN) != 0;
@@ -869,7 +871,6 @@ TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
 
   const auto t0 = std::chrono::steady_clock::now();
   fx.scene.reset();  // no drain(), no dispatch
-  const auto took = std::chrono::steady_clock::now() - t0;
 
   ASSERT_FALSE(seen->empty()) << "teardown should hand the in-flight buffers back";
   // Landed: the sequence moved past the commit, or the flip event is queued (a
@@ -880,9 +881,12 @@ TEST(LayerSceneReleaseVkms, DestructorWaitsForArmedFlip) {
         << armed << ")";
   }
   // A landing signal ends the wait well before its 100 ms bound; reaching the
-  // bound means the scene saw neither.
-  const auto took_ms = std::chrono::duration_cast<std::chrono::milliseconds>(took).count();
-  EXPECT_LT(took_ms, 90) << "the wait ran to its bound";
+  // bound means the scene saw neither. Timed to the first release, which follows
+  // the wait: the rest of teardown removes framebuffers, and removing the one on
+  // screen can turn the CRTC off, which takes ~100 ms on a DSI panel.
+  const auto waited_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(seen->front().at - t0).count();
+  EXPECT_LT(waited_ms, 90) << "the wait ran to its bound";
   // The event was not consumed: it is still queued for the caller.
   EXPECT_TRUE(pf.dispatch(0).has_value());
   EXPECT_EQ(flips_seen, 1);

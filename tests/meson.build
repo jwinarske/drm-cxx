@@ -109,6 +109,14 @@ test('test_dumb_scanout_sink',
 
 # Integration: needs a dumb-capable modeset card (vkms/amdgpu/rockchip; skips
 # if none). Serial — shares the DRM device with the other card-backed tests.
+test('test_dumb_buffer_vkms',
+  executable('test_dumb_buffer_vkms',
+    'integration/test_dumb_buffer_vkms.cpp',
+    dependencies : test_deps,
+  ),
+  is_parallel : false,
+)
+
 test('test_dma_buf_source_cache_vkms',
   executable('test_dma_buf_source_cache_vkms',
     'integration/test_dma_buf_source_cache_vkms.cpp',

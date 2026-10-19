@@ -90,7 +90,11 @@ drm::expected<std::unique_ptr<ExternalDmaBufRing>, std::error_code> ExternalDmaB
   }
 
   auto ring = std::unique_ptr<ExternalDmaBufRing>(new ExternalDmaBufRing(options.fence_deadline));
-  ring->fd_ = fd;
+  auto own = detail::dup_device_fd(fd);  // teardown goes through our own duplicate
+  if (!own) {
+    return drm::unexpected<std::error_code>(own.error());
+  }
+  ring->fd_ = *own;
   ring->format_.drm_fourcc = drm_format;
   ring->format_.modifier = slots[0].modifier;  // slots are kept plane-compatible
   ring->format_.width = width;
@@ -106,7 +110,7 @@ drm::expected<std::unique_ptr<ExternalDmaBufRing>, std::error_code> ExternalDmaB
     if (auto r = detail::dup_planes(rec, desc.planes); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
-    if (auto r = detail::import_slot(fd, rec, ring->format_); !r) {
+    if (auto r = detail::import_slot(ring->fd_, rec, ring->format_); !r) {
       return drm::unexpected<std::error_code>(r.error());
     }
   }
@@ -122,6 +126,7 @@ drm::expected<std::unique_ptr<ExternalDmaBufRing>, std::error_code> ExternalDmaB
 
 ExternalDmaBufRing::~ExternalDmaBufRing() {
   teardown_kernel_state();
+  detail::close_device_fd(fd_);
   close_duped_fds();
   // No on_release on teardown: the callback is a per-slot leave-scanout signal,
   // not a destruction signal — the producer owns its buffers and is going away.
@@ -197,23 +202,29 @@ drm::expected<void, std::error_code> ExternalDmaBufRing::on_session_resumed(
   if (new_fd < 0) {
     return drm::unexpected<std::error_code>(err(std::errc::bad_file_descriptor));
   }
-  fd_ = new_fd;
-
   // Abandon all pending/in-flight/scanning presentation state and damage carried
   // from the dead fd's session — the commit that would have consumed them was
   // lost with the old fd, and any stale post-resume release finds no entry.
   presenter_.reset();
 
-  // The old fd is dead: drop cached FB IDs + GEM handles without ioctls (they
-  // were reclaimed on fd close) and re-import every slot's duped fds on new_fd.
+  // The old device is gone: drop cached FB IDs + GEM handles without ioctls and
+  // close our duplicate of its descriptor (the kernel reclaims them when that
+  // file's last descriptor closes), then re-import every slot's duped fds on a
+  // duplicate of new_fd.
   for (SlotRecord& slot : slots_) {
     slot.fb_id = 0;
     for (std::size_t i = 0; i < slot.plane_count; ++i) {
       slot.planes.at(i).gem_handle = 0;
     }
   }
+  detail::close_device_fd(fd_);
+  auto own = detail::dup_device_fd(new_fd);
+  if (!own) {
+    return drm::unexpected<std::error_code>(own.error());
+  }
+  fd_ = *own;
   for (SlotRecord& slot : slots_) {
-    if (auto r = detail::import_slot(new_fd, slot, format_); !r) {
+    if (auto r = detail::import_slot(fd_, slot, format_); !r) {
       teardown_kernel_state();
       return drm::unexpected<std::error_code>(r.error());
     }
