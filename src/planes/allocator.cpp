@@ -2054,6 +2054,20 @@ drm::expected<void, std::error_code> Allocator::apply_layer_to_plane_real(
   const bool full_write =
       force_full_writes_ || it == last_committed_.end() || it->second.layer != &layer;
 
+  // Driver-private state another client may have left on the plane (a scaler
+  // setup sized for its buffer rejects ours): zero it whenever the plane is
+  // written in full.
+  if (full_write) {
+    if (const auto* caps = caps_of(plane_id); caps != nullptr) {
+      for (const uint32_t prop : caps->reset_on_arm_props) {
+        if (auto result = req.add_property(plane_id, prop, 0); !result.has_value()) {
+          return result;
+        }
+        ++diagnostics_.properties_written;
+      }
+    }
+  }
+
   for (std::size_t i = 0; i < k_num_props; ++i) {
     if (!layer.set_mask_.test(i)) {
       continue;

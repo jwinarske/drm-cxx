@@ -17,6 +17,7 @@
 #include <xf86drmMode.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -82,6 +83,22 @@ void PlaneCapabilities::build_format_metadata() {
 }
 
 namespace {
+
+// Downstream SDE plane properties whose 0 means "no configuration": a scaler
+// or colour-conversion setup, an exclusion rectangle, a LUT. drm-cxx drives
+// none of them, so it zeroes them on arming (PlaneCapabilities::
+// reset_on_arm_props) rather than inherit another client's.
+bool is_reset_on_arm(const char* name) {
+  static constexpr std::array<std::string_view, 8> k_names{"scaler_v2",
+                                                           "csc_v1",
+                                                           "excl_rect_v1",
+                                                           "lut_ed",
+                                                           "lut_cir",
+                                                           "lut_sep",
+                                                           "SDE_VIG_3D_LUT_GAMUT_V5",
+                                                           "SDE_VIG_1D_LUT_IGC_V5"};
+  return std::find(k_names.begin(), k_names.end(), std::string_view(name)) != k_names.end();
+}
 
 DRMPlaneType parse_plane_type(const int fd, const uint32_t plane_id) {
   auto* props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
@@ -179,6 +196,8 @@ void detect_plane_capabilities(const int fd, const uint32_t plane_id, PlaneCapab
             std::string_view(static_cast<const char*>(blob->data), blob->length));
         drmModeFreePropertyBlob(blob);
       }
+    } else if (is_reset_on_arm(prop->name)) {
+      caps.reset_on_arm_props.push_back(prop->prop_id);
     } else if (std::strcmp(prop->name, "SRC_W") == 0) {
       // Every atomic plane has SRC_W; nothing in KMS says whether it scales.
       // Assume it can and let the TEST decide (see supports_scaling).
