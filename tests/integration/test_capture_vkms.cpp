@@ -35,8 +35,6 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
-#include <fcntl.h>
-#include <filesystem>
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
@@ -44,10 +42,8 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <system_error>
-#include <unistd.h>
 #include <utility>
 
-namespace fs = std::filesystem;
 using drm::Device;
 using drm::capture::Image;
 using drm::capture::snapshot;
@@ -58,12 +54,14 @@ namespace {
 // reverse order. ok() reports whether construction succeeded.
 class DumbFb {
  public:
+  // `offset_rows` allocates that many extra rows ahead of the image and points
+  // the framebuffer's offsets[0] past them; pixels() still starts at byte 0.
   DumbFb(int fd, std::uint32_t w, std::uint32_t h, std::uint32_t fourcc = DRM_FORMAT_ARGB8888,
-         std::uint32_t bpp = 32)
+         std::uint32_t bpp = 32, std::uint32_t offset_rows = 0)
       : fd_(fd) {
     drm_mode_create_dumb cd{};
     cd.width = w;
-    cd.height = h;
+    cd.height = h + offset_rows;
     cd.bpp = bpp;
     if (::ioctl(fd_, DRM_IOCTL_MODE_CREATE_DUMB, &cd) < 0) {
       return;
@@ -74,7 +72,7 @@ class DumbFb {
 
     std::uint32_t handles[4] = {handle_, 0, 0, 0};
     std::uint32_t pitches[4] = {pitch_, 0, 0, 0};
-    std::uint32_t offsets[4] = {0, 0, 0, 0};
+    std::uint32_t offsets[4] = {offset_rows * pitch_, 0, 0, 0};
     if (drmModeAddFB2(fd_, w, h, fourcc, handles, pitches, offsets, &fb_id_, 0) != 0) {
       return;
     }
@@ -177,6 +175,48 @@ drm::expected<ActiveCrtc, std::error_code> pick_crtc(int fd) {
         std::make_error_code(std::errc::no_such_device_or_address));
   }
   return *found;
+}
+
+// An overlay plane `crtc_id` can use, or 0.
+std::uint32_t find_overlay(int fd, std::uint32_t crtc_id) {
+  auto* res = drmModeGetResources(fd);
+  if (res == nullptr) {
+    return 0;
+  }
+  int crtc_index = -1;
+  for (int c = 0; c < res->count_crtcs; ++c) {
+    if (res->crtcs[c] == crtc_id) {
+      crtc_index = c;
+    }
+  }
+  drmModeFreeResources(res);
+  auto* pres = drmModeGetPlaneResources(fd);
+  if (pres == nullptr || crtc_index < 0) {
+    drmModeFreePlaneResources(pres);
+    return 0;
+  }
+  std::uint32_t found = 0;
+  for (std::uint32_t i = 0; i < pres->count_planes && found == 0; ++i) {
+    auto* pl = drmModeGetPlane(fd, pres->planes[i]);
+    if (pl == nullptr) {
+      continue;
+    }
+    if ((pl->possible_crtcs & (1U << static_cast<unsigned>(crtc_index))) != 0 && pl->crtc_id == 0) {
+      auto* props = drmModeObjectGetProperties(fd, pl->plane_id, DRM_MODE_OBJECT_PLANE);
+      for (std::uint32_t p = 0; props != nullptr && p < props->count_props; ++p) {
+        auto* prop = drmModeGetProperty(fd, props->props[p]);
+        if (prop != nullptr && std::strcmp(prop->name, "type") == 0 &&
+            props->prop_values[p] == DRM_PLANE_TYPE_OVERLAY) {
+          found = pl->plane_id;
+        }
+        drmModeFreeProperty(prop);
+      }
+      drmModeFreeObjectProperties(props);
+    }
+    drmModeFreePlane(pl);
+  }
+  drmModeFreePlaneResources(pres);
+  return found;
 }
 
 }  // namespace
@@ -345,4 +385,180 @@ TEST(CaptureVkms, RoundTripRgb565Primary) {
   EXPECT_EQ(at((3 * w) / 4, h / 4), 0xFF00FF00U);
   EXPECT_EQ(at(w / 4, (3 * h) / 4), 0xFF0000FFU);
   EXPECT_EQ(at((3 * w) / 4, (3 * h) / 4), 0xFFFFFFFFU) << "white must be full scale";
+}
+
+namespace {
+
+// The test card with atomic enabled and a CRTC picked. An error means there
+// is none, and the test skips.
+struct CaptureCard {
+  Device dev;
+  ActiveCrtc active;
+};
+
+drm::expected<CaptureCard, std::string> open_capture_card() {
+  const auto node = drm::test::find_test_card_or_vkms();
+  if (!node) {
+    return drm::unexpected<std::string>(
+        "VKMS not loaded (or set DRM_CXX_TEST_CARD to a modeset card)");
+  }
+  auto dev_r = Device::open(*node);
+  if (!dev_r || !dev_r->enable_universal_planes() || !dev_r->enable_atomic()) {
+    return drm::unexpected<std::string>("cannot open " + *node + " with atomic enabled");
+  }
+  auto active_r = pick_crtc(dev_r->fd());
+  if (!active_r) {
+    return drm::unexpected<std::string>("no connected output: " + active_r.error().message());
+  }
+  return CaptureCard{std::move(*dev_r), *active_r};
+}
+
+bool set_crtc(int fd, const ActiveCrtc& active, std::uint32_t fb_id) {
+  std::uint32_t conn_id = active.connector_id;
+  drmModeModeInfo mode = active.mode;
+  return drmModeSetCrtc(fd, active.crtc_id, fb_id, 0, 0, &conn_id, 1, &mode) == 0;
+}
+
+// The lowest GEM handle number free on `fd`: drmModeGetFB2 opens one per
+// buffer object, numbered lowest-free; closed again before returning.
+std::uint32_t next_free_handle(int fd, std::uint32_t fb_id) {
+  drmModeFB2Ptr fb = drmModeGetFB2(fd, fb_id);
+  if (fb == nullptr) {
+    return 0;
+  }
+  const std::uint32_t h = fb->handles[0];
+  drmModeFreeFB2(fb);
+  drm_gem_close gc{};
+  gc.handle = h;
+  drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &gc);
+  return h;
+}
+
+}  // namespace
+
+// drmModeGetFB2 opens a GEM handle per buffer object; snapshot() must close
+// them, or every capture pins the scanout buffers it read (#373).
+TEST(CaptureVkms, SnapshotLeavesNoHandleOpen) {
+  auto card = open_capture_card();
+  if (!card) {
+    GTEST_SKIP() << card.error();
+  }
+  const int fd = card->dev.fd();
+  const DumbFb fb(fd, card->active.mode.hdisplay, card->active.mode.vdisplay, DRM_FORMAT_XRGB8888);
+  ASSERT_TRUE(fb.ok());
+  ASSERT_TRUE(set_crtc(fd, card->active, fb.fb_id())) << std::strerror(errno);
+
+  const std::uint32_t before = next_free_handle(fd, fb.fb_id());
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_TRUE(snapshot(card->dev, card->active.crtc_id).has_value());
+  }
+  const std::uint32_t after = next_free_handle(fd, fb.fb_id());
+  drmModeSetCrtc(fd, card->active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  ASSERT_NE(before, 0U);
+  EXPECT_EQ(after, before) << "snapshots left GEM handles open";
+}
+
+// A framebuffer whose image starts partway into its buffer object reads from
+// that offset, not byte 0 (#374).
+TEST(CaptureVkms, ImageStartsAtTheFramebufferOffset) {
+  auto card = open_capture_card();
+  if (!card) {
+    GTEST_SKIP() << card.error();
+  }
+  const int fd = card->dev.fd();
+  const std::uint32_t w = card->active.mode.hdisplay;
+  const std::uint32_t h = card->active.mode.vdisplay;
+  constexpr std::uint32_t k_skip = 16;
+  DumbFb fb(fd, w, h, DRM_FORMAT_XRGB8888, 32, k_skip);
+  ASSERT_TRUE(fb.ok());
+  const std::uint32_t pitch_px = fb.pitch() / 4;
+  for (std::uint32_t y = 0; y < h + k_skip; ++y) {
+    for (std::uint32_t x = 0; x < w; ++x) {
+      fb.pixels()[(static_cast<std::size_t>(y) * pitch_px) + x] = 0xFF000000U | y;  // row number
+    }
+  }
+  ASSERT_TRUE(set_crtc(fd, card->active, fb.fb_id())) << std::strerror(errno);
+  auto img = snapshot(card->dev, card->active.crtc_id);
+  drmModeSetCrtc(fd, card->active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  ASSERT_TRUE(img.has_value()) << img.error().message();
+  EXPECT_EQ(img->pixels()[0] & 0xFFFFFFU, k_skip) << "first row";
+  EXPECT_EQ(img->pixels()[static_cast<std::size_t>(h - 1) * w] & 0xFFFFFFU, k_skip + h - 1)
+      << "last row";
+}
+
+namespace {
+
+// Opaque white primary plus a 64x64 overlay at (0, 0) of `fourcc` showing a
+// `src` x `src` image filled with `px`, scaled to 64x64. Returns the snapshot's
+// pixel at (32, 32), or why the card cannot show it.
+drm::expected<std::uint32_t, std::string> overlay_over_white(std::uint32_t fourcc, std::uint32_t px,
+                                                             std::uint32_t src) {
+  auto card = open_capture_card();
+  if (!card) {
+    return drm::unexpected<std::string>(card.error());
+  }
+  const int fd = card->dev.fd();
+  const std::uint32_t w = card->active.mode.hdisplay;
+  const std::uint32_t h = card->active.mode.vdisplay;
+  DumbFb primary(fd, w, h, DRM_FORMAT_XRGB8888);
+  DumbFb overlay(fd, src, src, fourcc);
+  if (!primary.ok() || !overlay.ok()) {
+    return drm::unexpected<std::string>("dumb buffer allocation failed");
+  }
+  for (std::uint32_t y = 0; y < h; ++y) {
+    for (std::uint32_t x = 0; x < w; ++x) {
+      primary.pixels()[(static_cast<std::size_t>(y) * (primary.pitch() / 4)) + x] = 0xFFFFFFFFU;
+    }
+  }
+  for (std::uint32_t y = 0; y < src; ++y) {
+    for (std::uint32_t x = 0; x < src; ++x) {
+      overlay.pixels()[(static_cast<std::size_t>(y) * (overlay.pitch() / 4)) + x] = px;
+    }
+  }
+  const std::uint32_t plane = find_overlay(fd, card->active.crtc_id);
+  if (plane == 0) {
+    return drm::unexpected<std::string>("no free overlay plane (vkms needs enable_overlay=1)");
+  }
+  if (!set_crtc(fd, card->active, primary.fb_id())) {
+    return drm::unexpected<std::string>(std::string("drmModeSetCrtc: ") + std::strerror(errno));
+  }
+  if (drmModeSetPlane(fd, plane, card->active.crtc_id, overlay.fb_id(), 0, 0, 0, 64, 64, 0, 0,
+                      src << 16U, src << 16U) != 0) {
+    const std::string why =
+        std::string("the overlay cannot show this (scaling?): ") + std::strerror(errno);
+    drmModeSetCrtc(fd, card->active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+    return drm::unexpected<std::string>(why);
+  }
+  auto img = snapshot(card->dev, card->active.crtc_id);
+  drmModeSetPlane(fd, plane, card->active.crtc_id, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  drmModeSetCrtc(fd, card->active.crtc_id, 0, 0, 0, nullptr, 0, nullptr);
+  if (!img) {
+    return drm::unexpected<std::string>("snapshot: " + img.error().message());
+  }
+  return img->pixels()[(32 * static_cast<std::size_t>(img->width())) + 32];
+}
+
+}  // namespace
+
+// A pixel whose color exceeds its alpha must not wrap in the blend: a fully
+// transparent pixel that keeps its color leaves the layer under it (#375).
+TEST(CaptureVkms, ColorAboveAlphaDoesNotWrap) {
+  const auto clear = overlay_over_white(DRM_FORMAT_ARGB8888, 0x0000FF00U, 64);
+  if (!clear) {
+    GTEST_SKIP() << clear.error();
+  }
+  EXPECT_EQ(*clear, 0xFFFFFFFFU) << "a transparent pixel with color punched through white";
+  const auto half = overlay_over_white(DRM_FORMAT_ARGB8888, 0x80C83748U, 64);
+  ASSERT_TRUE(half.has_value()) << half.error();
+  EXPECT_EQ(*half >> 24U, 0xFFU) << "an opaque layer came out translucent";
+}
+
+// A scaled XRGB8888 plane is opaque whatever its top byte holds (#376). vkms
+// cannot scale a plane, so this skips there.
+TEST(CaptureVkms, ScaledXrgbPlaneIsOpaque) {
+  const auto px = overlay_over_white(DRM_FORMAT_XRGB8888, 0x00336699U, 32);
+  if (!px) {
+    GTEST_SKIP() << px.error();
+  }
+  EXPECT_EQ(*px, 0xFF336699U);
 }

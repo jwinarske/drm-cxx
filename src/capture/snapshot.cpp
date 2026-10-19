@@ -7,6 +7,7 @@
 #include "../core/property_store.hpp"
 #include "../log.hpp"
 
+#include <drm.h>
 #include <drm_fourcc.h>
 #include <drm_mode.h>
 #include <xf86drm.h>
@@ -39,6 +40,7 @@
 // <drm-cxx/detail/expected.hpp> and <system_error> are deliberately not
 // included here — CI's misc-include-cleaner flags them as redundant.
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
@@ -66,10 +68,8 @@ Image::Image(std::uint32_t width, std::uint32_t height) {
 
 namespace {
 
-// RAII mmap wrapper. Owns a single mapping whose lifetime covers the
-// BLImage that wraps its data — we pass BL_DATA_ACCESS_READ to
-// create_from_data so Blend2D never writes, and we tear the mapping
-// down after the blit context has ended.
+// RAII mmap wrapper over one plane's dma-buf, held while its pixels are
+// copied out (to_prgb32).
 struct FbMapping {
   void* data{nullptr};
   std::size_t size{0};
@@ -117,9 +117,40 @@ struct PlaneFrame {
 
   std::int32_t zpos{0};
 
-  FbMapping mapping;
-  // RGB565 planes, widened to XRGB8888 once at load (empty otherwise).
-  std::vector<std::uint32_t> expanded;
+  // The plane as premultiplied ARGB, `width` pixels per row (see to_prgb32).
+  std::vector<std::uint32_t> prgb;
+};
+
+// Closes the GEM handles drmModeGetFB2 opened on the caller's descriptor; each
+// holds a reference to its buffer object until closed. The dma-buf mapping
+// holds its own, so it outlives them.
+class Fb2Handles {
+ public:
+  Fb2Handles(int fd, const drmModeFB2& fb) noexcept : fd_(fd) {
+    for (std::size_t i = 0; i < handles_.size(); ++i) {
+      handles_.at(i) = fb.handles[i];  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
+    }
+  }
+  ~Fb2Handles() {
+    for (std::size_t i = 0; i < handles_.size(); ++i) {
+      const std::uint32_t h = handles_.at(i);
+      if (h == 0 || std::find(handles_.begin(), handles_.begin() + static_cast<std::ptrdiff_t>(i),
+                              h) != handles_.begin() + static_cast<std::ptrdiff_t>(i)) {
+        continue;  // unused, or a plane sharing an earlier plane's buffer object
+      }
+      drm_gem_close gc{};
+      gc.handle = h;
+      drmIoctl(fd_, DRM_IOCTL_GEM_CLOSE, &gc);
+    }
+  }
+  Fb2Handles(const Fb2Handles&) = delete;
+  Fb2Handles& operator=(const Fb2Handles&) = delete;
+  Fb2Handles(Fb2Handles&&) = delete;
+  Fb2Handles& operator=(Fb2Handles&&) = delete;
+
+ private:
+  int fd_;
+  std::array<std::uint32_t, 4> handles_{};
 };
 
 // Export GEM handle → DMA-BUF → mmap read-only. Returns an empty
@@ -153,26 +184,53 @@ bool is_supported_format(std::uint32_t fourcc) {
          fourcc == DRM_FORMAT_RGB565;
 }
 
-// RGB565 → XRGB8888. Each channel widens by replicating its high bits into
+// RGB565 → opaque ARGB. Each channel widens by replicating its high bits into
 // the low ones, so full scale lands on 0xFF (a plain shift stops at 0xF8 /
 // 0xFC and darkens every bright pixel).
-std::vector<std::uint32_t> expand_rgb565(const void* data, std::uint32_t pitch, std::uint32_t w,
-                                         std::uint32_t h) {
+std::uint32_t rgb565_pixel(std::uint32_t px) noexcept {
+  const std::uint32_t r5 = (px >> 11U) & 0x1FU;
+  const std::uint32_t g6 = (px >> 5U) & 0x3FU;
+  const std::uint32_t b5 = px & 0x1FU;
+  const std::uint32_t r = (r5 << 3U) | (r5 >> 2U);
+  const std::uint32_t g = (g6 << 2U) | (g6 >> 4U);
+  const std::uint32_t b = (b5 << 3U) | (b5 >> 2U);
+  return 0xFF000000U | (r << 16U) | (g << 8U) | b;
+}
+
+// ARGB8888 scanout is premultiplied by KMS convention, but nothing stops a
+// buffer holding a channel above its alpha (straight-alpha content, or a
+// transparent pixel that keeps its color). Blend2D's source-over assumes
+// otherwise and wraps past 255, alpha included, so an opaque layer under such
+// a pixel would come out transparent. Clamp each channel to alpha.
+std::uint32_t argb_pixel(std::uint32_t px) noexcept {
+  const std::uint32_t a = px >> 24U;
+  const std::uint32_t r = std::min((px >> 16U) & 0xFFU, a);
+  const std::uint32_t g = std::min((px >> 8U) & 0xFFU, a);
+  const std::uint32_t b = std::min(px & 0xFFU, a);
+  return (a << 24U) | (r << 16U) | (g << 8U) | b;
+}
+
+// One plane as premultiplied ARGB (Blend2D PRGB32), `w` pixels per row, read
+// from `data` (the framebuffer's first pixel, past its offset). XRGB8888's top
+// byte is undefined, usually 0: alpha is forced, since Blend2D's scaled
+// XRGB32 fetch passes the byte through and a scaled plane would vanish.
+std::vector<std::uint32_t> to_prgb32(const std::uint8_t* data, std::uint32_t pitch, std::uint32_t w,
+                                     std::uint32_t h, std::uint32_t fourcc) {
   std::vector<std::uint32_t> out(static_cast<std::size_t>(w) * h);
-  const auto* base = static_cast<const std::uint8_t*>(data);
   for (std::uint32_t y = 0; y < h; ++y) {
-    const auto* row = reinterpret_cast<
-        const std::uint16_t*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-        base + (static_cast<std::size_t>(y) * pitch));
+    const std::uint8_t* row = data + (static_cast<std::size_t>(y) * pitch);
+    std::uint32_t* dst = out.data() + (static_cast<std::size_t>(y) * w);
+    if (fourcc == DRM_FORMAT_RGB565) {
+      for (std::uint32_t x = 0; x < w; ++x) {
+        std::uint16_t px = 0;
+        std::memcpy(&px, row + (static_cast<std::size_t>(x) * 2), sizeof px);
+        dst[x] = rgb565_pixel(px);
+      }
+      continue;
+    }
+    std::memcpy(dst, row, static_cast<std::size_t>(w) * 4);
     for (std::uint32_t x = 0; x < w; ++x) {
-      const std::uint32_t px = row[x];
-      const std::uint32_t r5 = (px >> 11U) & 0x1FU;
-      const std::uint32_t g6 = (px >> 5U) & 0x3FU;
-      const std::uint32_t b5 = px & 0x1FU;
-      const std::uint32_t r = (r5 << 3U) | (r5 >> 2U);
-      const std::uint32_t g = (g6 << 2U) | (g6 >> 4U);
-      const std::uint32_t b = (b5 << 3U) | (b5 >> 2U);
-      out[(static_cast<std::size_t>(y) * w) + x] = 0xFF000000U | (r << 16U) | (g << 8U) | b;
+      dst[x] = fourcc == DRM_FORMAT_XRGB8888 ? (dst[x] | 0xFF000000U) : argb_pixel(dst[x]);
     }
   }
   return out;
@@ -207,15 +265,6 @@ bool fill_plane_geometry(const drm::PropertyStore& props, std::uint32_t plane_id
 // types — the include itself is already NOLINT'd at the top of the file.
 // NOLINTBEGIN(misc-include-cleaner)
 
-BLFormat bl_format_for(std::uint32_t fourcc) {
-  // ARGB8888 scanout is premultiplied by KMS convention — Blend2D's
-  // PRGB32 matches that layout byte-for-byte on LE hosts. XRGB8888 has
-  // undefined alpha and must stay XRGB32 (not PRGB32): Blend2D then ignores
-  // the byte, so a buffer holding 0 there doesn't vanish under SRC_OVER.
-  // RGB565 arrives already widened to XRGB8888.
-  return fourcc == DRM_FORMAT_ARGB8888 ? BL_FORMAT_PRGB32 : BL_FORMAT_XRGB32;
-}
-
 }  // namespace
 
 // NOLINTNEXTLINE(misc-use-internal-linkage)
@@ -246,13 +295,13 @@ drm::expected<Image, std::error_code> snapshot(const drm::Device& device, std::u
   std::unique_ptr<drmModePlaneRes, decltype(&drmModeFreePlaneResources)> pres(
       pres_raw, drmModeFreePlaneResources);
 
-  // `frames` owns every FbMapping we hand to Blend2D via
+  // `frames` owns every pixel buffer we hand to Blend2D via
   // create_from_data(BL_DATA_ACCESS_READ, null-destroy-cb). Its
-  // destruction (and thus the munmap of each plane's pixels) MUST run
-  // after ctx.end() returns — Blend2D may defer blit work to worker
-  // threads, so the mappings have to stay alive until composition
-  // flushes. Keep this declared at function scope so the natural
-  // destructor order is (BLContext via end() first, then frames).
+  // destruction MUST run after ctx.end() returns — Blend2D may defer blit
+  // work to worker threads, so the buffers have to stay alive until
+  // composition flushes. Keep this declared at function scope so the natural
+  // destructor order is (BLContext via end() first, then frames). Each
+  // plane's mapping is released once its pixels are copied out.
   std::vector<PlaneFrame> frames;
   frames.reserve(pres->count_planes);
   std::uint32_t unbound_planes = 0;
@@ -276,6 +325,7 @@ drm::expected<Image, std::error_code> snapshot(const drm::Device& device, std::u
       continue;
     }
     std::unique_ptr<drmModeFB2, decltype(&drmModeFreeFB2)> fb(fb_raw, drmModeFreeFB2);
+    const Fb2Handles handles(fd, *fb);
 
     const std::uint64_t mod = fb->modifier;
     const bool linear = (mod == DRM_FORMAT_MOD_LINEAR) || (mod == DRM_FORMAT_MOD_INVALID);
@@ -311,15 +361,17 @@ drm::expected<Image, std::error_code> snapshot(const drm::Device& device, std::u
       continue;
     }
 
-    const std::size_t map_size = static_cast<std::size_t>(frame.pitch) * frame.height;
-    frame.mapping = map_plane_fb(fd, fb->handles[0], map_size);
-    if (frame.mapping.data == nullptr) {
+    // The image starts offsets[0] bytes into the buffer object (sub-allocated
+    // and cropped buffers). mmap offsets must be page-aligned, so map from 0.
+    const std::size_t offset = fb->offsets[0];
+    const std::size_t map_size = offset + (static_cast<std::size_t>(frame.pitch) * frame.height);
+    const FbMapping mapping = map_plane_fb(fd, fb->handles[0], map_size);
+    if (mapping.data == nullptr) {
       drm::log_warn("capture: skipping plane {} — unable to mmap fb via DMA-BUF", plane_id);
       continue;
     }
-    if (frame.format == DRM_FORMAT_RGB565) {
-      frame.expanded = expand_rgb565(frame.mapping.data, frame.pitch, frame.width, frame.height);
-    }
+    frame.prgb = to_prgb32(static_cast<const std::uint8_t*>(mapping.data) + offset, frame.pitch,
+                           frame.width, frame.height, frame.format);
 
     frames.push_back(std::move(frame));
   }
@@ -351,13 +403,10 @@ drm::expected<Image, std::error_code> snapshot(const drm::Device& device, std::u
 
   for (PlaneFrame& frame : frames) {
     BLImage src;
-    const bool widened = !frame.expanded.empty();
-    void* const pixels = widened ? static_cast<void*>(frame.expanded.data()) : frame.mapping.data;
-    const auto stride =
-        widened ? static_cast<intptr_t>(frame.width) * 4 : static_cast<intptr_t>(frame.pitch);
     const BLResult wr = src.create_from_data(
-        static_cast<int>(frame.width), static_cast<int>(frame.height), bl_format_for(frame.format),
-        pixels, stride, BL_DATA_ACCESS_READ, nullptr, nullptr);
+        static_cast<int>(frame.width), static_cast<int>(frame.height), BL_FORMAT_PRGB32,
+        frame.prgb.data(), static_cast<intptr_t>(frame.width) * 4, BL_DATA_ACCESS_READ, nullptr,
+        nullptr);
     if (wr != BL_SUCCESS) {
       drm::log_warn("capture: BLImage::create_from_data failed for plane {}", frame.plane_id);
       continue;
