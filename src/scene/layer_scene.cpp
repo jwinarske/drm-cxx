@@ -180,7 +180,7 @@ class LayerScene::Impl {
       if (pinned_elsewhere) {
         continue;
       }
-      if (!p->supports_format(DRM_FORMAT_ARGB8888)) {
+      if (!p->scans_out_linear(DRM_FORMAT_ARGB8888)) {
         continue;
       }
       probe_plane_id = p->id;
@@ -1425,7 +1425,7 @@ class LayerScene::Impl {
   // policy lives in drm::scene::canvas_format_for_plane (composite_canvas).
   bool plane_hosts_canvas(const drm::planes::PlaneCapabilities& p) const {
     if (composition_canvas_) {
-      return p.supports_format(composition_canvas_->drm_fourcc());
+      return p.scans_out_linear(composition_canvas_->drm_fourcc());
     }
     return canvas_format_for_plane(p).has_value();
   }
@@ -3065,7 +3065,7 @@ class LayerScene::Impl {
     if (caps == nullptr || caps->type == drm::planes::DRMPlaneType::CURSOR) {
       return false;
     }
-    return caps->supports_format(layer.source().format().drm_fourcc);
+    return caps->scans_out(layer.source().format().drm_fourcc, layer.source().format().modifier);
   }
 
   // Write each pinned layer's plane state directly to its caller-chosen

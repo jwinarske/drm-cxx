@@ -27,11 +27,12 @@ namespace drm::cursor::detail {
 inline constexpr std::array<std::uint32_t, 4> k_cursor_formats{
     DRM_FORMAT_ARGB8888, DRM_FORMAT_RGBA8888, DRM_FORMAT_ABGR8888, DRM_FORMAT_BGRA8888};
 
-/// The format to drive `plane` in, or nullopt when it carries none of them.
+/// The format to drive `plane` in, or nullopt when it carries none of them
+/// linear (the cursor is a dumb buffer).
 [[nodiscard]] inline std::optional<std::uint32_t> cursor_format(
     const drm::planes::PlaneCapabilities& plane) {
   for (const auto fmt : k_cursor_formats) {
-    if (plane.supports_format(fmt)) {
+    if (plane.scans_out_linear(fmt)) {
       return fmt;
     }
   }

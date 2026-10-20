@@ -13,6 +13,8 @@
 #include "planes/plane_registry.hpp"
 #include "scene/composite_canvas.hpp"
 
+#include <drm-cxx/fmt/format_mod.hpp>
+
 #include <drm_fourcc.h>
 
 #include <cstdint>
@@ -89,4 +91,28 @@ TEST(CanvasFormatForPlane, UnsupportablePlaneReturnsNullopt) {
 
 TEST(CanvasFormatForPlane, EmptyFormatsReturnsNullopt) {
   EXPECT_FALSE(drm::scene::canvas_format_for_plane(plane_with({})).has_value());
+}
+
+namespace {
+
+// RK3566 Cluster window: ARGB8888/XRGB8888 listed, but IN_FORMATS gives each
+// only an AFBC modifier, no LINEAR (#364).
+drm::planes::PlaneCapabilities afbc_only_plane() {
+  constexpr std::uint64_t k_afbc = 0x0800000000000001ULL;
+  drm::planes::PlaneCapabilities caps;
+  caps.formats = {DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888};
+  caps.format_table =
+      drm::fmt::FormatTable::from_pairs(std::vector<std::pair<std::uint32_t, std::uint64_t>>{
+          {DRM_FORMAT_ARGB8888, k_afbc}, {DRM_FORMAT_XRGB8888, k_afbc}});
+  caps.has_format_modifiers = true;
+  caps.build_format_metadata();
+  return caps;
+}
+
+}  // namespace
+
+// The canvas is a dumb, linear buffer: a plane that takes its formats only
+// compressed cannot host it (#364).
+TEST(CanvasFormatForPlane, RejectsAPlaneWithoutLinear) {
+  EXPECT_FALSE(drm::scene::canvas_format_for_plane(afbc_only_plane()).has_value());
 }

@@ -185,7 +185,16 @@ struct PlaneCapabilities {
   uint32_t cursor_max_w{};
   uint32_t cursor_max_h{};
 
+  /// `fmt` is in the plane's bare format list, in some layout. Use scans_out()
+  /// for a given buffer: a plane can list a format it scans out only
+  /// compressed (RK3566 Cluster windows: AFBC alone in IN_FORMATS).
   [[nodiscard]] bool supports_format(uint32_t fmt) const;
+  /// The plane scans out `fmt` with `modifier`: its IN_FORMATS table, or the
+  /// bare list as LINEAR-only on a plane without IN_FORMATS. The allocator's
+  /// placement predicate (fmt::layer_fits_plane).
+  [[nodiscard]] bool scans_out(uint32_t fmt, uint64_t modifier) const;
+  /// scans_out() for a linear buffer (dumb buffers, the composition canvas).
+  [[nodiscard]] bool scans_out_linear(uint32_t fmt) const;
 
   [[nodiscard]] bool compatible_with_crtc(uint32_t crtc_index) const;
 
