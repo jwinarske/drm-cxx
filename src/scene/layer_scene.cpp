@@ -4,6 +4,7 @@
 #include "layer_scene.hpp"
 
 #include "../planes/multirect.hpp"
+#include "../planes/plane_clip.hpp"
 #include "buffer_source.hpp"
 #include "commit_report.hpp"
 #include "compatibility_report.hpp"
@@ -1292,10 +1293,7 @@ class LayerScene::Impl {
     // KMS plane rectangles: CRTC_* is destination on the scanout, in
     // signed 32-bit pixels. SRC_* is source within the buffer, encoded
     // as 16.16 fixed-point (kernel expects this for subpixel blits).
-    dst.set_property(drm::planes::PropTag::CrtcX, static_cast<std::uint64_t>(d.dst_rect.x));
-    dst.set_property(drm::planes::PropTag::CrtcY, static_cast<std::uint64_t>(d.dst_rect.y));
-    dst.set_property(drm::planes::PropTag::CrtcW, static_cast<std::uint64_t>(d.dst_rect.w));
-    dst.set_property(drm::planes::PropTag::CrtcH, static_cast<std::uint64_t>(d.dst_rect.h));
+    //
     // Resolve src_rect per the LayerDesc contract: a zero width/height means
     // "the source buffer's full extent". Callers commonly set only dst_rect
     // (the scene has no way to guess a screen position, but the source extent
@@ -1305,23 +1303,35 @@ class LayerScene::Impl {
     // atomic TEST failing on every controller (amdgpu DC, RPi5 vc4): the layer
     // never carried a valid source rectangle, so direct assignment to any
     // plane was rejected and the frame fell back to composition.
+    drm::planes::detail::PlaneSpan x{d.dst_rect.x, d.dst_rect.w, 0, 0};
+    drm::planes::detail::PlaneSpan y{d.dst_rect.y, d.dst_rect.h, 0, 0};
     if (d.src_rect_fixed.has_value()) {
       // Already 16.16: written as given, so a sub-pixel crop survives.
       const FixedRect& f = *d.src_rect_fixed;
-      dst.set_property(drm::planes::PropTag::SrcX, f.x);
-      dst.set_property(drm::planes::PropTag::SrcY, f.y);
-      dst.set_property(drm::planes::PropTag::SrcW, f.w != 0 ? f.w : to_16_16(fmt.width));
-      dst.set_property(drm::planes::PropTag::SrcH, f.h != 0 ? f.h : to_16_16(fmt.height));
+      x.src = f.x;
+      y.src = f.y;
+      x.src_len = f.w != 0 ? f.w : to_16_16(fmt.width);
+      y.src_len = f.h != 0 ? f.h : to_16_16(fmt.height);
     } else {
-      const std::uint32_t src_w = d.src_rect.w != 0 ? d.src_rect.w : fmt.width;
-      const std::uint32_t src_h = d.src_rect.h != 0 ? d.src_rect.h : fmt.height;
-      dst.set_property(drm::planes::PropTag::SrcX,
-                       to_16_16(static_cast<std::uint32_t>(d.src_rect.x)));
-      dst.set_property(drm::planes::PropTag::SrcY,
-                       to_16_16(static_cast<std::uint32_t>(d.src_rect.y)));
-      dst.set_property(drm::planes::PropTag::SrcW, to_16_16(src_w));
-      dst.set_property(drm::planes::PropTag::SrcH, to_16_16(src_h));
+      x.src = to_16_16(static_cast<std::uint32_t>(d.src_rect.x));
+      y.src = to_16_16(static_cast<std::uint32_t>(d.src_rect.y));
+      x.src_len = to_16_16(d.src_rect.w != 0 ? d.src_rect.w : fmt.width);
+      y.src_len = to_16_16(d.src_rect.h != 0 ? d.src_rect.h : fmt.height);
     }
+    // A destination above or left of the CRTC is clipped here rather than
+    // left to the kernel: some drivers refuse a negative CRTC_X/CRTC_Y.
+    if (drm::planes::detail::clip_applies(d.rotation, fmt.drm_fourcc)) {
+      (void)drm::planes::detail::clip_leading(x);
+      (void)drm::planes::detail::clip_leading(y);
+    }
+    dst.set_property(drm::planes::PropTag::CrtcX, static_cast<std::uint64_t>(x.dst));
+    dst.set_property(drm::planes::PropTag::CrtcY, static_cast<std::uint64_t>(y.dst));
+    dst.set_property(drm::planes::PropTag::CrtcW, x.dst_len);
+    dst.set_property(drm::planes::PropTag::CrtcH, y.dst_len);
+    dst.set_property(drm::planes::PropTag::SrcX, x.src);
+    dst.set_property(drm::planes::PropTag::SrcY, y.src);
+    dst.set_property(drm::planes::PropTag::SrcW, x.src_len);
+    dst.set_property(drm::planes::PropTag::SrcH, y.src_len);
 
     // Format + modifier let the allocator statically screen planes for
     // compatibility before any test commit. The allocator reads both

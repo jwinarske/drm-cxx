@@ -13,10 +13,12 @@
 #include <cstdint>
 #include <cstring>
 #include <gtest/gtest.h>
+#include <optional>
 #include <utility>
 #include <vector>
 
 using drm::cursor::detail::cursor_format;
+using drm::cursor::detail::cursor_zpos;
 using drm::cursor::detail::from_argb;
 
 namespace {
@@ -73,4 +75,31 @@ TEST(CursorFormat, PixelBytesPerFormat) {
             (std::array<std::uint8_t, 4>{0x11, 0x22, 0x33, 0x80}));  // R G B A
   EXPECT_EQ(bytes(from_argb(k_argb, DRM_FORMAT_BGRA8888)),
             (std::array<std::uint8_t, 4>{0x80, 0x11, 0x22, 0x33}));  // A R G B
+}
+
+// A mutable zpos goes to the top of the plane's range.
+TEST(CursorZpos, TakesTheTopOfAMutableRange) {
+  auto caps = plane_with({DRM_FORMAT_ARGB8888});
+  caps.zpos_min = 0;
+  caps.zpos_max = 255;
+  EXPECT_EQ(cursor_zpos(caps, std::nullopt), 255U);
+}
+
+// The SDE driver advertises [0,10] but blends 9 planes: zpos 8 is the top.
+TEST(CursorZpos, StaysUnderTheBlendLimit) {
+  auto caps = plane_with({DRM_FORMAT_ARGB8888});
+  caps.zpos_min = 0;
+  caps.zpos_max = 10;
+  EXPECT_EQ(cursor_zpos(caps, 9U), 8U);
+  caps.zpos_min = 9;
+  EXPECT_EQ(cursor_zpos(caps, 9U), 9U) << "never below the plane's own floor";
+}
+
+// A fixed or missing zpos is left alone.
+TEST(CursorZpos, SkipsFixedAndMissing) {
+  auto caps = plane_with({DRM_FORMAT_ARGB8888});
+  EXPECT_FALSE(cursor_zpos(caps, std::nullopt).has_value());
+  caps.zpos_min = 3;
+  caps.zpos_max = 3;
+  EXPECT_FALSE(cursor_zpos(caps, 9U).has_value());
 }

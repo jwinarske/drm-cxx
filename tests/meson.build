@@ -236,6 +236,13 @@ test('test_multirect',
   ),
 )
 
+test('test_plane_clip',
+  executable('test_plane_clip',
+    'unit/test_plane_clip.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # Seat against a fake libseat defined in the test itself (interposition);
 # libseat is linked for its header and types only.
 if has_libseat and has_input
@@ -395,6 +402,14 @@ if has_xcursor
       'integration/test_cursor_renderer_legacy.cpp',
       dependencies : test_deps,
     ),
+  )
+
+  test('test_cursor_overlay_clip_vkms',
+    executable('test_cursor_overlay_clip_vkms',
+      'integration/test_cursor_overlay_clip_vkms.cpp',
+      dependencies : test_deps,
+    ),
+    is_parallel : false,
   )
 endif
 

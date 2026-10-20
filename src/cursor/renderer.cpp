@@ -8,6 +8,7 @@
 #include "../core/resources.hpp"
 #include "../dumb/buffer.hpp"
 #include "../modeset/atomic.hpp"
+#include "../planes/plane_clip.hpp"
 #include "../planes/plane_registry.hpp"
 #include "../time/clock.hpp"
 #include "cursor.hpp"
@@ -208,6 +209,8 @@ struct Renderer::Impl {
   PlanePath path{PlanePath::kLegacy};
   // Buffer pixel format (cursor_format.hpp); ARGB8888 on the legacy path.
   std::uint32_t fourcc{DRM_FORMAT_ARGB8888};
+  // zpos written each atomic commit (cursor_zpos), when the plane has one.
+  std::optional<std::uint64_t> zpos;
   Rotation rotation{Rotation::k0};
   bool allow_legacy{true};
   drm::Clock* clock{nullptr};
@@ -284,6 +287,9 @@ struct Renderer::Impl {
   // is unset (legacy/no-rotation planes); always includes ROTATE_0
   // when set, since every plane that has the property accepts k0.
   std::uint64_t rotation_supported_mask{0};
+
+  // "zpos" id, resolved with the others when `zpos` is set.
+  std::optional<std::uint32_t> zpos_prop;
 
   // --- cursor binding + animation -----------------------------------
   // shared_ptr so multi-CRTC compositors can load once and hand the
@@ -728,8 +734,14 @@ void Renderer::Impl::probe_plane_properties() noexcept {
   hotspot_y_prop.reset();
   rotation_prop.reset();
   rotation_supported_mask = 0;
+  zpos_prop.reset();
   if (path == PlanePath::kLegacy) {
     return;
+  }
+  if (zpos.has_value()) {
+    if (auto id = props.property_id(plane_id, "zpos")) {
+      zpos_prop = *id;
+    }
   }
   if (auto id = props.property_id(plane_id, "HOTSPOT_X")) {
     hotspot_x_prop = *id;
@@ -787,38 +799,6 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   // ping-pong buffers share dimensions so CRTC_W/H and SRC_W/H read
   // the same regardless; FB_ID is what actually swaps.
   const auto& cb = commit_buffer();
-  if (auto r = add("FB_ID", cb.fb_id()); !r) {
-    return r;
-  }
-  if (auto r = add("CRTC_ID", crtc_id); !r) {
-    return r;
-  }
-  if (auto r = add("CRTC_X", static_cast<std::uint64_t>(px)); !r) {
-    return r;
-  }
-  if (auto r = add("CRTC_Y", static_cast<std::uint64_t>(py)); !r) {
-    return r;
-  }
-  if (auto r = add("CRTC_W", cb.width()); !r) {
-    return r;
-  }
-  if (auto r = add("CRTC_H", cb.height()); !r) {
-    return r;
-  }
-  if (auto r = add("SRC_X", 0); !r) {
-    return r;
-  }
-  if (auto r = add("SRC_Y", 0); !r) {
-    return r;
-  }
-  // Source rect is in 16.16 fixed-point; CRTC rect is plain pixels.
-  if (auto r = add("SRC_W", static_cast<std::uint64_t>(cb.width()) << 16U); !r) {
-    return r;
-  }
-  if (auto r = add("SRC_H", static_cast<std::uint64_t>(cb.height()) << 16U); !r) {
-    return r;
-  }
-
   // rotation — optional (some planes don't expose it). Written on
   // every commit so the value is re-armed on the first post-resume
   // commit (fresh fd lost the prior kernel state) and so set_rotation
@@ -827,11 +807,63 @@ drm::expected<void, std::error_code> Renderer::Impl::stage_position(drm::AtomicR
   // pre-rotated the pixels in software for that case (see
   // effective_sw_rotation), so the scanout hardware just sees a k0
   // sprite.
+  std::uint64_t hw_rotation = 0;
   if (rotation_prop) {
     const std::uint64_t want = rotation_to_drm_mask(rotation);
-    const std::uint64_t hw_value =
-        ((rotation_supported_mask & want) != 0U) ? want : DRM_MODE_ROTATE_0;
-    if (auto r = req.add_property(plane_id, *rotation_prop, hw_value); !r) {
+    hw_rotation = ((rotation_supported_mask & want) != 0U) ? want : DRM_MODE_ROTATE_0;
+  }
+
+  // Source rect is in 16.16 fixed-point; CRTC rect is plain pixels.
+  drm::planes::detail::PlaneSpan x{px, cb.width(), 0,
+                                   static_cast<std::uint64_t>(cb.width()) << 16U};
+  drm::planes::detail::PlaneSpan y{py, cb.height(), 0,
+                                   static_cast<std::uint64_t>(cb.height()) << 16U};
+  // An overlay standing in for a cursor is clipped at the CRTC's top and
+  // left edges: some drivers refuse a negative CRTC_X/CRTC_Y. Cursor planes
+  // are not: i915 and amdgpu take a negative position there but refuse any
+  // source offset.
+  if (path == PlanePath::kAtomicOverlay && drm::planes::detail::clip_applies(hw_rotation, fourcc)) {
+    (void)drm::planes::detail::clip_leading(x);
+    (void)drm::planes::detail::clip_leading(y);
+  }
+  if (auto r = add("FB_ID", cb.fb_id()); !r) {
+    return r;
+  }
+  if (auto r = add("CRTC_ID", crtc_id); !r) {
+    return r;
+  }
+  if (auto r = add("CRTC_X", static_cast<std::uint64_t>(x.dst)); !r) {
+    return r;
+  }
+  if (auto r = add("CRTC_Y", static_cast<std::uint64_t>(y.dst)); !r) {
+    return r;
+  }
+  if (auto r = add("CRTC_W", x.dst_len); !r) {
+    return r;
+  }
+  if (auto r = add("CRTC_H", y.dst_len); !r) {
+    return r;
+  }
+  if (auto r = add("SRC_X", x.src); !r) {
+    return r;
+  }
+  if (auto r = add("SRC_Y", y.src); !r) {
+    return r;
+  }
+  if (auto r = add("SRC_W", x.src_len); !r) {
+    return r;
+  }
+  if (auto r = add("SRC_H", y.src_len); !r) {
+    return r;
+  }
+  if (rotation_prop) {
+    if (auto r = req.add_property(plane_id, *rotation_prop, hw_rotation); !r) {
+      return r;
+    }
+  }
+
+  if (zpos_prop && zpos.has_value()) {
+    if (auto r = req.add_property(plane_id, *zpos_prop, *zpos); !r) {
       return r;
     }
   }
@@ -929,6 +961,8 @@ struct SelectedPlane {
   std::uint32_t legacy_plane_id{0};
   // Pixel format of the buffers (cursor_format.hpp); ARGB8888 on legacy.
   std::uint32_t fourcc{DRM_FORMAT_ARGB8888};
+  // zpos to write on the atomic paths (cursor_zpos); nullopt leaves it.
+  std::optional<std::uint64_t> zpos;
 };
 
 drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& dev,
@@ -953,7 +987,13 @@ drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& de
       }
       const auto path = cap.type == drm::planes::DRMPlaneType::CURSOR ? PlanePath::kAtomicCursor
                                                                       : PlanePath::kAtomicOverlay;
-      return SelectedPlane{cap.id, path, cap.cursor_max_w, cap.cursor_max_h, 0, *fmt};
+      return SelectedPlane{cap.id,
+                           path,
+                           cap.cursor_max_w,
+                           cap.cursor_max_h,
+                           0,
+                           *fmt,
+                           detail::cursor_zpos(cap, registry->blend_limit(crtc_index))};
     }
     return drm::unexpected<std::error_code>(std::make_error_code(std::errc::no_such_device));
   }
@@ -972,8 +1012,13 @@ drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& de
         // The legacy ioctls drive this same plane, asynchronously.
         return SelectedPlane{0, PlanePath::kLegacy, 0, 0, cap->id};
       }
-      return SelectedPlane{
-          cap->id, PlanePath::kAtomicCursor, cap->cursor_max_w, cap->cursor_max_h, 0, *fmt};
+      return SelectedPlane{cap->id,
+                           PlanePath::kAtomicCursor,
+                           cap->cursor_max_w,
+                           cap->cursor_max_h,
+                           0,
+                           *fmt,
+                           detail::cursor_zpos(*cap, registry->blend_limit(crtc_index))};
     }
   }
 
@@ -999,7 +1044,13 @@ drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& de
     }
   }
   if (chosen_overlay != nullptr) {
-    return SelectedPlane{chosen_overlay->id, PlanePath::kAtomicOverlay, 0, 0, 0, chosen_fourcc};
+    return SelectedPlane{chosen_overlay->id,
+                         PlanePath::kAtomicOverlay,
+                         0,
+                         0,
+                         0,
+                         chosen_fourcc,
+                         detail::cursor_zpos(*chosen_overlay, registry->blend_limit(crtc_index))};
   }
 
   if (allow_legacy) {
@@ -1041,6 +1092,7 @@ drm::expected<Renderer, std::error_code> Renderer::create(Device& dev, const Ren
   impl->preferred_size = cfg.preferred_size;
   impl->path = selected->path;
   impl->fourcc = selected->fourcc;
+  impl->zpos = selected->zpos;
   impl->rotation = cfg.rotation;
   impl->allow_legacy = cfg.allow_legacy;
   impl->clock = (cfg.clock != nullptr) ? cfg.clock : &drm::default_clock();

@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: (c) 2025 The drm-cxx Contributors
 // SPDX-License-Identifier: MIT
 //
-// Private (not installed): the pixel format a cursor plane is driven in.
+// Private (not installed): the pixel format a cursor plane is driven in, and
+// the zpos it takes.
 //
 // A cursor needs alpha, and the renderer holds ARGB8888. Some cursor planes
 // carry the same eight-bit channels in another order (Tegra: RGBA8888 only),
@@ -17,6 +18,7 @@
 
 #include <drm_fourcc.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -56,6 +58,25 @@ inline constexpr std::array<std::uint32_t, 4> k_cursor_formats{
     default:
       return argb;
   }
+}
+
+/// The zpos that puts `plane` above every other plane on its CRTC: its
+/// zpos_max, capped below `blend_limit` (the CRTC's blendable plane count,
+/// when the driver publishes one; it can advertise a range it then refuses).
+/// nullopt when the zpos is fixed or absent. Left unwritten, the plane keeps
+/// whatever zpos it had, which can tie with another plane's; the downstream
+/// SDE driver refuses two planes on one blend stage.
+[[nodiscard]] inline std::optional<std::uint64_t> cursor_zpos(
+    const drm::planes::PlaneCapabilities& plane, std::optional<std::uint32_t> blend_limit) {
+  if (!plane.zpos_min.has_value() || !plane.zpos_max.has_value() ||
+      *plane.zpos_min == *plane.zpos_max) {
+    return std::nullopt;
+  }
+  std::uint64_t z = *plane.zpos_max;
+  if (blend_limit.has_value() && *blend_limit > 0) {
+    z = std::min<std::uint64_t>(z, *blend_limit - 1U);
+  }
+  return std::max(z, *plane.zpos_min);
 }
 
 }  // namespace drm::cursor::detail

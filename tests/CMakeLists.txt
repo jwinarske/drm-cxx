@@ -30,6 +30,7 @@ set(DRM_CXX_TESTS
   test_layer_groups
   test_cursor_format
   test_multirect
+  test_plane_clip
   test_plane_alpha
   test_mode
   test_display
@@ -165,6 +166,11 @@ if(DRM_CXX_HAS_XCURSOR)
   add_executable(test_cursor_renderer_legacy integration/test_cursor_renderer_legacy.cpp)
   target_link_libraries(test_cursor_renderer_legacy PRIVATE drm-cxx::drm-cxx)
   add_test(NAME test_cursor_renderer_legacy COMMAND test_cursor_renderer_legacy)
+
+  add_executable(test_cursor_overlay_clip_vkms integration/test_cursor_overlay_clip_vkms.cpp)
+  target_link_libraries(test_cursor_overlay_clip_vkms PRIVATE
+    drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
+  gtest_discover_tests(test_cursor_overlay_clip_vkms)
 endif()
 
 # VKMS integration test — self-skips when vkms is absent. Kept out of
