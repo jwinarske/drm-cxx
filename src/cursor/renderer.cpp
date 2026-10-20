@@ -1025,12 +1025,14 @@ drm::expected<SelectedPlane, std::error_code> select_plane(const drm::Device& de
   // Second choice: an OVERLAY plane with a cursor format, preferring one not
   // already bound to another CRTC. Some platforms only expose a
   // handful of overlays; grabbing a free one matters when the
-  // compositor wants the rest for layers.
+  // compositor wants the rest for layers. A multirect virtual plane is
+  // skipped: the driver refuses it unless its parent is armed too.
   const drm::planes::PlaneCapabilities* chosen_overlay = nullptr;
   std::uint32_t chosen_fourcc = DRM_FORMAT_ARGB8888;
   for (const auto* cap : candidates) {
     const auto fmt = detail::cursor_format(*cap);
-    if (cap->type != drm::planes::DRMPlaneType::OVERLAY || !fmt.has_value()) {
+    if (cap->type != drm::planes::DRMPlaneType::OVERLAY || !fmt.has_value() ||
+        cap->multirect_parent.has_value()) {
       continue;
     }
     if (plane_current_crtc(dev.fd(), cap->id) == 0) {
