@@ -1,5 +1,86 @@
 # Changelog
 
+## v5.1.0 — 2026-10-20: teardown through owned descriptors; SDE plane fixes
+
+Fixes since 5.0.0. ABI-compatible: soname stays `libdrm-cxx.so.5` and no
+exported symbol was removed, but three structs grew (below); recompile if you
+construct or embed them.
+
+### Breaking changes
+
+- **ABI only:** `planes::PlaneCapabilities` gains `reset_on_arm_props`;
+  `planes::PlaneRegistry` and `planes::Allocator` gain private members. (#381,
+  #383)
+
+### API
+
+- `planes::PlaneCapabilities::scans_out(fourcc, modifier)` and
+  `scans_out_linear(fourcc)`: whether a plane scans out a buffer, from
+  IN_FORMATS (the bare list counts as LINEAR-only without it). (#385)
+- `planes::PlaneRegistry::blend_limit(crtc_index)` / `set_blend_limit()`: how
+  many planes a CRTC blends, from its `capabilities` blob. (#381)
+- `display::CrtcColorPipeline::on_session_resumed(const Device&)`. (#379)
+- `fmt::vendor_0b_is_mtk(Modifier)`. (#379)
+
+### Teardown and session loss
+
+- `dumb::Buffer`, `ExternalDmaBufSource`, `ExternalDmaBufRing`,
+  `ExternalDmaBufPool` and `CrtcColorPipeline` hold their own duplicate of the
+  device descriptor and tear down through it. After session loss the card's
+  next open reused the number, so teardown removed the new file's buffers,
+  framebuffers or blobs. (#368, #370, #372, #377, #379)
+- `CrtcColorPipeline` can resume after `clear_for_session_loss()`. (#372, #379)
+- `DumbRingSource` reports the frame's own change as damage, and resets its
+  ring on resume, so the first paint is full. (#367, #369, #380)
+
+### Planes and scene
+
+- The allocator keeps placement within a CRTC's blend limit, the
+  highest-`keep_priority` layers first, and composites the rest. On the
+  SA8155P a CRTC offers 14 planes but blends 9. (#363, #381)
+- SDE-private plane properties another client left (`scaler_v2`, `csc_v1`,
+  `excl_rect_v1`, LUT blobs) are zeroed when a plane is armed. (#382, #383)
+- Linear buffers (the composition canvas, the CSD overlay, the cursor, the
+  mixing probe) only go on planes that scan them out linear: an RK3566 Cluster
+  window lists XR24 but takes it AFBC-only. (#364, #385)
+- A plane destination above or left of the CRTC is clipped, with the source
+  trimmed as `drm_rect_clip_scaled()` does; the SDE driver refuses a negative
+  CRTC_X/CRTC_Y. Skipped for rotated planes and subsampled formats. (#384, #386)
+
+### Cursor
+
+- The cursor plane gets the top of its zpos range, capped below the CRTC's
+  blend limit; unwritten, it could share a blend stage with the primary.
+  (#384, #386)
+- An overlay standing in for a cursor is clipped at the CRTC's top and left
+  edges; CURSOR planes are not. (#384, #386)
+- A multirect virtual plane is never picked for the cursor. (#387)
+
+### Display, formats, capture
+
+- `DriverProfile::vrr_capable` also needs a connected sink reporting
+  `vrr_capable`; it was true on every atomic driver. (#371, #379)
+- Vendor 0x0b modifiers are told apart as MediaTek or VeriSilicon per
+  modifier. (#365, #366, #379)
+- `capture::snapshot()` closes the GEM handles `drmModeGetFB2` opens, reads
+  from `offsets[0]`, clamps ARGB8888 color to alpha and forces XRGB8888 alpha
+  before blending. (#373–#376, #378)
+
+### Tests
+
+- Composition and pin tests honor `DRM_CXX_CONNECTOR`; capture tests skip on
+  cards without plane readback; the teardown-wait test times only the wait.
+  (#377, #381)
+- `SubmitReportsAFrameItCannotTake` skips on drivers that take any modifier
+  at AddFB2 (RK3566). (#388)
+- New: `test_plane_clip`, `test_cursor_overlay_clip_vkms`, and tests for each
+  fix above.
+
+### Validated
+
+Host (vkms) 109/109, SA8155P DP-4 106/106, RK3566 (VOP2) 106/106; Raspberry
+Pi 5 and i.MX8M Plus full suites pass through #385.
+
 ## v5.0.0 — 2026-10-11: 32-bit Vulkan producer; teardown wait on early-flip drivers
 
 Major bump: `VkScanoutProducer`'s image API changed (below). Soname
