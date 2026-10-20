@@ -16,6 +16,7 @@
 #include <drm-cxx/cursor/cursor.hpp>
 #include <drm-cxx/cursor/renderer.hpp>
 #include <drm-cxx/detail/span.hpp>
+#include <drm-cxx/display/mode_list.hpp>
 #include <drm-cxx/planes/plane_registry.hpp>
 #include <drm-cxx/scene/dumb_buffer_source.hpp>
 #include <drm-cxx/scene/layer_desc.hpp>
@@ -26,9 +27,11 @@
 #include <xf86drmMode.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <gtest/gtest.h>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -61,18 +64,25 @@ struct Output {
 };
 
 // First connected connector and a CRTC its first encoder can drive.
+// DRM_CXX_CONNECTOR=<name> ("DP-4") picks the output: shared-display
+// controllers report several connected but unlit outputs.
 std::optional<Output> pick_output(int fd) {
   auto* res = drmModeGetResources(fd);
   if (res == nullptr) {
     return std::nullopt;
   }
+  const char* want = std::getenv("DRM_CXX_CONNECTOR");
   std::optional<Output> out;
   for (int i = 0; i < res->count_connectors && !out.has_value(); ++i) {
     auto* conn = drmModeGetConnector(fd, res->connectors[i]);
     if (conn == nullptr) {
       continue;
     }
-    if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0 &&
+    const bool wanted = want == nullptr || *want == '\0' ||
+                        std::string(drm::display::connector_type_name(conn->connector_type)) + "-" +
+                                std::to_string(conn->connector_type_id) ==
+                            want;
+    if (wanted && conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0 &&
         conn->count_encoders > 0) {
       if (auto* enc = drmModeGetEncoder(fd, conn->encoders[0]); enc != nullptr) {
         for (int c = 0; c < res->count_crtcs; ++c) {
@@ -110,8 +120,8 @@ TEST(CursorOverlayClipVkms, CursorAtTheTopLeftIsClipped) {
   ASSERT_TRUE(registry.has_value());
   std::optional<std::uint32_t> overlay;
   for (const auto* cap : registry->for_crtc(out->crtc_index)) {
-    if (cap->type == drm::planes::DRMPlaneType::OVERLAY &&
-        cap->scans_out_linear(DRM_FORMAT_ARGB8888)) {
+    if (cap->type == drm::planes::DRMPlaneType::OVERLAY && !cap->multirect_parent.has_value() &&
+        cap->scans_out_linear(DRM_FORMAT_ARGB8888) && !overlay.has_value()) {
       overlay = cap->id;
     }
   }
