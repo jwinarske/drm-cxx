@@ -34,6 +34,19 @@ bool PlaneCapabilities::supports_format(const uint32_t fmt) const {
   return std::find(formats.begin(), formats.end(), fmt) != formats.end();
 }
 
+bool PlaneCapabilities::scans_out(const uint32_t fmt, const uint64_t modifier) const {
+  const drm::fmt::Modifier m{modifier};
+  if (!has_format_modifiers) {
+    // No IN_FORMATS: the bare list, linear only.
+    return (m.is_linear() || m.is_invalid()) && supports_format(fmt);
+  }
+  return drm::fmt::layer_fits_plane(format_table, fmt, m);
+}
+
+bool PlaneCapabilities::scans_out_linear(const uint32_t fmt) const {
+  return scans_out(fmt, DRM_FORMAT_MOD_LINEAR);
+}
+
 bool PlaneCapabilities::compatible_with_crtc(const uint32_t crtc_index) const {
   // possible_crtcs is a 32-bit mask; a larger index has no bit (and shifting
   // by it is undefined).

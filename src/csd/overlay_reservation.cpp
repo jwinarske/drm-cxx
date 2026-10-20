@@ -59,7 +59,7 @@ drm::expected<std::vector<std::uint32_t>, std::error_code> OverlayReservation::r
     if (cap->type != drm::planes::DRMPlaneType::OVERLAY) {
       continue;
     }
-    if (!cap->supports_format(format)) {
+    if (!cap->scans_out_linear(format)) {  // decorations are dumb buffers
       continue;
     }
     // zpos floor enforcement. A plane without zpos_min can't honor a

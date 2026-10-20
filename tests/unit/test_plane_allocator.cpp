@@ -229,3 +229,37 @@ TEST(TestCacheTest, UnknownIsNotAFailure) {
   EXPECT_EQ(cache.failure_count(999, 0x1U), 0U);
   EXPECT_FALSE(cache.lookup(999, 0x1U).has_value());
 }
+
+namespace {
+
+// RK3566 Cluster window: ARGB8888/XRGB8888 listed, but IN_FORMATS gives each
+// only an AFBC modifier, no LINEAR (#364).
+drm::planes::PlaneCapabilities afbc_only_plane() {
+  constexpr std::uint64_t k_afbc = 0x0800000000000001ULL;
+  drm::planes::PlaneCapabilities caps;
+  caps.formats = {DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888};
+  caps.format_table =
+      drm::fmt::FormatTable::from_pairs(std::vector<std::pair<std::uint32_t, std::uint64_t>>{
+          {DRM_FORMAT_ARGB8888, k_afbc}, {DRM_FORMAT_XRGB8888, k_afbc}});
+  caps.has_format_modifiers = true;
+  caps.build_format_metadata();
+  return caps;
+}
+
+}  // namespace
+
+TEST(PlaneCapabilitiesTest, ScansOutReadsInFormats) {
+  constexpr std::uint64_t k_afbc = 0x0800000000000001ULL;
+  const auto caps = afbc_only_plane();
+  EXPECT_TRUE(caps.supports_format(DRM_FORMAT_ARGB8888));
+  EXPECT_FALSE(caps.scans_out_linear(DRM_FORMAT_ARGB8888));
+  EXPECT_TRUE(caps.scans_out(DRM_FORMAT_ARGB8888, k_afbc));
+}
+
+TEST(PlaneCapabilitiesTest, ScansOutWithoutInFormatsIsLinearOnly) {
+  drm::planes::PlaneCapabilities caps;
+  caps.formats = {DRM_FORMAT_XRGB8888};
+  EXPECT_TRUE(caps.scans_out_linear(DRM_FORMAT_XRGB8888));
+  EXPECT_FALSE(caps.scans_out(DRM_FORMAT_XRGB8888, 0x0800000000000001ULL));
+  EXPECT_FALSE(caps.scans_out_linear(DRM_FORMAT_ARGB8888));
+}

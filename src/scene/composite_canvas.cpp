@@ -236,7 +236,8 @@ std::optional<std::uint32_t> canvas_format_for_plane(const drm::planes::PlaneCap
       DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_FORMAT_XBGR8888,
       DRM_FORMAT_ABGR8888, DRM_FORMAT_RGB565,   DRM_FORMAT_BGR565};
   for (const std::uint32_t fourcc : k_canvas_formats) {
-    if (canvas_output_bpp(fourcc) != 0U && plane.supports_format(fourcc)) {
+    // The canvas is a dumb buffer: the plane must take the format linear.
+    if (canvas_output_bpp(fourcc) != 0U && plane.scans_out_linear(fourcc)) {
       return fourcc;
     }
   }
