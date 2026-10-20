@@ -575,6 +575,12 @@ class LayerScene::Impl {
       return CommitReport{};
     }
     auto state = std::move(*build);
+    if (!test_only && commit_hook_) {
+      if (auto hooked = commit_hook_(req); !hooked) {
+        return finalize_frame(std::move(state), drm::unexpected<std::error_code>(hooked.error()),
+                              nullptr);
+      }
+    }
     const std::uint32_t kernel_flags = LayerScene::effective_flags_of(*state);
 
     // OUT_FENCE: request a sync_file the kernel writes during the real commit; it
@@ -795,6 +801,8 @@ class LayerScene::Impl {
   void set_external_reserved_planes(drm::span<const std::uint32_t> planes) {
     external_reserved_planes_.assign(planes.data(), planes.data() + planes.size());
   }
+
+  void set_commit_hook(CommitHook hook) { commit_hook_ = std::move(hook); }
 
   // Conservative pre-build peek for SceneSet::NarrowPolicy::AutoOnModeset.
   // Returns true iff the next build_frame_into pass will definitely
@@ -3744,6 +3752,8 @@ class LayerScene::Impl {
   // into scratch_reserved_planes_ so the allocator's disable-unused
   // pass leaves them alone. Set via set_external_reserved_planes().
   std::vector<std::uint32_t> external_reserved_planes_;
+  // Run on every real commit after the scene's writes; set_commit_hook().
+  CommitHook commit_hook_;
   // Per-frame acquisitions list. build_frame_into populates it via
   // acquire_all and std::moves it into FrameBuildState::acquisitions
   // before returning. finalize_frame moves the (now-cleared but
@@ -4648,6 +4658,10 @@ void LayerScene::set_force_full_property_writes(bool force) noexcept {
 
 void LayerScene::set_external_reserved_planes(drm::span<const std::uint32_t> planes) {
   impl_->set_external_reserved_planes(planes);
+}
+
+void LayerScene::set_commit_hook(CommitHook hook) {
+  impl_->set_commit_hook(std::move(hook));
 }
 
 bool LayerScene::force_full_property_writes() const noexcept {
