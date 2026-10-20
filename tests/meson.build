@@ -403,6 +403,14 @@ if has_xcursor
       dependencies : test_deps,
     ),
   )
+
+  test('test_cursor_overlay_clip_vkms',
+    executable('test_cursor_overlay_clip_vkms',
+      'integration/test_cursor_overlay_clip_vkms.cpp',
+      dependencies : test_deps,
+    ),
+    is_parallel : false,
+  )
 endif
 
 if has_blend2d
