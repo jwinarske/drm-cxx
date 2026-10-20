@@ -236,6 +236,13 @@ test('test_multirect',
   ),
 )
 
+test('test_plane_clip',
+  executable('test_plane_clip',
+    'unit/test_plane_clip.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 # Seat against a fake libseat defined in the test itself (interposition);
 # libseat is linked for its header and types only.
 if has_libseat and has_input

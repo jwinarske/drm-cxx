@@ -115,23 +115,23 @@ drm::expected<ActiveCrtc, std::error_code> pick_crtc(int fd) {
   return *found;
 }
 
-std::optional<std::uint64_t> plane_type(int fd, std::uint32_t plane_id) {
+std::optional<std::uint64_t> plane_prop(int fd, std::uint32_t plane_id, const char* name) {
   auto* props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
   if (props == nullptr) {
     return std::nullopt;
   }
-  std::optional<std::uint64_t> type;
+  std::optional<std::uint64_t> value;
   for (std::uint32_t i = 0; i < props->count_props; ++i) {
     auto* prop = drmModeGetProperty(fd, props->props[i]);
     if (prop != nullptr) {
-      if (std::strcmp(prop->name, "type") == 0) {
-        type = props->prop_values[i];
+      if (std::strcmp(prop->name, name) == 0) {
+        value = props->prop_values[i];
       }
       drmModeFreeProperty(prop);
     }
   }
   drmModeFreeObjectProperties(props);
-  return type;
+  return value;
 }
 
 // First OVERLAY plane on `pipe` that scans out `fourcc`, or nullopt.
@@ -154,7 +154,7 @@ std::optional<std::uint32_t> find_overlay_plane(int fd, int pipe, std::uint32_t 
         break;
       }
     }
-    const auto type = plane_type(fd, plane->plane_id);
+    const auto type = plane_prop(fd, plane->plane_id, "type");
     if (on_pipe && has_fmt && type.has_value() && *type == DRM_PLANE_TYPE_OVERLAY) {
       found = plane->plane_id;
     }
@@ -268,6 +268,57 @@ TEST(LayerScenePinVkms, PinnedLayerLandsOnItsPlane) {
       << "the pinned layer must land on exactly the plane it was pinned to";
 
   cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+}
+
+// A destination above and left of the CRTC is clipped before it reaches the
+// plane: some drivers refuse a negative CRTC_X/CRTC_Y outright.
+TEST(LayerScenePinVkms, LayerOffTheTopLeftIsClipped) {
+  const auto node = find_scene_card();
+  if (!node) {
+    GTEST_SKIP() << "VKMS not loaded";
+  }
+  auto fx_r = open_vkms_scene(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+  const auto overlay = find_overlay_plane(fx.dev->fd(), fx.active.pipe, DRM_FORMAT_ARGB8888);
+  if (!overlay) {
+    cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+    GTEST_SKIP() << "no ARGB8888-capable overlay plane on this CRTC";
+  }
+  add_background(fx, fx.active.mode.hdisplay, fx.active.mode.vdisplay);
+
+  auto src = DumbBufferSource::create(*fx.dev, 64, 64, DRM_FORMAT_ARGB8888);
+  ASSERT_TRUE(src.has_value()) << src.error().message();
+  LayerDesc d;
+  d.source = std::move(*src);
+  d.display.src_rect = drm::scene::Rect{0, 0, 64, 64};
+  d.display.dst_rect = drm::scene::Rect{-16, -8, 64, 64};
+  d.display.zpos = 1;
+  d.pinned_plane_id = overlay;
+  auto handle_r = fx.scene->add_layer(std::move(d));
+  ASSERT_TRUE(handle_r.has_value()) << handle_r.error().message();
+
+  auto report = fx.scene->commit();
+  ASSERT_TRUE(report.has_value()) << report.error().message();
+  if (report->pins_failed > 0) {
+    cleanup_crtc(fx.dev->fd(), fx.active.crtc_id);
+    GTEST_SKIP() << "driver rejects plane " << *overlay << " on this CRTC";
+  }
+  auto* layer = fx.scene->get_layer(*handle_r);
+  ASSERT_NE(layer, nullptr);
+  EXPECT_EQ(layer->last_placement(), LayerPlacement::AssignedToPlane);
+
+  const int fd = fx.dev->fd();
+  EXPECT_EQ(plane_prop(fd, *overlay, "CRTC_X"), 0U);
+  EXPECT_EQ(plane_prop(fd, *overlay, "CRTC_Y"), 0U);
+  EXPECT_EQ(plane_prop(fd, *overlay, "CRTC_W"), 48U);
+  EXPECT_EQ(plane_prop(fd, *overlay, "CRTC_H"), 56U);
+  EXPECT_EQ(plane_prop(fd, *overlay, "SRC_X"), 16U << 16U);
+  EXPECT_EQ(plane_prop(fd, *overlay, "SRC_Y"), 8U << 16U);
+  EXPECT_EQ(plane_prop(fd, *overlay, "SRC_W"), 48U << 16U);
+  EXPECT_EQ(plane_prop(fd, *overlay, "SRC_H"), 56U << 16U);
+
+  cleanup_crtc(fd, fx.active.crtc_id);
 }
 
 TEST(LayerScenePinVkms, UnhonorablePinFallsBackAndCountsFailure) {
