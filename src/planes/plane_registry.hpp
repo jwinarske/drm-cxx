@@ -92,6 +92,11 @@ struct PlaneCapabilities {
   /// is only valid alongside; nullopt for ordinary planes. Read from the
   /// driver's read-only `capabilities` blob (`primary_smart_plane_id=`).
   std::optional<uint32_t> multirect_parent;
+  /// Driver-private plane properties drm-cxx does not drive and writes 0 to
+  /// ("no configuration") when it arms the plane, so state another client left
+  /// there cannot reject or alter our frames: the downstream SDE driver's
+  /// scaler_v2, csc_v1, excl_rect_v1 and LUT blobs. Property ids.
+  std::vector<uint32_t> reset_on_arm_props;
   /// Supported rotation/reflect angles as a mask of DRM_MODE_ROTATE_* |
   /// DRM_MODE_REFLECT_* bits, harvested from the `"rotation"` bitmask
   /// property; 0 when the plane exposes no rotation property. A plane can

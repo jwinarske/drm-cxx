@@ -3324,6 +3324,14 @@ class LayerScene::Impl {
         return r;
       }
     }
+    // Driver-private state another client may have left (see
+    // PlaneCapabilities::reset_on_arm_props).
+    for (const std::uint32_t prop : plane.reset_on_arm_props) {
+      if (auto r = req.add_property(plane.id, prop, 0); !r) {
+        return r;
+      }
+      ++report.properties_written;
+    }
     // Clamp the requested canvas zpos into the plane's advertised range.
     // choose_canvas_zpos() returns (top of the armed stack + 1), which can
     // exceed the plane's zpos_max on controllers with a tight range — TI
