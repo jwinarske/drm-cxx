@@ -33,6 +33,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <system_error>
@@ -475,6 +476,16 @@ class LayerScene {
   /// the full set on each call; pass an empty span to clear. Survives
   /// pause/resume and rebind (stored on the scene, re-read every frame).
   void set_external_reserved_planes(drm::span<const std::uint32_t> planes);
+
+  /// Writes a caller adds to every real commit, after the scene's own: the
+  /// state of a plane armed outside the scene (a cursor plane passed to
+  /// set_external_reserved_planes), so it changes in the scene's commit
+  /// rather than in one of its own, which would contend with the scene's
+  /// flip. Not run for test(), nor by SceneSet. An error aborts the commit
+  /// with it, as a kernel rejection would. Empty clears it. Survives
+  /// pause/resume and rebind.
+  using CommitHook = std::function<drm::expected<void, std::error_code>(drm::AtomicRequest&)>;
+  void set_commit_hook(CommitHook hook);
 
   // ── Session hooks ──────────────────────────────────────────────────
   //

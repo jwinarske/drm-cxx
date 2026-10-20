@@ -171,6 +171,11 @@ if(DRM_CXX_HAS_XCURSOR)
   target_link_libraries(test_cursor_overlay_clip_vkms PRIVATE
     drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
   gtest_discover_tests(test_cursor_overlay_clip_vkms)
+
+  add_executable(test_layer_scene_commit_hook_vkms integration/test_layer_scene_commit_hook_vkms.cpp)
+  target_link_libraries(test_layer_scene_commit_hook_vkms PRIVATE
+    drm-cxx::drm-cxx GTest::gtest GTest::gtest_main)
+  gtest_discover_tests(test_layer_scene_commit_hook_vkms)
 endif()
 
 # VKMS integration test — self-skips when vkms is absent. Kept out of

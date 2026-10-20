@@ -411,6 +411,14 @@ if has_xcursor
     ),
     is_parallel : false,
   )
+
+  test('test_layer_scene_commit_hook_vkms',
+    executable('test_layer_scene_commit_hook_vkms',
+      'integration/test_layer_scene_commit_hook_vkms.cpp',
+      dependencies : test_deps,
+    ),
+    is_parallel : false,
+  )
 endif
 
 if has_blend2d
