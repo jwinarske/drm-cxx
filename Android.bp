@@ -63,6 +63,7 @@ cc_library_shared {
         "src/scene/egl_stream_source.cpp",
         "src/scene/detail/dmabuf_slot.cpp",
         "src/scene/detail/external_ring_core.cpp",
+        "src/scene/detail/source_mirror.cpp",
         "src/scene/external_dma_buf_source.cpp",
         "src/scene/external_dma_buf_ring.cpp",
         "src/scene/external_dma_buf_pool.cpp",

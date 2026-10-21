@@ -63,18 +63,24 @@ class LayerScene;
 /// internal forwarder so each scene's LayerScene::add_layer receives
 /// its own LayerBufferSource pointer.
 ///
-/// Limitations:
-///   * The underlying source must accept multiple acquire/release
-///     pairs per logical frame — N participating scenes call
-///     acquire() / release() once each per commit. Static-buffer
-///     sources (DumbBufferSource, ExternalDmaBufSource) handle this
-///     naturally. Per-frame ring sources (V4L2 decoder, GstAppsink)
-///     do NOT support mirroring in this revision.
-///   * on_session_resumed() fires once per participating scene, so
-///     the underlying source's resume hook must tolerate repeated
-///     calls within a single VT-switch cycle. DumbBufferSource and
-///     ExternalDmaBufSource do; GBM-backed sources have not been
-///     audited for this pattern yet.
+/// With several targets the source is acquired once per frame and the
+/// buffer shared, so a per-frame ring (V4L2 capture or decode,
+/// GbmSurfaceSource, GstAppsinkSource, ExternalDmaBufRing) shows the
+/// same frame on every target:
+///   * A target takes the newest frame if it has not shown it yet;
+///     once it has, its next acquire advances the source. Targets that
+///     commit together through SceneSet::commit() show one frame; a
+///     target whose scene commits alone still sees new frames, and a
+///     slower target skips the frames it missed.
+///   * A buffer goes back to the source when every target that showed
+///     it has released it and a newer frame has replaced it. The
+///     targets' release fences are merged.
+///   * on_session_paused() / on_session_resumed() reach the source once
+///     per session cycle.
+///   * Damage passes to a target only when it also showed the previous
+///     frame; otherwise the frame is full damage.
+///   * The source keeps one more buffer out than a single scene would:
+///     the newest frame, held for targets yet to take it.
 struct SceneSetLayerSpec {
   std::shared_ptr<LayerBufferSource> source;
 

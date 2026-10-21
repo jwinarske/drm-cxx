@@ -229,6 +229,13 @@ test('test_plane_allocator',
   ),
 )
 
+test('test_source_mirror',
+  executable('test_source_mirror',
+    'unit/test_source_mirror.cpp',
+    dependencies : test_deps,
+  ),
+)
+
 test('test_multirect',
   executable('test_multirect',
     'unit/test_multirect.cpp',

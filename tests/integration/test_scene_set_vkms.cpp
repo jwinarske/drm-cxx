@@ -16,6 +16,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/display/hdr_metadata.hpp>
+#include <drm-cxx/dumb/buffer.hpp>
 #include <drm-cxx/scene/buffer_source.hpp>
 #include <drm-cxx/scene/commit_report.hpp>
 #include <drm-cxx/scene/display_params.hpp>
@@ -26,7 +27,9 @@
 
 #include <drm_fourcc.h>
 #include <xf86drm.h>
+#include <xf86drmMode.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
@@ -128,6 +131,115 @@ drm::expected<ScenesFixture, std::error_code> open_scenes(const std::string& nod
     scenes.push_back(std::move(*s));
   }
   return ScenesFixture{std::move(dev), std::move(outputs), std::move(scenes)};
+}
+
+// A ring of dumb framebuffers that advances on every acquire, like a camera
+// or decoder ring. Counts acquires.
+class DumbRing final : public drm::scene::LayerBufferSource {
+ public:
+  static std::shared_ptr<DumbRing> create(const drm::Device& dev, std::uint32_t w,
+                                          std::uint32_t h) {
+    auto ring = std::make_shared<DumbRing>();
+    ring->w_ = w;
+    ring->h_ = h;
+    for (int i = 0; i < 3; ++i) {
+      drm::dumb::Config cfg;
+      cfg.width = w;
+      cfg.height = h;
+      cfg.drm_format = DRM_FORMAT_ARGB8888;
+      cfg.bpp = 32;
+      cfg.add_fb = true;
+      auto b = drm::dumb::Buffer::create(dev, cfg);
+      if (!b) {
+        return nullptr;
+      }
+      ring->bufs_.push_back(std::move(*b));
+    }
+    return ring;
+  }
+
+  drm::expected<drm::scene::AcquiredBuffer, std::error_code> acquire() override {
+    drm::scene::AcquiredBuffer out;
+    out.fb_id = bufs_[next_ % bufs_.size()].fb_id();
+    ++next_;
+    ++acquires;
+    return out;
+  }
+  void release(drm::scene::AcquiredBuffer /*acquired*/) noexcept override {}
+  [[nodiscard]] drm::scene::BindingModel binding_model() const noexcept override {
+    return drm::scene::BindingModel::SceneSubmitsFbId;
+  }
+  [[nodiscard]] drm::scene::SourceFormat format() const noexcept override {
+    return {DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR, w_, h_};
+  }
+  [[nodiscard]] bool owns(std::uint32_t fb) const {
+    return std::any_of(bufs_.begin(), bufs_.end(),
+                       [fb](const drm::dumb::Buffer& b) { return b.fb_id() == fb; });
+  }
+
+  int acquires{0};
+
+ private:
+  std::vector<drm::dumb::Buffer> bufs_;
+  std::size_t next_{0};
+  std::uint32_t w_{0};
+  std::uint32_t h_{0};
+};
+
+std::optional<std::uint64_t> object_prop(int fd, std::uint32_t id, const char* name) {
+  auto* props = drmModeObjectGetProperties(fd, id, DRM_MODE_OBJECT_PLANE);
+  if (props == nullptr) {
+    return std::nullopt;
+  }
+  std::optional<std::uint64_t> value;
+  for (std::uint32_t i = 0; i < props->count_props; ++i) {
+    auto* prop = drmModeGetProperty(fd, props->props[i]);
+    if (prop != nullptr) {
+      if (std::strcmp(prop->name, name) == 0) {
+        value = props->prop_values[i];
+      }
+      drmModeFreeProperty(prop);
+    }
+  }
+  drmModeFreeObjectProperties(props);
+  return value;
+}
+
+// Every plane CRTC index `pipe` can use.
+std::vector<std::uint32_t> planes_for_crtc(int fd, unsigned pipe) {
+  std::vector<std::uint32_t> out;
+  auto* pres = drmModeGetPlaneResources(fd);
+  if (pres == nullptr) {
+    return out;
+  }
+  for (std::uint32_t i = 0; i < pres->count_planes; ++i) {
+    if (auto* plane = drmModeGetPlane(fd, pres->planes[i]); plane != nullptr) {
+      if ((plane->possible_crtcs & (1U << pipe)) != 0) {
+        out.push_back(plane->plane_id);
+      }
+      drmModeFreePlane(plane);
+    }
+  }
+  drmModeFreePlaneResources(pres);
+  return out;
+}
+
+// The ring framebuffer a plane on `crtc_id` scans out, or 0.
+std::uint32_t ring_fb_on_crtc(int fd, std::uint32_t crtc_id, const DumbRing& ring) {
+  auto* pres = drmModeGetPlaneResources(fd);
+  if (pres == nullptr) {
+    return 0;
+  }
+  std::uint32_t found = 0;
+  for (std::uint32_t i = 0; i < pres->count_planes && found == 0; ++i) {
+    const auto crtc = object_prop(fd, pres->planes[i], "CRTC_ID");
+    const auto fb = object_prop(fd, pres->planes[i], "FB_ID");
+    if (crtc == crtc_id && fb.has_value() && ring.owns(static_cast<std::uint32_t>(*fb))) {
+      found = static_cast<std::uint32_t>(*fb);
+    }
+  }
+  drmModeFreePlaneResources(pres);
+  return found;
 }
 
 }  // namespace
@@ -529,5 +641,59 @@ TEST(SceneSetVkms, PerCrtcAcceptsTwoEngagedScenes) {
   ASSERT_EQ(reports->size(), fx.outputs.size());
   for (std::size_t i = 0; i < reports->size(); ++i) {
     EXPECT_EQ((*reports)[i].layers_total, 1U) << "scene " << i;
+  }
+}
+
+// A per-frame ring mirrored across two CRTCs is acquired once per commit and
+// every CRTC scans out the same frame. Without the mirror each scene took its
+// own frame: two acquires per commit, a different buffer on each CRTC.
+TEST(SceneSetVkms, MirroredRingShowsOneFrameOnEveryCrtc) {
+  const auto node = find_vkms_multi_crtc(2);
+  if (!node) {
+    GTEST_SKIP() << "no vkms instance with >=2 connected outputs";
+  }
+  auto fx_r = open_scenes(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+  std::uint32_t w = 0;
+  std::uint32_t h = 0;
+  for (const auto& o : fx.outputs) {
+    w = std::max<std::uint32_t>(w, o.mode.hdisplay);
+    h = std::max<std::uint32_t>(h, o.mode.vdisplay);
+  }
+  auto ring = DumbRing::create(*fx.dev, w, h);
+  ASSERT_NE(ring, nullptr);
+  const auto outputs = fx.outputs;
+  // Scenes in one SceneSet do not yet split planes that several CRTCs can
+  // use: keep the later scenes off the planes the first CRTC can use, so
+  // each CRTC's layer lands on a plane of its own.
+  const auto shared = planes_for_crtc(fx.dev->fd(), fx.outputs[0].crtc_index);
+  for (std::size_t i = 1; i < fx.scenes.size(); ++i) {
+    fx.scenes[i]->set_external_reserved_planes(shared);
+  }
+  auto set_r = drm::scene::SceneSet::create(*fx.dev, std::move(fx.scenes));
+  ASSERT_TRUE(set_r.has_value()) << set_r.error().message();
+
+  drm::scene::SceneSetLayerSpec spec;
+  spec.source = ring;
+  for (std::size_t i = 0; i < outputs.size(); ++i) {
+    drm::scene::DisplayParams display;
+    display.src_rect = drm::scene::Rect{0, 0, outputs[i].mode.hdisplay, outputs[i].mode.vdisplay};
+    display.dst_rect = drm::scene::Rect{0, 0, outputs[i].mode.hdisplay, outputs[i].mode.vdisplay};
+    spec.targets.push_back({i, display, false});
+  }
+  ASSERT_TRUE((*set_r)->add_layer(spec).has_value());
+
+  const int fd = fx.dev->fd();
+  for (int frame = 1; frame <= 3; ++frame) {
+    auto reports = (*set_r)->commit();
+    ASSERT_TRUE(reports.has_value()) << reports.error().message();
+    EXPECT_EQ(ring->acquires, frame) << "one acquire per commit";
+    const std::uint32_t first = ring_fb_on_crtc(fd, outputs[0].crtc_id, *ring);
+    ASSERT_NE(first, 0U) << "the ring is on a plane of CRTC " << outputs[0].crtc_id;
+    for (std::size_t i = 1; i < outputs.size(); ++i) {
+      EXPECT_EQ(ring_fb_on_crtc(fd, outputs[i].crtc_id, *ring), first)
+          << "frame " << frame << ": CRTC " << outputs[i].crtc_id;
+    }
   }
 }
