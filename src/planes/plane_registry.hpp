@@ -235,11 +235,17 @@ class PlaneRegistry {
 
   [[nodiscard]] drm::span<const PlaneCapabilities> all() const noexcept;
 
-  /// Planes compatible with `crtc_index`. The returned reference is
-  /// stable for the lifetime of the registry — `for_crtc` lazily
-  /// populates a per-CRTC cache on first call so repeated lookups for
-  /// the same CRTC are O(1) and allocation-free.
+  /// Planes compatible with `crtc_index`, less the excluded ones. The
+  /// returned reference is stable for the lifetime of the registry —
+  /// `for_crtc` lazily populates a per-CRTC cache on first call so
+  /// repeated lookups for the same CRTC are O(1) and allocation-free.
+  /// Its contents change when set_excluded_planes() changes the set.
   [[nodiscard]] const std::vector<const PlaneCapabilities*>& for_crtc(uint32_t crtc_index) const;
+
+  /// Planes for_crtc() leaves out: ones another user of the device holds
+  /// (another scene in a SceneSet, on a plane several CRTCs share).
+  /// Replaces the set; an empty span clears it. all() is unaffected.
+  void set_excluded_planes(drm::span<const uint32_t> plane_ids);
 
   /// How many planes `crtc_index` can blend at once, when the driver says: one
   /// per mixer stage, from the CRTC's read-only `capabilities` blob
@@ -254,6 +260,8 @@ class PlaneRegistry {
   std::vector<PlaneCapabilities> planes_;
   // Per-CRTC blend limits by CRTC index; absent when the driver gives none.
   std::unordered_map<uint32_t, uint32_t> blend_limits_;
+  // Plane ids for_crtc() leaves out, sorted.
+  std::vector<uint32_t> excluded_;
   // Lazy per-CRTC view; mutable so const lookups can populate it.
   // Pointers reference elements in `planes_`, whose addresses are
   // stable for the registry's lifetime (vector is built once in

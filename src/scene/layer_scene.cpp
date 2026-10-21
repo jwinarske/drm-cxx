@@ -798,6 +798,13 @@ class LayerScene::Impl {
   }
   [[nodiscard]] bool force_full_property_writes() const noexcept { return force_full_writes_; }
 
+  void set_planes_claimed_elsewhere(drm::span<const std::uint32_t> planes) {
+    claimed_elsewhere_.assign(planes.data(), planes.data() + planes.size());
+    registry_.set_excluded_planes(planes);
+  }
+
+  [[nodiscard]] std::uint32_t crtc_id() const noexcept { return crtc_id_; }
+
   void set_external_reserved_planes(drm::span<const std::uint32_t> planes) {
     external_reserved_planes_.assign(planes.data(), planes.data() + planes.size());
   }
@@ -909,6 +916,7 @@ class LayerScene::Impl {
       return drm::unexpected<std::error_code>(fresh_registry.error());
     }
     registry_ = std::move(*fresh_registry);
+    registry_.set_excluded_planes(claimed_elsewhere_);
 
     if (auto r = cache_object_properties(); !r) {
       return drm::unexpected<std::error_code>(r.error());
@@ -3752,6 +3760,10 @@ class LayerScene::Impl {
   // into scratch_reserved_planes_ so the allocator's disable-unused
   // pass leaves them alone. Set via set_external_reserved_planes().
   std::vector<std::uint32_t> external_reserved_planes_;
+  // Planes another scene holds (set_planes_claimed_elsewhere): left out of
+  // registry_.for_crtc() and reserved from the allocator, whose warm start
+  // would otherwise reuse one it placed on before.
+  std::vector<std::uint32_t> claimed_elsewhere_;
   // Run on every real commit after the scene's writes; set_commit_hook().
   CommitHook commit_hook_;
   // Per-frame acquisitions list. build_frame_into populates it via
@@ -4080,7 +4092,8 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // their properties itself via compose_unassigned / the canvas-arm
   // path and arm_stream_layer_planes respectively.
   scratch_reserved_planes_.clear();
-  scratch_reserved_planes_.reserve(1 + acquisitions.size() + external_reserved_planes_.size());
+  scratch_reserved_planes_.reserve(1 + acquisitions.size() + external_reserved_planes_.size() +
+                                   claimed_elsewhere_.size());
   // Not a multirect virtual plane: it is only valid while its parent is armed,
   // and the allocator may give the parent away, leaving the reserved canvas
   // orphaned in every TEST. Unreserved, the canvas is re-picked each frame.
@@ -4097,6 +4110,9 @@ drm::expected<FrameBuildPtr, std::error_code> LayerScene::Impl::build_frame_into
   // scene): the allocator must not disable them in its disable-unused
   // pass — the external owner drives their properties itself.
   for (const auto id : external_reserved_planes_) {
+    scratch_reserved_planes_.push_back(id);
+  }
+  for (const auto id : claimed_elsewhere_) {
     scratch_reserved_planes_.push_back(id);
   }
   // Hard pins: reserve each honorable pinned plane out of the allocator
@@ -4630,6 +4646,33 @@ std::uint32_t LayerScene::effective_flags_of(const FrameBuildState& state) noexc
 
 bool LayerScene::wants_release_fence_of(const FrameBuildState& state) noexcept {
   return state.wants_release_fence;
+}
+
+std::vector<std::uint32_t> LayerScene::armed_planes_of(const FrameBuildState& state) {
+  std::vector<std::uint32_t> out;
+  out.reserve(state.acquisitions.size() + 1);
+  for (const auto& acq : state.acquisitions) {
+    if (acq.planes_layer != nullptr) {
+      if (const auto id = acq.planes_layer->assigned_plane_id(); id.has_value()) {
+        out.push_back(*id);
+      }
+    }
+    if (acq.stream_pinned_plane_id.has_value()) {
+      out.push_back(*acq.stream_pinned_plane_id);
+    }
+  }
+  if (state.canvas_plane.has_value()) {
+    out.push_back(*state.canvas_plane);
+  }
+  return out;
+}
+
+void LayerScene::set_planes_claimed_elsewhere(drm::span<const std::uint32_t> planes) {
+  impl_->set_planes_claimed_elsewhere(planes);
+}
+
+std::uint32_t LayerScene::crtc_id() const noexcept {
+  return impl_->crtc_id();
 }
 
 bool LayerScene::would_request_modeset() const noexcept {

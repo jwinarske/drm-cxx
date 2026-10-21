@@ -382,6 +382,20 @@ class LayerScene {
   /// touching the (incomplete-at-that-point) FrameBuildState internals.
   [[nodiscard]] static bool wants_release_fence_of(const FrameBuildState& state) noexcept;
 
+  /// The planes a build arms: its hardware-assigned layers, stream-pinned
+  /// planes and the composition canvas. SceneSet passes them to the other
+  /// scenes as set_planes_claimed_elsewhere().
+  [[nodiscard]] static std::vector<std::uint32_t> armed_planes_of(const FrameBuildState& state);
+
+  /// Planes another scene on the same device holds: SceneSet sets them on
+  /// planes several CRTCs share. The scene neither places a layer on them
+  /// nor disables them. Replaces the set; an empty span clears it. Survives
+  /// pause/resume and rebind.
+  void set_planes_claimed_elsewhere(drm::span<const std::uint32_t> planes);
+
+  /// The CRTC this scene drives.
+  [[nodiscard]] std::uint32_t crtc_id() const noexcept;
+
   /// Conservative pre-build peek: would the next `build_frame_into`
   /// pass OR `DRM_MODE_ATOMIC_ALLOW_MODESET` into its effective_flags?
   /// Returns true for the cases knowable without running the build —

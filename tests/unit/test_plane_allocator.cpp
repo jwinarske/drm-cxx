@@ -8,6 +8,7 @@
 
 #include <drm_fourcc.h>
 
+#include <array>
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <optional>
@@ -262,4 +263,26 @@ TEST(PlaneCapabilitiesTest, ScansOutWithoutInFormatsIsLinearOnly) {
   EXPECT_TRUE(caps.scans_out_linear(DRM_FORMAT_XRGB8888));
   EXPECT_FALSE(caps.scans_out(DRM_FORMAT_XRGB8888, 0x0800000000000001ULL));
   EXPECT_FALSE(caps.scans_out_linear(DRM_FORMAT_ARGB8888));
+}
+
+// set_excluded_planes leaves planes out of for_crtc and refills the cached
+// view in place: a reference taken earlier sees the change.
+TEST(PlaneRegistryTest, ExcludedPlanesLeaveForCrtcInPlace) {
+  std::vector<drm::planes::PlaneCapabilities> caps(3);
+  for (std::uint32_t i = 0; i < caps.size(); ++i) {
+    caps[i].id = 10 + i;
+    caps[i].possible_crtcs = 0x3;
+  }
+  auto reg = drm::planes::PlaneRegistry::from_capabilities(std::move(caps));
+  const auto& view = reg.for_crtc(0);
+  ASSERT_EQ(view.size(), 3U);
+  const std::array<std::uint32_t, 1> claimed{11};
+  reg.set_excluded_planes(claimed);
+  ASSERT_EQ(view.size(), 2U);
+  EXPECT_EQ(view[0]->id, 10U);
+  EXPECT_EQ(view[1]->id, 12U);
+  EXPECT_EQ(reg.for_crtc(1).size(), 2U) << "a view built after the change";
+  EXPECT_EQ(reg.all().size(), 3U);
+  reg.set_excluded_planes({});
+  EXPECT_EQ(view.size(), 3U);
 }

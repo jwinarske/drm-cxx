@@ -412,11 +412,37 @@ const std::vector<const PlaneCapabilities*>& PlaneRegistry::for_crtc(uint32_t cr
   }
   std::vector<const PlaneCapabilities*> result;
   for (const auto& p : planes_) {
-    if (p.compatible_with_crtc(crtc_index)) {
+    if (p.compatible_with_crtc(crtc_index) &&
+        !std::binary_search(excluded_.begin(), excluded_.end(), p.id)) {
       result.push_back(&p);
     }
   }
   return for_crtc_cache_.emplace(crtc_index, std::move(result)).first->second;
+}
+
+void PlaneRegistry::set_excluded_planes(drm::span<const uint32_t> plane_ids) {
+  // Steady state: the same sorted set again, checked without allocating.
+  if (std::is_sorted(plane_ids.begin(), plane_ids.end()) &&
+      std::equal(plane_ids.begin(), plane_ids.end(), excluded_.begin(), excluded_.end())) {
+    return;
+  }
+  std::vector<uint32_t> next(plane_ids.begin(), plane_ids.end());
+  std::sort(next.begin(), next.end());
+  next.erase(std::unique(next.begin(), next.end()), next.end());
+  if (next == excluded_) {
+    return;
+  }
+  excluded_ = std::move(next);
+  // Refill each cached view in place: callers hold references to them.
+  for (auto& [crtc_index, view] : for_crtc_cache_) {
+    view.clear();
+    for (const auto& p : planes_) {
+      if (p.compatible_with_crtc(crtc_index) &&
+          !std::binary_search(excluded_.begin(), excluded_.end(), p.id)) {
+        view.push_back(&p);
+      }
+    }
+  }
 }
 
 }  // namespace drm::planes

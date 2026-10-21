@@ -205,19 +205,18 @@ std::optional<std::uint64_t> object_prop(int fd, std::uint32_t id, const char* n
   return value;
 }
 
-// Every plane CRTC index `pipe` can use.
-std::vector<std::uint32_t> planes_for_crtc(int fd, unsigned pipe) {
+// Framebuffer ids lit on `crtc_id`'s planes.
+std::vector<std::uint32_t> fbs_on_crtc(int fd, std::uint32_t crtc_id) {
   std::vector<std::uint32_t> out;
   auto* pres = drmModeGetPlaneResources(fd);
   if (pres == nullptr) {
     return out;
   }
   for (std::uint32_t i = 0; i < pres->count_planes; ++i) {
-    if (auto* plane = drmModeGetPlane(fd, pres->planes[i]); plane != nullptr) {
-      if ((plane->possible_crtcs & (1U << pipe)) != 0) {
-        out.push_back(plane->plane_id);
-      }
-      drmModeFreePlane(plane);
+    const auto crtc = object_prop(fd, pres->planes[i], "CRTC_ID");
+    const auto fb = object_prop(fd, pres->planes[i], "FB_ID");
+    if (crtc == crtc_id && fb.has_value() && *fb != 0) {
+      out.push_back(static_cast<std::uint32_t>(*fb));
     }
   }
   drmModeFreePlaneResources(pres);
@@ -664,13 +663,6 @@ TEST(SceneSetVkms, MirroredRingShowsOneFrameOnEveryCrtc) {
   auto ring = DumbRing::create(*fx.dev, w, h);
   ASSERT_NE(ring, nullptr);
   const auto outputs = fx.outputs;
-  // Scenes in one SceneSet do not yet split planes that several CRTCs can
-  // use: keep the later scenes off the planes the first CRTC can use, so
-  // each CRTC's layer lands on a plane of its own.
-  const auto shared = planes_for_crtc(fx.dev->fd(), fx.outputs[0].crtc_index);
-  for (std::size_t i = 1; i < fx.scenes.size(); ++i) {
-    fx.scenes[i]->set_external_reserved_planes(shared);
-  }
   auto set_r = drm::scene::SceneSet::create(*fx.dev, std::move(fx.scenes));
   ASSERT_TRUE(set_r.has_value()) << set_r.error().message();
 
@@ -694,6 +686,45 @@ TEST(SceneSetVkms, MirroredRingShowsOneFrameOnEveryCrtc) {
     for (std::size_t i = 1; i < outputs.size(); ++i) {
       EXPECT_EQ(ring_fb_on_crtc(fd, outputs[i].crtc_id, *ring), first)
           << "frame " << frame << ": CRTC " << outputs[i].crtc_id;
+    }
+  }
+}
+
+// Planes several CRTCs can use go to one scene at a time (#391). Each scene
+// holds one full-screen layer; before the fix both picked the same shared
+// plane and the first CRTC lost its layer while both reported it placed.
+TEST(SceneSetVkms, ScenesDoNotShareAPlane) {
+  const auto node = find_vkms_multi_crtc(2);
+  if (!node) {
+    GTEST_SKIP() << "no vkms instance with >=2 connected outputs";
+  }
+  auto fx_r = open_scenes(*node);
+  ASSERT_TRUE(fx_r.has_value()) << fx_r.error().message();
+  auto& fx = *fx_r;
+  const auto outputs = fx.outputs;
+  std::vector<std::uint32_t> fbs;
+  for (std::size_t i = 0; i < outputs.size(); ++i) {
+    const auto& o = outputs[i];
+    auto src = drm::scene::DumbBufferSource::create(*fx.dev, o.mode.hdisplay, o.mode.vdisplay,
+                                                    DRM_FORMAT_ARGB8888);
+    ASSERT_TRUE(src.has_value()) << src.error().message();
+    drm::scene::LayerDesc desc;
+    desc.source = std::move(*src);
+    desc.display.src_rect = drm::scene::Rect{0, 0, o.mode.hdisplay, o.mode.vdisplay};
+    desc.display.dst_rect = drm::scene::Rect{0, 0, o.mode.hdisplay, o.mode.vdisplay};
+    ASSERT_TRUE(fx.scenes[i]->add_layer(std::move(desc)).has_value());
+  }
+  auto set_r = drm::scene::SceneSet::create(*fx.dev, std::move(fx.scenes));
+  ASSERT_TRUE(set_r.has_value()) << set_r.error().message();
+
+  const int fd = fx.dev->fd();
+  for (int frame = 0; frame < 3; ++frame) {
+    auto reports = (*set_r)->commit();
+    ASSERT_TRUE(reports.has_value()) << reports.error().message();
+    for (std::size_t i = 0; i < outputs.size(); ++i) {
+      EXPECT_EQ((*reports)[i].layers_assigned, 1U) << "scene " << i;
+      EXPECT_EQ(fbs_on_crtc(fd, outputs[i].crtc_id).size(), 1U)
+          << "frame " << frame << ": CRTC " << outputs[i].crtc_id << " scans out its layer";
     }
   }
 }

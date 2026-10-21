@@ -17,6 +17,7 @@
 #include <drm-cxx/sync/fence.hpp>
 
 #include <drm_mode.h>
+#include <xf86drmMode.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -173,10 +174,13 @@ class SceneSet::Impl {
     for (std::size_t i = 0; i < scenes_.size(); ++i) {
       if (!scenes_[i]) {
         scenes_[i] = std::move(scene);
+        seeded_.resize(scenes_.size(), false);
+        seeded_[i] = false;
         return i;
       }
     }
     scenes_.push_back(std::move(scene));
+    seeded_.resize(scenes_.size(), false);
     return scenes_.size() - 1;
   }
 
@@ -195,6 +199,13 @@ class SceneSet::Impl {
       pins.erase(std::remove_if(pins.begin(), pins.end(),
                                 [index](const PerScenePin& p) { return p.scene_index == index; }),
                  pins.end());
+    }
+    // Its planes are free for the other scenes.
+    plane_owner_.erase(std::remove_if(plane_owner_.begin(), plane_owner_.end(),
+                                      [index](const PlaneClaim& c) { return c.owner == index; }),
+                       plane_owner_.end());
+    if (index < seeded_.size()) {
+      seeded_[index] = false;
     }
     // Destroy the LayerScene last — its dtor releases buffers /
     // unbinds planes / etc., and we want every set-level pin already
@@ -353,6 +364,37 @@ class SceneSet::Impl {
       return reports;
     }
 
+    // Plane claims for this frame, starting from the committed ones. Each
+    // scene builds with every plane another scene holds left out, then
+    // claims what it armed: a plane several CRTCs share has one owner.
+    seed_plane_owners();
+    auto& claims = scratch_claims_;
+    claims = plane_owner_;
+    auto exclude_others = [&claims, this](std::size_t idx) {
+      scratch_claimed_.clear();
+      for (const auto& c : claims) {
+        if (c.owner != idx) {
+          scratch_claimed_.push_back(c.plane);
+        }
+      }
+      std::sort(scratch_claimed_.begin(), scratch_claimed_.end());
+      scenes_[idx]->set_planes_claimed_elsewhere(scratch_claimed_);
+    };
+    auto claim = [&claims](std::size_t idx, const FrameBuildState& state) {
+      claims.erase(std::remove_if(claims.begin(), claims.end(),
+                                  [idx](const PlaneClaim& c) { return c.owner == idx; }),
+                   claims.end());
+      for (const auto plane : LayerScene::armed_planes_of(state)) {
+        auto it = std::find_if(claims.begin(), claims.end(),
+                               [plane](const PlaneClaim& c) { return c.plane == plane; });
+        if (it != claims.end()) {
+          it->owner = idx;
+        } else {
+          claims.push_back({plane, idx});
+        }
+      }
+    };
+
     struct EngagedBuild {
       std::size_t scene_index;
       FrameBuildPtr state;
@@ -400,6 +442,7 @@ class SceneSet::Impl {
         if (!scene) {
           continue;  // hole — partition_for_policy already filtered, but be defensive
         }
+        exclude_others(idx);
         auto build = scene->build_frame_into(gp.req, caller_flags, test_only);
         if (!build) {
           // Roll back this group's already-built engaged states plus
@@ -418,6 +461,7 @@ class SceneSet::Impl {
           continue;  // scene suspended
         }
         gp.combined_flags |= LayerScene::effective_flags_of(**build);
+        claim(idx, **build);
         gp.engaged.push_back({idx, std::move(*build)});
       }
       if (!gp.engaged.empty()) {
@@ -436,6 +480,7 @@ class SceneSet::Impl {
     // masks PAGE_FLIP_EVENT internally — the strip below is a no-op
     // on that path but keeps both branches symmetric.
     std::error_code first_error;
+    std::vector<bool> failed(scenes_.size(), false);
     const std::size_t last_idx = pending.size() - 1;
     for (std::size_t i = 0; i < pending.size(); ++i) {
       auto& gp = pending[i];
@@ -451,10 +496,31 @@ class SceneSet::Impl {
       } else {
         kr = gp.req.commit(submit_flags, submit_user_data);
       }
+      if (!kr) {
+        for (const auto& eb : gp.engaged) {
+          failed[eb.scene_index] = true;
+        }
+      }
       finalize_with(gp.engaged, kr);
       if (!kr && !first_error) {
         first_error = kr.error();
       }
+    }
+
+    // Keep the claims of the scenes whose commit went through; a failed
+    // scene keeps what it held, unless a committed scene took it.
+    if (!test_only) {
+      claims.erase(std::remove_if(claims.begin(), claims.end(),
+                                  [&failed](const PlaneClaim& c) { return failed[c.owner]; }),
+                   claims.end());
+      for (const auto& c : plane_owner_) {
+        const bool taken = std::any_of(claims.begin(), claims.end(),
+                                       [&c](const PlaneClaim& k) { return k.plane == c.plane; });
+        if (failed[c.owner] && !taken) {
+          claims.push_back(c);
+        }
+      }
+      std::swap(plane_owner_, claims);
     }
 
     if (first_error) {
@@ -464,6 +530,47 @@ class SceneSet::Impl {
   }
 
  private:
+  struct PlaneClaim {
+    std::uint32_t plane{0};
+    std::size_t owner{0};
+  };
+
+  // A scene that joins the set claims the planes the kernel shows lit on
+  // its CRTC, so a scene warmed up alone keeps them.
+  void seed_plane_owners() {
+    seeded_.resize(scenes_.size(), false);
+    drmModePlaneRes* res = nullptr;
+    for (std::size_t i = 0; i < scenes_.size(); ++i) {
+      if (!scenes_[i] || seeded_[i]) {
+        continue;
+      }
+      if (res == nullptr) {
+        res = drmModeGetPlaneResources(dev_->fd());
+        if (res == nullptr) {
+          return;  // retried next frame
+        }
+      }
+      seeded_[i] = true;
+      const auto crtc_id = scenes_[i]->crtc_id();
+      for (std::uint32_t p = 0; p < res->count_planes; ++p) {
+        drmModePlane* plane = drmModeGetPlane(dev_->fd(), res->planes[p]);
+        if (plane == nullptr) {
+          continue;
+        }
+        const bool owned =
+            std::any_of(plane_owner_.begin(), plane_owner_.end(),
+                        [plane](const PlaneClaim& c) { return c.plane == plane->plane_id; });
+        if (plane->crtc_id == crtc_id && plane->fb_id != 0 && !owned) {
+          plane_owner_.push_back({plane->plane_id, i});
+        }
+        drmModeFreePlane(plane);
+      }
+    }
+    if (res != nullptr) {
+      drmModeFreePlaneResources(res);
+    }
+  }
+
   struct PerScenePin {
     std::size_t scene_index{0};
     LayerHandle layer_handle{};
@@ -479,6 +586,13 @@ class SceneSet::Impl {
   std::vector<std::unique_ptr<LayerScene>> scenes_;
   std::vector<SetLayerSlot> set_slots_;
   std::vector<std::uint32_t> free_set_slot_ids_;
+  // Committed owner (scene index) of each plane a scene holds, and the
+  // frame's working copy (reused, so a steady frame does not allocate).
+  std::vector<PlaneClaim> plane_owner_;
+  std::vector<PlaneClaim> scratch_claims_;
+  // Scenes whose lit planes were read into plane_owner_.
+  std::vector<bool> seeded_;
+  std::vector<std::uint32_t> scratch_claimed_;
 };
 
 SceneSet::SceneSet(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
