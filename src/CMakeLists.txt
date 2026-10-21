@@ -40,6 +40,7 @@ set(DRM_CXX_SOURCES
   scene/egl_stream_source.cpp
   scene/detail/dmabuf_slot.cpp
   scene/detail/external_ring_core.cpp
+  scene/detail/source_mirror.cpp
   scene/external_dma_buf_source.cpp
   scene/external_dma_buf_ring.cpp
   scene/external_dma_buf_pool.cpp

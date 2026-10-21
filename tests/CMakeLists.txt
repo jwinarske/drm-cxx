@@ -30,6 +30,7 @@ set(DRM_CXX_TESTS
   test_layer_groups
   test_cursor_format
   test_multirect
+  test_source_mirror
   test_plane_clip
   test_plane_alpha
   test_mode

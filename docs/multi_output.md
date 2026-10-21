@@ -48,10 +48,9 @@ live on individual `LayerScene` instances:
 - **Cross-scene layers** are added via `SceneSet::add_layer(spec)`.
   The supplied `SceneSetLayerSpec` carries one `shared_ptr<LayerBufferSource>`
   plus a vector of per-scene `{scene_index, DisplayParams, force_composited}`
-  targets. The set wraps the shared source in an internal per-target
-  forwarder so each child's `LayerScene::add_layer` receives its own
-  `LayerBufferSource` pointer; the underlying source stays alive for
-  the lifetime of every per-scene `LayerHandle`. This is the
+  targets. The set gives each child's `LayerScene::add_layer` its own
+  `LayerBufferSource` in front of the shared one; the underlying source
+  stays alive for the lifetime of every per-scene `LayerHandle`. This is the
   mirroring path (one logical layer presented on every output) and
   the per-output-specialization path (the same source displayed at
   different rects per output — a sidebar HUD on the right of display
@@ -62,27 +61,43 @@ sees both equally.
 
 ### Shared-source constraints
 
-A shared `LayerBufferSource` rides N scenes through N forwarders. The
-underlying source's vtable is reached once per participating scene
-per frame:
+A source with one target is forwarded as is. A source with several
+targets goes through a mirror that acquires it once per frame and
+shares the buffer, so a per-frame ring (`V4l2CameraSource`,
+`V4l2DecoderSource`, `GbmSurfaceSource`, `GstAppsinkSource`,
+`ExternalDmaBufRing`) shows the same frame on every output:
 
-- `acquire()` / `release()` pass through verbatim. **Static-buffer
-  sources** (`DumbBufferSource`, `ExternalDmaBufSource`) handle the
-  repeated acquire / release pairs naturally — they hand back the
-  same buffer every time. **Per-frame ring sources** (`V4l2DecoderSource`,
-  `GstAppsinkSource`) do not — calling `acquire()` twice per frame
-  silently drops one decoded frame.
-- `on_session_resumed()` fires once per participating scene during a
-  VT-switch resume cycle. Resumable static-buffer sources tolerate N
-  back-to-back re-allocations; GBM-backed sources have not been
-  audited for this pattern.
+- **Advancing.** A target takes the newest frame if it has not shown
+  it yet; once it has, its next `acquire()` advances the source. Scenes
+  committed together through `SceneSet::commit()` show one frame. A
+  scene committed on its own still sees new frames, and a scene that
+  commits less often skips the frames it missed: with outputs at
+  different refresh rates the faster one advances the source, and the
+  slower one shows the newest frame each time it commits.
+- **Release.** A buffer goes back to the source once every target that
+  showed it has released it and a newer frame has replaced it. The
+  targets' release fences are merged, so a GPU producer waiting on the
+  fence waits for every output. The source keeps one more buffer out
+  than a single scene would: the newest frame, held for targets yet to
+  take it.
+- **Damage.** A target gets the frame's damage only if it also showed
+  the previous frame; otherwise the frame counts as full damage.
+- **Session.** `on_session_paused()` / `on_session_resumed()` reach
+  the source once per VT-switch cycle, and `on_retired()` once every
+  target's layer is gone.
 
-If you need a per-frame source mirrored across CRTCs, the right
-pattern today is to add the source to one scene as a regular per-scene
-layer, hand the most recent acquired buffer to a `DumbBufferSource`
-or `ExternalDmaBufSource` per other CRTC, and add those as the
-mirrored targets. The library may grow first-class per-frame mirroring
-later if a real workload demands it.
+The mirror is single-threaded, like the scenes: drive the `SceneSet`
+from one thread.
+
+### Planes shared between CRTCs
+
+Each scene allocates from every plane its CRTC can use. A plane whose
+`possible_crtcs` covers several CRTCs is a candidate for every scene,
+and `SceneSet` does not yet keep two scenes off the same one (#391): in
+a combined commit the later scene's writes win and the earlier CRTC
+loses that layer, though both report it placed. Until that lands, split
+shared planes yourself with `LayerScene::set_external_reserved_planes`
+on all but one of the scenes that can use them.
 
 ## Commit semantics
 

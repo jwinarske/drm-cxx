@@ -5,6 +5,7 @@
 
 #include "buffer_source.hpp"
 #include "commit_report.hpp"
+#include "detail/source_mirror.hpp"
 #include "layer_desc.hpp"
 #include "layer_handle.hpp"
 #include "layer_scene.hpp"
@@ -13,6 +14,7 @@
 #include <drm-cxx/core/device.hpp>
 #include <drm-cxx/detail/expected.hpp>
 #include <drm-cxx/modeset/atomic.hpp>
+#include <drm-cxx/sync/fence.hpp>
 
 #include <drm_mode.h>
 
@@ -20,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <unordered_set>
 #include <utility>
@@ -29,19 +32,10 @@ namespace drm::scene {
 
 namespace {
 
-// Per-scene LayerBufferSource forwarder. Each forwarder owns a
-// shared_ptr to the application-provided underlying source and
-// pass-through-forwards every virtual call. The underlying source's
-// lifetime extends until the last forwarder is destroyed (which
-// happens when the SceneSet drops the matching LayerHandles).
-//
-// Limitations match SceneSetLayerSpec's documented surface:
-//   * acquire() / release() pass through verbatim — the underlying
-//     source sees one call per participating scene per frame. Static-
-//     buffer sources tolerate this; per-frame ring sources do not.
-//   * on_session_resumed() is invoked once per participating scene
-//     in the resume cycle. Resumable static-buffer sources tolerate
-//     N back-to-back re-allocations.
+// LayerBufferSource forwarder for a layer on one scene. Owns a
+// shared_ptr to the application-provided source and forwards every
+// virtual call. A layer on several scenes goes through
+// detail::SourceMirror instead.
 class SharedLayerBufferSource final : public LayerBufferSource {
  public:
   explicit SharedLayerBufferSource(std::shared_ptr<LayerBufferSource> inner) noexcept
@@ -68,6 +62,20 @@ class SharedLayerBufferSource final : public LayerBufferSource {
   void on_session_paused() noexcept override { inner_->on_session_paused(); }
   drm::expected<void, std::error_code> on_session_resumed(const drm::Device& new_dev) override {
     return inner_->on_session_resumed(new_dev);
+  }
+  void release_with_fence(AcquiredBuffer acquired,
+                          std::optional<drm::sync::SyncFence> release_fence) noexcept override {
+    inner_->release_with_fence(std::move(acquired), std::move(release_fence));
+  }
+  [[nodiscard]] bool wants_release_fence() const noexcept override {
+    return inner_->wants_release_fence();
+  }
+  [[nodiscard]] bool has_fresh_content() const noexcept override {
+    return inner_->has_fresh_content();
+  }
+  void on_retired() noexcept override { inner_->on_retired(); }
+  [[nodiscard]] drm::expected<DmaBufDesc, std::error_code> export_dma_buf() override {
+    return inner_->export_dma_buf();
   }
 
  private:
@@ -228,11 +236,21 @@ class SceneSet::Impl {
     // Build the per-target LayerDescs + add to each scene. On the
     // first failure, roll back every successful add so the caller
     // sees an atomic outcome.
+    // Several targets share one acquire per frame through a mirror, so a
+    // per-frame ring shows the same frame on every CRTC.
+    std::shared_ptr<detail::SourceMirror> mirror;
+    if (spec.targets.size() > 1) {
+      mirror = detail::SourceMirror::create(spec.source);
+    }
     std::vector<PerScenePin> pins;
     pins.reserve(spec.targets.size());
     for (const auto& t : spec.targets) {
       LayerDesc desc;
-      desc.source = std::make_unique<SharedLayerBufferSource>(spec.source);
+      if (mirror) {
+        desc.source = mirror->make_consumer();
+      } else {
+        desc.source = std::make_unique<SharedLayerBufferSource>(spec.source);
+      }
       desc.display = t.display;
       desc.force_composited = t.force_composited;
 
