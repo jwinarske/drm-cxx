@@ -1,5 +1,67 @@
 # Changelog
 
+## v5.2.0 — 2026-10-21: mirrored ring sources and shared planes in SceneSet
+
+Multi-output fixes for `SceneSet`, and a commit hook for planes armed
+outside a scene. ABI-compatible: soname stays `libdrm-cxx.so.5` and no
+exported symbol was removed, but `PlaneRegistry` grew (below); recompile if
+you construct or embed it.
+
+### Breaking changes
+
+- **ABI only:** `planes::PlaneRegistry` gains a private member. (#393)
+
+### API
+
+- `scene::LayerScene::set_commit_hook(CommitHook)`: writes a caller adds to
+  every real commit, after the scene's own, for a plane armed outside the
+  scene (a cursor overlay passed to `set_external_reserved_planes`), so it
+  changes in the scene's commit instead of contending with its flip. Not
+  run for `test()` or by `SceneSet`. (#390)
+- `scene::LayerScene::set_planes_claimed_elsewhere(span)`,
+  `armed_planes_of(const FrameBuildState&)` and `crtc_id()`. (#393)
+- `planes::PlaneRegistry::set_excluded_planes(span)`: planes `for_crtc()`
+  leaves out. (#393)
+
+### SceneSet
+
+- **Mirrored per-frame sources.** A layer on several scenes acquires its
+  source once per frame and shares the buffer, so a per-frame ring
+  (`V4l2CameraSource`, `V4l2DecoderSource`, `GbmSurfaceSource`,
+  `GstAppsinkSource`, `ExternalDmaBufRing`) shows the same frame on every
+  output. A scene takes the newest frame if it has not shown it; once it
+  has, its next acquire advances the source. A buffer goes back once every
+  scene that showed it has released it and a newer frame replaced it;
+  release fences are merged. Session hooks and `on_retired` reach the
+  source once. The source keeps one more buffer out. (Roadmap M8.5, #392)
+- A single-target `SceneSet` layer now forwards `release_with_fence`,
+  `wants_release_fence`, `has_fresh_content`, `on_retired` and
+  `export_dma_buf` to its source. (#392)
+- **Shared planes go to one scene at a time.** Each scene allocated from
+  every plane its CRTC can use, so two scenes could place on a plane
+  several CRTCs share; in the combined commit the later scene's writes won
+  and the earlier CRTC lost its layer while both reported it placed. The
+  set now records an owner per plane and leaves the others' planes out of
+  each scene's build. A scene that joins keeps the planes lit on its
+  CRTC. (#391, #393)
+
+### Docs
+
+- `docs/multi_output.md`: mirrored sources and shared planes. (#392, #393)
+
+### Tests
+
+- `test_source_mirror`, `SceneSetVkms.MirroredRingShowsOneFrameOnEveryCrtc`,
+  `SceneSetVkms.ScenesDoNotShareAPlane`,
+  `PlaneRegistryTest.ExcludedPlanesLeaveForCrtcInPlace`,
+  `test_layer_scene_commit_hook_vkms`.
+
+### Validated
+
+Host (vkms, two CRTCs) 111/111, SA8155P DP-4 108/108, Raspberry Pi 5 HDMI
+112/112, i.MX8M Plus 111/111. Single-output hardware; no multi-CRTC hardware
+run.
+
 ## v5.1.0 — 2026-10-20: teardown through owned descriptors; SDE plane fixes
 
 Fixes since 5.0.0. ABI-compatible: soname stays `libdrm-cxx.so.5` and no
