@@ -91,13 +91,15 @@ from one thread.
 
 ### Planes shared between CRTCs
 
-Each scene allocates from every plane its CRTC can use. A plane whose
-`possible_crtcs` covers several CRTCs is a candidate for every scene,
-and `SceneSet` does not yet keep two scenes off the same one (#391): in
-a combined commit the later scene's writes win and the earlier CRTC
-loses that layer, though both report it placed. Until that lands, split
-shared planes yourself with `LayerScene::set_external_reserved_planes`
-on all but one of the scenes that can use them.
+A plane whose `possible_crtcs` covers several CRTCs belongs to one
+scene at a time. Before building a scene, `SceneSet` leaves out the
+planes the other scenes hold (`LayerScene::set_planes_claimed_elsewhere`),
+then records the planes the scene armed. A plane a scene stops using is
+free for the scenes built after it in the same frame, and for every
+scene from the next frame. A scene that joins the set keeps the planes
+the kernel shows lit on its CRTC. Scenes committed through the set
+claim planes in build order, so the first scene gets first pick of the
+shared ones.
 
 ## Commit semantics
 
