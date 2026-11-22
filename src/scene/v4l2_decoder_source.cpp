@@ -4,6 +4,7 @@
 #include "v4l2_decoder_source.hpp"
 
 #include "../core/addfb2.hpp"
+#include "../core/gem_close.hpp"
 #include "buffer_source.hpp"
 #include "v4l2_plane_layout.hpp"
 
@@ -136,7 +137,7 @@ struct V4l2CaptureBuffer {
       }
       for (auto h : drm_handles) {
         if (h != 0) {
-          drmCloseBufferHandle(drm_fd, h);
+          drm::detail::close_gem_handle(drm_fd, h);
         }
       }
     }
@@ -173,7 +174,7 @@ struct V4l2CaptureBuffer {
 // then drmModeAddFB2WithModifiers to a stable per-buffer fb_id. The
 // kernel's prime-import GEM dedup means importing the same dmabuf
 // twice (NV12 single-V4L2-plane case) returns the same handle and
-// the second drmCloseBufferHandle decref is correct.
+// the second GEM_CLOSE decref is correct.
 //
 // On any failure, partial state is rolled back so the caller's
 // V4l2CaptureBuffer dtor doesn't double-free.
@@ -198,7 +199,7 @@ struct V4l2CaptureBuffer {
       // committed the slot's drm_fd.
       for (std::uint32_t prev = 0; prev < p; ++prev) {
         if (handles.at(prev) != 0) {
-          drmCloseBufferHandle(drm_fd, handles.at(prev));
+          drm::detail::close_gem_handle(drm_fd, handles.at(prev));
         }
       }
       return make_errno(errno != 0 ? errno : EIO);
@@ -216,7 +217,7 @@ struct V4l2CaptureBuffer {
     int const saved = errno;
     for (auto h : handles) {
       if (h != 0) {
-        drmCloseBufferHandle(drm_fd, h);
+        drm::detail::close_gem_handle(drm_fd, h);
       }
     }
     return make_errno(saved != 0 ? saved : EIO);

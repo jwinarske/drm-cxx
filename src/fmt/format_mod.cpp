@@ -8,6 +8,7 @@
 // accounting -- lives here.
 
 #include "../core/addfb2.hpp"
+#include "../core/gem_close.hpp"
 
 #include <drm-cxx/core/format.hpp>
 #include <drm-cxx/detail/expected.hpp>
@@ -319,7 +320,7 @@ drm::expected<ScanoutBuffer, std::error_code> ScanoutBuffer::import_dmabuf(int f
   // The FB holds its own reference to the underlying GEM object(s); drop our
   // imported handles whether we succeeded or failed.
   for (std::size_t i = 0; i < unique_n; ++i) {
-    drmCloseBufferHandle(fd, unique.at(i));
+    drm::detail::close_gem_handle(fd, unique.at(i));
   }
 
   if (err) {
