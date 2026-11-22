@@ -1,5 +1,20 @@
 # Changelog
 
+## v5.2.1 — 2026-11-21: loads on a libdrm older than 2.4.108
+
+GEM handles are closed with `DRM_IOCTL_GEM_CLOSE` instead of
+`drmCloseBufferHandle`, so the library loads on a system whose libdrm is
+older than 2.4.108. Drop-in for 5.2.0: same soname (`libdrm-cxx.so.5`), same
+exported symbols.
+
+### Fixes
+
+- `drmCloseBufferHandle` came in libdrm 2.4.108. A binary that linked a
+  drm-cxx path calling it did not load on an older libdrm, or, bound lazily,
+  failed at the first close (`ScanoutBuffer::import_dmabuf`,
+  `V4l2DecoderSource`, `V4l2CameraSource`, `GstAppsinkSource`). They now
+  issue the ioctl through `drmIoctl`, which every libdrm has. (#395)
+
 ## v5.2.0 — 2026-10-21: mirrored ring sources and shared planes in SceneSet
 
 Multi-output fixes for `SceneSet`, and a commit hook for planes armed
