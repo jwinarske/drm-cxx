@@ -4,6 +4,7 @@
 #include "gst_appsink_source.hpp"
 
 #include "../core/addfb2.hpp"
+#include "../core/gem_close.hpp"
 #include "buffer_source.hpp"
 
 #include <drm-cxx/detail/expected.hpp>
@@ -248,7 +249,7 @@ void teardown_cached_fb(int drm_fd, CachedFb& entry) noexcept {
       }
     }
     if (!already) {
-      drmCloseBufferHandle(drm_fd, h);
+      drm::detail::close_gem_handle(drm_fd, h);
       seen.at(seen_n++) = h;
     }
   }
@@ -273,7 +274,7 @@ void teardown_drm_state(GstAppsinkSource::Impl& impl) noexcept {
 }
 
 // Pause-time variant: drop the cached DRM state WITHOUT issuing
-// drmModeRmFB / drmCloseBufferHandle against the dying master fd.
+// drmModeRmFB / GEM_CLOSE against the dying master fd.
 // The kernel reclaims FBs and GEM handles when libseat closes that
 // fd, so the ioctls would at best be a no-op (EACCES from a non-
 // master fd) and at worst hit somebody else's resources if libseat

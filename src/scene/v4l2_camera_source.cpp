@@ -4,6 +4,7 @@
 #include "v4l2_camera_source.hpp"
 
 #include "../core/addfb2.hpp"
+#include "../core/gem_close.hpp"
 #include "buffer_source.hpp"
 #include "v4l2_plane_layout.hpp"
 
@@ -126,7 +127,7 @@ struct V4l2CaptureBuffer {
       }
       for (auto h : drm_handles) {
         if (h != 0) {
-          drmCloseBufferHandle(drm_fd, h);
+          drm::detail::close_gem_handle(drm_fd, h);
         }
       }
     }
@@ -175,7 +176,7 @@ struct V4l2CaptureBuffer {
     if (drmPrimeFDToHandle(drm_fd, slot.dmabuf_fd.at(v4l2_idx), &handle) != 0 || handle == 0) {
       for (std::uint32_t prev = 0; prev < p; ++prev) {
         if (handles.at(prev) != 0) {
-          drmCloseBufferHandle(drm_fd, handles.at(prev));
+          drm::detail::close_gem_handle(drm_fd, handles.at(prev));
         }
       }
       return make_errno(errno != 0 ? errno : EIO);
@@ -193,7 +194,7 @@ struct V4l2CaptureBuffer {
     int const saved = errno;
     for (auto h : handles) {
       if (h != 0) {
-        drmCloseBufferHandle(drm_fd, h);
+        drm::detail::close_gem_handle(drm_fd, h);
       }
     }
     return make_errno(saved != 0 ? saved : EIO);
@@ -905,7 +906,7 @@ drm::expected<void, std::error_code> V4l2CameraSource::on_session_resumed(
           }
           for (auto h : prior.drm_handles) {
             if (h != 0) {
-              drmCloseBufferHandle(new_drm_fd, h);
+              drm::detail::close_gem_handle(new_drm_fd, h);
             }
           }
           prior.drm_fd = -1;
